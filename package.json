@@ -79,7 +79,7 @@
   },
   "dependencies": {
     "@klarkxy/dsh-deep-view": "^0.2.0",
-    "@klarkxy/dsh-plugin-kit": "^0.7.0",
+    "@klarkxy/dsh-plugin-kit": "^0.8.0",
     "zod": "4.4.3"
   },
   "peerDependencies": {

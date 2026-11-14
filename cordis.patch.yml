@@ -3,4 +3,4 @@
       name: '@klarkxy/dsh-deep-view'
       disabled: false
     - id: dot
-      name: '@klarkxy/dsh-dot'
+      name: 'ds-dot'

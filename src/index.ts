@@ -149,7 +149,7 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
             { id: 'command-compact', name: '@deepseek-ai/dsh-command-compact' },
           ],
         },
-        { id: 'dot-tools', name: '@klarkxy/dsh-dot/tools' },
+        { id: 'dot-tools', name: 'ds-dot/tools' },
       ] as never,
     }).then((dispose: () => Promise<void>) => {
       if (disposed) { void dispose(); return }
@@ -178,7 +178,7 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
       plugins: [
         { id: 'persona', name: '@deepseek-ai/dsh-persona', config: { prefix: REFLECTION_INSTRUCTIONS } },
         { id: 'time-context', name: '@deepseek-ai/dsh-time-context' },
-        { id: 'dot-reflection-tools', name: '@klarkxy/dsh-dot/reflection' },
+        { id: 'dot-reflection-tools', name: 'ds-dot/reflection' },
       ] as never,
     }).then((dispose: () => Promise<void>) => {
       if (disposed) { void dispose(); return }

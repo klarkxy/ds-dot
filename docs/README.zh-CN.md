@@ -1,7 +1,5 @@
 # 桃乐丝（dot）
 
-<!-- release-state-note -->
-
 [English](../README.md)
 
 DeepSeek Harness 的常驻调度管家桃乐丝，简称 dot。在她自己的面板里和她对话：她管理工作区、启动任务、跟进进度、处理审批，并向你汇报。你只需要在一个对话里交流，而她负责调度你的项目。
@@ -10,22 +8,15 @@ DeepSeek Harness 的常驻调度管家桃乐丝，简称 dot。在她自己的�
 
 ## 安装
 
-从 GitHub 装进你正在用的 profile：
+从 npm 装进你正在用的 profile：
 
 ```sh
-dsh plugin --profile web add github:klarkxy/ds-dot
+dsh plugin --profile web add ds-dot
 ```
 
-pnpm 默认不会构建 Git 依赖。如果第一次安装停下来，把终端里打印的包名写进该 profile 的 `pnpm-workspace.yaml`：
+DSH 提示时重启 profile。需要固定版本时使用 `ds-dot@0.1.0`。Deep View 会一起装上，负责绘制卡片、确认框和图表。
 
-```yaml
-allowBuilds:
-  "@klarkxy/dsh-dot": true
-```
-
-再执行同一条 `dsh plugin add`。DSH 提示时重启 profile。想固定这次版本时，钉住提交：`github:klarkxy/ds-dot#<commit>`。
-
-包名仍是 `@klarkxy/dsh-dot`。Deep View 会一起装上，负责绘制卡片、确认框和图表。
+需要安装源码修订时，使用 `github:klarkxy/ds-dot#<commit>`。如果 pnpm 提示需要允许构建，在该 profile 的 `pnpm-workspace.yaml` 的 `allowBuilds` 下加入 `ds-dot: true`，再执行安装。
 
 ## 使用
 

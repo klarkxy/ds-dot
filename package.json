@@ -1,10 +1,15 @@
 {
-  "name": "@klarkxy/dsh-dot",
+  "name": "ds-dot",
   "version": "0.1.0",
   "description": "Dorothy (dot): an always-on coordinator for DeepSeek Harness. Talk to Dorothy in her own panel, and she opens workspaces, starts sessions, follows their progress, settles their approvals and questions for you, and reports back.",
   "icon": "./icon.svg",
   "license": "Apache-2.0",
   "type": "module",
+  "packageManager": "pnpm@10.29.2",
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
   "engines": {
     "node": ">=22",
     "dsh": ">=0.2.2-rc.1"

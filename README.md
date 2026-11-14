@@ -1,7 +1,5 @@
 # Dorothy (dot)
 
-<!-- release-state-note -->
-
 [简体中文](docs/README.zh-CN.md)
 
 Dorothy, dot for short, is an always-on coordinator for DeepSeek Harness. Talk to her in her own panel: she manages workspaces, starts sessions, follows their progress, handles approvals, and reports back. You stay in one chat while she coordinates your projects.
@@ -10,22 +8,15 @@ Her chat is warm, relaxed, and helpful. When work is underway, she keeps tasks m
 
 ## Install
 
-From GitHub, into the profile you use:
+Install from npm into the profile you use:
 
 ```sh
-dsh plugin --profile web add github:klarkxy/ds-dot
+dsh plugin --profile web add ds-dot
 ```
 
-pnpm will not build a Git dependency until you allow it. If the first install stops, add the package name it prints to that profile's `pnpm-workspace.yaml`:
+Restart the profile if DSH asks. Pin a version with `ds-dot@0.1.0`. Deep View is installed with it and draws Dorothy's cards.
 
-```yaml
-allowBuilds:
-  "@klarkxy/dsh-dot": true
-```
-
-Run the same `dsh plugin add` again. Restart the profile if DSH asks. Pin a commit when you want this revision to stay fixed: `github:klarkxy/ds-dot#<commit>`.
-
-The package name stays `@klarkxy/dsh-dot`. Deep View is installed with it and draws Dorothy's cards.
+To install a source revision instead, use `github:klarkxy/ds-dot#<commit>`. If pnpm asks you to allow its build, add `ds-dot: true` under `allowBuilds` in that profile's `pnpm-workspace.yaml`, then repeat the install.
 
 ## Use
 

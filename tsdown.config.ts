@@ -4,7 +4,7 @@ import { defineConfig, type UserConfig } from 'tsdown'
 const wrapClient: NonNullable<UserConfig['plugins']>[number] = {
   name: 'wrap-dsh-client',
   closeBundle() {
-    const result = spawnSync(process.execPath, ['scripts/wrap-client.mjs', '@klarkxy/dsh-dot'], { stdio: 'inherit' })
+    const result = spawnSync(process.execPath, ['scripts/wrap-client.mjs', 'ds-dot'], { stdio: 'inherit' })
     if (result.status !== 0) throw new Error(`client wrap exited ${result.status ?? 'unknown'}`)
   },
 }

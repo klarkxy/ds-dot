@@ -9,6 +9,10 @@ Source revision: https://github.com/bowenliang123/dsh-context/tree/432c5cbb99117
 
 The adaptations scope the widgets to Dorothy's panel, connect them to her session projections, fold her live prompt into seven browsable categories, replace the dashboard cards with continuous sections, and leave out unrelated fleet, promotion, history, and cross-session surfaces.
 
+## DeepSeek fish logo
+
+`icon.svg` and `src/whale.tsx` reuse the DeepSeek fish silhouette path from **@deepseek-ai/dsh-client-ui-primitives**, under the MIT License, Copyright (c) 2026 DeepSeek. The path is recoloured pink as Dorothy's look and mirrored so she faces right.
+
 ---
 
                                  Apache License

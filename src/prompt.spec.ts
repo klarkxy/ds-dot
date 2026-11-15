@@ -121,6 +121,9 @@ describe('dot approval instructions', () => {
 
   it('allows small talk from memory only with an unverified caveat and checks exact answers in a task', () => {
     expect(DOT_INSTRUCTIONS).toContain('from memory and unverified')
-    expect(DOT_INSTRUCTIONS).toContain('start a task to check rather than guess')
+    expect(DOT_INSTRUCTIONS).toContain('look it up yourself with web_search')
+    expect(DOT_INSTRUCTIONS).toContain('web_fetch')
+    expect(DOT_INSTRUCTIONS).toContain('Do not open a session for a small lookup')
+    expect(DOT_INSTRUCTIONS).not.toContain('start a task to check rather than guess')
   })
 })

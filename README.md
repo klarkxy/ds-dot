@@ -2,6 +2,8 @@
 
 [简体中文](docs/README.zh-CN.md)
 
+![Dorothy arrives with her suitcase and umbrella, ready to coordinate your projects](docs/images/dot-arrival.png)
+
 Dorothy, dot for short, is an always-on coordinator for DeepSeek Harness. Talk to her in her own panel: she manages workspaces, starts sessions, follows their progress, handles approvals, and reports back. You stay in one chat while she coordinates your projects.
 
 Her chat is warm, relaxed, and helpful. When work is underway, she keeps tasks moving and provides clear status updates. You can customize her persona and nickname in her settings.
@@ -56,7 +58,7 @@ The gear icon opens a drawer for Settings, Persona, Context, and Trajectory. You
 ## Limits
 
 - **Workflow integration**: Dorothy operates through task sessions, where all file and shell work is recorded and reviewable.
-- **Resource Scope**: Her search is focused on her own conversation and tasks she manages.
+- **Resource scope**: She can check a current fact on the web herself. A lookup that needs several steps or ongoing research still goes to a task session. Her own records cover her conversation and the tasks she manages.
 - **Agreements & Cognition**: These are managed via the Persona page, ensuring your preferences are respected.
 - **Task Board**: Task reminders appear exclusively on Dorothy's board.
 - **Approval routing**: In human approval mode, use the request's bound confirmation card; an expired card cannot approve a later request.

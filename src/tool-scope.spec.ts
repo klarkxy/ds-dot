@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { TOOL } from './contracts.ts'
 import { restrictInheritedTools } from './tool-scope.ts'
+import { DOT_INHERITED_ALLOW, HOST_WEB_TOOLS } from './tools.ts'
 
 /** Model the public registry contract, including synchronous change notifications. */
 function scope(initial: string[]) {
@@ -78,9 +79,35 @@ describe('dot preset tool restrictions', () => {
   })
 
   it('gives reflection no inherited public mutation tools', () => {
-    const s = scope([...Object.values(TOOL), 'show_view', 'dot_reflection_submit'])
+    const s = scope([...Object.values(TOOL), 'show_view', 'web_search', 'web_fetch', 'dot_reflection_submit'])
     restrictInheritedTools(s.ctx as never, [TOOL.searchHistory, TOOL.readHistory, 'dot_reflection_submit'])
     expect(s.visible().sort()).toEqual([TOOL.searchHistory, TOOL.readHistory, 'dot_reflection_submit'].sort())
     expect(s.visible()).not.toContain(TOOL.agreement)
+    expect(s.visible()).not.toContain('web_search')
+  })
+
+  it('keeps installed web_search and web_fetch, and still denies every other inherited tool', () => {
+    const allowed = [...DOT_INHERITED_ALLOW]
+    const s = scope([...allowed, 'read', 'pwsh', 'working_directory'])
+    restrictInheritedTools(s.ctx as never, allowed)
+    expect(s.visible().sort()).toEqual([...allowed].sort())
+    expect(s.visible()).not.toContain('pwsh')
+    expect(s.visible()).not.toContain('read')
+    expect(HOST_WEB_TOOLS).toEqual(['web_search', 'web_fetch'])
+  })
+
+  it('does not require web tools and denies a renamed global tool without dropping dot tools', () => {
+    const allowed = [...DOT_INHERITED_ALLOW]
+    const s = scope([...Object.values(TOOL), 'show_view', 'pwsh'])
+    expect(() => restrictInheritedTools(s.ctx as never, allowed)).not.toThrow()
+    expect(s.visible().sort()).toEqual([...Object.values(TOOL), 'show_view'].sort())
+    s.add('web_lookup')
+    expect(s.visible()).not.toContain('web_lookup')
+    expect(s.visible()).toContain(TOOL.overview)
+    s.add('web_search')
+    s.add('web_fetch')
+    expect(s.visible()).toContain('web_search')
+    expect(s.visible()).toContain('web_fetch')
+    expect(s.visible()).not.toContain('pwsh')
   })
 })

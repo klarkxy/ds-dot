@@ -18,6 +18,11 @@ import { personaSection } from './persona.ts'
 import { settingsSnapshotBlock, type SelfSettings } from './self-settings.ts'
 import { DotError, messageOf, type DotService } from './service.ts'
 import { restrictInheritedTools } from './tool-scope.ts'
+import { installDotWeb } from './web-scope.ts'
+
+/** Host tool names from `@deepseek-ai/dsh-tool-web` (0.2.2-rc.1). Absent names are not an error. */
+export const HOST_WEB_TOOLS = ['web_search', 'web_fetch'] as const
+export const DOT_INHERITED_ALLOW = [...Object.values(TOOL), 'show_view', ...HOST_WEB_TOOLS]
 
 export const name = 'dsh-dot-tools'
 export const inject = ['tools', 'systemPrompt', SERVICE_NAME] as const
@@ -81,7 +86,8 @@ async function run(work: () => Promise<string> | string): Promise<string> {
 }
 
 export function apply(ctx: Context): void {
-  restrictInheritedTools(ctx, [...Object.values(TOOL), 'show_view'])
+  installDotWeb(ctx)
+  restrictInheritedTools(ctx, DOT_INHERITED_ALLOW)
   const host = ctx as ToolHost
   const dot = () => host[SERVICE_NAME]
   // Both sections read what the segment froze when it started, so every request of a segment

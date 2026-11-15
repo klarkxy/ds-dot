@@ -3,7 +3,7 @@
  * and instructions a session works with; the host keeps the roster, and this
  * file holds the pure decisions about dot's request.
  */
-import { PRESET_ID } from './contracts.ts'
+import { isInternalPreset } from './preset-visibility.ts'
 
 export interface CatalogPreset {
   readonly id: string
@@ -24,9 +24,9 @@ export class TaskPresetError extends Error {
   constructor(readonly code: 'dot/unknown-preset' | 'dot/preset-broken', message: string) { super(message); this.name = 'TaskPresetError' }
 }
 
-/** Presets a task can run on: dot's own is for dot alone. */
+/** Presets a task can run on. Dot's own preset and the reflection pass are internal. */
 export function usablePresets(catalog: TaskPresetCatalog): CatalogPreset[] {
-  return catalog.presets.filter(preset => preset.id !== PRESET_ID && !preset.broken)
+  return catalog.presets.filter(preset => !isInternalPreset(preset.id) && !preset.broken)
 }
 
 const describe = (catalog: TaskPresetCatalog): string => {
@@ -50,13 +50,13 @@ export function pickTaskPreset(catalog: TaskPresetCatalog, requested?: string): 
   const wanted = requested?.trim()
   if (!wanted || wanted.toLowerCase() === 'default') {
     const fallback = catalog.presets.find(preset => preset.id === catalog.fallback)
-    if (fallback && fallback.id !== PRESET_ID && !fallback.broken) return { id: fallback.id, named: false }
+    if (fallback && !isInternalPreset(fallback.id) && !fallback.broken) return { id: fallback.id, named: false }
     const safe = usablePresets(catalog)[0]
-    if (!safe) throw new TaskPresetError('dot/unknown-preset', 'No usable non-dot preset is available for a task session.')
+    if (!safe) throw new TaskPresetError('dot/unknown-preset', 'No usable preset is available for a task session.')
     return { id: safe.id, named: true }
   }
   const found = catalog.presets.find(preset => preset.id === wanted) ?? catalog.presets.find(preset => preset.id.toLowerCase() === wanted.toLowerCase())
-  if (!found || found.id === PRESET_ID) throw new TaskPresetError('dot/unknown-preset', `no preset "${wanted}" for tasks. ${describe(catalog)} Leave preset out for the default.`)
+  if (!found || isInternalPreset(found.id)) throw new TaskPresetError('dot/unknown-preset', `no preset "${wanted}" for tasks. ${describe(catalog)} Leave preset out for the default.`)
   if (found.broken) throw new TaskPresetError('dot/preset-broken', `preset ${found.id} cannot be used on this host: ${found.broken}. ${describe(catalog)}`)
   // Naming the default is the same as leaving it out.
   return { id: found.id, named: found.id !== catalog.fallback }

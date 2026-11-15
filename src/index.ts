@@ -28,6 +28,7 @@ import { bindHost } from './host.ts'
 import { clip } from './ledger.ts'
 import { detachNative } from './native.ts'
 import { DOT_INSTRUCTIONS } from './prompt.ts'
+import { installPresetVisibility } from './preset-visibility.ts'
 import { REFLECTION_INSTRUCTIONS, REFLECTION_PRESET_ID } from './reflection.ts'
 import { APPROVAL_GRACE_MS, DotError, DotService, messageOf } from './service.ts'
 import { patchSettings } from './settings.ts'
@@ -126,6 +127,8 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
       await domain.close()
     })()
   }, 'dot.lifecycle')
+
+  ctx.effect(() => installPresetVisibility(ctx.agentPresets), 'dot.preset-visibility')
 
   // The dot preset: conversation, dot's tools, and in-place compaction for the
   // one turn that outgrows the window before a segment change. Choices go through

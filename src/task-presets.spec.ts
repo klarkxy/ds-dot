@@ -3,11 +3,11 @@ import { pickTaskPreset, usablePresets, type TaskPresetCatalog } from './task-pr
 
 const CATALOG: TaskPresetCatalog = {
   fallback: 'standard',
-  presets: [{ id: 'standard', name: 'Standard' }, { id: 'ptc' }, { id: 'cordis' }, { id: 'dot' }, { id: 'mine', broken: 'a row does not load' }],
+  presets: [{ id: 'standard', name: 'Standard' }, { id: 'ptc' }, { id: 'cordis' }, { id: 'dot' }, { id: 'dot-reflection' }, { id: 'mine', broken: 'a row does not load' }],
 }
 
 describe('task presets', () => {
-  it("leaves out dot's own preset and the broken ones", () => {
+  it("leaves out dot's own preset, the reflection pass, and the broken ones", () => {
     expect(usablePresets(CATALOG).map(preset => preset.id)).toEqual(['standard', 'ptc', 'cordis'])
   })
 
@@ -19,8 +19,9 @@ describe('task presets', () => {
     // An unnamed or unsafe default must not leak dot's private preset.
     expect(pickTaskPreset({ presets: CATALOG.presets })).toEqual({ id: 'standard', named: true })
     expect(pickTaskPreset({ ...CATALOG, fallback: 'dot' })).toEqual({ id: 'standard', named: true })
+    expect(pickTaskPreset({ ...CATALOG, fallback: 'dot-reflection' })).toEqual({ id: 'standard', named: true })
     expect(pickTaskPreset({ ...CATALOG, fallback: 'mine' })).toEqual({ id: 'standard', named: true })
-    expect(() => pickTaskPreset({ fallback: 'dot', presets: [{ id: 'dot' }] })).toThrow(/No usable non-dot preset/)
+    expect(() => pickTaskPreset({ fallback: 'dot', presets: [{ id: 'dot' }, { id: 'dot-reflection' }] })).toThrow(/No usable preset/)
   })
 
   it('names another preset, whatever the letter case', () => {
@@ -31,6 +32,7 @@ describe('task presets', () => {
   it('refuses what a task cannot run on and says what it can', () => {
     expect(() => pickTaskPreset(CATALOG, 'turbo')).toThrowError(expect.objectContaining({ code: 'dot/unknown-preset', message: expect.stringContaining('standard (the default), ptc, cordis') }))
     expect(() => pickTaskPreset(CATALOG, 'dot')).toThrowError(expect.objectContaining({ code: 'dot/unknown-preset' }))
+    expect(() => pickTaskPreset(CATALOG, 'dot-reflection')).toThrowError(expect.objectContaining({ code: 'dot/unknown-preset' }))
     expect(() => pickTaskPreset(CATALOG, 'mine')).toThrowError(expect.objectContaining({ code: 'dot/preset-broken', message: expect.stringContaining('a row does not load') }))
     expect(() => pickTaskPreset({ presets: [{ id: 'dot' }] }, 'ptc')).toThrow(/lists no preset a task can run on/)
   })

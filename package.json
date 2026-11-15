@@ -45,6 +45,7 @@
     "cordis.patch.yml",
     "README.md",
     "docs/README.zh-CN.md",
+    "docs/images/dot-arrival.png",
     "LICENSE",
     "NOTICE.md"
   ],
@@ -99,7 +100,9 @@
     "@deepseek-ai/dsh-agent-preset-registry": ">=0.2.2-rc.1",
     "@deepseek-ai/dsh-user-approval": ">=0.2.2-rc.1",
     "@deepseek-ai/dsh-sandbox-policy": ">=0.2.2-rc.1",
-    "@deepseek-ai/dsh-user-questions": ">=0.2.2-rc.1"
+    "@deepseek-ai/dsh-user-questions": ">=0.2.2-rc.1",
+    "@deepseek-ai/dsh-web": ">=0.2.2-rc.1",
+    "@deepseek-ai/dsh-tool-web": ">=0.2.2-rc.1"
   },
   "peerDependenciesMeta": {
     "@deepseek-ai/cordis": {
@@ -137,6 +140,12 @@
     },
     "@deepseek-ai/dsh-user-questions": {
       "optional": true
+    },
+    "@deepseek-ai/dsh-web": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-tool-web": {
+      "optional": true
     }
   },
   "devDependencies": {
@@ -162,6 +171,8 @@
     "@deepseek-ai/dsh-user-approval": "0.2.2-rc.1",
     "@deepseek-ai/dsh-sandbox-policy": "0.2.2-rc.1",
     "@deepseek-ai/dsh-user-questions": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-web": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-tool-web": "0.2.2-rc.1",
     "tsdown": "^0.22.14",
     "typescript": "^5.9.2",
     "vitest": "^3.2.4"

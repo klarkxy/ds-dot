@@ -21,6 +21,8 @@ const hostExternal = [
   '@deepseek-ai/dsh-agent-preset-registry',
   '@deepseek-ai/dsh-user-approval',
   '@deepseek-ai/dsh-user-questions',
+  '@deepseek-ai/dsh-web',
+  '@deepseek-ai/dsh-tool-web',
   'zod',
   '@klarkxy/dsh-deep-view',
 ]

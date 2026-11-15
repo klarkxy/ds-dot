@@ -162,7 +162,7 @@ describe('dot web scope', () => {
         })
         installDotWeb(ctx as never)
         await expect(runtime().search({ query: 'example docs' })).resolves.toMatchObject({ sources: [{ url: 'https://example.com/docs' }] })
-        expect(calls).toEqual(['https://html.duckduckgo.com/html/'])
+        expect(calls).toEqual(['https://html.duckduckgo.com/html/?q=example+docs'])
       }, html)
     })
   })

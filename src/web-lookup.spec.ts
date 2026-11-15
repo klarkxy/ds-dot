@@ -59,8 +59,24 @@ describe('dot web lookup', () => {
       search: async () => { throw new Error('should not run') },
     }
     const result = await searchWithFallback(parent, { query: 'example docs', maxResults: 3 }, undefined, () => duckDuckGoSearch('example docs', { fetch, maxResults: 3 }))
-    expect(seen).toEqual(['https://html.duckduckgo.com/html/'])
+    expect(seen).toEqual(['https://html.duckduckgo.com/html/?q=example+docs'])
     expect(result.sources[0]?.url).toBe('https://example.com/docs?q=1')
+  })
+
+  it('requests DuckDuckGo with an encoded GET query and never posts the form', async () => {
+    const seen: Array<{ url: string; method?: string; body?: BodyInit | null }> = []
+    const fetch: LookupFetch = async (input, init) => {
+      seen.push({ url: input, method: init.method, body: init.body })
+      return jsonResponse(html)
+    }
+    const query = 'deep seek & harness?'
+    await duckDuckGoSearch(query, { fetch, maxResults: 3 })
+    expect(seen).toEqual([{
+      url: 'https://html.duckduckgo.com/html/?q=deep+seek+%26+harness%3F',
+      method: 'GET',
+      body: undefined,
+    }])
+    expect(new URL(seen[0]!.url).searchParams.get('q')).toBe(query)
   })
 
   it('does not hide an ambiguous or pinned parent search behind DuckDuckGo', async () => {

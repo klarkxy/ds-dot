@@ -169,18 +169,18 @@ export async function duckDuckGoSearch(query: string, options: {
   if (!text) throw new WebError('search query is empty', 'WEB_PROVIDER_ERROR')
   const maxResults = options.maxResults ?? DEFAULT_MAX_RESULTS
   const signal = combineSignal(options.signal, options.timeoutMs ?? DEFAULT_TIMEOUT_MS)
+  const url = new URL(DDG_ENDPOINT)
+  url.searchParams.set('q', text)
   let response: Response
   try {
-    response = await options.fetch(DDG_ENDPOINT, {
-      method: 'POST',
+    response = await options.fetch(url.toString(), {
+      method: 'GET',
       redirect: 'follow',
       signal,
       headers: {
-        'content-type': 'application/x-www-form-urlencoded',
         accept: 'text/html',
         'user-agent': 'dsh-dot',
       },
-      body: new URLSearchParams({ q: text }).toString(),
     })
   } catch (error) {
     throw asWebError(error, 'DuckDuckGo search failed', signal)

@@ -1,6 +1,7 @@
 import { Button, SegmentedTabs, StateDot, Tag, type SegmentedTab, type StateDotState, type TagTone } from '@deepseek-ai/dsh-client-ui-primitives'
 import { Fragment, useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
 import { BOARD_ROOT } from './board.tsx'
+import { FINISHED_SHOWN } from './board-groups.ts'
 import { t, type CopyLocale, type TextKey } from './ui-copy.ts'
 import {
   acceptPayload, groupWork, lookRequest, rejectPayload, resumePayload, scopeText, shortId, workFactKey, workFactTone, workFailure,
@@ -45,7 +46,9 @@ export function WorkBoard({ locale, items, pending, notice, filter = 'all', onAc
   readonly onResume: (payload: { readonly id: string }) => void
   readonly onRead?: WorkRead
 }) {
-  const groups = groupWork(items, pending)
+  const groups = useMemo(() => groupWork(items, pending), [items, pending])
+  // Finished work folds away like finished tickets; it would otherwise grow without end.
+  const [showDone, setShowDone] = useState(false)
   const section = (title: TextKey, rows: readonly WorkBoardItem[]) => rows.length === 0 ? null : (
     <section className="dsh-ui-stack" aria-label={t(locale, title)}>
       <span className="dsh-ui-meta">{t(locale, title)} · {rows.length}</span>
@@ -59,7 +62,14 @@ export function WorkBoard({ locale, items, pending, notice, filter = 'all', onAc
         {items.length === 0 && filter === 'all' ? <p className="dsh-ui-hint">{t(locale, 'workEmpty')}</p> : null}
         {filter !== 'active' ? section('workNeedsHuman', groups.needsHuman) : null}
         {filter !== 'waiting' ? section('workActive', groups.active) : null}
-        {filter === 'all' ? section('workDone', groups.done) : null}
+        {filter === 'all' && groups.done.length > 0 ? (
+          <section className="dsh-ui-stack" aria-label={t(locale, 'workDone')}>
+            <Button variant="ghost" size="sm" className="dsh-dot-fold" aria-expanded={showDone} onClick={() => setShowDone(open => !open)}>
+              {t(locale, 'workDone')} · {groups.done.length}
+            </Button>
+            {showDone ? groups.done.slice(0, FINISHED_SHOWN).map(row => <WorkRow key={row.id} locale={locale} item={row} pending={pending} onAccept={onAccept} onReject={onReject} onAnswer={onAnswer} onResume={onResume} {...onRead ? { onRead } : {}} />) : null}
+          </section>
+        ) : null}
       </div>
     </div>
   )
@@ -115,9 +125,13 @@ function WorkFacts({ locale, item, onRead }: {
   const identity = verificationId ? `${item.id}|${changeInputRef}|${changeRevision}|${verificationId}|${inputRef}|${inputRevision}` : ''
   const [slot, setSlot] = useState<SourceSlot>({ identity: '', loaded: {}, full: {} })
   const [pane, setPane] = useState<SourcePane>('evidence')
+  // Sources are read only once the human opens this card's details: a closed card costs no request and no preview text.
+  const [open, setOpen] = useState(false)
   const loaded = slot.identity === identity ? slot.loaded : {}
   const fullState = slot.identity === identity ? slot.full : {}
   const fullFlights = useRef(new Set<string>())
+  const slotRef = useRef(slot)
+  slotRef.current = slot
   const life = useRef(0)
   useEffect(() => () => { life.current += 1 }, [])
   const loadPreview = useCallback((kind: 'evidence' | 'change', ref: string, token: string, isCancelled?: () => boolean) => {
@@ -154,15 +168,17 @@ function WorkFacts({ locale, item, onRead }: {
     })
   }, [onRead, item.id, verificationId, inputRef, inputRevision])
   useEffect(() => {
-    if (!onRead || !verificationId) return
+    if (!open || !onRead || !verificationId) return
     let cancel = false
     const token = identity
     setSlot(current => current.identity === token ? current : { identity: token, loaded: {}, full: {} })
     const evidenceJobs = evidenceKey.split('\n').filter(Boolean).map(ref => ({ kind: 'evidence' as const, ref }))
     const changeJobs = changeKey.split('\n').filter(Boolean).filter(row => !row.startsWith('deleted:')).map(row => ({ kind: 'change' as const, ref: row.slice(row.indexOf(':') + 1) }))
-    for (const job of [...evidenceJobs, ...changeJobs]) loadPreview(job.kind, job.ref, token, () => cancel)
+    // Reopening keeps what was already read; only missing or failed sources are asked for again.
+    const known = slotRef.current.identity === token ? slotRef.current.loaded : {}
+    for (const job of [...evidenceJobs, ...changeJobs]) if (known[`${job.kind}:${job.ref}`]?.ok !== true) loadPreview(job.kind, job.ref, token, () => cancel)
     return () => { cancel = true }
-  }, [onRead, loadPreview, evidenceKey, changeKey, identity, verificationId])
+  }, [open, onRead, loadPreview, evidenceKey, changeKey, identity, verificationId])
   const visible = Boolean(item.summary) || item.runs.some(run => run.writeScope || (run.deliveries?.length ?? 0) > 0) || checks.length > 0 || changes.length > 0 || exclusions.length > 0
   if (!visible) return null
   const outcome = (kind: 'evidence' | 'change', ref: string) => {
@@ -222,7 +238,7 @@ function WorkFacts({ locale, item, onRead }: {
   ))
   const shownPane = evidencePane && filesPane ? pane : evidencePane ? 'evidence' : 'files'
   return (
-    <details className="dsh-dot-work-facts">
+    <details className="dsh-dot-work-facts" open={open} onToggle={event => setOpen(event.currentTarget.open)}>
       <summary>{t(locale, 'workDetails')}</summary>
       <div className="dsh-dot-work-facts-body">
         {item.summary ? <p className="dsh-dot-work-summary"><span className="dsh-ui-meta">{t(locale, 'workSummary')}</span> {item.summary}</p> : null}
@@ -390,6 +406,8 @@ export function WorkBoardPanel({ locale, api, pending, initialItems, filter = 'a
   const [tick, setTick] = useState(0)
   const refresh = useCallback(() => setTick(value => value + 1), [])
   const loadPrefix = t(locale, 'workLoadFailed')
+  // The board poll hands a fresh array every few seconds; read again only when the requests themselves change.
+  const pendingKey = pending.map(row => row.id).join('\n')
   useEffect(() => {
     const lifetime = new AbortController()
     void api.workList(lifetime.signal).then(rows => {
@@ -399,7 +417,7 @@ export function WorkBoardPanel({ locale, api, pending, initialItems, filter = 'a
       if (!lifetime.signal.aborted) setNotice(`${loadPrefix}${failure instanceof Error ? failure.message : String(failure)}`)
     })
     return () => lifetime.abort()
-  }, [api, locale, tick, pending])
+  }, [api, locale, tick, pendingKey])
   const run = (work: Promise<unknown>) => {
     setNotice(undefined)
     void work.then(refresh, failure => {

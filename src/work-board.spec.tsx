@@ -35,6 +35,18 @@ const click = (text: string) => act(async () => {
 
 const buttonIncluding = (text: string) => [...document.querySelectorAll('button')].find(node => (node.textContent ?? '').includes(text))
 
+/** Open every card's details the way a click does; sources are read only after that. */
+async function openDetails() {
+  await act(async () => {
+    for (const node of document.querySelectorAll<HTMLDetailsElement>('details.dsh-dot-work-facts')) {
+      if (node.open) continue
+      node.open = true
+      node.dispatchEvent(new dom.window.Event('toggle'))
+    }
+    await Promise.resolve(); await Promise.resolve()
+  })
+}
+
 const longBody = (head: string, tail: string, size = 80_000) => `${head}${'a'.repeat(size)}${tail}`
 
 describe('WorkBoard', () => {
@@ -96,9 +108,14 @@ describe('WorkBoard', () => {
     rows = [done]
     await act(async () => { root.render(<WorkBoardPanel locale="en" api={api} pending={[{ id: 'p-2', kind: 'approval' }]} />); await Promise.resolve() })
     expect(calls).toBe(2)
+    // Finished work is folded; the fold counts it and opens on demand.
+    expect(document.body.textContent).not.toContain('Version 1')
+    await act(async () => { buttonIncluding('Finished · 1')!.click() })
     expect(document.body.textContent).toContain('Version 2')
     expect(document.body.textContent).toContain('Done')
-    expect(document.body.textContent).not.toContain('Version 1')
+    // A fresh but identical pending list does not read again.
+    await act(async () => { root.render(<WorkBoardPanel locale="en" api={api} pending={[{ id: 'p-2', kind: 'approval' }]} />); await Promise.resolve() })
+    expect(calls).toBe(2)
     await act(async () => root.unmount())
   })
 
@@ -172,6 +189,7 @@ describe('WorkBoard', () => {
       }
       const root = createRoot(document.getElementById('root')!)
       await act(async () => { root.render(<WorkBoard locale="zh" items={[view]} pending={[]} onAccept={vi.fn()} onReject={vi.fn()} onAnswer={vi.fn()} onResume={vi.fn()} onRead={read} />); await Promise.resolve(); await Promise.resolve() })
+      await openDetails()
       const text = document.body.textContent ?? ''
       expect(document.querySelectorAll('a[data-evidence-ref]')).toHaveLength(1)
       expect(text).toContain(marker)
@@ -186,6 +204,7 @@ describe('WorkBoard', () => {
         await Promise.resolve()
         await Promise.resolve()
       })
+      await openDetails()
       expect(document.body.textContent).toContain('证据不存在或是空的')
       expect(document.body.textContent).not.toContain('已完成')
       expect(document.body.textContent).not.toContain(marker)
@@ -216,6 +235,7 @@ describe('WorkBoard', () => {
     }
     const root = createRoot(document.getElementById('root')!)
     await act(async () => { root.render(<WorkBoard locale="en" items={[first]} pending={[]} onAccept={vi.fn()} onReject={vi.fn()} onAnswer={vi.fn()} onResume={vi.fn()} onRead={onRead} />); await Promise.resolve() })
+    await openDetails()
     expect(calls).toEqual(['v-old:evidence:log-1', 'v-old:change:a.ts'])
     await act(async () => {
       late.splice(0).forEach(resolve => resolve({ source: 'evidence:log-1', body: 'OLD_MARKED_BODY' }))
@@ -224,6 +244,7 @@ describe('WorkBoard', () => {
     expect(document.body.textContent).toContain('OLD_MARKED_BODY')
     const seen = calls.length
     await act(async () => { root.render(<WorkBoard locale="en" items={[second]} pending={[]} onAccept={vi.fn()} onReject={vi.fn()} onAnswer={vi.fn()} onResume={vi.fn()} onRead={onRead} />); await Promise.resolve(); await Promise.resolve() })
+    await openDetails()
     expect(document.body.textContent).toContain('Version 2')
     expect(document.body.textContent).not.toContain('OLD_MARKED_BODY')
     expect(calls.length).toBeGreaterThan(seen)
@@ -250,10 +271,12 @@ describe('WorkBoard', () => {
     }
     const root = createRoot(document.getElementById('root')!)
     await act(async () => { root.render(<WorkBoard locale="en" items={[first]} pending={[]} onAccept={vi.fn()} onReject={vi.fn()} onAnswer={vi.fn()} onResume={vi.fn()} onRead={onRead} />); await Promise.resolve(); await Promise.resolve() })
+    await openDetails()
     expect(document.body.textContent).toContain('OLD_MARKED_BODY')
     expect(document.querySelectorAll('[data-evidence-body]')).toHaveLength(2)
     hang = true
     await act(async () => { root.render(<WorkBoard locale="en" items={[bumped]} pending={[]} onAccept={vi.fn()} onReject={vi.fn()} onAnswer={vi.fn()} onResume={vi.fn()} onRead={onRead} />); await Promise.resolve() })
+    await openDetails()
     expect(document.body.textContent).toContain('Version 2')
     expect(document.body.textContent).toContain('v-1')
     expect(document.body.textContent).not.toContain('OLD_MARKED_BODY')
@@ -277,8 +300,10 @@ describe('WorkBoard', () => {
     }
     const root = createRoot(document.getElementById('root')!)
     await act(async () => { root.render(<WorkBoard locale="en" items={[first]} pending={[]} onAccept={vi.fn()} onReject={vi.fn()} onAnswer={vi.fn()} onResume={vi.fn()} onRead={onRead} />); await Promise.resolve() })
+    await openDetails()
     expect(calls).toEqual([0, 0])
     await act(async () => { root.render(<WorkBoard locale="en" items={[bumped]} pending={[]} onAccept={vi.fn()} onReject={vi.fn()} onAnswer={vi.fn()} onResume={vi.fn()} onRead={onRead} />); await Promise.resolve() })
+    await openDetails()
     expect(document.body.textContent).toContain('Version 2')
     expect(document.querySelectorAll('[data-evidence-body]')).toHaveLength(0)
     expect(calls.filter(wave => wave === 1).length).toBeGreaterThan(0)
@@ -324,6 +349,7 @@ describe('WorkBoard', () => {
       }
       const root = createRoot(document.getElementById('root')!)
       await act(async () => { root.render(<WorkBoard locale="en" items={[view]} pending={[]} onAccept={vi.fn()} onReject={vi.fn()} onAnswer={vi.fn()} onResume={vi.fn()} onRead={read} />); await Promise.resolve(); await Promise.resolve() })
+      await openDetails()
       const preview = document.querySelector('[data-evidence-body="evidence:big-log"]')?.textContent ?? ''
       expect(preview).not.toContain(tail)
       expect(preview.length).toBeLessThan(70_000)
@@ -351,6 +377,7 @@ describe('WorkBoard', () => {
     const onRead = async () => ({ source: 'evidence:log-1', body, truncated: false, totalBytes: Buffer.byteLength(body) })
     const root = createRoot(document.getElementById('root')!)
     await act(async () => { root.render(<WorkBoard locale="zh" items={[row]} pending={[]} onAccept={vi.fn()} onReject={vi.fn()} onAnswer={vi.fn()} onResume={vi.fn()} onRead={onRead} />); await Promise.resolve(); await Promise.resolve() })
+    await openDetails()
     expect(document.querySelector('[data-evidence-body="evidence:log-1"]')?.textContent).toBe(body)
     expect(buttonIncluding('查看全文')).toBeUndefined()
     await act(async () => root.unmount())
@@ -372,6 +399,7 @@ describe('WorkBoard', () => {
     }
     const root = createRoot(document.getElementById('root')!)
     await act(async () => { root.render(<WorkBoard locale="en" items={[row]} pending={[]} onAccept={vi.fn()} onReject={vi.fn()} onAnswer={vi.fn()} onResume={vi.fn()} onRead={onRead} />); await Promise.resolve(); await Promise.resolve() })
+    await openDetails()
     const preview = document.querySelector('[data-evidence-body="evidence:log-1"]')?.textContent ?? ''
     expect(preview.startsWith('HEAD64_')).toBe(true)
     expect(preview).not.toContain(tail)
@@ -401,6 +429,7 @@ describe('WorkBoard', () => {
     }
     const root = createRoot(document.getElementById('root')!)
     await act(async () => { root.render(<WorkBoard locale="en" items={[row]} pending={[]} onAccept={vi.fn()} onReject={vi.fn()} onAnswer={vi.fn()} onResume={vi.fn()} onRead={onRead} />); await Promise.resolve(); await Promise.resolve() })
+    await openDetails()
     expect(document.body.textContent).toContain('preview temporarily unavailable')
     await act(async () => { buttonIncluding('Retry')?.click(); await Promise.resolve() })
     expect(attempts).toBe(2)
@@ -427,6 +456,7 @@ describe('WorkBoard', () => {
     }
     const root = createRoot(document.getElementById('root')!)
     await act(async () => { root.render(<WorkBoard locale="en" items={[row]} pending={[]} onAccept={vi.fn()} onReject={vi.fn()} onAnswer={vi.fn()} onResume={vi.fn()} onRead={onRead} />); await Promise.resolve(); await Promise.resolve() })
+    await openDetails()
     expect(document.body.textContent).toContain('KEEP_PREVIEW_')
     expect(document.body.textContent).not.toContain(tail)
     await act(async () => { buttonIncluding('View full content')?.click(); await Promise.resolve() })
@@ -458,6 +488,7 @@ describe('WorkBoard', () => {
     }
     const root = createRoot(document.getElementById('root')!)
     await act(async () => { root.render(<WorkBoard locale="en" items={[row]} pending={[]} onAccept={vi.fn()} onReject={vi.fn()} onAnswer={vi.fn()} onResume={vi.fn()} onRead={onRead} />); await Promise.resolve(); await Promise.resolve() })
+    await openDetails()
     await act(async () => {
       const open = buttonIncluding('View full content')
       open?.click()
@@ -495,10 +526,12 @@ describe('WorkBoard', () => {
     }
     const root = createRoot(document.getElementById('root')!)
     await act(async () => { root.render(<WorkBoard locale="en" items={[first]} pending={[]} onAccept={vi.fn()} onReject={vi.fn()} onAnswer={vi.fn()} onResume={vi.fn()} onRead={onRead} />); await Promise.resolve(); await Promise.resolve() })
+    await openDetails()
     expect(document.body.textContent).toContain('OLD_PREVIEW_HEAD')
     await act(async () => { buttonIncluding('View full content')?.click() })
     expect(buttonIncluding('Loading')).toBeTruthy()
     await act(async () => { root.render(<WorkBoard locale="en" items={[second]} pending={[]} onAccept={vi.fn()} onReject={vi.fn()} onAnswer={vi.fn()} onResume={vi.fn()} onRead={onRead} />); await Promise.resolve(); await Promise.resolve() })
+    await openDetails()
     expect(document.body.textContent).toContain('Version 2')
     expect(document.body.textContent).toContain('NEW_PREVIEW_HEAD')
     expect(document.body.textContent).not.toContain('OLD_PREVIEW_HEAD')
@@ -542,7 +575,7 @@ describe('WorkBoard', () => {
     await act(async () => root.unmount())
   })
 
-  it('loads every listed source on mount without an 8-item cap or opening details', async () => {
+  it('reads nothing while details are closed, then every listed source without an 8-item cap once opened', async () => {
     const refs = Array.from({ length: 9 }, (_, index) => `log-${index}`)
     const calls: string[] = []
     const onRead = (request: WorkReadRequest) => {
@@ -558,9 +591,14 @@ describe('WorkBoard', () => {
     }
     const root = createRoot(document.getElementById('root')!)
     await act(async () => { root.render(<WorkBoard locale="en" items={[row]} pending={[]} onAccept={vi.fn()} onReject={vi.fn()} onAnswer={vi.fn()} onResume={vi.fn()} onRead={onRead} />); await Promise.resolve(); await Promise.resolve() })
+    expect(calls).toEqual([])
+    await openDetails()
     expect(calls).toEqual(refs.map(ref => `evidence:${ref}:false`))
     for (const ref of refs) expect(document.body.textContent).toContain(`BODY_${ref}`)
-    expect((document.querySelector('details') as HTMLDetailsElement | null)?.open).toBe(false)
+    // Closing and reopening keeps what was read instead of asking again.
+    await act(async () => { const node = document.querySelector<HTMLDetailsElement>('details')!; node.open = false; node.dispatchEvent(new dom.window.Event('toggle')) })
+    await openDetails()
+    expect(calls).toHaveLength(refs.length)
     await act(async () => root.unmount())
   })
 })

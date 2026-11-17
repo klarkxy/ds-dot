@@ -104,9 +104,14 @@ function useBoard(api: ChatApi): [BoardView | undefined, string | undefined, () 
   useEffect(() => {
     const lifetime = new AbortController()
     let timer: ReturnType<typeof setTimeout> | undefined
+    // An unchanged poll keeps the old object, so the chat and the board do not redraw every few seconds.
+    let last = ''
     const run = () => {
       api.board(lifetime.signal).then(next => {
-        if (!lifetime.signal.aborted) { setView(next); setError(undefined) }
+        if (lifetime.signal.aborted) return
+        const text = JSON.stringify(next)
+        if (text !== last) { last = text; setView(next) }
+        setError(undefined)
       }, failure => {
         if (!lifetime.signal.aborted) setError(failure instanceof Error ? failure.message : String(failure))
       }).finally(() => {
@@ -397,6 +402,10 @@ export function ChatPanel({ locale, api, Card, onOpenSession, renderFactorySlot 
   // The badge counts requests, human-review items, drafts, and closeout-ready Changes.
   const waiting = counts.waitingCount
   const tasksBySession = useMemo<TaskLookup>(() => sessionLookup(board), [board])
+  // The log is the heaviest part of the panel (markdown, cards). Keeping its elements stable lets
+  // opening a drawer, typing or a board poll skip redrawing every message.
+  const sessionId = snapshot?.sessionId ?? ''
+  const logRows = useMemo(() => rows.map(row => <Fragment key={row.kind === 'tools' ? 'tools:' + row.key : row.item.key}>{renderRow(row, { locale, labels, Card, sessionId, answers: state.answers, hiddenRequestIds: filtered.hiddenRequestIds, tasks: tasksBySession, onOpenSession })}</Fragment>), [rows, locale, labels, Card, sessionId, state.answers, filtered.hiddenRequestIds, tasksBySession, onOpenSession])
   const lastTool = rows.at(-1)?.kind === 'tools'
   const showThinking = running && !preparingCard && !lastTool && !filtered.silentTail
   const segmentCount = useMemo(() => 1 + state.items.filter(item => item.kind === 'segment').length, [state.items])
@@ -444,7 +453,7 @@ export function ChatPanel({ locale, api, Card, onOpenSession, renderFactorySlot 
               </div>
             </div>
           ) : null}
-          {rows.map(row => <Fragment key={row.kind === 'tools' ? 'tools:' + row.key : row.item.key}>{renderRow(row, { locale, labels, Card, sessionId: snapshot?.sessionId ?? '', answers: state.answers, hiddenRequestIds: filtered.hiddenRequestIds, tasks: tasksBySession, onOpenSession })}</Fragment>)}
+          {logRows}
           {pendingEchoes.map(echo => <div key={'echo:' + echo.at} className="dsh-dot-user dsh-dot-echo"><UserMessageBubble>{echo.text}</UserMessageBubble>{echo.images.length > 0 ? <ImageNotes locale={locale} images={echo.images.map(image => ({ mediaType: image.mediaType, ...(image.name ? { name: image.name } : {}) }))} /> : null}</div>)}
           {preparingCard ? <BotLine lead={!lastTool}><span role="status"><TextShimmer active>{t(locale, 'cardPreparing')}</TextShimmer></span></BotLine> : null}
           {showThinking ? <BotLine lead={!lastTool}><TextShimmer active>{t(locale, 'thinking')}</TextShimmer></BotLine> : null}

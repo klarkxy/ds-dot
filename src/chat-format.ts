@@ -125,60 +125,21 @@ export function permissionLabel(locale: CopyLocale, raw: string | undefined): st
   return raw
 }
 
-/** Unescape a JSON string body, tolerating a string cut off by `clip()` at the end. */
-function unescapeJsonString(raw: string): string {
-  let out = ''
-  for (let i = 0; i < raw.length; i++) {
-    const ch = raw[i]!
-    if (ch !== '\\' || i + 1 >= raw.length) { out += ch; continue }
-    const next = raw[++i]!
-    if (next === 'n') out += '\n'
-    else if (next === 'r') out += '\r'
-    else if (next === 't') out += '\t'
-    else if (next === '"' || next === '\\' || next === '/') out += next
-    else if (next === 'u' && /^[0-9a-fA-F]{4}$/.test(raw.slice(i + 1, i + 5))) {
-      out += String.fromCharCode(parseInt(raw.slice(i + 1, i + 5), 16))
-      i += 4
-    } else out += next
-  }
-  return out
-}
-
-/** Parse JSON arguments, salvaging top-level fields even when `clip()` truncated the tail. */
+/** Legacy logs may end halfway through a JSON string. New displays use full values. */
 export function extractJsonFields(raw: string): Record<string, unknown> | undefined {
-  const trimmed = raw.trim()
-  if (!trimmed.startsWith('{')) return undefined
   try {
-    const parsed: unknown = JSON.parse(trimmed)
-    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) return parsed as Record<string, unknown>
-  } catch { /* fall through to tolerant field scan */ }
-
-  const out: Record<string, unknown> = {}
-  const keyRe = /"((?:\\.|[^"\\])*)"\s*:\s*/g
-  let match: RegExpExecArray | null
-  while ((match = keyRe.exec(trimmed)) !== null) {
-    const key = unescapeJsonString(match[1]!)
-    let pos = keyRe.lastIndex
-    while (pos < trimmed.length && /\s/.test(trimmed[pos]!)) pos++
-    const lead = trimmed[pos]
-    if (lead === '"') {
-      let end = pos + 1
-      while (end < trimmed.length) {
-        if (trimmed[end] === '\\') { end += 2; continue }
-        if (trimmed[end] === '"') break
-        end++
-      }
-      out[key] = unescapeJsonString(trimmed.slice(pos + 1, end))
-      keyRe.lastIndex = Math.min(trimmed.length, end + 1)
-    } else {
-      const prim = /^(true|false|null|-?\d+(?:\.\d+)?)/.exec(trimmed.slice(pos))
-      if (!prim) continue
-      const token = prim[1]!
-      out[key] = token === 'true' ? true : token === 'false' ? false : token === 'null' ? null : Number(token)
-      keyRe.lastIndex = pos + token.length
-    }
+    const value: unknown = JSON.parse(raw)
+    if (value && typeof value === 'object' && !Array.isArray(value)) return value as Record<string, unknown>
+  } catch { /* old clipped logs: retain scalar fields only */ }
+  const fields: Record<string, unknown> = {}
+  for (const match of raw.matchAll(/"((?:\\.|[^"\\])*)"\s*:\s*("(?:\\.|[^"\\])*(?:"|$)|true|false|null|-?\d+(?:\.\d+)?)/g)) {
+    try {
+      let value = match[2]!
+      if (value.startsWith('"') && !/(?<!\\)"$/.test(value)) value += '"'
+      fields[JSON.parse(`"${match[1]}"`) as string] = JSON.parse(value)
+    } catch { /* an incomplete escape has no readable value */ }
   }
-  return Object.keys(out).length > 0 ? out : undefined
+  return Object.keys(fields).length ? fields : undefined
 }
 
 function strOf(value: unknown): string | undefined {
@@ -244,31 +205,34 @@ function parseApprovalDetail(rawDetail: string): {
     }
   }
 
-  const argPerm = strOf(parsedArgs.sandbox_permissions)
-  if (argPerm) permission = argPerm
-  const justification = strOf(parsedArgs.justification)
-  const reason = mergeReason(cleanReason, justification)
-  const command = strOf(parsedArgs.command) ?? strOf(parsedArgs.cmd) ?? strOf(parsedArgs.path) ?? strOf(parsedArgs.file_path) ?? strOf(parsedArgs.url)
-  const rawDesc = strOf(parsedArgs.description)
-  const description = rawDesc && rawDesc !== reason && rawDesc !== command ? rawDesc : undefined
-  const cwd = strOf(parsedArgs.workdir) ?? strOf(parsedArgs.cwd)
-
-  const extra: { key: string; value: string }[] = []
-  for (const [key, value] of Object.entries(parsedArgs)) {
-    if (IGNORED_SHELL_KEYS.has(key) || value === undefined || value === null || value === '') continue
-    const formatted = typeof value === 'string' ? value : JSON.stringify(value)
-    if (formatted) extra.push({ key, value: formatted.length > 120 ? formatted.slice(0, 120) + '…' : formatted })
-  }
-
+  const facts = approvalDisplay(parsedArgs)
   return {
     ...viaSubagent ? { viaSubagent: true } : {},
     ...permission ? { permission } : {},
-    ...reason ? { reason } : {},
-    ...description ? { description } : {},
-    ...command ? { command } : {},
-    ...cwd ? { cwd } : {},
-    ...extra.length > 0 ? { extraArgs: extra } : {},
+    ...facts,
+    ...mergeReason(cleanReason, facts.reason) ? { reason: mergeReason(cleanReason, facts.reason) } : {},
   }
+}
+
+/** Project live request arguments before model text is clipped or formatted. */
+export function approvalDisplay(args: unknown): {
+  permission?: string; reason?: string; description?: string; command?: string; cwd?: string
+  extraArgs?: readonly { readonly key: string; readonly value: string }[]
+} {
+  let value = args
+  if (typeof value === 'string') {
+    try { value = JSON.parse(value) } catch { return {} }
+  }
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {}
+  const row = value as Record<string, unknown>
+  const permission = strOf(row.sandbox_permissions)
+  const reason = strOf(row.justification)
+  const command = strOf(row.command) ?? strOf(row.cmd) ?? strOf(row.path) ?? strOf(row.file_path) ?? strOf(row.url)
+  const rawDescription = strOf(row.description)
+  const description = rawDescription && rawDescription !== reason && rawDescription !== command ? rawDescription : undefined
+  const cwd = strOf(row.workdir) ?? strOf(row.cwd)
+  const extraArgs = Object.entries(row).filter(([key, entry]) => !IGNORED_SHELL_KEYS.has(key) && entry !== undefined && entry !== null && entry !== '').map(([key, entry]) => ({ key, value: clipInline(typeof entry === 'string' ? entry : JSON.stringify(entry), 120) }))
+  return { ...permission ? { permission } : {}, ...reason ? { reason } : {}, ...command ? { command } : {}, ...description ? { description } : {}, ...cwd ? { cwd } : {}, ...extraArgs.length ? { extraArgs } : {} }
 }
 
 function parseQuestionLine(line: string): QuestionRow | undefined {
@@ -556,46 +520,50 @@ function parseSessionListOutcome(raw: string): { readonly items: readonly Parsed
     }
   } catch { /* fall through to tolerant scan for clipped JSON */ }
 
-  const head = /"items"\s*:\s*\[/.exec(trimmed)
-  if (!head) return undefined
-  const items: ParsedSessionItem[] = []
-  let pos = head.index + head[0].length
-  let hasMore = trimmed.endsWith('…')
-  while (pos < trimmed.length) {
-    while (pos < trimmed.length && /[\s,]/.test(trimmed[pos]!)) pos++
-    if (pos >= trimmed.length || trimmed[pos] === ']') break
-    if (trimmed[pos] !== '{') { hasMore = true; break }
-    let depth = 0
-    let inStr = false
-    let end = pos
-    for (; end < trimmed.length; end++) {
-      const ch = trimmed[end]!
-      if (inStr) {
-        if (ch === '\\') { end++; continue }
-        if (ch === '"') inStr = false
-        continue
-      }
-      if (ch === '"') inStr = true
-      else if (ch === '{') depth++
-      else if (ch === '}') {
-        depth--
-        if (depth === 0) { end++; break }
-      }
-    }
-    const fields = extractJsonFields(trimmed.slice(pos, end))
-    if (fields) {
-      items.push({
-        ...strOf(fields.sessionId) ? { sessionId: strOf(fields.sessionId)! } : {},
-        ...strOf(fields.title) ? { title: strOf(fields.title)! } : {},
-        ...strOf(fields.cwd) ? { cwd: strOf(fields.cwd)! } : {},
-        ...typeof fields.live === 'boolean' ? { live: fields.live } : {},
-      })
-    }
-    if (depth !== 0) { hasMore = true; break }
-    pos = end
-  }
-  if (/"nextCursor"\s*:\s*"/.test(trimmed)) hasMore = true
-  return { items, hasMore }
+  // Only older chat rows can contain truncated arrays. Salvage their flat rows.
+  const tail = trimmed.split(/"items"\s*:\s*\[/, 2)[1]
+  if (!tail) return undefined
+  const items = [...tail.matchAll(/\{([^{}]*)/g)].map(match => extractJsonFields(`{${match[1]}`)).filter((row): row is Record<string, unknown> => row !== undefined).map(row => ({
+    ...strOf(row.sessionId) ? { sessionId: strOf(row.sessionId)! } : {},
+    ...strOf(row.title) ? { title: strOf(row.title)! } : {},
+    ...strOf(row.cwd) ? { cwd: strOf(row.cwd)! } : {},
+    ...typeof row.live === 'boolean' ? { live: row.live } : {},
+  }))
+  return { items, hasMore: trimmed.endsWith('…') || /"nextCursor"\s*:\s*"/.test(trimmed) }
+
+}
+
+/** Display facts captured from an uncut result; independent of model hint text. */
+export interface ToolDisplay {
+  readonly version: 1
+  readonly error?: { readonly code?: string; readonly message: string }
+  readonly fields?: Readonly<Record<string, unknown>>
+  readonly sessions?: { readonly items: readonly ParsedSessionItem[]; readonly hasMore: boolean }
+  readonly read?: { readonly taskTitle?: string; readonly reply: string; readonly noReply: boolean }
+}
+
+export function toolDisplay(name: string, detail: string, failure?: { readonly code?: string; readonly message: string }): ToolDisplay {
+  if (failure) return { version: 1, error: failure }
+  let value: Record<string, unknown> | undefined
+  try {
+    const parsed: unknown = JSON.parse(detail)
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) value = parsed as Record<string, unknown>
+  } catch { /* text output has no JSON display fields */ }
+  const fields = value && Object.fromEntries(['status', 'ok', 'summary', 'message', 'error', 'code', 'turns'].filter(key => value![key] !== undefined).map(key => [key, value![key]]))
+  if (fields && Array.isArray(fields.turns)) fields.turns = fields.turns.map(turn => {
+    const row = turn !== null && typeof turn === 'object' ? turn as Record<string, unknown> : {}
+    return { ...strOf(row.request) ? { request: clipInline(strOf(row.request)!, 80) } : {}, ...strOf(row.response) ? { response: clipInline(strOf(row.response)!, 100) } : {} }
+  })
+  const sessions = (name === 'list_sessions' || name === 'search_sessions') && value?.status === 'ok' && Array.isArray(value.items)
+    ? { items: value.items.filter((item): item is Record<string, unknown> => item !== null && typeof item === 'object').map(item => ({
+        ...strOf(item.sessionId) ? { sessionId: strOf(item.sessionId)! } : {},
+        ...strOf(item.title) ? { title: strOf(item.title)! } : {},
+        ...strOf(item.cwd) ? { cwd: strOf(item.cwd)! } : {},
+        ...typeof item.live === 'boolean' ? { live: item.live } : {},
+      })), hasMore: Boolean(value.nextCursor) }
+    : undefined
+  const read = name === TOOL.read ? parseDotRead(detail) : undefined
+  return { version: 1, ...fields && Object.keys(fields).length ? { fields } : {}, ...sessions ? { sessions } : {}, ...read ? { read: { ...read, reply: read.reply.slice(0, 1600) } } : {} }
 }
 
 function parseDotRead(raw: string): { readonly taskTitle?: string; readonly reply: string; readonly noReply: boolean } | undefined {
@@ -626,11 +594,12 @@ function formatEmbeddedToolReply(reply: string, locale: CopyLocale): string | un
 export function summarizeToolCall(item: ToolItem, locale: CopyLocale, tasks: TaskLookup): ToolCallSummary {
   const args = item.args ?? {}
   const detail = item.detail?.trim() ?? ''
-  const failure = extractFailureMessage(detail)
+  if (item.display?.error?.code === 'dot/unknown-request') return { summary: [strOf(args.id), t(locale, 'alreadyHandled')].filter(Boolean).join(' · '), tone: 'muted' }
+  const failure = item.display?.error ?? (item.display ? undefined : extractFailureMessage(detail))
   if (failure) {
     return {
       summary: clipInline(failure.message, 48),
-      tone: failure.muted ? 'muted' : 'error',
+      tone: 'muted' in failure && failure.muted ? 'muted' : 'error',
     }
   }
   if (item.status === 'error' && detail) {
@@ -639,7 +608,7 @@ export function summarizeToolCall(item: ToolItem, locale: CopyLocale, tasks: Tas
 
   switch (item.name) {
     case TOOL.answerPending: {
-      const race = UNKNOWN_REQ_RE.exec(detail)
+      const race = !item.display ? UNKNOWN_REQ_RE.exec(detail) : undefined
       const answered = ANSWERED_RE.exec(detail)
       const id = strOf(args.id) ?? race?.[1] ?? answered?.[1]
       if (race) return { summary: [id, t(locale, 'alreadyHandled')].filter(Boolean).join(' · '), tone: 'muted' }
@@ -657,7 +626,7 @@ export function summarizeToolCall(item: ToolItem, locale: CopyLocale, tasks: Tas
     }
     case TOOL.read: {
       const sid = strOf(args.session_id)
-      const parsed = detail ? parseDotRead(detail) : undefined
+      const parsed = item.display?.read ?? (!item.display && detail ? parseDotRead(detail) : undefined)
       const badge = sid
         ? resolveSessionBadge(sid, tasks, parsed?.taskTitle ? { taskTitle: parsed.taskTitle } : undefined)
         : undefined
@@ -693,7 +662,7 @@ export function summarizeToolCall(item: ToolItem, locale: CopyLocale, tasks: Tas
       const query = strOf(args.query)
       const folder = folderName(strOf(args.cwd))
       const scopeHint = query ? clipInline(query, 24) : folder
-      const parsed = detail ? parseSessionListOutcome(detail) : undefined
+      const parsed = item.display?.sessions ?? (!item.display && detail ? parseSessionListOutcome(detail) : undefined)
       if (!parsed) return scopeHint ? { summary: scopeHint } : {}
       if (parsed.items.length === 0 && !parsed.hasMore) {
         return {
@@ -838,12 +807,12 @@ export interface FormattedToolDetail {
 export function formatToolDetail(item: ToolItem, locale: CopyLocale, tasks: TaskLookup): FormattedToolDetail | undefined {
   const raw = item.detail?.trim()
   if (!raw) return undefined
-  if (UNKNOWN_REQ_RE.test(raw)) {
+  if (item.display?.error?.code === 'dot/unknown-request' || !item.display && UNKNOWN_REQ_RE.test(raw)) {
     return { tone: 'muted', text: t(locale, 'alreadyHandledDetail') }
   }
-  const failure = extractFailureMessage(raw)
+  const failure = item.display?.error ?? (item.display ? undefined : extractFailureMessage(raw))
   if (failure) {
-    return { tone: failure.muted ? 'muted' : 'error', text: failure.message }
+    return { tone: 'muted' in failure && failure.muted ? 'muted' : 'error', text: failure.message }
   }
   const answered = ANSWERED_RE.exec(raw)
   if (answered) {
@@ -881,7 +850,7 @@ export function formatToolDetail(item: ToolItem, locale: CopyLocale, tasks: Task
     return { tone: 'normal', text: t(locale, 'segmentScheduled') }
   }
   if (item.name === TOOL.read) {
-    const parsed = parseDotRead(raw)
+    const parsed = item.display?.read ?? (!item.display ? parseDotRead(raw) : undefined)
     if (parsed) {
       const sid = strOf(item.args?.session_id)
       const session = sid
@@ -901,7 +870,7 @@ export function formatToolDetail(item: ToolItem, locale: CopyLocale, tasks: Task
     }
   }
   if (item.name === 'list_sessions' || item.name === 'search_sessions') {
-    const parsed = parseSessionListOutcome(raw)
+    const parsed = item.display?.sessions ?? (!item.display ? parseSessionListOutcome(raw) : undefined)
     if (parsed) {
       if (parsed.items.length === 0 && !parsed.hasMore) {
         return { tone: 'muted', text: t(locale, 'noSessionsFound') }
@@ -959,7 +928,7 @@ function formatGenericJsonOutcome(raw: string, item: ToolItem, locale: CopyLocal
   const sid = strOf(item.args?.session_id)
   const session = sid ? resolveSessionBadge(sid, tasks) : undefined
   try {
-    const parsed = JSON.parse(raw) as Record<string, unknown>
+    const parsed = (item.display?.fields ?? JSON.parse(raw)) as Record<string, unknown>
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return undefined
     if (item.name === 'send_session_message' && parsed.status === 'ok' && session) {
       return { tone: 'normal', text: t(locale, 'toolDelivered').replace('{target}', session.label), session }
@@ -986,7 +955,7 @@ function formatGenericJsonOutcome(raw: string, item: ToolItem, locale: CopyLocal
     }
   } catch { /* clipped JSON falls through to field salvage */ }
 
-  const fields = extractJsonFields(raw)
+  const fields = item.display?.fields ?? extractJsonFields(raw)
   if (!fields) return undefined
   const summaryText = strOf(fields.summary) ?? strOf(fields.message)
   if (summaryText) {

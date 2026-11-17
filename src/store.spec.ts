@@ -59,11 +59,12 @@ describe('ticket migration', () => {
     expect(tables.tickets!.size).toBe(2)
   })
   it('keeps only the newest finished tickets in the capped memory view', async () => {
-    const store = new DotStore(undefined)
-    for (let index = 0; index < 301; index++) {
-      const ticket = await store.createTicket({ title: String(index), goal: 'g', dir: '/work', access: 'read', at: index })
-      await store.moveTicket(ticket.id, 'done', 'dot', 'finished', index)
-    }
+    const tickets = Object.fromEntries(Array.from({ length: 301 }, (_, index) => {
+      const id = `t-${index + 1}`
+      return [id, { id, title: String(index), goal: 'g', dir: '/work', access: 'read', priority: 2, status: 'done', sessions: [], rounds: [], history: [], createdAt: index, updatedAt: index }]
+    }))
+    const { domain } = fakeDomain({ tickets })
+    const store = new DotStore(domain)
     expect(store.listTickets()).toHaveLength(300)
     expect(store.ticket('t-1')).toBeUndefined()
     expect(store.ticket('t-301')).toBeDefined()
@@ -86,22 +87,6 @@ describe('ticket migration', () => {
 })
 
 describe('DotStore', () => {
-  it('retains a durable write lock when cancellation persistence fails', async () => {
-    const { domain, tables } = fakeDomain()
-    let fail = false
-    const failing: DotDomainHandle = { ...domain, table: name => {
-      const table = domain.table(name)
-      return name === 'tickets' ? { ...table, put: async (key, value) => { if (fail) throw Error('disk failure'); await table.put(key, value) } } : table
-    } }
-    const store = new DotStore(failing)
-    const ticket = await store.createTicket({ title: 'write', goal: 'g', dir: '/work', access: 'write' })
-    await store.moveTicket(ticket.id, 'active', 'dot', 'start')
-    fail = true
-    await expect(store.moveTicket(ticket.id, 'cancelled', 'human', 'cancel')).rejects.toThrow('disk failure')
-    expect(store.ticket(ticket.id)?.status).toBe('active')
-    expect(store.ticketLockHolders('/work')).toHaveLength(1)
-    expect((tables.tickets!.get(ticket.id) as { status: string }).status).toBe('active')
-  })
   it('round-trips tasks and the dot identity through the domain', async () => {
     const { domain, tables } = fakeDomain()
     const store = new DotStore(domain)
@@ -148,12 +133,14 @@ describe('DotStore', () => {
   })
 
   it('shows tasks on the board with derived flags and keeps only watched sessions in tasks', async () => {
-    const store = new DotStore(undefined)
-    const ticket = await store.createTicket({ title: 'Ship it', goal: 'g', dir: '/work', access: 'write', at: 1 })
-    await store.moveTicket(ticket.id, 'active', 'dot', 'start', 2)
-    await store.track({ sessionId: 's', origin: 'started', title: 'T', goal: 'G', cwd: '/work', at: 3 })
-    await store.attachTicketSession(ticket.id, 's', 'work', 3)
+    const ticket = { id: 't-1', title: 'Ship it', goal: 'g', dir: '/work', access: 'write', priority: 2, status: 'active', sessions: [{ sessionId: 's', role: 'work', at: 3 }], rounds: [], history: [], createdAt: 1, updatedAt: 2 }
+    const { domain, puts } = fakeDomain({ tickets: { [ticket.id]: ticket }, tasks: {
+      s: { sessionId: 's', origin: 'started', title: 'T', goal: 'G', cwd: '/work', ticketId: ticket.id, role: 'work', status: 'idle', createdAt: 3, updatedAt: 3, unseenTurns: 0 },
+    } })
+    const store = new DotStore(domain)
     const board = store.board([{ id: 'ap-1', kind: 'approval', sessionId: 's', createdAt: 4, subject: 'bash' }])
+    expect(puts).toEqual([])
+    expect(store.ticketForSession('s')).toEqual(ticket)
     expect(board.tasks).toEqual([])
     expect(board.tickets).toHaveLength(1)
     expect(board.tickets[0]).toMatchObject({ id: ticket.id, status: 'active', waiting: true, orphaned: false })
@@ -186,7 +173,7 @@ describe('DotStore', () => {
     expect(puts).toEqual(['tasks:a', 'state:current', 'tasks:b'])
   })
 
-  it('strips a baseline that was saved on the run but not the change', async () => {
+  it('loads run-owned baselines without repairing the legacy change mirror', async () => {
     const { domain, tables } = fakeDomain()
     const store = new DotStore(domain)
     const change = await store.work.createChange({ title: 'A', cwd: 'H:\\proj', goal: 'a', at: 1 })
@@ -195,10 +182,10 @@ describe('DotStore', () => {
     const diverged = { ...reserved.run, baselineRefs: [{ workspaceRoot: reserved.run.workspaceRoot, scopeKey: 'stale', artifactRef: 'ghost' }] }
     tables.runs!.set(reserved.run.id, diverged)
     const reloaded = new DotStore(domain)
-    expect(reloaded.work.run(reserved.run.id)?.baselineRefs).toEqual([])
+    expect(reloaded.work.run(reserved.run.id)?.baselineRefs).toEqual(diverged.baselineRefs)
     expect(reloaded.work.dispatchAllowed(reserved.run.id)).toMatchObject({ code: 'baseline' })
     await reloaded.flush()
-    expect(tables.runs!.get(reserved.run.id)).toMatchObject({ baselineRefs: [] })
+    expect(tables.runs!.get(reserved.run.id)).toEqual(diverged)
   })
 
   it('refuses a new reservation when the runs table cannot be read or a core row is illegal', async () => {

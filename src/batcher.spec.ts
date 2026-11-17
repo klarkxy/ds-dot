@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { NoticeBatcher, formatNotices, type Notice, type Timer } from './batcher.ts'
+import { NoticeBatcher, formatNoticeDisplay, formatNotices, type Notice, type Timer } from './batcher.ts'
 
 function clock() {
   let now = 0, next = 0
@@ -59,4 +59,10 @@ describe('idle notice queue', () => {
     expect(text).toContain('- turn-end · s: new')
     expect(text).toContain('Ready to start')
   })
+  it('preserves display facts directly and folds the same completed turns as model text', () => {
+    const display = { kind: 'approval' as const, sessionId: 'x', requestId: 'ap-1', subject: 'pwsh', command: 'unescaped \"command\"\nnext line' }
+    const batch = [{ ...n('s'), ticketId: 't-1', text: 'old' }, { ...n('s'), ticketId: 't-1', text: 'new' }, { ...n('x'), kind: 'approval' as const, text: 'unrelated copy', display }]
+    expect(formatNoticeDisplay(batch)).toEqual({ isReminder: false, entries: [{ kind: 'turn-end', sessionId: 's', summary: 'new' }, display] })
+  })
+
 })

@@ -2,7 +2,7 @@ import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, existsSync, rmSync
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
-import { filesMatch, restoreSnapshot, saveSnapshot, sha256, baselineCaptures } from './artifacts.ts'
+import { readSnapshot, saveSnapshot, sha256, baselineCaptures } from './artifacts.ts'
 import { inputConstraints } from './brief.ts'
 import { WorkBook, judgeVerification, occupantsConflict, parseInput, workspaceIdentity, type ExternalOccupant, type WorkPersist } from './work.ts'
 
@@ -263,36 +263,46 @@ describe('work records', () => {
     expect((await book.reserveRun({ changeId: change.id, cwd: 'H:\\third', writeScope: { kind: 'paths', paths: [] }, at: 14 })).ok).toBe(true)
   })
 
-  it('does not publish a baseline when the change write fails, and strips a half-written one on restore', async () => {
-    let failChange = false
+  it('publishes only the run baseline and restores it without a change mirror', async () => {
     const rows = new Map<string, unknown>()
-    const persist: WorkPersist = async (table, key, value) => {
-      if (table === 'changes' && failChange) throw new Error('change disk')
+    const writes: string[] = []
+    const book = new WorkBook(async (table, key, value) => {
+      writes.push(table)
       rows.set(`${table}:${key}`, structuredClone(value))
-    }
-    const book = new WorkBook(persist, 'win32')
+    }, 'win32')
     const change = await book.createChange({ title: 'A', cwd: 'H:\\proj', goal: 'a', at: 1 })
-    const reserved = await book.reserveRun({ changeId: change.id, cwd: 'H:\\proj\\docs', writeScope: { kind: 'paths', paths: [{ path: 'H:\\proj\\docs\\a.md', type: 'file' }] }, at: 2 })
+    const reserved = await book.reserveRun({ changeId: change.id, writeScope: { kind: 'paths', paths: [{ path: 'a.md', type: 'file' }] }, at: 2 })
     if (!reserved.ok) throw new Error(reserved.message)
-    failChange = true
-    await expect(book.publishBaseline(reserved.run.id, book.revision, 'artifact-1', 3)).rejects.toThrow('change disk')
-    expect(book.run(reserved.run.id)?.baselineRefs).toEqual([])
-    expect(book.change(change.id)?.baselineRefs).toEqual([])
-    expect(book.dispatchAllowed(reserved.run.id)).toMatchObject({ code: 'baseline' })
-    const half = { ...reserved.run, baselineRefs: [{ workspaceRoot: reserved.run.workspaceRoot, scopeKey: 'stale', artifactRef: 'ghost' }] }
+    writes.length = 0
+    expect((await book.publishBaseline(reserved.run.id, book.revision, 'artifact-1', 3)).applied).toBe(true)
+    expect(writes).toEqual(['runs'])
+    expect(rows.get(`changes:${change.id}`)).not.toHaveProperty('baselineRefs')
     const restored = WorkBook.restore({
-      changes: [rows.get(`changes:${change.id}`)],
-      inputs: [rows.get(`inputs:${change.currentInputRef}`)],
-      runs: [half],
+      changes: [{ ...(rows.get(`changes:${change.id}`) as object), baselineRefs: [{ artifactRef: 'obsolete-mirror' }] }],
+      inputs: [rows.get(`inputs:${change.currentInputRef}`)], runs: [rows.get(`runs:${reserved.run.id}`)],
     }, async () => {}, 'win32')
-    expect(restored.run(half.id)?.baselineRefs).toEqual([])
-    expect(restored.dispatchAllowed(half.id)).toMatchObject({ code: 'baseline' })
-    expect(restored.takeRepairs().map(row => row.id)).toEqual([half.id])
-    const added = await restored.addDelivery(half.id, {
-      kind: 'context', targetSessionId: half.requestedSessionId, inputRevision: half.inputRevision, contentRef: 'more', source: 'dot', status: 'intent', at: 4,
-    })
-    if (!('id' in added)) throw new Error('expected delivery')
-    expect(added.deliveries.map(item => item.id)).toEqual(['del-1', 'del-2'])
+    expect(restored.recoveryError).toBeUndefined()
+    expect(restored.change(change.id)?.baselineRefs.map(ref => ref.artifactRef)).toEqual(['artifact-1'])
+    expect(restored.dispatchAllowed(reserved.run.id)).toEqual({ ok: true })
+  })
+
+  it('blocks dispatch after an unknown baseline write until storage is reopened', async () => {
+    const rows = new Map<string, unknown>()
+    let unknown = false
+    let attempts = 0
+    const book = new WorkBook(async (table, key, value) => {
+      rows.set(`${table}:${key}`, structuredClone(value))
+      if (unknown) { attempts += 1; throw Object.assign(new Error('receipt lost'), { code: 'unknown-state' }) }
+    }, 'win32')
+    const change = await book.createChange({ title: 'A', cwd: 'H:/proj', goal: 'a' })
+    const reserved = await book.reserveRun({ changeId: change.id, writeScope: { kind: 'paths', paths: [{ path: 'a.ts', type: 'file' }] } })
+    if (!reserved.ok) throw new Error(reserved.message)
+    unknown = true
+    await expect(book.publishBaseline(reserved.run.id, book.revision, 'base-1')).rejects.toThrow('receipt lost')
+    expect(attempts).toBe(1)
+    expect(book.dispatchAllowed(reserved.run.id)).toMatchObject({ code: 'recovery' })
+    const reopened = WorkBook.restore({ changes: [rows.get(`changes:${change.id}`)], inputs: [rows.get(`inputs:${change.currentInputRef}`)], runs: [rows.get(`runs:${reserved.run.id}`)] }, async () => {}, 'win32')
+    expect(reopened.dispatchAllowed(reserved.run.id)).toEqual({ ok: true })
   })
 
   it('refuses scheduling when a core record is illegal instead of dropping it', async () => {
@@ -442,50 +452,19 @@ describe('work records', () => {
 })
 
 describe('content snapshots', () => {
-  it('keeps the manifest absent when a body fails, then restores bytes and deletions', () => {
+  it('publishes an immutable manifest only after all bodies are saved and verifies their hashes', () => {
     const root = mkdtempSync(join(tmpdir(), 'dot-snapshot-'))
-    const dir = join(root, 'artifact')
-    const before = new TextEncoder().encode('before')
-    expect(() => saveSnapshot(dir, [{ path: 'edit.txt', body: before }, { path: 'kept.txt', body: new TextEncoder().encode('kept') }], 'kept.txt')).toThrow(/SAVE_ENTRY_FAILED/)
-    expect(existsSync(join(dir, 'manifest.json'))).toBe(false)
-    const saved = saveSnapshot(dir, [
-      { path: 'edit.txt', body: new TextEncoder().encode('after') },
-      { path: 'added.txt', body: new TextEncoder().encode('run-a') },
-      { path: 'gone.txt', deleted: true },
-      { path: 'failed-residue.txt', body: new TextEncoder().encode('residue') },
-    ])
-    expect(saved.deleted).toEqual(['gone.txt'])
-    expect(saved.saved.find(item => item.path === 'edit.txt')?.sha256).toBe(sha256(new TextEncoder().encode('after')))
-    const out = join(root, 'restored')
-    restoreSnapshot(dir, out)
-    expect(readFileSync(join(out, 'edit.txt'), 'utf8')).toBe('after')
-    expect(readFileSync(join(out, 'added.txt'), 'utf8')).toBe('run-a')
-    expect(existsSync(join(out, 'gone.txt'))).toBe(false)
-    expect(filesMatch(dir, out)).toBe(true)
-    const manifest = readFileSync(join(dir, 'manifest.json'), 'utf8')
-    expect(() => saveSnapshot(dir, [{ path: 'edit.txt', body: new TextEncoder().encode('nope') }], 'edit.txt')).toThrow(/immutable/)
-    expect(readFileSync(join(dir, 'manifest.json'), 'utf8')).toBe(manifest)
-    writeFileSync(join(dir, 'manifest.json'), JSON.stringify({
-      saved: [{ path: '../outside.txt', sha256: sha256(new TextEncoder().encode('after')), bytes: 5 }],
-      deleted: ['../deleted.txt'],
-      covers: [],
-    }))
-    expect(() => restoreSnapshot(dir, out)).toThrow(/escapes/)
-    expect(existsSync(join(root, 'outside.txt'))).toBe(false)
-    expect(existsSync(join(out, 'edit.txt'))).toBe(true)
-    const outside = mkdtempSync(join(tmpdir(), 'dot-outside-'))
-    const link = join(root, 'link')
-    symlinkSync(outside, link, 'junction')
-    const linked = join(root, 'linked-artifact')
-    saveSnapshot(linked, [
-      { path: 'keep.txt', body: new TextEncoder().encode('keep') },
-      { path: 'link/escaped.txt', body: new TextEncoder().encode('nope') },
-    ])
-    expect(() => restoreSnapshot(linked, root)).toThrow(/link/)
-    expect(existsSync(join(outside, 'escaped.txt'))).toBe(false)
-    expect(existsSync(join(root, 'keep.txt'))).toBe(false)
-    rmSync(outside, { recursive: true, force: true })
-    rmSync(root, { recursive: true, force: true })
+    try {
+      const dir = join(root, 'artifact')
+      expect(() => saveSnapshot(dir, [{ path: 'edit.txt', body: new TextEncoder().encode('before') }, { path: 'kept.txt', body: new TextEncoder().encode('kept') }], 'kept.txt')).toThrow(/SAVE_ENTRY_FAILED/)
+      expect(existsSync(join(dir, 'manifest.json'))).toBe(false)
+      const saved = saveSnapshot(dir, [{ path: 'edit.txt', body: new TextEncoder().encode('after') }, { path: 'gone.txt', deleted: true }])
+      expect(saved.deleted).toEqual(['gone.txt'])
+      expect(new TextDecoder().decode(readSnapshot(dir).bodies.get('edit.txt'))).toBe('after')
+      expect(() => saveSnapshot(dir, [])).toThrow(/immutable/)
+      writeFileSync(join(dir, 'blobs', saved.saved[0]!.sha256), 'broken')
+      expect(() => readSnapshot(dir)).toThrow(/corrupt blob/)
+    } finally { rmSync(root, { recursive: true, force: true }) }
   })
 
   it('rejects a snapshot that omits a live file, misses a directory member, or names the wrong root, and accepts a scanned empty directory', () => {

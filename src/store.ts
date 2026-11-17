@@ -3,16 +3,14 @@
  * the durable copy follows the in-memory order; reads never wait on disk.
  */
 import { APPROVAL_DETAIL_LIMIT } from './approval-risk.ts'
-import { COGNITION_HISTORY_MAX, type BoardView, type CognitionVersion, type DotContextUsage, type DotSettings, type DotUsageOffset, type PendingView, type ReflectionRun, type ScheduleRecord, type SettingProposal, type TaskRecord, type Ticket, type TicketAccess, type TicketPriority, type TicketRound, type TicketStatus } from './contracts.ts'
+import { COGNITION_HISTORY_MAX, type BoardView, type CognitionVersion, type DotContextUsage, type DotSettings, type DotUsageOffset, type PendingView, type ReflectionRun, type ScheduleRecord, type SettingProposal, type TaskRecord, type Ticket } from './contracts.ts'
 import { ZERO_USAGE, addUsage } from './context.ts'
 import { applyEvent, createTask, ledgerSummary, markSeen, sortTasks, withPending, type LedgerEvent, type NewTask } from './ledger.ts'
 import { MAX_PAST_SEGMENTS, type PastSegment, type Segment } from './segments.ts'
 import { parseSettings } from './settings.ts'
 import { STATE_KEY, parseScheduleRecord, parseSettingProposal, parseState, parseTask, parseTicket, type DotState } from './storage.ts'
 import { clip } from './ledger.ts'
-import { appendTicketRound, moveTicket } from './ticket.ts'
 import { deriveTicketViews } from './ticket-view.ts'
-import { lockHolders } from './lock.ts'
 import { ownedSessionIds, sessionIsOwned } from './peer.ts'
 import { WorkBook, isUnknownState, type WorkPersist } from './work.ts'
 import { projectWorkIdle, projectWorkLedger } from './work-actions.ts'
@@ -46,7 +44,6 @@ export class DotStore {
   private readonly reminders = new Map<string, ScheduleRecord>()
   private readonly proposals = new Map<string, SettingProposal>()
   private tail: Promise<unknown> = Promise.resolve()
-  private ticketTail: Promise<unknown> = Promise.resolve()
   private cognitionRevision = 0
   get cognitionVersion(): number { return this.cognitionRevision }
   private readonly listeners = new Set<() => void>()
@@ -81,10 +78,7 @@ export class DotStore {
       runs: this.loadWork('runs'),
       verifications: this.loadWork('verifications'),
     }, (table, key, value) => this.persistWork(table, key, value))
-    for (const repair of this.work.takeRepairs()) {
-      const op = this.tail.then(() => this.persistWork('runs', repair.id, repair))
-      this.tail = op.catch(() => undefined)
-    }
+
   }
 
   /** `null` is an unreadable table. An empty array is a table that really has no rows. */
@@ -480,107 +474,6 @@ export class DotStore {
     return id ? this.tickets.get(id) : [...this.tickets.values()].find(ticket => ticket.sessions.some(row => row.sessionId === sessionId))
   }
 
-  createTicket(input: { title: string; goal: string; dir: string; access: TicketAccess; priority?: TicketPriority; deliverable?: string; acceptance?: string; workspaceId?: string; draft?: boolean; humanReview?: boolean; at?: number }): Promise<Ticket> {
-    const op = this.ticketTail.then(async () => {
-    const at = input.at ?? Date.now()
-    const sequence = Math.max(this.state.ticketSequence ?? 0, ...[...this.tickets.keys()].map(id => Number(/^t-(\d+)$/.exec(id)?.[1] ?? 0))) + 1
-    const ticket: Ticket = {
-      id: `t-${sequence}`, title: clip(input.title, 80), goal: clip(input.goal, 600), dir: input.dir, access: input.access,
-      priority: input.priority ?? 2, status: input.draft ? 'draft' : 'todo', sessions: [], rounds: [], history: [], createdAt: at, updatedAt: at,
-      ...(input.deliverable !== undefined ? { deliverable: clip(input.deliverable, 400) } : {}),
-      ...(input.acceptance !== undefined ? { acceptance: clip(input.acceptance, 1200) } : {}),
-      ...(input.workspaceId !== undefined ? { workspaceId: input.workspaceId } : {}),
-      ...(input.humanReview !== undefined ? { humanReview: input.humanReview } : {}),
-    }
-    this.state = { ...this.state, ticketSequence: sequence }
-    await this.putTicket(ticket)
-    await this.write('state', STATE_KEY, this.state)
-    return ticket
-    })
-    this.ticketTail = op.catch(() => undefined)
-    return op
-  }
-
-  updateTicket(id: string, patch: Partial<Pick<Ticket, 'title' | 'goal' | 'deliverable' | 'acceptance' | 'dir' | 'workspaceId' | 'access' | 'priority' | 'humanReview'>>, at = Date.now()): Promise<Ticket> {
-    const op = this.ticketTail.then(async () => {
-    const current = this.requireTicket(id)
-    if ((current.status === 'active' || current.status === 'review') && ((patch.dir !== undefined && patch.dir !== current.dir) || (patch.access !== undefined && patch.access !== current.access))) throw new Error('Cannot change directory or access while active or in review')
-    const clearWorkspace = patch.dir !== undefined && patch.dir !== current.dir && patch.workspaceId === undefined
-    const { workspaceId: _oldWorkspace, ...withoutWorkspace } = current
-    const next = { ...(clearWorkspace ? withoutWorkspace : current), ...patch, ...(patch.title !== undefined ? { title: clip(patch.title, 80) } : {}), ...(patch.goal !== undefined ? { goal: clip(patch.goal, 600) } : {}), ...(patch.deliverable !== undefined ? { deliverable: clip(patch.deliverable, 400) } : {}), ...(patch.acceptance !== undefined ? { acceptance: clip(patch.acceptance, 1200) } : {}), updatedAt: at }
-    await this.putTicket(next)
-    return next
-    })
-    this.ticketTail = op.catch(() => undefined)
-    return op
-  }
-
-  moveTicket(id: string, to: TicketStatus, by: 'dot' | 'human', reason: string, at = Date.now()): Promise<Ticket> {
-    const op = this.ticketTail.then(async () => {
-      const next = moveTicket(this.requireTicket(id), to, by, reason, at, this.tickets.values())
-      await this.putTicket(next)
-      return next
-    })
-    this.ticketTail = op.catch(() => undefined)
-    return op
-  }
-
-  noteTicket(id: string, round: TicketRound): Promise<Ticket> {
-    const op = this.ticketTail.then(async () => {
-      const next = appendTicketRound(this.requireTicket(id), round)
-      await this.putTicket(next)
-      return next
-    })
-    this.ticketTail = op.catch(() => undefined)
-    return op
-  }
-
-  attachTicketSession(id: string, sessionId: string, role: 'work' | 'rework' | 'review', at = Date.now()): Promise<void> {
-    const op = this.ticketTail.then(async () => {
-      const ticket = this.requireTicket(id)
-      const task = this.tasks.get(sessionId)
-      if (!task || task.origin !== 'started') throw new Error('A started session is required')
-      await this.putTicket({ ...ticket, sessions: [...ticket.sessions.filter(row => row.sessionId !== sessionId), { sessionId, role, at }].slice(-20), updatedAt: at })
-      await this.put({ ...task, ticketId: id, role })
-    })
-    this.ticketTail = op.catch(() => undefined)
-    return op
-  }
-
-  deleteTicket(id: string): Promise<boolean> {
-    const op = this.ticketTail.then(async () => {
-    const ticket = this.tickets.get(id)
-    if (!ticket) return false
-    if (ticket.status !== 'draft') throw new Error('Only draft tickets can be deleted')
-    const domain = this.domain
-    if (domain) {
-      const op = this.tail.then(() => this.durable(() => domain.table('tickets').delete(id)))
-      this.tail = op.catch(() => undefined)
-      await op
-    }
-    this.tickets.delete(id)
-    this.changed()
-    return true
-    })
-    this.ticketTail = op.catch(() => undefined)
-    return op
-  }
-
-  ticketLockHolders(dir: string, exceptId?: string): Ticket[] { return lockHolders(this.tickets.values(), dir, exceptId) }
-
-  private requireTicket(id: string): Ticket {
-    const ticket = this.tickets.get(id)
-    if (!ticket) throw new Error(`Unknown ticket: ${id}`)
-    return ticket
-  }
-
-  private async putTicket(ticket: Ticket): Promise<void> {
-    await this.write('tickets', ticket.id, ticket)
-    this.tickets.set(ticket.id, ticket)
-    this.pruneTickets()
-    this.changed()
-  }
-
   private pruneTickets(): void {
     const finished = [...this.tickets.values()].filter(ticket => ticket.status === 'done' || ticket.status === 'cancelled').sort((a, b) => a.updatedAt - b.updatedAt)
     for (const ticket of finished.slice(0, Math.max(0, this.tickets.size - MAX_TASKS))) this.tickets.delete(ticket.id)
@@ -733,7 +626,7 @@ export class DotStore {
   }
 
   /** Wait for queued writes; used on shutdown and in tests. */
-  async flush(): Promise<void> { await this.ticketTail.catch(() => undefined); await this.tail.catch(() => undefined) }
+  async flush(): Promise<void> { await this.tail.catch(() => undefined) }
 
   private put(task: TaskRecord): Promise<void> {
     this.tasks.set(task.sessionId, task)

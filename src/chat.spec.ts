@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { chatItems, type RawEvent } from './chat.ts'
+import { formatToolDetail, summarizeToolCall } from './chat-format.ts'
 
 const ev = (seq: number, type: string, data: unknown): RawEvent => ({ seq, type, time: 1000 + seq, data })
 
@@ -89,4 +90,38 @@ describe('chatItems', () => {
     expect(items[4]).toMatchObject({ name: 'list_sessions', status: 'error' })
     expect(items[5]).toMatchObject({ name: 'list_sessions', status: 'done' })
   })
+  it.each(['{"status":"failed"}', '{"status":"error"}', '{"ok":false}'])('keeps legacy failure interpretation for unmarked isError:false rows: %s', content => {
+    const events = [
+      ev(1, 'tool/call', { callId: 'legacy', name: 'dot_task', arguments: '{}' }),
+      ev(2, 'tool/result', { message: { toolCallId: 'legacy', isError: false, content } }),
+    ]
+    expect(chatItems(events)[0]).toMatchObject({ status: 'error' })
+    expect(chatItems([events[0]!, ev(2, 'tool/result', {
+      message: { toolCallId: 'legacy', isError: false, content },
+      meta: { dshDot: { display: { kind: 'task', summary: 'Recorded' } } },
+    })])[0]).toMatchObject({ status: 'done' })
+  })
+
+  it('saves display fields before clipping long result text', () => {
+    const title = 'Complete title beyond the detail window'
+    const result = JSON.stringify({ status: 'ok', padding: 'x'.repeat(2000), items: [{ sessionId: 's1', title, cwd: '/work/project' }], nextCursor: 'more' })
+    const items = chatItems([
+      ev(1, 'tool/call', { callId: 'c', name: 'list_sessions', arguments: '{}' }),
+      ev(2, 'tool/result', { message: { toolCallId: 'c', isError: false, content: result } }),
+    ])
+    const item = items[0]!
+    expect(item.kind).toBe('tool')
+    if (item.kind !== 'tool') return
+    expect(item.detail).not.toContain(title)
+    expect(item.display?.sessions).toMatchObject({ items: [{ title }], hasMore: true })
+    expect(summarizeToolCall(item, 'en', new Map()).summary).toContain('1+')
+    expect(formatToolDetail(item, 'en', new Map())?.text).toContain(title)
+  })
+
+  it('carries structured notices without parsing their human text', () => {
+    const notice = { isReminder: false, entries: [{ kind: 'approval', sessionId: 's', requestId: 'ap-1', subject: 'pwsh', command: 'echo hi' }] }
+    const items = chatItems([ev(1, 'user/message', { content: '任意通知文案', source: { kind: 'agent-message', dshDot: { notices: notice } } })])
+    expect(items[0]).toMatchObject({ kind: 'notice', notice })
+  })
+
 })

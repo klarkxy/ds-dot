@@ -14,42 +14,23 @@ const watched = (sessionId: string, status: TaskRecord['status'] = 'idle'): Task
 const board = (patch: Partial<BoardView>): BoardView => ({ tasks: [], tickets: [], pending: [], schedules: [], ...patch })
 
 describe('groupBoard', () => {
-  it('splits tasks into the groups of the board and counts the first one for the badge', () => {
+  it('keeps legacy tickets as newest-first history and never counts them as waiting or live', () => {
     const groups = groupBoard(board({
       pending: [{ id: 'ap-1', kind: 'approval', sessionId: 's', createdAt: 1, subject: 'pwsh' }],
       tickets: [
-        ticket('t-1', 'review', { humanReview: true }),
-        ticket('t-2', 'review'),
-        ticket('t-3', 'draft'),
-        ticket('t-4', 'active'),
-        ticket('t-5', 'todo'),
-        ticket('t-6', 'done'),
-        ticket('t-7', 'cancelled'),
+        ticket('t-1', 'review', { humanReview: true, updatedAt: 3 }),
+        ticket('t-2', 'draft', { updatedAt: 1 }),
+        ticket('t-3', 'active', { updatedAt: 9 }),
+        ticket('t-4', 'done', { updatedAt: 5 }),
       ],
       tasks: [watched('w-1'), watched('w-2', 'archived')],
     }))
-    expect(groups.review.map(row => row.id)).toEqual(['t-1'])
-    expect(groups.drafts.map(row => row.id)).toEqual(['t-3'])
-    expect(groups.active.map(row => row.id).sort()).toEqual(['t-2', 't-4'])
-    expect(groups.todo.map(row => row.id)).toEqual(['t-5'])
-    expect(groups.finished.map(row => row.id).sort()).toEqual(['t-6', 't-7'])
+    expect(groups.legacy.map(row => row.id)).toEqual(['t-3', 't-4', 't-1', 't-2'])
+    expect(groups.requests).toHaveLength(1)
     expect(groups.watched.map(row => row.sessionId)).toEqual(['w-1'])
     expect(groups.watchedArchived).toBe(1)
-    expect(groups.waitingCount).toBe(3)
-    expect(groups.liveCount).toBe(6)
-  })
-
-  it('puts higher priority first, then the freshest; the queue keeps its creation order within a priority', () => {
-    const groups = groupBoard(board({ tickets: [
-      ticket('t-1', 'active', { priority: 2, updatedAt: 9 }),
-      ticket('t-2', 'active', { priority: 3, updatedAt: 1 }),
-      ticket('t-3', 'active', { priority: 2, updatedAt: 5 }),
-      ticket('t-4', 'todo', { priority: 2, createdAt: 8 }),
-      ticket('t-5', 'todo', { priority: 2, createdAt: 3 }),
-      ticket('t-6', 'todo', { priority: 3, createdAt: 9 }),
-    ] }))
-    expect(groups.active.map(row => row.id)).toEqual(['t-2', 't-1', 't-3'])
-    expect(groups.todo.map(row => row.id)).toEqual(['t-6', 't-5', 't-4'])
+    expect(groups.liveCount).toBe(1)
+    expect(headerBoardCounts(board({ tickets: [ticket('t-1', 'review', { humanReview: true }), ticket('t-2', 'draft')] }))).toEqual({ liveCount: 0, waitingCount: 0 })
   })
 })
 

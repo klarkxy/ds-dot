@@ -501,9 +501,9 @@ type ChatItemRow =
   /** The human's answer to one of dot's cards. */
   | { readonly kind: 'answer'; readonly key: string; readonly text: string; readonly at: number }
   /** A batch of task updates the host delivered to dot. */
-  | { readonly kind: 'notice'; readonly key: string; readonly text: string; readonly at: number }
+  | { readonly kind: 'notice'; readonly key: string; readonly text: string; readonly at: number; readonly notice?: import('./chat-format.ts').ParsedNotice }
   | { readonly kind: 'bot'; readonly key: string; readonly text: string; readonly at: number }
-  | { readonly kind: 'tool'; readonly key: string; readonly name: string; readonly status: 'running' | 'done' | 'error'; readonly args?: Readonly<Record<string, unknown>>; readonly detail?: string; readonly at: number }
+  | { readonly kind: 'tool'; readonly key: string; readonly name: string; readonly status: 'running' | 'done' | 'error'; readonly args?: Readonly<Record<string, unknown>>; readonly detail?: string; readonly at: number; readonly display?: import('./chat-format.ts').ToolDisplay }
   /** A show_view card; presentation is filled once its result commits. */
   | { readonly kind: 'view'; readonly key: string; readonly title?: unknown; readonly view?: unknown; readonly presentation?: Record<string, unknown>; readonly failed?: boolean; readonly at: number }
   | { readonly kind: 'error'; readonly key: string; readonly text: string; readonly at: number }

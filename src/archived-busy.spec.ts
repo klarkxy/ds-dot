@@ -26,11 +26,10 @@ async function active() {
   return { book, run: reserved.run }
 }
 
-describe('archived fallback does not hide a live busy agent', () => {
+describe('an archive label does not prove a live agent stopped', () => {
   it('keeps the known live busy agent occupied if the last state read fails', async () => {
     const { book, run } = await active()
-    let reads = 0
-    const agent = { status: 'idle' as 'idle' | 'running', session: { id: run.requestedSessionId }, whenIdle: () => new Promise<void>(() => undefined) }
+    const agent = { status: 'idle' as 'idle' | 'running', session: { id: run.requestedSessionId }, cancel() {}, whenIdle: () => new Promise<void>(() => undefined) }
     const host = bindHost(name => {
       if (name === 'agents') return { get: () => agent }
       if (name === 'workspaceRegistry') return { archivedSessionIds: [run.requestedSessionId] }
@@ -38,20 +37,13 @@ describe('archived fallback does not hide a live busy agent', () => {
       if (name === 'sessionQuery') return { readSession: async () => ({ events: [] }) }
       if (name === 'sessionController') return {
         cancel: async () => ({ accepted: true }),
-        state: async () => {
-          reads += 1
-          if (reads >= 3) throw new Error('latest state unavailable')
-          const snapshot = { queue: [], running: false }
-          if (reads === 2) agent.status = 'running'
-          return snapshot
-        },
+        state: async () => { agent.status = 'running'; throw new Error('latest state unavailable') },
       }
       return undefined
     })
     const report = await host.stopActivity!(run.requestedSessionId)
     expect(agent.status).toBe('running')
     expect(report.idle).toBe(false)
-    reads = 0
     agent.status = 'idle'
     const result = await finishWork(book, bindRunSession({
       ...host,
@@ -67,6 +59,7 @@ describe('archived fallback does not hide a live busy agent', () => {
     const agent = {
       status: 'running' as const,
       session: { id },
+      cancel() {},
       whenIdle() { throw new Error('idle accessor failed') },
     }
     const host = bindHost(name => {

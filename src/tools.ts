@@ -20,6 +20,7 @@ import { DotError, messageOf, type DotService } from './service.ts'
 import { DEV_INDEX_TOOLS, installDotDevIndex } from './dev-index-scope.ts'
 import { restrictInheritedTools } from './tool-scope.ts'
 import { installDotWeb } from './web-scope.ts'
+import { toolDisplay } from './chat-format.ts'
 
 /** Host tool names from `@deepseek-ai/dsh-tool-web` (0.2.2-rc.1). Absent names are not an error. */
 export const HOST_WEB_TOOLS = ['web_search', 'web_fetch'] as const
@@ -86,14 +87,7 @@ const num = (args: unknown, key: string): number | undefined => {
 const bool = (args: unknown, key: string): boolean =>
   (args as Record<string, unknown> | null)?.[key] === true
 
-async function run(work: () => Promise<string> | string): Promise<string> {
-  try {
-    return await work()
-  } catch (error) {
-    const code = error instanceof DotError ? error.code : 'dot/failed'
-    return `Error [${code}]: ${messageOf(error)}`
-  }
-}
+export const TASK_ACTIONS = ['create', 'revise', 'dispatch', 'read', 'list', 'supplement', 'finish', 'step', 'closeout', 'pause', 'resume', 'cancel', 'decide', 'reject'] as const
 
 export function apply(ctx: Context): void {
   installDotWeb(ctx)
@@ -199,7 +193,7 @@ export function apply(ctx: Context): void {
     parameters: {
       limit: { type: 'integer', description: 'Sessions to list, default 30.' },
     },
-    execute: (args, exec) => run(() => dot().overview(exec.signal ?? new AbortController().signal, typeof (args as { limit?: unknown }).limit === 'number' ? (args as { limit: number }).limit : 30)),
+    execute: async (args, exec) => dot().overview(exec.signal ?? new AbortController().signal, typeof (args as { limit?: unknown }).limit === 'number' ? (args as { limit: number }).limit : 30),
     title: 'Overview',
   }), true)
 
@@ -211,7 +205,7 @@ export function apply(ctx: Context): void {
       session_id: { type: 'string', required: true, description: 'Session to read.' },
       max_chars: { type: 'integer', description: 'Tail characters of the reply, default 4000.' },
     },
-    execute: args => run(() => dot().read(str(args, 'session_id') ?? '', typeof (args as { max_chars?: unknown }).max_chars === 'number' ? (args as { max_chars: number }).max_chars : 4000)),
+    execute: async (args) => dot().read(str(args, 'session_id') ?? '', typeof (args as { max_chars?: unknown }).max_chars === 'number' ? (args as { max_chars: number }).max_chars : 4000),
     title: 'Read session',
   }), true)
 
@@ -225,50 +219,58 @@ export function apply(ctx: Context): void {
       title: { type: 'string', description: 'create only: display title for a new workspace.' },
       workspace_id: { type: 'string', description: 'inspect or files: workspace id from action=list. Omit to use your own workspace.' },
     },
-    execute: args => run(() => {
+    execute: async (args) => {
       const action = str(args, 'action')
       if (action === 'create') return dot().createWorkspace(str(args, 'path') ?? '', str(args, 'title'))
       if (action === 'inspect') return dot().inspectWorkspace(str(args, 'workspace_id'))
       if (action === 'files') return dot().listWorkspaceFiles(str(args, 'workspace_id'), str(args, 'path'))
       return dot().listWorkspaces()
-    }),
+    },
     title: 'Workspace',
   }))
 
   // ── dot_task ──────────────────────────────────────────────────────────────
   tool(defineToolInput({
     name: TOOL.task,
-    description: 'Manage work. action=create starts a Change. action=revise or update changes the current input. action=supplement delivers one context message to an active Run through a recorded delivery. It does not revise the input, open a Run, or widen scope. Name run_id, message, expected_input_ref and expected_input_revision; an older or different input is refused and nothing is sent. Do not resend a delivery that was not confirmed. action=reserve opens a work, rework, or review Run. action=baseline captures a run baseline. action=subject captures the current delivery and returns subjectRef. action=verify records checks for that current input: pass subject_ref, or the full JSON object from action=subject. A snapshot id is not the subject. evidenceRefs must be evidence_ref values returned by action=evidence, not a subjectRef, baseline id, or session id. A stale input, another change, a trimmed subject, an unregistered evidence ref, or a missing required check is refused. Do not shrink checks to get past a refusal. action=hold keeps a stopped review until closeout. action=finish completes a writer or rework run only; a review stays reserved until closeout, so finish refuses it and hold is the next step. action=accept accepts a recorded verification; action=reject releases its review for rework. Both require the expected input revision. action=decide asks the user to look at this version; it does not record their answer. action=pause stops new runs. action=resume opens them again. action=cancel closes new work and settles current runs. action=step records one current step done only when that run has a readable result for this input. An accepted first prompt is not that result. A file written after this run released its scope is not that result either. A reserved run cannot be marked done. action=board shows the derived status. action=read shows the current input, its steps, and earlier inputs. action=dispatch reserves, captures baseline, and launches a run in one step. action=closeout copies expected_input_ref and expected_input_revision from action=read (inputRef, revision), then holds an open review, captures the subject, may register evidence_ref plus summary, records the checks you pass, and accepts or asks the human. Omitting the input does not approve the current one. checks must name every required item, or an explicit goal check when there are none. A summary does not pass checks. action=reject still releases a review without accepting. action=move does not close out work.',
+    description: 'Manage a change from goal to verified delivery. create/revise define its input; dispatch reserves scope, captures a baseline and starts a run. finish settles a writer after its result arrives. closeout captures the delivery, records checks and accepts it, or asks for the requested human review. An independent review run is optional: dispatch with role=review, then closeout or reject. read/list show state; supplement delivers context once to an active run; step records progress; pause/resume/cancel control work; decide requests a human decision for a recorded verification. Service refusals retain their scope and version guarantees.',
     parameters: {
-      action: { type: 'string', enum: ['create', 'update', 'revise', 'move', 'note', 'read', 'list', 'delete', 'board', 'accept', 'reject', 'reserve', 'baseline', 'subject', 'verify', 'hold', 'decide', 'finish', 'evidence', 'supplement', 'pause', 'resume', 'cancel', 'step', 'dispatch', 'closeout'], required: true, description: 'create, revise, supplement, reserve, baseline, subject, verify, hold, finish, evidence, accept, reject, decide, pause, resume, cancel, step, board, list, or read use the work model. supplement records context on the named active run and its input version; it does not revise. dispatch reserves a run, captures its baseline, and launches it in one call. closeout requires expected_input_ref, expected_input_revision, and checks. It holds an open review, captures the subject, may register evidence, and accepts or asks the human. A summary does not pass checks. decide only asks the user to look. pause, resume, and cancel are the work controls. move, note, and delete stay closed.' },
-      task_id: { type: 'string' }, title: { type: 'string' }, goal: { type: 'string' }, dir: { type: 'string' }, workspace_id: { type: 'string' },
-      access: { type: 'string', enum: ['read', 'write'], description: 'reserve: "write" when the run will change files. "read" cannot write. A writing run also needs paths, for example [{"path":"site/note.txt","type":"file"}].' }, deliverable: { type: 'string' }, acceptance: { type: 'string' }, priority: { type: 'integer' }, draft: { type: 'boolean' }, human_review: { type: 'boolean', description: 'create or revise: the user asked to see this version before closeout.' },
-      requirements: { type: 'string', description: 'create or revise: JSON array of {requirementRef, text, required, scenarios?}. text is in English and states what SHALL hold; quote exact strings verbatim. scenarios: [{scenarioRef, given?, when, then}], concrete checks such as R1.a; every required requirement needs at least one. Scenario ids are unique across the input.' },
-      steps: { type: 'string', description: 'create or revise: JSON array of {stepRef, text, covers?, after?}. Stable step ids, not positions. covers: requirement or scenario ids this step serves. after: step ids it waits for; no cycles. A suggested approach, not a copy of the requirements.' },
-      behavior_notes: { type: 'string', description: 'Legacy free-text constraints. Use constraints instead; passing both is refused.' },
-      constraints: { type: 'string', description: 'create or revise: JSON array of {constraintRef, text}, in English: how the work must be done (order, paths not to touch). Part of the input, so changing them makes a new input.' },
-      user_request: { type: 'string', description: 'create or revise: the human\'s own words for this goal, unedited and untranslated. Runs read it as the source of truth when the English spec is ambiguous.' },
-      deliverable_language: { type: 'string', description: 'create or revise: the language the deliverable itself must use, for example "Simplified Chinese" for Chinese docs or UI copy. Omit to follow the request and existing files. Reports stay in English.' },
-      max_concurrent: { type: 'integer', description: 'create or revise: how many runs of this change may be open at once, from 1 to 8.' },
-      step_refs: { type: 'string', description: 'reserve: JSON array of stepRef values this run covers. Omit to cover the current steps.' },
-      step_ref: { type: 'string', description: 'step: the current step this run finished. Recorded only when a readable result belongs to this run and input. The accepted first prompt is not that result, and neither is a file written after this run released its scope.' },
-      input_ref: { type: 'string', description: 'read: one earlier input. Omit to read the current input and its history.' },
-      checks: { type: 'string', description: 'verify or closeout: JSON array of {requirementRef, applicability, verdict, evidenceRefs, note?}. applicability is only "applicable" or "not-applicable". Each evidenceRefs entry must be an evidence_ref returned by action=evidence. Include every required requirement. When the input has no requirements, closeout still needs an explicit goal check. A summary does not fill these in. Do not drop one to make verify or closeout pass.' },
-      subject: { type: 'string', description: 'verify: the full JSON object from action=subject, not a snapshot id. Prefer subject_ref. A trimmed object is rejected.' },
-      subject_ref: { type: 'string', description: 'verify: subjectRef returned by action=subject. The service loads that captured delivery for the current change and input. An older input or another change is rejected.' },
-      run_id: { type: 'string', description: 'baseline, finish, hold, supplement, or one writer run named by verify. supplement delivers to this run only.' },
-      message: { type: 'string', description: 'supplement: context to record and deliver once, in English; it does not change the input. dispatch: notes appended to the brief the service renders from the input. Write only context the input does not hold; never restate requirements or scope.' },
-      run_ids: { type: 'string', description: 'verify: JSON array of every related run id.' },
-      paths: { type: 'string', description: 'reserve: JSON array of {path, type}. type is "file" or "directory". Example: [{"path":"site/note.txt","type":"file"}]. A write run must also set access to "write". Review ignores this and reserves the whole workspace.' },
-      evidence_ref: { type: 'string', description: 'evidence or closeout: relative id to register. The call returns this evidence_ref. Put that id in verify evidenceRefs. Not a subjectRef, baseline id, or session id.' },
-      to: { type: 'string', enum: ['draft', 'todo', 'active', 'review', 'done', 'cancelled'], description: 'move only. update rejects to and leaves the stored status unchanged.' }, status: { type: 'string' }, reason: { type: 'string' }, role: { type: 'string', enum: ['work', 'rework', 'review'], description: 'reserve: the run kind. note: the round being recorded.' }, summary: { type: 'string', description: 'note: the round summary. closeout: optional text registered with evidence_ref. It does not pass checks.' }, verdict: { type: 'string', enum: ['pass', 'fail'], description: 'finish: fail marks a writer or rework run failed. finish does not complete a review; use hold. decide does not take a verdict.' }, session_id: { type: 'string', description: 'verify: the review session, which must not be a writer session.' },
-      verification_id: { type: 'string', description: 'accept or decide.' },
-      review_run_id: { type: 'string', description: 'reject, hold, verify, or closeout: the review run of this change. closeout holds it before capturing the subject.' },
-      expected_input_ref: { type: 'string', description: 'accept, verify, closeout, or supplement: the input this action was made for. closeout copies inputRef from action=read. Omitting it does not use the current input.' },
-      expected_input_revision: { type: 'integer', description: 'accept, reject, verify, decide, closeout, or supplement. closeout copies revision from action=read and refuses any other revision.' },
-      expected_subject_key: { type: 'string', description: 'accept: the delivery the button was rendered for.' },
+      action: { type: 'string', enum: [...TASK_ACTIONS], required: true },
+      task_id: { type: 'string', description: 'Change id. Required except create, list, and dispatch of a new change.' },
+      title: { type: 'string', description: 'create/revise/dispatch: short task title.' },
+      goal: { type: 'string', description: 'create/revise/dispatch: one sentence stating what the delivery must achieve, in English.' },
+      dir: { type: 'string', description: 'create/dispatch: absolute project directory.' },
+      workspace_id: { type: 'string', description: 'create/dispatch: project workspace.' },
+      requirements: { type: 'string', description: 'create/revise: JSON array of {requirementRef,text,required,scenarios?}. text is in English and states what SHALL hold; quote exact strings verbatim. scenarios: [{scenarioRef,given?,when,then}], concrete checks such as R1.a; every required requirement needs at least one. Scenario ids are unique across the input.' },
+      steps: { type: 'string', description: 'create/revise: JSON array of {stepRef,text,covers?,after?}; planning notes, not delivery proof. covers: requirement or scenario ids this step serves. after: step ids it waits for; no cycles.' },
+      constraints: { type: 'string', description: 'create/revise: JSON array of {constraintRef,text}, in English: how the work must be done (order, paths not to touch). Part of the input, so changing them makes a new input.' },
+      user_request: { type: 'string', description: 'create/revise: the human\'s own words for this goal, unedited and untranslated. Runs read it as the source of truth when the English spec is ambiguous.' },
+      deliverable_language: { type: 'string', description: 'create/revise: the language the deliverable itself must use, for example "Simplified Chinese" for Chinese docs or UI copy. Omit to follow the request and existing files. Reports stay in English.' },
+      behavior_notes: { type: 'string', description: 'Legacy free-text constraints. Use constraints instead; passing both, or revising it once constraints exist, is refused.' },
+      acceptance: { type: 'string', description: 'create/revise: acceptance criteria when requirements are omitted.' },
+      deliverable: { type: 'string', description: 'create/revise: expected output.' },
+      priority: { type: 'integer', description: 'create/revise: priority, 1 to 3.' },
+      human_review: { type: 'boolean', description: 'create/revise: the human requested a decision before acceptance.' },
+      max_concurrent: { type: 'integer', description: 'create/revise: maximum open runs, 1 to 8.' },
+      role: { type: 'string', enum: ['work', 'rework', 'review'], description: 'dispatch: run kind; independent review is optional and holds the workspace.' },
+      access: { type: 'string', enum: ['read', 'write'], description: 'dispatch: write for file changes; read cannot write.' },
+      paths: { type: 'string', description: 'dispatch: JSON array of {path,type}, type file or directory. Omit for the whole change directory.' },
+      message: { type: 'string', description: 'dispatch: notes, in English, appended to the brief the service renders from the work order (goal, original request, scope, requirements, constraints, steps, report format). Write only context the input does not hold; never restate requirements or scope. supplement: context delivered once to the named active run; it changes no requirement.' },
+      model: { type: 'string', description: 'dispatch: allowed provider/model from dot_list_models; omit for default.' },
+      preset: { type: 'string', description: 'dispatch: agent preset; omit for default.' },
+      run_id: { type: 'string', description: 'finish/step/supplement: run id. dispatch: continue a reserved run.' },
+      verdict: { type: 'string', enum: ['pass', 'fail'], description: 'finish: writer result; review runs close through closeout/reject.' },
+      step_refs: { type: 'string', description: 'dispatch: JSON array of planning step ids this run covers; omit for current steps.' },
+      step_ref: { type: 'string', description: 'step: planning step whose progress is recorded.' },
+      input_ref: { type: 'string', description: 'read: historical input; omit for current input and history.' },
+      checks: { type: 'string', description: 'closeout: JSON array of {requirementRef,applicability,verdict,note,evidenceRefs}. Each check carries its own note and evidence refs. A requirement passes only when every one of its scenarios is backed by evidence; name the scenario ids in the note.' },
+      expected_input_ref: { type: 'string', description: 'closeout/supplement: inputRef copied from read.' },
+      expected_input_revision: { type: 'integer', description: 'closeout/supplement/step/decide/reject: revision copied from read.' },
+      review_run_id: { type: 'string', description: 'closeout: optional independent review run; reject: required review run to release.' },
+      expected_subject_key: { type: 'string', description: 'decide: subjectKey of the recorded verification.' },
+      verification_id: { type: 'string', description: 'decide: recorded verification to show the human.' },
+      reason: { type: 'string', description: 'pause/resume/cancel: reason for the control action.' },
     },
-    execute: args => run(async () => dot().manageTask(args as Record<string, unknown>)),
+    execute: async (args) => dot().manageTask(args as Record<string, unknown>),
     title: 'Manage task',
   }))
 
@@ -291,7 +293,7 @@ export function apply(ctx: Context): void {
       preset: { type: 'string', description: 'Agent preset: the tools and instructions the session works with. Leave it out for the default, which fits most work. "ptc" for mechanical work that is mostly running steps by script: bulk edits, batch processing, repetitive checks. "cordis" for work on DSH itself: writing or changing DSH plugins, presets and settings.' },
       paths: { type: 'string', description: 'JSON array of {path, type} for a write run. type is "file" or "directory". Example: [{"path":"site/note.txt","type":"file"}]. A continuation must match the reserved run\'s full list; a relative path is resolved against the change directory. Review reserves the whole workspace. Omit with access "write" only to reserve the whole change directory.' },
     },
-    execute: (args, exec) => run(() => dot().startTask({
+    execute: async (args, exec) => dot().startTask({
       title: str(args, 'title') ?? 'task',
       instruction: str(args, 'instruction') ?? '',
       ...(str(args, 'task_id') ? { taskId: str(args, 'task_id')! } : {}),
@@ -309,7 +311,7 @@ export function apply(ctx: Context): void {
       ...str(args, 'preset') ? { preset: str(args, 'preset')! } : {},
       ...pathsText(args) ? { paths: pathsText(args)! } : {},
       ...str(args, 'run_id') ? { runId: str(args, 'run_id')! } : {},
-    }, exec.signal ?? new AbortController().signal)),
+    }, exec.signal ?? new AbortController().signal),
     title: 'Start task',
   }))
 
@@ -318,7 +320,7 @@ export function apply(ctx: Context): void {
     name: TOOL.listModels,
     description: `The models a task may run on, as provider/model keys, and the default a task gets without one. The human decides in your settings which models are allowed; ${TOOL.startTask} refuses the others.`,
     parameters: {},
-    execute: () => run(() => dot().listModels()),
+    execute: async () => dot().listModels(),
     title: 'List models',
   }), true)
 
@@ -330,7 +332,7 @@ export function apply(ctx: Context): void {
       session_id: { type: 'string', required: true, description: 'Target session.' },
       message: { type: 'string', required: true, description: 'Text to deliver.' },
     },
-    execute: args => run(() => dot().send(str(args, 'session_id') ?? '', str(args, 'message') ?? '')),
+    execute: async (args) => dot().send(str(args, 'session_id') ?? '', str(args, 'message') ?? ''),
     title: 'Message session',
   }))
 
@@ -339,7 +341,7 @@ export function apply(ctx: Context): void {
     name: TOOL.interruptSession,
     description: 'Stop the current turn of a session. Its queued messages stay.',
     parameters: { session_id: { type: 'string', required: true, description: 'Session to stop.' } },
-    execute: args => run(() => dot().interrupt(str(args, 'session_id') ?? '')),
+    execute: async (args) => dot().interrupt(str(args, 'session_id') ?? ''),
     title: 'Stop session',
   }))
 
@@ -348,7 +350,7 @@ export function apply(ctx: Context): void {
     name: TOOL.archiveSession,
     description: 'Archive a session you started yourself (marked "started" in the ledger), stopping its running work. Waiting requests from it are declined. Sessions you did not start are refused.',
     parameters: { session_id: { type: 'string', required: true, description: 'A session you started.' } },
-    execute: args => run(() => dot().archive(str(args, 'session_id') ?? '')),
+    execute: async (args) => dot().archive(str(args, 'session_id') ?? ''),
     title: 'Archive session',
   }))
 
@@ -361,7 +363,7 @@ export function apply(ctx: Context): void {
       goal: { type: 'string', required: true, description: 'What the human expects from it.' },
       title: { type: 'string', description: 'Board name.' },
     },
-    execute: args => run(() => dot().watch(str(args, 'session_id') ?? '', str(args, 'goal') ?? '', str(args, 'title'))),
+    execute: async (args) => dot().watch(str(args, 'session_id') ?? '', str(args, 'goal') ?? '', str(args, 'title')),
     title: 'Watch session',
   }))
 
@@ -377,7 +379,7 @@ export function apply(ctx: Context): void {
       allow: { type: 'boolean', description: 'Approval decision (omit for a question).' },
       answers: { type: 'string', description: 'Question answers as JSON text (omit for an approval), e.g. [{"id":"q1","selected":["Option"],"custom":"details"}]. Include every question id exactly once; selected may be empty.' },
     },
-    execute: args => run(() => {
+    execute: async (args) => {
       const id = str(args, 'id') ?? ''
       if (str(args, 'action') === 'read') return dot().readApprovalDetail(id)
       const allow = (args as { allow?: unknown }).allow
@@ -399,7 +401,7 @@ export function apply(ctx: Context): void {
         }) })
       }
       throw new DotError('dot/invalid', 'give allow for an approval or answers for a question')
-    }),
+    },
     title: 'Answer request',
   }))
 
@@ -418,7 +420,7 @@ export function apply(ctx: Context): void {
       weekdays: { type: 'string', description: 'add: with daily_time only — comma-separated weekday numbers 1 (Monday) to 7 (Sunday), e.g. "1,2,3,4,5".' },
       id: { type: 'string', description: 'remove: reminder id (sch-...).' },
     },
-    execute: args => run(() => {
+    execute: async (args) => {
       const action = str(args, 'action')
       if (action === 'list') return dot().scheduleList()
       if (action === 'remove') return dot().scheduleRemove(str(args, 'id') ?? '')
@@ -438,7 +440,7 @@ export function apply(ctx: Context): void {
         ...str(args, 'daily_time') ? { dailyTime: str(args, 'daily_time')! } : {},
         ...weekdays ? { weekdays } : {},
       })
-    }),
+    },
     title: 'Manage reminders',
   }))
 
@@ -453,7 +455,7 @@ export function apply(ctx: Context): void {
       tools: { type: 'boolean', description: 'Also search tool calls and their results; default false, the conversation only.' },
       limit: { type: 'integer', description: 'Matches to list, default 12, at most 40.' },
     },
-    execute: args => run(() => {
+    execute: async (args) => {
       const limit = num(args, 'limit')
       return dot().searchHistory({
         query: str(args, 'query') ?? '',
@@ -462,7 +464,7 @@ export function apply(ctx: Context): void {
         tools: bool(args, 'tools'),
         ...limit === undefined ? {} : { limit },
       })
-    }),
+    },
     title: 'Search history',
   }), true)
 
@@ -477,7 +479,7 @@ export function apply(ctx: Context): void {
       after: { type: 'integer', description: 'Messages after it, default 4, at most 30.' },
       tools: { type: 'boolean', description: 'Include tool calls and their results; default false.' },
     },
-    execute: args => run(() => {
+    execute: async (args) => {
       const seq = num(args, 'seq')
       const before = num(args, 'before')
       const after = num(args, 'after')
@@ -488,7 +490,7 @@ export function apply(ctx: Context): void {
         ...after === undefined ? {} : { after },
         tools: bool(args, 'tools'),
       })
-    }),
+    },
     title: 'Read history',
   }), true)
 
@@ -500,7 +502,7 @@ export function apply(ctx: Context): void {
       action: { type: 'string', enum: ['add', 'remove'], required: true, description: 'add or remove.' },
       text: { type: 'string', required: true, description: 'add: the requirement, in the human\'s own words (one short line, at most 400 characters). remove: the requirement, or enough of its words to single it out.' },
     },
-    execute: args => run(() => str(args, 'action') === 'remove' ? dot().agreementRemove(str(args, 'text') ?? '') : dot().agreementAdd(str(args, 'text') ?? '')),
+    execute: async (args) => str(args, 'action') === 'remove' ? dot().agreementRemove(str(args, 'text') ?? '') : dot().agreementAdd(str(args, 'text') ?? ''),
     title: 'Agreement',
   }))
 
@@ -511,7 +513,7 @@ export function apply(ctx: Context): void {
     parameters: {
       text: { type: 'string', required: true, description: 'The complete new cognition text (at most 4000 characters); empty clears it.' },
     },
-    execute: args => run(() => dot().cognitionRewrite(str(args, 'text') ?? '')),
+    execute: async (args) => dot().cognitionRewrite(str(args, 'text') ?? ''),
     title: 'Cognition',
   }))
 
@@ -522,7 +524,7 @@ export function apply(ctx: Context): void {
     parameters: {
       focus: { type: 'string', description: 'What to focus on after the segment change.' },
     },
-    execute: args => run(() => dot().requestSegment(str(args, 'focus'))),
+    execute: async (args) => dot().requestSegment(str(args, 'focus')),
     title: 'New segment',
   }))
 
@@ -539,7 +541,7 @@ export function apply(ctx: Context): void {
       value: { type: 'string', description: 'propose: JSON-encoded value, e.g. "human", true, {"provider":"p","model":"m"}, or null. The outer tool argument is always a string.' },
       reason: { type: 'string', description: 'propose: why this change helps; shown to the human.' },
     },
-    execute: args => run(() => {
+    execute: async (args) => {
       const action = str(args, 'action')
       if (action === 'propose') {
         let value = (args as Record<string, unknown> | null)?.value
@@ -549,7 +551,7 @@ export function apply(ctx: Context): void {
         return self().propose({ field: str(args, 'field') ?? '', value, reason: str(args, 'reason') ?? '' })
       }
       return self().read()
-    }),
+    },
     title: 'Settings',
   }), /* read is not exclusively read-only since propose mutates */ false)
 }
@@ -566,7 +568,7 @@ function defineToolInput(input: {
     name: input.name,
     description: input.description,
     parameters: input.parameters,
-    output: TEXT_OUTPUT,
+    output: { ...TEXT_OUTPUT, presentationMeta: (_args: unknown, value: string) => ({ dshDot: { display: toolDisplay(input.name, value) } }) },
     isConcurrencySafe: () => false,
     execute: input.execute,
     presentCall: () => ({ card: 'generic', title: input.title, kind: 'other' }),

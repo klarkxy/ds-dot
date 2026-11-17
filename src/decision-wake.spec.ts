@@ -90,7 +90,10 @@ describe('work decision wake', () => {
       expect(first.relayed[0]!.text).toContain('verification v-9')
       expect(first.relayed[0]!.text).toContain('subject subject-9')
       expect(first.relayed[0]!.text).toContain('Do not call decide again')
-      expect(first.relayed[0]!.text).toContain('action=accept')
+      expect(first.relayed[0]!.text).toContain('action=closeout')
+      expect(first.relayed[0]!.text).toContain(`expected_input_ref=${change.currentInputRef}`)
+      expect(first.relayed[0]!.text).toContain(`expected_input_revision=${change.currentRevision}`)
+      expect(first.relayed[0]!.text).not.toContain('action=accept')
       expect(first.relayed[0]!.text).toContain('does not accept, reject, or open a session')
       expect(first.store.work.change(change.id)?.oversight?.decision?.notifiedAt).toBe(1000)
       expect(first.store.work.change(change.id)?.closeout).toBeUndefined()
@@ -113,6 +116,31 @@ describe('work decision wake', () => {
     }
   })
 
+  it('names the independent review when a rejected verification has one', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'dot-wake-review-'))
+    const domain = memoryDomain()
+    const first = harness(domain, home)
+    try {
+      await first.store.setSettings({ ...DEFAULT_SETTINGS, reflection: false, idleCheckMinutes: 0 })
+      await first.service.ensureDot()
+      const change = await first.service.createWorkChange({ title: 'Reviewed', cwd: home, goal: 'see', at: 1 })
+      const review = await first.store.work.reserveRun({ changeId: change.id, kind: 'review', writeScope: { kind: 'workspace-exclusive' }, at: 2 })
+      if (!review.ok) throw new Error(review.message)
+      await domain.table('verifications').put('v-4', {
+        id: 'v-4', changeId: change.id, inputRef: change.currentInputRef, inputRevision: change.currentRevision,
+        runIds: [], reviewRunId: review.run.id, checks: [], verdict: 'unverified', subjectKey: 'subject-4', createdAt: 3,
+      })
+      const restored = harness(domain, home)
+      const pending = await ask(restored.service, change.id, change.currentRevision, 'v-4', 'subject-4')
+      await restored.service.answerWorkReview(pending, false)
+      await restored.service.flushNotices()
+      const text = restored.relayed[0]!.text
+      expect(text).toContain(`action=reject with task_id=${change.id}, review_run_id=${review.run.id}`)
+      expect(text).toContain(`expected_input_revision=${change.currentRevision}`)
+      expect(text).not.toContain('action=revise')
+    } finally { rmSync(home, { recursive: true, force: true }) }
+  })
+
   it('delivers an undelivered decision after restart, once, including a rejection', async () => {
     const home = mkdtempSync(join(tmpdir(), 'dot-wake-redo-'))
     const domain = memoryDomain()
@@ -132,7 +160,9 @@ describe('work decision wake', () => {
       expect(second.relayed).toHaveLength(1)
       expect(second.relayed[0]!.target).toBe('dot-1')
       expect(second.relayed[0]!.text).toContain('user reject is already recorded')
-      expect(second.relayed[0]!.text).toContain('action=reject')
+      expect(second.relayed[0]!.text).toContain('action=revise')
+      expect(second.relayed[0]!.text).toContain('role=rework')
+      expect(second.relayed[0]!.text).not.toContain('action=reject')
       expect(second.relayed[0]!.text).toContain('Do not call decide again')
       expect(second.store.work.change(change.id)?.oversight?.decision?.notifiedAt).toBe(1000)
       expect(second.store.work.change(change.id)?.closeout).toBeUndefined()

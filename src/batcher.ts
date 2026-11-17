@@ -1,8 +1,10 @@
 /** Idle-only wake-up queue. Approval grace is evaluated per item. */
+import type { NoticeEntry, ParsedNotice } from './chat-format.ts'
 export interface Notice {
   readonly sessionId: string
   readonly kind: 'turn-end' | 'error' | 'approval' | 'question' | 'archived' | 'lock-free' | 'task-human' | 'idle-check'
   readonly text: string
+  readonly display?: NoticeEntry
   readonly at: number
   readonly requestId?: string
   readonly ticketId?: string
@@ -106,14 +108,25 @@ export class NoticeBatcher {
   dispose(): void { this.disposed = true; this.take() }
 }
 
-/** Fold task turn endings and group requests before other updates. */
-export function formatNotices(items: readonly Notice[], ready: readonly string[] = []): string {
+/** The text prompt and structured display share the same folded set. */
+function foldedNotices(items: readonly Notice[]): readonly Notice[] {
   const latest = new Map<string, Notice>()
   for (const item of items) if (item.kind === 'turn-end' && item.ticketId) {
     const key = `${item.ticketId}\0${item.sessionId}`
     if ((latest.get(key)?.at ?? Number.NEGATIVE_INFINITY) <= item.at) latest.set(key, item)
   }
-  const filtered = items.filter(item => item.kind !== 'turn-end' || !item.ticketId || latest.get(`${item.ticketId}\0${item.sessionId}`) === item)
+  return items.filter(item => item.kind !== 'turn-end' || !item.ticketId || latest.get(`${item.ticketId}\0${item.sessionId}`) === item)
+}
+
+export function formatNoticeDisplay(items: readonly Notice[]): ParsedNotice {
+  return { isReminder: false, entries: foldedNotices(items).map(item => item.display ?? {
+    kind: item.kind, sessionId: item.sessionId, ...item.requestId ? { requestId: item.requestId } : {}, summary: item.text,
+  }) }
+}
+
+/** Model-facing context; browser display reads formatNoticeDisplay instead. */
+export function formatNotices(items: readonly Notice[], ready: readonly string[] = []): string {
+  const filtered = foldedNotices(items)
   const groups: Array<[string, (notice: Notice) => boolean]> = [
     ['Requests waiting for you:', item => item.kind === 'approval' || item.kind === 'question'],
     ['Errors:', item => item.kind === 'error'],

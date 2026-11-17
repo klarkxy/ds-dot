@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { bindRunSession, finishWork, launchReservedRun } from './execution.ts'
 import { bindHost } from './host.ts'
 import { WorkBook, type WorkPersist } from './work.ts'
@@ -31,39 +31,22 @@ describe('running task permissions and relay', () => {
     await host.relay('target', 'sender', 'follow-up')
     expect(calls).toEqual(['followup'])
   })
-  it('unwraps an AgentHandle and does not treat a methodless registry object as absence', async () => {
-    const calls: string[] = []
-    const handled = bindHost(name => name === 'agents' ? {
-      get: () => ({ agent: { followup: () => calls.push('followup'), status: 'idle' }, async dispose() {} }),
-    } : undefined)
-    await handled.relay('target', 'sender', 'follow-up')
-    expect(calls).toEqual(['followup'])
-
-    const host = bindHost(name => {
-      if (name === 'jobs') return { list: () => [] }
-      if (name === 'agents') return { get: () => ({ id: 'session-1' }) }
-      if (name === 'sessionController') return {
-        async cancel() { return { accepted: true } },
-        async state() { return { queue: [], running: false, cursor: 1 } },
-        async resolveAgent() { return { agent: { status: 'idle', whenIdle: () => Promise.resolve() } } },
-      }
-      if (name === 'sessionQuery') return { async readSession() { return { events: [] } } }
-      return undefined
-    })
-    expect(await host.stopActivity!('session-1')).toMatchObject({ cancelAccepted: true, queueCleared: true, idle: true, jobsSettled: true })
-
-    const gone = bindHost(name => {
-      if (name === 'jobs') return { list: () => [] }
-      if (name === 'agents') return { get: () => undefined }
-      if (name === 'sessionController') return {
-        async cancel() { return { accepted: true } },
-        async state() { return { queue: [], running: false, cursor: 1 } },
-        async resolveAgent() { return { error: { message: 'session-1 has no live agent' } } },
-      }
-      if (name === 'sessionQuery') return { async readSession() { return { events: [] } } }
-      return undefined
-    })
-    expect(await gone.stopActivity!('session-1')).toMatchObject({ cancelAccepted: true, queueCleared: true, idle: false, jobsSettled: true })
+  it('stores notice facts alongside relayed and carried user messages', async () => {
+    const messages: unknown[] = []
+    const agent = { status: 'idle', followup: (message: unknown) => messages.push(message) }
+    const host = bindHost(name => name === 'agents' ? { get: () => agent } : undefined)
+    const notice = { isReminder: false, entries: [{ kind: 'turn-end' as const, sessionId: 's', summary: 'done' }] }
+    await host.relay('target', 'sender', 'notice copy', undefined, undefined, notice)
+    await host.say('target', 'hello', '[dot notice] carried', undefined, undefined, notice)
+    expect(messages[0]).toMatchObject({ source: { kind: 'agent-message', dshDot: { notices: notice } } })
+    expect(messages[1]).toMatchObject({ source: { kind: 'user', dshDot: { carriedChars: 20, notices: notice } } })
+  })
+  it('checks the caller gate after resolving and before followup', async () => {
+    let follows = 0
+    const host = bindHost(name => name === 'agents' ? { get: () => undefined }
+      : name === 'sessionController' ? { resolveAgent: async () => ({ agent: { followup: () => { follows += 1 } } }) } : undefined)
+    await expect(host.relay('target', 'sender', 'late', 'd1', () => false)).rejects.toThrow('closed before followup')
+    expect(follows).toBe(0)
   })
 })
 
@@ -112,9 +95,10 @@ describe('rc.3 owned jobs', () => {
       kill: jobs.kill,
       wait: jobs.wait,
     }
+    const agent = { status: 'idle', cancel() {}, whenIdle: async () => {} }
     const host = bindHost(name => {
       if (name === 'jobs') return wrapped
-      if (name === 'agents') return { get: () => ({ status: 'idle' }) }
+      if (name === 'agents') return { get: () => agent }
       if (name === 'sessionController') return {
         async cancel() { return { accepted: true } },
         state: state ?? (async () => ({ queue: [], running: false, cursor: 1 })),
@@ -202,54 +186,6 @@ describe('rc.3 owned jobs', () => {
     expect(seen.every(signal => signal instanceof AbortSignal)).toBe(true)
   })
 
-  it('treats a turn as idle only after whenIdle, not from the queue snapshot', async () => {
-    let reads = 0
-    let status: 'running' | 'idle' = 'running'
-    const host = bindHost(name => {
-      if (name === 'jobs') return { list: () => [] }
-      if (name === 'agents') return {
-        get: () => ({
-          get status() { return status },
-          whenIdle: () => { status = 'idle'; return Promise.resolve() },
-        }),
-      }
-      if (name === 'sessionController') return {
-        async cancel() { return { accepted: true } },
-        async state(_request: { sessionId: string }, signal: AbortSignal) {
-          signal.throwIfAborted()
-          reads += 1
-          return { queue: [], running: reads < 3, cursor: 1 }
-        },
-      }
-      if (name === 'sessionQuery') return { async readSession() { return { events: [] } } }
-      return undefined
-    })
-    expect((await host.stopActivity!('session-1')).idle).toBe(true)
-
-    let still = 0
-    const busy = bindHost(name => {
-      if (name === 'jobs') return { list: () => [] }
-      if (name === 'agents') return {
-        get: () => ({
-          status: 'idle' as const,
-          whenIdle: () => Promise.resolve(),
-        }),
-      }
-      if (name === 'sessionController') return {
-        async cancel() { return { accepted: true } },
-        async state(_request: { sessionId: string }, signal: AbortSignal) {
-          signal.throwIfAborted()
-          still += 1
-          return { queue: [], running: true, cursor: 1 }
-        },
-      }
-      if (name === 'sessionQuery') return { async readSession() { return { events: [] } } }
-      return undefined
-    })
-    expect((await busy.stopActivity!('session-1')).idle).toBe(false)
-    expect(still).toBeGreaterThan(2)
-  })
-
   it('stays unknown when ctx.jobs is absent', async () => {
     const host = bindHost(name => {
       if (name === 'agents') return { get: () => ({ status: 'idle' }) }
@@ -267,94 +203,161 @@ describe('rc.3 owned jobs', () => {
   })
 })
 
-describe('archived session with no live agent', () => {
-  const settled = (sessionId: string) => [{ type: 'job/settled', data: { jobId: 'bash-1', owner: sessionId, producerReported: true } }]
+describe('cold inactive session', () => {
+  const inactive = { active: false, running: false, queue: null, cursor: 1 }
+  const settled = { cancelAccepted: true, queueCleared: true, idle: true, jobsSettled: true as const }
 
-  function hostFor(sessionId: string, options: {
-    archived?: boolean
-    queue: unknown
-    running: boolean
-    jobs?: 'settled' | 'throw'
-    live?: boolean
-  }) {
-    return bindHost(name => {
-      if (name === 'workspaceRegistry') return { archivedSessionIds: options.archived ? [sessionId] : [] }
-      if (name === 'jobs') {
-        return {
-          list() {
-            if (options.jobs === 'throw') throw new Error('jobs unreadable')
-            return [{ id: 'bash-1', status: 'completed', owner: sessionId }]
-          },
-        }
+  function coldHost(options: {
+    state?: (read: number) => unknown
+    agent?: unknown
+    registry?: 'throw'
+    beforeJobFacts?: () => void
+    jobs?: 'absent' | { list: (caller?: string) => readonly { id?: string; status?: string; owner?: string }[] }
+    events?: { type: string; data?: { jobId?: string; owner?: string; producerReported?: boolean } }[]
+  } = {}) {
+    let stateReads = 0
+    const agent = options.agent
+    if (agent) Object.assign(agent, { cancel() {} })
+    const resolves: string[] = []
+    const host = bindHost(name => {
+      if (name === 'jobs') return options.jobs === 'absent' ? undefined : (options.jobs ?? { list: () => [] })
+      if (name === 'agents') return {
+        get() {
+          if (options.registry === 'throw') throw new Error('registry down')
+          return agent
+        },
       }
-      if (name === 'agents') return { get: () => options.live ? { status: 'running' as const, whenIdle: () => Promise.resolve() } : undefined }
       if (name === 'sessionController') return {
-        async cancel() { throw new Error('not attached') },
-        async list() { return { items: [{ sessionId, cwd: 'H:\\repo', agentPreset: 'standard' }] } },
+        async cancel() { return { accepted: true } },
         async state(_request: { sessionId: string }, signal: AbortSignal) {
           signal.throwIfAborted()
-          return { queue: options.queue, running: options.running }
+          stateReads += 1
+          if (!options.state) return inactive
+          return options.state(stateReads)
         },
         async resolveAgent() {
-          return options.live
-            ? { agent: { status: 'running' as const, whenIdle: () => Promise.resolve() } }
-            : { error: { message: `${sessionId} has no live agent` } }
+          resolves.push('resolve')
+          return { error: { message: 'cold subagent cannot be resolved' } }
         },
       }
-      if (name === 'sessionQuery') return { async readSession() { return { events: options.jobs === 'throw' ? [] : settled(sessionId) } } }
+      if (name === 'sessionQuery') return { async readSession() { options.beforeJobFacts?.(); return { events: options.events ?? [] } } }
       return undefined
     })
+    return { host, resolves, reads: () => stateReads }
   }
 
-  it('finishes an archived stopped session and releases it', async () => {
-    const { work, run } = await activeRun()
-    const sessionId = run.sessionId ?? run.requestedSessionId
-    const dot = bindRunSession(hostFor(sessionId, { archived: true, queue: null, running: false, jobs: 'settled' }))
-    const finished = await finishWork(work, dot, run.id, 'completed', 9)
-    expect(finished).toMatchObject({ ok: true, phase: 'completed' })
-    expect(work.run(run.id)?.closureEvidence).toEqual({ queueCleared: true, agentIdle: true, jobsSettled: true })
+  it('accepts a registry-absent session only when active is strictly false', async () => {
+    const released = coldHost()
+    expect(await released.host.stopActivity!('session-1')).toMatchObject(settled)
+    expect(released.resolves).toEqual([])
+
+    expect(released.reads()).toBe(1)
+  })
+
+  it('does not accept a missing or true active flag', async () => {
+    const missing = coldHost({ state: () => ({ running: false, queue: null }) })
+    expect(await missing.host.stopActivity!('session-1')).toMatchObject({ queueCleared: false, idle: false, jobsSettled: true })
+    const attached = coldHost({ state: () => ({ active: true, running: false, queue: null }) })
+    expect(await attached.host.stopActivity!('session-1')).toMatchObject({ queueCleared: false, idle: false, jobsSettled: true })
+    expect(missing.resolves).toEqual([])
+    expect(attached.resolves).toEqual([])
+  })
+
+  it('does not accept a registry or state failure', async () => {
+    const registry = coldHost({ registry: 'throw' })
+    expect(await registry.host.stopActivity!('session-1')).toMatchObject({ queueCleared: false, idle: false })
+    expect(registry.resolves).toEqual([])
+    const unreadable = coldHost({ state: () => { throw new Error('state unreadable') } })
+    expect(await unreadable.host.stopActivity!('session-1')).toMatchObject({ queueCleared: false, idle: false, jobsSettled: true })
+    expect(unreadable.resolves).toEqual([])
+  })
+
+  it('does not accept running or a non-empty queue', async () => {
+    const running = coldHost({ state: () => ({ active: false, running: true, queue: null }) })
+    expect(await running.host.stopActivity!('session-1')).toMatchObject({ queueCleared: false, idle: false, jobsSettled: true })
+    const queued = coldHost({ state: () => ({ active: false, running: false, queue: [{ id: 'still' }] }) })
+    expect(await queued.host.stopActivity!('session-1')).toMatchObject({ queueCleared: false, idle: false, jobsSettled: true })
+    expect(running.resolves).toEqual([])
+    expect(queued.resolves).toEqual([])
+  })
+
+  it('keeps an unsettled or unknown owned job blocking', async () => {
+    const busy = coldHost({ jobs: { list: () => [{ id: 'bash-1', status: 'running', owner: 'session-1' }] } })
+    expect(await busy.host.stopActivity!('session-1')).toMatchObject({ idle: true, queueCleared: true, jobsSettled: false })
+    const unknown = coldHost({ jobs: 'absent' })
+    expect(await unknown.host.stopActivity!('session-1')).toMatchObject({ idle: true, queueCleared: true, jobsSettled: 'unknown' })
+  })
+
+  it('retains a writer scope until idle-status maintenance actually settles', async () => {
+    const { work, run } = await activeRun(true)
+    let finishMaintenance!: () => void
+    const maintenance = new Promise<void>(resolve => { finishMaintenance = resolve })
+    const agent = { status: 'idle', whenIdle: vi.fn(() => maintenance) }
+    const h = coldHost({ agent, state: () => ({ active: true, running: false, queue: [] }) })
+    const finishing = finishWork(work, bindRunSession(h.host), run.id, 'completed', 9)
+    await vi.waitFor(() => expect(agent.whenIdle).toHaveBeenCalledOnce())
+    expect(work.run(run.id)?.phase).toBe('settling')
+    expect(work.occupying().map(row => row.id)).toContain(run.id)
+    finishMaintenance()
+    expect(await finishing).toMatchObject({ ok: true, phase: 'completed' })
     expect(work.occupying()).toEqual([])
   })
 
-  it('keeps a live running session busy', async () => {
-    const report = await hostFor('session-1', { archived: true, queue: [], running: true, jobs: 'settled', live: true }).stopActivity!('session-1')
-    expect(report).toMatchObject({ idle: false, jobsSettled: true })
+  it('finishes a cold session without resuming it and releases its scope', async () => {
+    const { work, run } = await activeRun()
+    const h = coldHost()
+    expect(await finishWork(work, bindRunSession(h.host), run.id, 'completed', 9)).toMatchObject({ ok: true, phase: 'completed' })
+    expect(work.occupying()).toEqual([])
+    expect(h.resolves).toEqual([])
   })
 
-  it('does not release a dead session that is still running or still queued', async () => {
-    const { work, run } = await activeRun()
-    const sessionId = run.sessionId ?? run.requestedSessionId
-    const running = bindRunSession(hostFor(sessionId, { archived: true, queue: null, running: true, jobs: 'settled' }))
-    expect(await finishWork(work, running, run.id, 'completed', 9)).toMatchObject({ ok: false, code: 'unknown' })
-    expect(work.occupying().map(item => item.id)).toEqual([run.id])
-
-    const queued = bindRunSession(hostFor(sessionId, { archived: true, queue: [{ id: 'still-queued' }], running: false, jobs: 'settled' }))
-    expect(await finishWork(work, queued, run.id, 'completed', 10)).toMatchObject({ ok: false, code: 'unknown' })
-    expect(work.run(run.id)?.phase).toBe('settling')
-    expect(work.occupying().map(item => item.id)).toEqual([run.id])
-  })
-
-  it('keeps occupancy when a missing agent has no persisted stop', async () => {
-    const { work, run } = await activeRun()
-    const sessionId = run.sessionId ?? run.requestedSessionId
-    const dot = bindRunSession(hostFor(sessionId, { archived: false, queue: null, running: false, jobs: 'throw' }))
-    const refused = await finishWork(work, dot, run.id, 'completed', 9)
-    expect(refused).toMatchObject({ ok: false, code: 'unknown' })
-    expect(work.run(run.id)?.closureEvidence).toBeUndefined()
-    expect(work.run(run.id)?.phase).toBe('settling')
-    expect(work.occupying().map(item => item.id)).toEqual([run.id])
-    expect(await hostFor(sessionId, { archived: false, queue: null, running: false, jobs: 'settled' }).stopActivity!(sessionId)).toMatchObject({
-      queueCleared: false, idle: false, jobsSettled: true,
+  it.each(['running', 'queued', 'unreadable'] as const)('rechecks %s state after reading job settlement', async change => {
+    let settled = false
+    const agent = { status: 'idle' as 'idle' | 'running', whenIdle: () => Promise.resolve() }
+    const h = coldHost({
+      agent,
+      beforeJobFacts() {
+        settled = true
+        if (change === 'running') agent.status = 'running'
+      },
+      state() {
+        if (settled && change === 'unreadable') throw new Error('state lost during job settlement')
+        return { active: true, running: agent.status === 'running', queue: settled && change === 'queued' ? [{ id: 'new-input' }] : [] }
+      },
     })
+    const report = await h.host.stopActivity!('session-1')
+    expect(report.jobsSettled).toBe(true)
+    if (change === 'queued') expect(report.queueCleared).toBe(false)
+    else expect(report.idle).toBe(false)
+    expect(h.resolves).toEqual([])
+  })
+
+  it('sees an owned job that appears while waiting for idle', async () => {
+    const owned: { id: string; status: string; owner: string }[] = []
+    const agent = {
+      status: 'running' as 'running' | 'idle',
+      whenIdle() {
+        owned.push({ id: 'bash-late', status: 'running', owner: 'session-1' })
+        agent.status = 'idle'
+        return Promise.resolve()
+      },
+    }
+    const host = coldHost({
+      agent,
+      jobs: { list: () => owned },
+      state: () => ({ active: true, running: false, queue: [] }),
+    })
+    expect(await host.host.stopActivity!('session-1')).toMatchObject({ idle: true, queueCleared: true, jobsSettled: false })
   })
 })
 
-async function activeRun() {
+async function activeRun(write = false) {
   const persist: WorkPersist = async () => undefined
   const work = new WorkBook(persist, 'win32')
   const change = await work.createChange({ title: 'Ship', cwd: 'H:\\repo', goal: 'land it', at: 1 })
-  const reserved = await work.reserveRun({ changeId: change.id, cwd: 'H:\\repo', root: { workspaceRoot: 'H:\\repo' }, writeScope: { kind: 'paths', paths: [] }, at: 2 })
+  const reserved = await work.reserveRun({ changeId: change.id, cwd: 'H:\\repo', root: { workspaceRoot: 'H:\\repo' }, writeScope: { kind: 'paths', paths: write ? [{ path: 'a.ts', type: 'file' }] : [] }, at: 2 })
   if (!reserved.ok) throw new Error(reserved.message)
+  if (write) await work.publishBaseline(reserved.run.id, work.revision, 'base-1', 3)
   const started = await launchReservedRun(work, {
     async findSession() { return { cwd: 'H:\\repo', preset: 'standard' } },
     async createSession(input) { return { sessionId: input.sessionId, cwd: input.cwd } },

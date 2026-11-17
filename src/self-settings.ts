@@ -69,7 +69,6 @@ export class SelfSettings {
       after = normalized || null
     } else {
       const patch = { [field]: input.value }
-      patchSettings(this.dot.store.settings, patch)
       before = valueOf(this.dot.store.settings, field, '')
       after = valueOf(patchSettings(this.dot.store.settings, patch), field, '')
     }

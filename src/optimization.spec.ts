@@ -1,7 +1,7 @@
 /**
  * Regression and integration suite for the architecture optimization patch:
  * 1. Snapshot directory filtering (.git / node_modules), in-tree symlink tolerance,
- *    shared CAS hardlink deduplication, and factory-reset artifact cleanup.
+ *    independent snapshot blobs, and factory-reset artifact cleanup.
  * 2. Git repository & worktree `commondir` mutual-exclusion root detection.
  * 3. Unified WorkBook observability across `ledgerSummary`, `IdleChecker`,
  *    `headerBoardCounts`, `sessionLookup`, and read-only `Run` approval escalation.
@@ -12,7 +12,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, 
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
-import { captureScope, restoreSnapshot, saveSnapshot, wipeArtifacts } from './artifacts.ts'
+import { captureScope, readSnapshot, saveSnapshot, wipeArtifacts } from './artifacts.ts'
 import { headerBoardCounts, sessionLookup } from './board-groups.ts'
 import { DEFAULT_SETTINGS, TOOL, type DotSettings } from './contracts.ts'
 import { detectWorkspaceRoot } from './git-root.ts'
@@ -85,7 +85,7 @@ function createHarness(settings: Partial<DotSettings> = {}) {
     effect(fn: () => unknown) { fn() },
   } as never)
   const taskTool = registered.find(row => row.name === TOOL.task) as { execute(args: Record<string, unknown>): Promise<string> }
-  const startTool = registered.find(row => row.name === TOOL.startTask) as { execute(args: Record<string, unknown>, exec: { signal?: AbortSignal }): Promise<string> }
+  const startTool = { ...taskTool, execute: (args: Record<string, unknown>, _exec?: unknown) => taskTool.execute({ ...args, action: 'dispatch', ...((args.cwd ?? args.dir) ? { dir: args.cwd ?? args.dir } : {}) }) }
   return {
     home,
     project,
@@ -102,8 +102,8 @@ function createHarness(settings: Partial<DotSettings> = {}) {
   }
 }
 
-describe('snapshot filtering, symlink safety, and shared CAS deduplication', () => {
-  it('ignores .git and node_modules, skips symlinks during scans, deduplicates through the CAS without sharing inodes, and wipes on reset', () => {
+describe('snapshot filtering, symlink safety, and independent snapshot blobs', () => {
+  it('ignores .git and node_modules, skips symlinks during scans, stores independent blobs, and wipes on reset', () => {
     const root = mkdtempSync(join(tmpdir(), 'dot-cas-proj-'))
     const home = mkdtempSync(join(tmpdir(), 'dot-cas-home-'))
     const outside = mkdtempSync(join(tmpdir(), 'dot-cas-ext-'))
@@ -125,7 +125,7 @@ describe('snapshot filtering, symlink safety, and shared CAS deduplication', () 
       const savedA = saveSnapshot(snapA, captured.files, undefined, { root })
       const savedB = saveSnapshot(snapB, captured.files, undefined, { root })
       expect(readdirSync(join(home, 'artifacts')).sort()).toEqual(['snap-a', 'snap-b'])
-      expect(existsSync(join(home, 'cas-blobs', savedA.saved[0]!.sha256))).toBe(true)
+      expect(existsSync(join(home, 'cas-blobs'))).toBe(false)
 
       const blobA = join(snapA, 'blobs', savedA.saved[0]!.sha256)
       const blobB = join(snapB, 'blobs', savedB.saved[0]!.sha256)
@@ -135,12 +135,12 @@ describe('snapshot filtering, symlink safety, and shared CAS deduplication', () 
       expect(readFileSync(blobA)).toEqual(readFileSync(blobB))
       writeFileSync(blobA, new Uint8Array([0]))
       expect(readFileSync(blobB, 'utf8')).toBe('export const x = 42\n')
-      expect(readFileSync(join(home, 'cas-blobs', savedA.saved[0]!.sha256), 'utf8')).toBe('export const x = 42\n')
 
-      // Restore still refuses writing through a symlink/junction inside target root
-      const badSnap = join(home, 'artifacts', 'snap-escape')
-      saveSnapshot(badSnap, [{ path: 'src/linked-dir/pwn.txt', body: new TextEncoder().encode('no') }], undefined, { root })
-      expect(() => restoreSnapshot(badSnap, root)).toThrow(/link/)
+      // Old snapshots with only a CAS body remain readable.
+      mkdirSync(join(home, 'cas-blobs'), { recursive: true })
+      writeFileSync(join(home, 'cas-blobs', savedB.saved[0]!.sha256), readFileSync(blobB))
+      rmSync(blobB)
+      expect(new TextDecoder().decode(readSnapshot(snapB).bodies.get('src/app.ts'))).toBe('export const x = 42\n')
 
       wipeArtifacts(home)
       expect(existsSync(join(home, 'artifacts'))).toBe(false)

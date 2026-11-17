@@ -1,6 +1,6 @@
 /**
  * Test-only fault adapter around the real DotHost composition root.
- * Production leaves it idle unless DSH_DOT_HOST_FAULT is set.
+ * Tests opt into faults explicitly; production does not install this adapter.
  * It does not add a dispose RPC and it does not rewrite work records.
  */
 import { existsSync, readFileSync } from 'node:fs'
@@ -57,8 +57,8 @@ export function createHostFault(options: HostFaultOptions = {}): HostFaultContro
       if (!state.relayAckUnknown) return host
       return {
         ...host,
-        async relay(targetId, senderId, text, deliveryId) {
-          await host.relay(targetId, senderId, text, deliveryId)
+        async relay(targetId, senderId, text, deliveryId, confirm) {
+          await host.relay(targetId, senderId, text, deliveryId, confirm)
           state.relayCalls += 1
           state.hideProofs += 1
           throw new Error('relay ack unknown')

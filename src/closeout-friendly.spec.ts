@@ -60,7 +60,7 @@ function harness() {
     effect(fn: () => unknown) { fn() },
   } as never)
   const task = registered.find(row => row.name === TOOL.task) as { execute(args: Record<string, unknown>): Promise<string> }
-  const start = registered.find(row => row.name === TOOL.startTask) as { execute(args: Record<string, unknown>, exec: { signal: AbortSignal }): Promise<string> }
+  const start = { ...task, execute: (args: Record<string, unknown>, _exec?: unknown) => task.execute({ ...args, action: 'dispatch', ...((args.cwd ?? args.dir) ? { dir: args.cwd ?? args.dir } : {}) }) }
   const exec = { signal: new AbortController().signal }
   return {
     home, project, store, service, task, start, exec,
@@ -100,8 +100,7 @@ describe('closeout binds the read version and explicit checks', () => {
       const bare = await h.task.execute({
         action: 'closeout', task_id: created.id, evidence_ref: 'log', summary: 'looks done',
         checks: JSON.stringify([{ requirementRef: 'R1', applicability: 'applicable', verdict: 'pass', evidenceRefs: ['log'] }]),
-      })
-      expect(bare).toContain('Error [dot/invalid]')
+      }).catch(error => { expect(error.code).toBe('dot/invalid'); return error.message as string })
       expect(bare).toContain('expected_input_ref')
       expect(existsSync(join(h.home, 'artifacts', 'evidence', 'log'))).toBe(false)
       expect(h.store.work.run(reviewId!)?.phase).not.toBe('settling')
@@ -110,7 +109,7 @@ describe('closeout binds the read version and explicit checks', () => {
       const stale = await h.task.execute({
         action: 'closeout', task_id: created.id, ...version, expected_input_revision: version.expected_input_revision + 1,
         checks: JSON.stringify([{ requirementRef: 'R1', applicability: 'applicable', verdict: 'pass', evidenceRefs: ['log'] }]),
-      })
+      }).catch(error => { expect(error.code).toBe('dot/invalid'); return error.message as string })
       expect(stale).toContain('is not current')
       expect(h.store.work.run(reviewId!)?.phase).not.toBe('settling')
     } finally { h.cleanup() }
@@ -129,13 +128,13 @@ describe('closeout binds the read version and explicit checks', () => {
       writeFileSync(join(h.project, 'doc.md'), 'new')
       expect(await h.task.execute({ action: 'finish', task_id: changeId!, run_id: runId })).toContain(`completed ${runId}`)
       const version = await readInput(h.task, changeId!)
-      const summarized = await h.task.execute({ action: 'closeout', task_id: changeId!, ...version, evidence_ref: 'doc-check', summary: 'updated' })
+      const summarized = await h.task.execute({ action: 'closeout', task_id: changeId!, ...version, evidence_ref: 'doc-check', summary: 'updated' }).catch(error => { expect(error.code).toBe('dot/invalid'); return error.message as string })
       expect(summarized).toContain('requires checks')
       expect(h.store.work.change(changeId!)?.closeout).toBeUndefined()
       const failedGoal = await h.task.execute({
         action: 'closeout', task_id: changeId!, ...version, evidence_ref: 'doc-check', summary: 'updated',
         checks: JSON.stringify([{ requirementRef: 'goal', applicability: 'applicable', verdict: 'fail', evidenceRefs: ['doc-check'] }]),
-      })
+      }).catch(error => { expect(error.code).toBe('dot/invalid'); return error.message as string })
       expect(failedGoal).toContain('explicit goal check')
       expect(h.store.work.latestVerification(changeId!)).toBeUndefined()
       const accepted = await h.task.execute({
@@ -144,6 +143,32 @@ describe('closeout binds the read version and explicit checks', () => {
       })
       expect(accepted).toContain(`accepted ${changeId}`)
       expect(h.store.work.workView(changeId!)?.status).toBe('done')
+    } finally { h.cleanup() }
+  })
+
+  it('captures only the union of write scopes and permits unrelated files to change after verification', async () => {
+    const h = harness()
+    try {
+      writeFileSync(join(h.project, 'other.txt'), 'unrelated original')
+      const created = await h.service.createWorkChange({ title: 'Scoped', cwd: h.project, goal: 'edit doc', requirements: [{ requirementRef: 'R1', text: 'edited', required: true }] })
+      const runId = await settleWriter(h, created.id)
+      const subject = await h.service.captureWorkSubject(created.id)
+      expect(subject.changes.map(item => item.path)).toEqual(['doc.md'])
+      expect(subject.protectedDirty).not.toContain('other.txt')
+      expect(subject.outOfScopePaths).toContain('other.txt')
+      const current = h.store.work.change(created.id)!
+      const verification = await h.service.recordWorkVerification(created.id, [{ requirementRef: 'R1', applicability: 'applicable', verdict: 'pass', evidenceRefs: ['event:session-run-1:1'], note: 'doc.md contains the required edit' }], [runId], { inputRef: current.currentInputRef, inputRevision: current.currentRevision, subject })
+      if (!('id' in verification)) throw new Error(verification.message)
+      const human = { expectedInputRevision: current.currentRevision, expectedVerificationId: verification.id }
+      writeFileSync(join(h.project, 'doc.md'), 'drifted')
+      expect(await h.service.acceptWork(created.id, verification.id, current.currentInputRef, verification.subjectKey!, 'tool', human)).toMatchObject({ code: 'baseline' })
+      writeFileSync(join(h.project, 'doc.md'), 'new')
+      writeFileSync(join(h.project, 'other.txt'), 'changed by another writer')
+      writeFileSync(join(h.project, 'later.txt'), 'another unrelated file')
+      const accepted = await h.service.acceptWork(created.id, verification.id, current.currentInputRef, verification.subjectKey!, 'tool', human)
+      expect(accepted).toHaveProperty('closeout')
+      expect(h.service.workBoard(created.id)?.verification?.outOfScopePaths).toContain('other.txt')
+      expect(h.store.work.workView(created.id)?.status).toBe('done')
     } finally { h.cleanup() }
   })
 
@@ -161,7 +186,7 @@ describe('closeout binds the read version and explicit checks', () => {
       const pendingId = /pending (\S+)/.exec(gate)?.[1]
       expect(pendingId, gate).toBeTruthy()
       await h.service.answerWorkReview(pendingId!, true)
-      const skipped = await h.task.execute({ action: 'closeout', task_id: created.id, checks, evidence_ref: 'r1-log', summary: 'seen' })
+      const skipped = await h.task.execute({ action: 'closeout', task_id: created.id, checks, evidence_ref: 'r1-log', summary: 'seen' }).catch(error => { expect(error.code).toBe('dot/invalid'); return error.message as string })
       expect(skipped).toContain('expected_input_ref')
       expect(h.store.work.change(created.id)?.closeout).toBeUndefined()
       const again = await readInput(h.task, created.id)
@@ -181,13 +206,13 @@ describe('closeout binds the read version and explicit checks', () => {
       const review = await h.start.execute({ task_id: created.id, role: 'review', instruction: 'look', capture_baseline: true }, h.exec)
       const reviewId = /started (run-\d+)/.exec(review)?.[1]
       expect(reviewId, review).toBeTruthy()
-      expect(await h.task.execute({ action: 'hold', task_id: created.id, review_run_id: reviewId })).toContain(`holding ${reviewId}`)
+      expect(h.store.work.run(reviewId!)?.phase).toBe('active')
       const version = await readInput(h.task, created.id)
       expect(await h.task.execute({ action: 'reject', task_id: created.id, review_run_id: reviewId, expected_input_revision: version.expected_input_revision })).toContain('rejected')
       const checks = JSON.stringify([{ requirementRef: 'R1', applicability: 'applicable', verdict: 'pass', evidenceRefs: ['r1-log'] }])
       const again = await h.task.execute({
         action: 'closeout', task_id: created.id, ...version, checks, evidence_ref: 'r1-log', summary: 'same delivery',
-      })
+      }).catch(error => { expect(error.code).toBe('dot/invalid'); return error.message as string })
       expect(again).toContain(`${reviewId} rejected this delivery`)
       expect(h.store.work.change(created.id)?.closeout).toBeUndefined()
       expect(h.store.work.change(created.id)?.control).toBe('open')
@@ -206,7 +231,7 @@ describe('closeout binds the read version and explicit checks', () => {
       const review = await h.start.execute({ task_id: created.id, role: 'review', instruction: 'look', capture_baseline: true }, h.exec)
       const reviewId = /started (run-\d+)/.exec(review)?.[1]
       expect(reviewId, review).toBeTruthy()
-      expect(await h.task.execute({ action: 'hold', task_id: created.id, review_run_id: reviewId })).toContain(`holding ${reviewId}`)
+      expect(h.store.work.run(reviewId!)?.phase).toBe('active')
       const version = await readInput(h.task, created.id)
       expect(await h.task.execute({ action: 'reject', task_id: created.id, review_run_id: reviewId, expected_input_revision: version.expected_input_revision })).toContain('rejected')
       const rework = await h.start.execute({

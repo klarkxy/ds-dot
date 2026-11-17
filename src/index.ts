@@ -26,7 +26,6 @@ import { COMPACTION_POLICY, PLUGIN_NAME, PRESET_ID, RPC_CHANNEL, SERVICE_NAME, t
 import { CHAT_SAY_BODY_BYTES, checkChatImages } from './chat-images.ts'
 import { ChatFeed } from './feed.ts'
 import { bindHost } from './host.ts'
-import { hostFaultFromEnv } from './host-fault-harness.ts'
 import { clip } from './ledger.ts'
 import { detachNative } from './native.ts'
 import { PeerLedger } from './peer.ts'
@@ -100,9 +99,8 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
   const query = ctx.get('sessionQuery' as never) as unknown as { readSession(sessionId: string): Promise<{ events: readonly { time?: unknown }[] }> }
   await restoreTaskTimestamps(domain, async sessionId => (await query.readSession(sessionId)).events.map(event => event.time).filter((time): time is number => typeof time === 'number'), log)
   const store = new DotStore(domain, [...domain.table('tasks').entries()].map(([, value]) => parseTask(value)).filter((task): task is TaskRecord => task !== undefined))
-  const fault = hostFaultFromEnv()
   let sealOwned: ((agent: unknown) => void) | undefined
-  const host = fault.wrapHost(bindHost(name => fault.wrapService(name, ctx.get(name as never)), log, () => store.settings.model, agent => { sealOwned?.(agent) }))
+  const host = bindHost(name => ctx.get(name as never), log, () => store.settings.model, agent => { sealOwned?.(agent) })
   const service = new DotService({
     host,
     store,

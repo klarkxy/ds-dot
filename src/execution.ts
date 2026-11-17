@@ -208,7 +208,7 @@ export async function finishWork(book: WorkBook, host: RunSessionHost, runId: st
   const owner = current ? book.change(current.changeId) : undefined
   // A review keeps the workspace until closeout. finish must not release it or look like a missing stop.
   if (current?.kind === 'review' && owner && owner.control !== 'cancelled' && !owner.closeout && current.phase !== 'completed' && current.phase !== 'failed' && current.phase !== 'stopped') {
-    return { ok: false, code: 'unknown', message: `${runId} stays reserved until closeout; hold the review instead of finish` }
+    return { ok: false, code: 'unknown', message: `${runId} stays reserved until closeout; use action=closeout or action=reject for the review instead of finish` }
   }
   const prepared = await book.prepareFinish(runId, phase, at)
   if (!prepared.ok) return prepared

@@ -17,7 +17,6 @@ import { personaCss } from './persona-panel.tsx'
 import { trajectoryCss } from './trajectory-panel.tsx'
 import { PLUGIN_NAME, RPC_CHANNEL, type BoardView, type ChatSnapshot, type DotContextView, type DotSettings, type FactoryResetPreview, type FactoryResetResult, type KnowledgeView, type ReflectionRun, type SettingProposal, type TrajectoryView } from './contracts.ts'
 import { copyLocale, t, type CopyLocale } from './ui-copy.ts'
-import type { WorkBoardItem } from './work-board.ts'
 import { DotIcon } from './whale.tsx'
 
 export const name = 'dsh-dot-client'
@@ -67,12 +66,6 @@ export function apply(ctx: Context): void {
     stop: async () => { await call('stop') },
     board: signal => call<BoardView>('board', {}, signal),
     removeSchedule: id => call<boolean>('schedule.remove', { id }),
-    confirmTask: async id => { await call('task.confirm', { id }) },
-    deleteTask: async id => { await call('task.delete', { id }) },
-    cancelTask: async id => { await call('task.cancel', { id }) },
-    reviewTask: async (id, pass, note) => { await call('task.review', { id, pass, ...note === undefined ? {} : { note } }) },
-    setTaskPriority: async (id, priority) => { await call('task.priority', { id, priority }) },
-    workList: signal => call<WorkBoardItem[]>('work.list', {}, signal),
     workAccept: async payload => { await call('work.accept', payload) },
     workReject: async payload => { await call('work.reject', payload) },
     workAnswer: async payload => { await call('work.answer', payload) },

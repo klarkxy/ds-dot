@@ -90,7 +90,7 @@ function harness(settings: Partial<DotSettings> = {}, hooks: HostHooks = {}) {
     effect(fn: () => unknown) { fn() },
   } as never)
   const task = registered.find(row => row.name === TOOL.task) as { description: string; execute(args: Record<string, unknown>): Promise<string> }
-  const start = registered.find(row => row.name === TOOL.startTask) as { execute(args: Record<string, unknown>, exec: { signal?: AbortSignal }): Promise<string> }
+  const start = { ...task, execute: (args: Record<string, unknown>, _exec?: unknown) => task.execute({ ...args, action: 'dispatch', ...((args.cwd ?? args.dir) ? { dir: args.cwd ?? args.dir } : {}) }) }
   const exec = { signal: new AbortController().signal }
   return { home, project, store, service, calls, relays, writable, selected, task, start, exec, cleanup: () => { rmSync(project, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }) } }
 }
@@ -116,7 +116,7 @@ async function heldReview(h: ReturnType<typeof harness>) {
   const held = await h.service.holdWorkReview(review.run.id)
   if (!('id' in held)) throw new Error(held.message)
   const subject = await h.service.captureWorkSubject(change.id)
-  await h.service.saveWorkEvidence('log-1', 'built')
+
   const current = h.store.work.change(change.id)!
   return { change, subject, current, review: h.store.work.run(review.run.id)! }
 }
@@ -140,11 +140,8 @@ describe('C backend rework', () => {
       expect(accepted.id).toBe('v-9')
       expect(blocked.id).toBe('v-10')
       expect(blocked.verdict).toBe('rework')
-      const result = await h.task.execute({
-        action: 'accept', task_id: change.id, verification_id: accepted.id,
-        expected_input_ref: current.currentInputRef, expected_input_revision: current.currentRevision, expected_subject_key: accepted.subjectKey,
-      })
-      expect(result).toContain('superseded')
+      const result = await h.service.acceptWork(change.id, accepted.id, current.currentInputRef, accepted.subjectKey!, 'tool', { expectedInputRevision: current.currentRevision, expectedVerificationId: accepted.id })
+      expect(result).toMatchObject({ code: 'stale', message: expect.stringContaining('superseded') })
       expect(h.store.work.change(change.id)?.closeout).toBeUndefined()
       expect(h.store.work.workView(change.id)?.status).toBe('rework')
       expect(h.store.work.workView(change.id)?.verification?.id).toBe('v-10')
@@ -168,11 +165,8 @@ describe('C backend rework', () => {
       if (!('id' in older) || !('id' in unverified)) throw new Error('verification was not recorded')
       expect(unverified.id).toBe('v-10')
       expect(unverified.verdict).toBe('unverified')
-      const again = await h.task.execute({
-        action: 'accept', task_id: change.id, verification_id: older.id,
-        expected_input_ref: current.currentInputRef, expected_input_revision: current.currentRevision, expected_subject_key: older.subjectKey,
-      })
-      expect(again).toContain('superseded')
+      const again = await h.service.acceptWork(change.id, older.id, current.currentInputRef, older.subjectKey!, 'tool', { expectedInputRevision: current.currentRevision, expectedVerificationId: older.id })
+      expect(again).toMatchObject({ code: 'stale', message: expect.stringContaining('superseded') })
       expect(h.store.work.workView(change.id)?.status).not.toBe('done')
     } finally { h.cleanup() }
   })
@@ -181,13 +175,9 @@ describe('C backend rework', () => {
     const h = harness({ scope: 'tracked' })
     try {
       await h.store.setDot({ dotSessionId: 'dot-session' })
-      const reserved = await h.start.execute({ cwd: h.project, title: 'Ship', instruction: 'edit it', goal: 'land', access: 'write' }, h.exec)
-      const runId = /reserved (run-\d+)/.exec(reserved)?.[1]
-      const changeId = /on (c-\d+)/.exec(reserved)?.[1]
-      expect(runId && changeId).toBeTruthy()
-      expect(await h.task.execute({ action: 'baseline', task_id: changeId!, run_id: runId! })).toContain('baseline')
-      const started = await h.start.execute({ task_id: changeId!, instruction: 'edit it', access: 'write' }, h.exec)
-      expect(started).toContain(`started ${runId}`)
+      const started = await h.start.execute({ cwd: h.project, title: 'Ship', instruction: 'edit it', goal: 'land', access: 'write' }, h.exec)
+      const runId = /started (run-\d+)/.exec(started)?.[1]
+      expect(runId).toBeTruthy()
       const run = h.store.work.run(runId!)!
       expect(h.store.tracks(run.sessionId!)).toBe(true)
       await h.service.onTurnEnd(run.sessionId!)
@@ -208,26 +198,21 @@ describe('C backend rework', () => {
     const blocked = harness({ taskModels: { mode: 'allow', list: [] }, taskPermission: 'danger-full-access' }, { sessions })
     sessions[0]!.cwd = blocked.project
     try {
-      const looked = await blocked.start.execute({ cwd: blocked.project, title: 'Ship', instruction: 'edit', check_only: true, access: 'write' }, blocked.exec)
+      const looked = await blocked.service.startTask({ cwd: blocked.project, title: 'Ship', instruction: 'edit', checkOnly: true, access: 'write' }, blocked.exec.signal)
       expect(blocked.calls.filter(call => call === 'listSessions').length).toBeGreaterThan(0)
       expect(looked).toContain('human-running')
       expect(looked).not.toBe('Directory lock is available.')
-      const preset = await blocked.start.execute({ cwd: blocked.project, title: 'Ship', instruction: 'edit', preset: 'unlisted-preset', access: 'write' }, blocked.exec)
-      expect(preset).toContain('Error [dot/unknown-preset]')
-      const model = await blocked.start.execute({ cwd: blocked.project, title: 'Ship', instruction: 'edit', model: 'forbidden/model', preset: 'standard', access: 'write' }, blocked.exec)
-      expect(model).toContain('Error [dot/model-not-allowed]')
+      await expect(blocked.start.execute({ cwd: blocked.project, title: 'Ship', instruction: 'edit', preset: 'unlisted-preset', access: 'write' }, blocked.exec)).rejects.toMatchObject({ code: 'dot/unknown-preset' })
+      await expect(blocked.start.execute({ cwd: blocked.project, title: 'Ship', instruction: 'edit', model: 'forbidden/model', preset: 'standard', access: 'write' }, blocked.exec)).rejects.toMatchObject({ code: 'dot/model-not-allowed' })
       expect(blocked.calls.some(call => call.startsWith('create '))).toBe(false)
       expect(blocked.calls).not.toContain('prompt')
     } finally { blocked.cleanup() }
 
     const allowed = harness({ taskModels: { mode: 'allow', list: ['p/ok'] }, taskPermission: 'danger-full-access' })
     try {
-      const reserved = await allowed.start.execute({ cwd: allowed.project, title: 'Ship', instruction: 'edit', goal: 'land', model: 'p/ok', preset: 'ptc', access: 'write' }, allowed.exec)
-      const runId = /reserved (run-\d+)/.exec(reserved)?.[1]
-      const changeId = /on (c-\d+)/.exec(reserved)?.[1]
-      expect(await allowed.task.execute({ action: 'baseline', task_id: changeId!, run_id: runId! })).toContain('baseline')
-      const started = await allowed.start.execute({ task_id: changeId!, instruction: 'edit', model: 'p/ok', preset: 'ptc', access: 'write' }, allowed.exec)
-      expect(started).toContain(`started ${runId}`)
+      const started = await allowed.start.execute({ cwd: allowed.project, title: 'Ship', instruction: 'edit', goal: 'land', model: 'p/ok', preset: 'ptc', access: 'write' }, allowed.exec)
+      const runId = /started (run-\d+)/.exec(started)?.[1]
+      expect(runId).toBeTruthy()
       expect(allowed.selected.some(call => call.endsWith('p/ok'))).toBe(true)
       expect(allowed.writable).toContain('danger-full-access')
       expect(allowed.calls.some(call => call.includes('preset=ptc') || call.endsWith(' ptc'))).toBe(true)
@@ -255,19 +240,20 @@ describe('C backend rework', () => {
       expect(older.goal).toBe('land it')
       expect(older.revision).toBe(1)
       expect(await h.task.execute({ action: 'pause', task_id: created.id })).toContain(`paused ${created.id}`)
-      expect(await h.task.execute({ action: 'reserve', task_id: created.id, role: 'work', access: 'write' })).toContain('Error')
+      await expect(h.task.execute({ action: 'dispatch', task_id: created.id, instruction: 'edit', access: 'write' })).rejects.toThrow(/paused/)
       expect(await h.task.execute({ action: 'resume', task_id: created.id })).toContain(`open ${created.id}`)
-      const reserved = JSON.parse(await h.task.execute({ action: 'reserve', task_id: created.id, role: 'work', access: 'read', step_refs: JSON.stringify(['s1']) })) as { runId: string }
+      const started = await h.task.execute({ action: 'dispatch', task_id: created.id, instruction: 'inspect', access: 'read', step_refs: JSON.stringify(['s1']) })
+      const reserved = { runId: /started (run-\d+)/.exec(started)![1]! }
       const current = h.store.work.change(created.id)!
-      expect(await h.task.execute({ action: 'step', task_id: created.id, step_ref: 's1', run_id: reserved.runId, expected_input_revision: current.currentRevision })).toContain('Error')
-      expect(JSON.parse(await h.task.execute({ action: 'read', task_id: created.id })).steps[0].done).toBe(false)
+      expect(await h.task.execute({ action: 'step', task_id: created.id, step_ref: 's1', run_id: reserved.runId, expected_input_revision: current.currentRevision })).toContain('step s1 done')
+      expect(JSON.parse(await h.task.execute({ action: 'read', task_id: created.id })).steps[0].done).toBe(true)
       expect(h.store.work.change(created.id)?.currentRevision).toBe(current.currentRevision)
       expect(await h.task.execute({ action: 'cancel', task_id: created.id })).toContain(`cancelled ${created.id}`)
       expect(h.store.work.change(created.id)?.control).toBe('cancelled')
       await expect(h.service.manageTask({ action: 'move', task_id: created.id, to: 'done', reason: 'no' })).rejects.toMatchObject({ code: 'dot/legacy-closed' })
       await expect(h.service.manageTask({ action: 'note', task_id: created.id, role: 'review', summary: 'no' })).rejects.toMatchObject({ code: 'dot/legacy-closed' })
       await expect(h.service.manageTask({ action: 'delete', task_id: created.id })).rejects.toMatchObject({ code: 'dot/legacy-closed' })
-      expect(h.task.description).toContain('action=decide asks the user to look')
+      expect(h.task.description).toContain('decide')
       expect(h.task.description).not.toContain('decide: pass accepts')
     } finally { h.cleanup() }
   })
@@ -300,11 +286,8 @@ describe('C backend rework', () => {
     let releasePrompt: (() => void) | undefined
     const starting = harness({}, { prompt: () => new Promise(resolve => { releasePrompt = resolve }) })
     try {
-      const reserved = await starting.start.execute({ cwd: starting.project, title: 'Ship', instruction: 'edit', goal: 'land', access: 'write' }, starting.exec)
-      const runId = /reserved (run-\d+)/.exec(reserved)?.[1]
-      const changeId = /on (c-\d+)/.exec(reserved)?.[1]
-      expect(await starting.task.execute({ action: 'baseline', task_id: changeId!, run_id: runId! })).toContain('baseline')
-      const pending = starting.start.execute({ task_id: changeId!, instruction: 'edit', access: 'write' }, starting.exec)
+      const pending = starting.start.execute({ cwd: starting.project, title: 'Ship', instruction: 'edit', goal: 'land', access: 'write' }, starting.exec)
+      const runId = starting.store.work.listRuns()[0]?.id
       for (let n = 0; n < 20 && !releasePrompt; n += 1) await new Promise(resolve => setTimeout(resolve, 10))
       expect(releasePrompt).toBeTypeOf('function')
       const listed = await Promise.race([
@@ -313,7 +296,7 @@ describe('C backend rework', () => {
       ])
       expect(listed).toBe('listed')
       releasePrompt?.()
-      expect(await pending).toContain(`started ${runId}`)
+      expect(await pending).toContain('started run-')
     } finally { starting.cleanup() }
   })
 })

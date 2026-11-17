@@ -537,7 +537,7 @@ describe('ordinary session execution', () => {
     expect(book.occupying()).toEqual([])
   })
 
-  it('refuses to finish a review and points at hold without releasing it', async () => {
+  it('refuses to finish a review and points at closeout or reject without releasing it', async () => {
     const book = openBook()
     const change = await book.createChange({ title: 'Ship', cwd: 'H:\\repo', goal: 'land it', at: 1 })
     const held = await book.reserveRun({
@@ -551,7 +551,7 @@ describe('ordinary session execution', () => {
       async stop() { stops += 1; return { cancelAccepted: true, queueCleared: true, idle: true, jobsSettled: true } },
     }).host, held.run.id, 'completed', 8)
     expect(refused).toMatchObject({ code: 'unknown' })
-    expect('message' in refused && refused.message).toContain('hold the review instead of finish')
+    expect('message' in refused && refused.message).toContain('use action=closeout or action=reject')
     expect(stops).toBe(0)
     expect(book.run(held.run.id)?.phase).toBe('active')
     expect(book.run(held.run.id)?.closeIntent).toBeUndefined()

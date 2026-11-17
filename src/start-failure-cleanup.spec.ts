@@ -74,9 +74,9 @@ function harness(lookup: 'absent' | 'present' | 'throws' = 'absent') {
     effect(fn: () => unknown) { fn() },
   } as never)
   const task = registered.find(row => row.name === TOOL.task) as { execute(args: Record<string, unknown>): Promise<string> }
-  const start = registered.find(row => row.name === TOOL.startTask) as { execute(args: Record<string, unknown>, exec: { signal: AbortSignal }): Promise<string> }
+  const start = { execute: (args: Record<string, unknown>, _exec?: unknown) => task.execute({ ...args, action: 'dispatch', ...((args.cwd ?? args.dir) ? { dir: args.cwd ?? args.dir } : {}) }) }
   return {
-    home, project, store, task, start, exec: { signal: new AbortController().signal },
+    home, project, store, service, task, start, exec: { signal: new AbortController().signal },
     cleanup: () => { rmSync(project, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }) },
   }
 }
@@ -90,17 +90,16 @@ describe('baseline capture failure cleans only a fresh unsent reservation', () =
     try {
       mkdirSync(join(h.project, 'not-a-file'))
       const other = JSON.parse(await h.task.execute({ action: 'create', title: 'Other', goal: 'keep', dir: h.project })) as { id: string }
-      const reserved = JSON.parse(await h.task.execute({
-        action: 'reserve', task_id: other.id, role: 'work', access: 'write',
-        paths: JSON.stringify([{ path: 'other.md', type: 'file' }]),
-      })) as { runId: string }
+      const otherRun = await h.service.reserveWorkRun({ changeId: other.id, root: { workspaceRoot: h.project }, writeScope: { kind: 'paths', paths: [{ path: 'other.md', type: 'file' }] } })
+      if (!otherRun.ok) throw new Error(otherRun.message)
+      const reserved = { runId: otherRun.run.id }
       const failed = await h.start.execute({
         cwd: h.project, title: 'Bad scope', instruction: 'write', access: 'write', capture_baseline: true,
         paths: JSON.stringify([{ path: 'not-a-file', type: 'file' }]),
-      }, h.exec)
+      }, h.exec).catch(error => { expect(error.code).toBe('dot/baseline'); return error.message as string })
       const runId = /baseline for (run-\d+)/.exec(failed)?.[1]
       const changeId = /on (c-\d+)/.exec(failed)?.[1]
-      expect(failed).toContain('Error [dot/baseline]')
+      expect(failed).toContain('baseline for')
       expect(failed).toContain('was released')
       expect(failed).toContain('was not cancelled')
       expect(runId && changeId).toBeTruthy()
@@ -117,14 +116,14 @@ describe('baseline capture failure cleans only a fresh unsent reservation', () =
     const h = harness()
     try {
       const created = JSON.parse(await h.task.execute({ action: 'create', title: 'Retry', goal: 'edit', dir: h.project })) as { id: string }
-      const reserved = JSON.parse(await h.task.execute({
-        action: 'reserve', task_id: created.id, role: 'work', access: 'write', paths,
-      })) as { runId: string }
+      const existing = await h.service.reserveWorkRun({ changeId: created.id, root: { workspaceRoot: h.project }, writeScope: { kind: 'paths', paths: [{ path: 'doc.md', type: 'file' }] } })
+      if (!existing.ok) throw new Error(existing.message)
+      const reserved = { runId: existing.run.id }
       mutate.project = h.project
       const failed = await h.start.execute({
         task_id: created.id, run_id: reserved.runId, instruction: 'edit', access: 'write', capture_baseline: true, paths,
-      }, h.exec)
-      expect(failed).toContain('Error [dot/baseline]')
+      }, h.exec).catch(error => { expect(error.code).toBe('dot/baseline'); return error.message as string })
+      expect(failed).toContain('baseline for')
       expect(failed).toContain('already reserved')
       expect(failed).toContain('was not cancelled')
       expect(h.store.work.run(reserved.runId)?.phase).toBe('reserved')
@@ -140,10 +139,10 @@ describe('baseline capture failure cleans only a fresh unsent reservation', () =
       mutate.project = published.project
       const failed = await published.start.execute({
         cwd: published.project, title: 'Publish refused', instruction: 'edit', access: 'write', capture_baseline: true, paths,
-      }, published.exec)
+      }, published.exec).catch(error => { expect(error.code).toBe('dot/baseline'); return error.message as string })
       const runId = /baseline for (run-\d+)/.exec(failed)?.[1]
       const changeId = /on (c-\d+)/.exec(failed)?.[1]
-      expect(failed).toContain('Error [dot/baseline]')
+      expect(failed).toContain('baseline for')
       expect(failed).toContain('was released')
       expect(failed).not.toContain('cancel it before reserving')
       expect(published.store.work.run(runId!)).toMatchObject({ phase: 'stopped', closeReason: 'unsent' })
@@ -157,7 +156,7 @@ describe('baseline capture failure cleans only a fresh unsent reservation', () =
         const failed = await h.start.execute({
           cwd: h.project, title: 'Lookup ignored', instruction: 'write', access: 'write', capture_baseline: true,
           paths: JSON.stringify([{ path: 'not-a-file', type: 'file' }]),
-        }, h.exec)
+        }, h.exec).catch(error => { expect(error.code).toBe('dot/baseline'); return error.message as string })
         const runId = /baseline for (run-\d+)/.exec(failed)?.[1]
         const changeId = /on (c-\d+)/.exec(failed)?.[1]
         expect(failed).toContain('was released')

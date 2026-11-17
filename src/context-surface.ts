@@ -4,7 +4,7 @@
  * Only the live surface is kept: no request history or per-step snapshots.
  */
 import type { DotContextNode, DotContextParts, DotContextSurface } from './contracts.ts'
-import type { RawEvent } from './chat.ts'
+import { toolResultFailed, type RawEvent } from './chat.ts'
 
 const CHARS_PER_TOKEN = 4
 const BLOCK_OVERHEAD = 4
@@ -170,7 +170,7 @@ function addNode(state: ContextSurfaceState, event: RawEvent, message: Rec | und
     tokens: estimateContent(content, category === 'assistant' || category === 'inject'),
     ...clipped(text),
     ...(name ? { name } : {}),
-    ...(message?.isError === true ? { status: 'error' as const } : {}),
+    ...((category === 'tool' ? toolResultFailed(rec(event.data) ?? {}) : message?.isError === true) ? { status: 'error' as const } : {}),
   })
 }
 

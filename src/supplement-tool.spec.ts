@@ -117,8 +117,7 @@ describe('dot_task supplement', () => {
     const task = registered.find(tool => tool.name === TOOL.task) as { description: string; parameters: { properties: { action: { enum: string[] } } } }
     const send = registered.find(tool => tool.name === TOOL.sendToSession) as { description: string }
     expect(task.parameters.properties.action.enum).toContain('supplement')
-    expect(task.description).toContain('action=supplement')
-    expect(task.description).toContain('does not revise')
+    expect(task.description).toContain('supplement delivers context once')
     expect(send.description).toContain('action=supplement')
     expect(send.description).toContain('refuses')
   })
@@ -160,16 +159,8 @@ describe('dot_task supplement', () => {
     const h = await setup()
     try {
       const { change, runId, current } = await activeRun(h)
-      const stale = await h.task.execute({
-        action: 'supplement', run_id: runId, message: 'late note',
-        expected_input_ref: current.currentInputRef, expected_input_revision: current.currentRevision - 1,
-      })
-      const wrong = await h.task.execute({
-        action: 'supplement', run_id: runId, message: 'other input',
-        expected_input_ref: 'input-other', expected_input_revision: current.currentRevision,
-      })
-      expect(stale).toContain('Error [dot/stale]')
-      expect(wrong).toContain('Error [dot/stale]')
+      await expect(h.task.execute({ action: 'supplement', run_id: runId, message: 'late note', expected_input_ref: current.currentInputRef, expected_input_revision: current.currentRevision - 1 })).rejects.toMatchObject({ code: 'dot/stale' })
+      await expect(h.task.execute({ action: 'supplement', run_id: runId, message: 'other input', expected_input_ref: 'input-other', expected_input_revision: current.currentRevision })).rejects.toMatchObject({ code: 'dot/stale' })
       expect(h.relays).toEqual([])
       expect(contextDeliveries(h, runId)).toEqual([])
       expect(h.store.work.change(change.id)?.currentRevision).toBe(current.currentRevision)
@@ -187,21 +178,12 @@ describe('dot_task supplement', () => {
       expect(revised).not.toContain('Error')
       const next = h.store.work.change(change.id)!
       expect(next.currentRevision).toBe(current.currentRevision + 1)
-      const refused = await h.task.execute({
-        action: 'supplement', run_id: runId, message: 'still the old run',
-        expected_input_ref: current.currentInputRef, expected_input_revision: current.currentRevision,
-      })
-      const namedNew = await h.task.execute({
-        action: 'supplement', run_id: runId, message: 'new input on the old run',
-        expected_input_ref: next.currentInputRef, expected_input_revision: next.currentRevision,
-      })
-      expect(refused).toContain('Error [dot/stale]')
-      expect(namedNew).toContain('Error [dot/stale]')
+      await expect(h.task.execute({ action: 'supplement', run_id: runId, message: 'still the old run', expected_input_ref: current.currentInputRef, expected_input_revision: current.currentRevision })).rejects.toMatchObject({ code: 'dot/stale' })
+      await expect(h.task.execute({ action: 'supplement', run_id: runId, message: 'new input on the old run', expected_input_ref: next.currentInputRef, expected_input_revision: next.currentRevision })).rejects.toMatchObject({ code: 'dot/stale' })
       expect(h.relays).toEqual([])
       expect(contextDeliveries(h, runId)).toEqual([])
       const sessionId = h.store.work.run(runId)?.sessionId ?? h.store.work.run(runId)?.requestedSessionId
-      const sent = await h.send.execute({ session_id: sessionId, message: 'bypass' })
-      expect(sent).toContain('Error [dot/legacy-closed]')
+      await expect(h.send.execute({ session_id: sessionId, message: 'bypass' })).rejects.toMatchObject({ code: 'dot/legacy-closed' })
       expect(h.relays).toEqual([])
       expect(contextDeliveries(h, runId)).toEqual([])
     } finally {

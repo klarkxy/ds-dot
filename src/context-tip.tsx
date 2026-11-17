@@ -11,11 +11,6 @@ export function tipShiftOf(anchor: number, tipWidth: number, frameWidth: number)
   return rightOver > 0 ? Math.ceil(-rightOver) : 0
 }
 
-export function clampTipLeft(anchor: number, tipWidth: number, frameWidth: number): number {
-  const half = Math.min(tipWidth / 2, frameWidth / 2)
-  return Math.round(Math.min(Math.max(anchor, half), frameWidth - half) - tipWidth / 2)
-}
-
 export interface TipAnchor {
   unit: 'px' | 'pct'
   value: number

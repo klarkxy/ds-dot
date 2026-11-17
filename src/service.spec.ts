@@ -33,13 +33,14 @@ function fakeHost() {
   const workspaces: WorkspaceRow[] = []
   const calls: string[] = []
   const timeline: string[] = []
-  const said: Array<{ text: string; carriedNotices?: string; images?: readonly { mediaType: string }[] }> = []
-  const relayed: Array<{ target: string; text: string }> = []
+  const said: Array<{ text: string; carriedNotices?: string; images?: readonly { mediaType: string }[]; notice?: import('./chat-format.ts').ParsedNotice }> = []
+  const relayed: Array<{ target: string; text: string; notice?: import('./chat-format.ts').ParsedNotice }> = []
   const dots = new Set<string>()
   const lost = new Set<string>()
   const events = new Map<string, RawEvent[]>()
   const running = new Set<string>()
   const unreadable = new Set<string>()
+  const runSessions = new Map<string, { cwd?: string; preset?: string }>()
   let sessions = 0
   let permissionWorks = true
   let context: DotContextView = { live: false, compactions: 0 }
@@ -61,10 +62,15 @@ function fakeHost() {
     async listSessions(): Promise<SessionRow[]> { return [] },
     async titles() { return new Map() },
     async createSession(place) {
-      const id = `s${++sessions}`
+      const id = place.sessionId ?? `s${++sessions}`
+      runSessions.set(id, { cwd: place.cwd, preset: place.preset })
       calls.push(`create ${id} ${place.workspaceId ?? place.cwd}${place.preset ? ` preset=${place.preset}` : ''}`)
       return id
     },
+    async findSession(id) { return runSessions.get(id) },
+    async setReadOnly(id) { calls.push(`readonly ${id}`); return permissionWorks },
+    async setWritable(id, permission) { calls.push(`permit ${id} ${permission}`); return permissionWorks },
+    async verifyTaskPermission() { return permissionWorks },
     async listPresets() {
       if (presetsFail) throw new Error('roster offline')
       return {
@@ -82,7 +88,7 @@ function fakeHost() {
     async selectModel(sessionId, choice) { calls.push(`model ${sessionId} ${choice.provider}/${choice.model}`) },
     async setPermission(sessionId, preset) { calls.push(`permit ${sessionId} ${preset}`); return permissionWorks },
     async prompt(sessionId, text) { calls.push(`prompt ${sessionId} ${text}`) },
-    async relay(target, _sender, text) { relayed.push({ target, text }); timeline.push(`relay ${text}`) },
+    async relay(target, _sender, text, _deliveryId, _confirm, notice) { relayed.push({ target, text, ...(notice ? { notice } : {}) }); timeline.push(`relay ${text}`) },
     async cancel(sessionId) { calls.push(`cancel ${sessionId}`) },
     async cancelAndWait(sessionId) { calls.push(`cancel-wait ${sessionId}`); return true },
     async archive(sessionId) { calls.push(`archive ${sessionId}`) },
@@ -106,7 +112,7 @@ function fakeHost() {
       calls.push(`prompt-internal ${sessionId} ${text}`)
       await reflectionHooks.promptHook?.(sessionId, text)
     },
-    async waitIdle() { return true },
+    async waitIdle() {},
     async releaseInternal(sessionId) { calls.push(`release-internal ${sessionId}`) },
     async readEvents(sessionId) {
       if (unreadable.has(sessionId)) throw new Error('no such session')
@@ -122,7 +128,7 @@ function fakeHost() {
       calls.push(`handoff-view ${fromSessionId} ${toSessionId}`)
     },
     modelKey: () => model,
-    async say(sessionId, text, carriedNotices, _answer, images) { said.push({ text, ...carriedNotices ? { carriedNotices } : {}, ...images?.length ? { images } : {} }); calls.push(`say ${sessionId} ${text}`); timeline.push(`say ${text}`) },
+    async say(sessionId, text, carriedNotices, _answer, images, notice) { said.push({ text, ...carriedNotices ? { carriedNotices } : {}, ...images?.length ? { images } : {}, ...(notice ? { notice } : {}) }); calls.push(`say ${sessionId} ${text}`); timeline.push(`say ${text}`) },
     async stop(sessionId) { calls.push(`stop ${sessionId}`) },
     async stopActivity(sessionId) {
       calls.push(`stop-activity ${sessionId}`)
@@ -147,7 +153,7 @@ function fakeHost() {
   }
 }
 
-function setup(settings?: Partial<DotSettings>, trace?: { info: (event: string, message: string, context?: Record<string, unknown>) => boolean; debug: (event: string, message: string, context?: Record<string, unknown>) => boolean; warn: (event: string, message: string, error?: unknown, context?: Record<string, unknown>) => boolean }, legacyWorkEntries = true, homeDir = join(tmpdir(), 'dsh-dot-spec')) {
+function setup(settings?: Partial<DotSettings>, trace?: { info: (event: string, message: string, context?: Record<string, unknown>) => boolean; debug: (event: string, message: string, context?: Record<string, unknown>) => boolean; warn: (event: string, message: string, error?: unknown, context?: Record<string, unknown>) => boolean }, homeDir = join(tmpdir(), 'dsh-dot-spec')) {
   const fake = fakeHost()
   const clock = manualTimer()
   const store = new DotStore(undefined)
@@ -159,7 +165,7 @@ function setup(settings?: Partial<DotSettings>, trace?: { info: (event: string, 
   let at = 1000
   // The legacy note files live in memory here; only the one-time migration reads them.
   const notes = { path: '/dot/memory.md', text: '', cognition: '', read: async () => notes.text, readCognition: async () => notes.cognition }
-  const service = new DotService({ host: fake.host, store, homeDir, notes, approvalGraceMs: 0, timer: clock.timer, now: () => at, legacyWorkEntries, ...(trace ? { trace } : {}) })
+  const service = new DotService({ host: fake.host, store, homeDir, notes, approvalGraceMs: 0, timer: clock.timer, now: () => at, ...(trace ? { trace } : {}) })
   return { ...fake, ...clock, store, service, notes, advance: (ms: number) => { at += ms } }
 }
 
@@ -490,7 +496,8 @@ describe('DotService history', () => {
     const { h, first, second, task } = await threeSessions()
     const all = await h.service.searchHistory({ query: 'FRIDAY' })
     expect(all).toContain('2 match(es) for "FRIDAY" (3 session(s) searched)')
-    expect(all).toContain(`Task "release" · ${task}`)
+    expect(all).toContain('Task "release · ')
+    expect(all).toContain(`· ${task}`)
     expect(all).toContain('Assistant: the friday build is green')
     expect(all).toContain(`· ${first}`)
     expect(all).toContain('Human: ship v2 on friday')
@@ -1080,105 +1087,10 @@ describe('idle delivery and reconciliation', () => {
     expect(h.delays()).toContain(480_000)
     await h.service.dispose()
   })
-  it('includes task id, title, role and round in actual notices', async () => {
-    const h = setup()
-    await h.service.ensureDot()
-    await h.service.startTask({ cwd: '/proj', title: 'Build', instruction: 'go' }, new AbortController().signal)
-    const ticket = h.store.listTickets()[0]!
-    const session = ticket.sessions[0]!.sessionId
-    await h.store.noteTicket(ticket.id, { n: 1, at: 1, role: 'review', summary: 'needs work' })
-    await h.store.noteTicket(ticket.id, { n: 2, at: 2, role: 'review', summary: 'still needs work' })
-    await h.service.onTurnEnd(session)
-    const request = h.service.relayRequest({ kind: 'approval', sessionId: session, subject: 'pwsh' })
-    if (request.decided !== 'pending') throw new Error('expected pending')
-    const question = h.service.relayRequest({ kind: 'question', sessionId: session, subject: 'which?' })
-    if (question.decided !== 'pending') throw new Error('expected pending')
-    await h.service.flushNotices()
-    const text = h.relayed[0]!.text
-    expect(text).toContain(`task ${ticket.id} "Build" (ACTIVE, work, round 2)`)
-    expect(text).not.toContain('consecutive unsuccessful')
-    expect(text).toContain(`${request.id} for task ${ticket.id} "Build": approval`)
-    expect(text).toContain(`${question.id} for task ${ticket.id} "Build": question`)
-  })
-  it('rejects update,to without moving status and reports the stored status', async () => {
-    const h = setup()
-    await h.service.ensureDot()
-    await h.service.startTask({ cwd: '/proj', title: 'Build', instruction: 'go' }, new AbortController().signal)
-    const ticket = h.store.listTickets()[0]!
-    await expect(h.service.manageTask({ action: 'update', task_id: ticket.id, to: 'done', title: 'Finished' })).rejects.toMatchObject({
-      code: 'dot/invalid',
-      message: expect.stringContaining(`${ticket.id} is still active`),
-    })
-    await expect(h.service.manageTask({ action: 'update', task_id: ticket.id, to: 'review' })).rejects.toThrow(/action=move/)
-    expect(h.store.ticket(ticket.id)).toMatchObject({ status: 'active', title: 'Build' })
-    const noted = JSON.parse(await h.service.manageTask({ action: 'note', task_id: ticket.id, role: 'review', verdict: 'fail', summary: 'missing tests' }))
-    expect(noted.status).toBe('active')
-    expect(noted.rounds.at(-1)).toMatchObject({ role: 'review', verdict: 'fail' })
-  })
-  it('writes a trace for a refused update and a real move without changing either result', async () => {
-    const info = vi.fn(() => true)
-    const h = setup(undefined, { info, debug: () => true, warn: () => true })
-    await h.service.startTask({ cwd: '/proj', title: 'Build', instruction: 'go' }, new AbortController().signal)
-    const ticket = h.store.listTickets()[0]!
-    await expect(h.service.manageTask({ action: 'update', task_id: ticket.id, to: 'done' })).rejects.toThrow(/still active/)
-    await h.service.manageTask({ action: 'move', task_id: ticket.id, to: 'review', reason: 'check' })
-    expect(info).toHaveBeenCalledWith('ticket.update-rejected', expect.stringContaining('still active'), expect.objectContaining({ ticketId: ticket.id, status: 'active', to: 'done' }))
-    expect(info).toHaveBeenCalledWith('ticket.moved', expect.stringContaining('review'), expect.objectContaining({ ticketId: ticket.id, from: 'active', to: 'review' }))
-    expect(h.store.ticket(ticket.id)?.status).toBe('review')
-  })
-  it('tells a successful dispatch or follow-up to wait, and does not claim that when delivery was refused', async () => {
-    const h = setup()
-    await h.service.ensureDot()
-    const started = await h.service.startTask({ cwd: '/proj', title: 'Build', instruction: 'go' }, new AbortController().signal)
-    expect(started).toContain('The instruction is queued.')
-    expect(started).toContain('Do not send it again.')
-    expect(started).toContain('end this turn and wait')
-    const ticket = h.store.listTickets()[0]!
-    const session = ticket.sessions[0]!.sessionId
-    h.host.setWritable = async () => true
-    const delivered = await h.service.send(session, 'detail')
-    expect(delivered).toContain('Delivered to')
-    expect(delivered).toContain('Do not send it again.')
-    expect(delivered).not.toContain('Queued for the next turn')
-    h.running.add(session)
-    h.host.listSessions = async () => [{ sessionId: session, cwd: '/proj', running: true, updatedAt: 1, blank: false, subagent: false, archived: false }]
-    h.host.verifyTaskPermission = async () => true
-    const queued = await h.service.send(session, 'more')
-    expect(queued).toContain(`Queued for the next turn of ${session}`)
-    expect(queued).toContain('Do not send it again.')
-    h.host.verifyTaskPermission = async () => false
-    await expect(h.service.send(session, 'again')).rejects.toMatchObject({ message: expect.not.stringContaining('Do not send it again') })
-  })
-  it('states the three-round rule from this task only, and only numbers a complete trailing fail streak', async () => {
-    const h = setup()
-    await h.service.ensureDot()
-    const signal = new AbortController().signal
-    await h.service.startTask({ cwd: '/proj', title: 'Picnic', instruction: 'go', role: 'review' }, signal)
-    const picnic = h.store.listTickets()[0]!
-    const session = picnic.sessions[0]!.sessionId
-    for (let n = 1; n <= 3; n += 1) await h.store.noteTicket(picnic.id, { n, at: n, role: 'review', summary: 'no', verdict: 'fail' })
-    const other = await h.store.createTicket({ title: 'Other', goal: 'g', dir: '/elsewhere', access: 'read', at: 1 })
-    for (let n = 1; n <= 6; n += 1) await h.store.noteTicket(other.id, { n, at: n, role: 'review', summary: 'no', verdict: 'fail' })
-    await h.service.onTurnEnd(session)
-    await h.service.flushNotices()
-    const text = h.relayed.at(-1)!.text
-    expect(text).toContain('end with 3 consecutive unsuccessful verdicts')
-    expect(text).toContain('ask the human and wait')
-    expect(text).not.toContain('end with 6')
-    h.relayed.length = 0
-    await h.service.startTask({ cwd: '/open', title: 'Open', instruction: 'go', role: 'review' }, signal)
-    const open = h.store.listTickets().find(row => row.title === 'Open')!
-    await h.store.noteTicket(open.id, { n: 1, at: 1, role: 'review', summary: 'unclear' })
-    await h.service.onTurnEnd(open.sessions[0]!.sessionId)
-    await h.service.flushNotices()
-    const incomplete = h.relayed.at(-1)!.text
-    expect(incomplete).toContain('Do not count other tasks')
-    expect(incomplete).not.toContain('end with')
-  })
   it('tells a routine check to stay silent when the human has nothing to see', async () => {
     const h = setup({ idleCheckMinutes: 10 })
     const dot = await h.service.ensureDot()
-    await h.store.createTicket({ title: 'Ready', goal: 'g', dir: '/ready', access: 'read', at: 1 })
+    await h.service.createWorkChange({ title: 'Ready', goal: 'g', cwd: '/ready', at: 1 })
     h.service.onStatus(dot, 'idle')
     h.fire()
     await h.service.flushNotices()
@@ -1200,22 +1112,11 @@ describe('idle delivery and reconciliation', () => {
     expect(h.relayed).toHaveLength(1)
     expect(h.relayed[0]!.text).toContain('failed')
   })
-  it('wakes on lock release only when a conflicting write task is waiting', async () => {
-    const h = setup()
-    await h.service.ensureDot()
-    await h.service.startTask({ cwd: '/proj', title: 'holder', instruction: 'go' }, new AbortController().signal)
-    const holder = h.store.listTickets()[0]!
-    await h.store.createTicket({ title: 'waiting', goal: 'g', dir: '/proj/sub', access: 'write' })
-    await h.service.manageTask({ action: 'move', task_id: holder.id, to: 'done', reason: 'finished' })
-    await h.service.flushNotices()
-    expect(h.relayed[0]!.text).toContain('lock-free')
-    expect(h.relayed[0]!.text).toContain('waiting')
-  })
   it('reconciles existing and missing task sessions without moving tickets', async () => {
     const h = setup()
-    const signal = new AbortController().signal
-    await h.service.startTask({ cwd: '/proj', title: 'a', instruction: 'go' }, signal)
-    await h.service.startTask({ cwd: '/elsewhere', title: 'b', instruction: 'go' }, signal)
+    await h.store.track({ sessionId: 'legacy-a', origin: 'started', title: 'a', goal: 'go', cwd: '/proj', at: 1 })
+    await h.store.track({ sessionId: 'legacy-b', origin: 'started', title: 'b', goal: 'go', cwd: '/elsewhere', at: 1 })
+    await h.store.migrateTickets()
     const rows = h.store.list()
     const existing = rows.find(row => row.title === 'a')!
     const missing = rows.find(row => row.title === 'b')!
@@ -1223,659 +1124,47 @@ describe('idle delivery and reconciliation', () => {
     await h.service.reconcile()
     expect(h.store.task(existing.sessionId)?.status).toBe('running')
     expect(h.store.task(missing.sessionId)?.status).toBe('archived')
+    expect(h.store.listTickets()).toHaveLength(2)
     expect(h.store.listTickets().every(row => row.status === 'active')).toBe(true)
   })
 })
 
-describe('human board actions', () => {
-  it('does not report cancellation or release a lock when persistence fails', async () => {
+describe('DotService WorkBook sessions', () => {
+  it('launches a read run under the selected model and preset, records ownership, and refuses unrecorded followups', async () => {
     const h = setup()
     await h.service.ensureDot()
-    await h.service.startTask({ cwd: '/proj', title: 'writer', instruction: 'go' }, new AbortController().signal)
-    const ticket = h.store.listTickets()[0]!
-    h.store.moveTicket = async () => { throw new Error('disk failure') }
-    await expect(h.service.cancelTask(ticket.id)).rejects.toThrow('disk failure')
-    expect(h.store.ticket(ticket.id)?.status).toBe('active')
-    expect(h.store.ticketLockHolders('/proj')).toHaveLength(1)
+    const reply = await h.service.startTask({ cwd: '/proj', title: 'Inspect', instruction: 'report', preset: 'cordis', model: 'p/big', access: 'read' }, new AbortController().signal)
+    const run = h.store.work.listRuns()[0]!
+    expect(reply).toContain(`started ${run.id}`)
+    expect(run).toMatchObject({ phase: 'active', access: 'read', expectedPreset: 'cordis' })
+    expect(h.store.tracks(run.sessionId!)).toBe(true)
+    // The prompt is the rendered work order, not dot's raw instruction.
+    expect(h.calls.indexOf(`model ${run.sessionId} p/big`)).toBeLessThan(h.calls.findIndex(call => call.startsWith(`prompt ${run.sessionId} `)))
+    expect(h.calls).toContain(`readonly ${run.sessionId}`)
+    expect(h.store.listTickets()).toEqual([])
+    await expect(h.service.send(run.sessionId!, 'more')).rejects.toMatchObject({ code: 'dot/legacy-closed' })
     expect(h.relayed).toEqual([])
-  })
-  it('retains the write lock if a running session cannot be confirmed stopped', async () => {
-    const h = setup()
-    await h.service.startTask({ cwd: '/proj', title: 'writer', instruction: 'go' }, new AbortController().signal)
-    const ticket = h.store.listTickets()[0]!
-    h.host.cancelAndWait = async () => false
-    await expect(h.service.cancelTask(ticket.id)).rejects.toThrow(/retains its lock/)
-    expect(h.store.ticket(ticket.id)?.status).toBe('active')
-    expect(h.store.ticketLockHolders('/proj')).toHaveLength(1)
-  })
-  const draftOf = (h: ReturnType<typeof setup>, patch: { dir?: string; access?: 'read' | 'write' } = {}) => h.store.createTicket({ title: 'Plan', goal: 'g', dir: patch.dir ?? '/proj', access: patch.access ?? 'write', draft: true })
-  const lastMove = (h: ReturnType<typeof setup>, id: string) => h.store.ticket(id)!.history.at(-1)!
-
-  it('confirms a draft as the human and queues one task-human notice', async () => {
-    const h = setup()
-    await h.service.ensureDot()
-    const draft = await draftOf(h)
-    await h.service.confirmTask(draft.id)
-    expect(h.store.ticket(draft.id)!.status).toBe('todo')
-    expect(lastMove(h, draft.id)).toMatchObject({ from: 'draft', to: 'todo', by: 'human' })
-    await h.service.flushNotices()
-    expect(h.relayed).toHaveLength(1)
-    expect(h.relayed[0]!.text).toContain('task-human')
-    expect(h.relayed[0]!.text).toContain(`the human confirmed draft ${draft.id} "Plan"`)
+    await h.service.dispose()
   })
 
-  it('deletes only drafts and tells dot', async () => {
-    const h = setup()
-    await h.service.ensureDot()
-    const draft = await draftOf(h)
-    const todo = await h.store.createTicket({ title: 'Keep', goal: 'g', dir: '/other', access: 'read' })
-    await expect(h.service.deleteDraft(todo.id)).rejects.toThrow('not a draft')
-    expect(h.store.ticket(todo.id)).toBeDefined()
-    await h.service.deleteDraft(draft.id)
-    expect(h.store.ticket(draft.id)).toBeUndefined()
-    await h.service.flushNotices()
-    expect(h.relayed[0]!.text).toContain(`the human deleted draft ${draft.id} "Plan"`)
-  })
-
-  it('cancels an open task as the human, refuses a finished one, and frees waiting write tasks', async () => {
-    const h = setup()
-    await h.service.ensureDot()
-    await h.service.startTask({ cwd: '/proj', title: 'holder', instruction: 'go' }, new AbortController().signal)
-    const holder = h.store.listTickets()[0]!
-    const waiting = await h.store.createTicket({ title: 'next', goal: 'g', dir: '/proj/sub', access: 'write' })
-    await h.service.cancelTask(holder.id)
-    expect(lastMove(h, holder.id)).toMatchObject({ from: 'active', to: 'cancelled', by: 'human' })
-    await h.service.flushNotices()
-    expect(h.relayed[0]!.text).toContain('task-human')
-    expect(h.relayed[0]!.text).toContain(`the human cancelled task ${holder.id}`)
-    expect(h.relayed[0]!.text).toContain('lock-free')
-    expect(h.relayed[0]!.text).toContain(waiting.id)
-    await expect(h.service.cancelTask(holder.id)).rejects.toThrow('already cancelled')
-  })
-
-  it('passes a task in review as done, with the human as author', async () => {
-    const h = setup()
-    await h.service.ensureDot()
-    const ticket = await h.store.createTicket({ title: 'Ship', goal: 'g', dir: '/proj', access: 'read' })
-    await expect(h.service.reviewTask(ticket.id, true)).rejects.toThrow('not waiting for review')
-    await h.store.moveTicket(ticket.id, 'review', 'dot', 'ready', 5)
-    await h.service.reviewTask(ticket.id, true, 'looks good')
-    expect(h.store.ticket(ticket.id)!.status).toBe('done')
-    expect(lastMove(h, ticket.id)).toMatchObject({ from: 'review', to: 'done', by: 'human', reason: 'looks good' })
-    await h.service.flushNotices()
-    expect(h.relayed[0]!.text).toContain(`the human approved task ${ticket.id} "Ship" as done: looks good`)
-  })
-
-  it('sends a task back to active with a failing review round', async () => {
-    const h = setup()
-    await h.service.ensureDot()
-    const ticket = await h.store.createTicket({ title: 'Ship', goal: 'g', dir: '/proj', access: 'read' })
-    await h.store.moveTicket(ticket.id, 'review', 'dot', 'ready', 5)
-    await h.service.reviewTask(ticket.id, false, 'missing tests')
-    const after = h.store.ticket(ticket.id)!
-    expect(after.status).toBe('active')
-    expect(lastMove(h, ticket.id)).toMatchObject({ from: 'review', to: 'active', by: 'human', reason: 'missing tests' })
-    expect(after.rounds.at(-1)).toMatchObject({ n: 1, role: 'review', verdict: 'fail', summary: 'missing tests' })
-    await h.service.flushNotices()
-    expect(h.relayed[0]!.text).toContain(`the human sent task ${ticket.id} "Ship" back to active: missing tests`)
-  })
-
-  it('changes priority without queueing a notice and rejects other values', async () => {
-    const h = setup()
-    await h.service.ensureDot()
-    const ticket = await h.store.createTicket({ title: 'Ship', goal: 'g', dir: '/proj', access: 'read' })
-    await h.service.setTaskPriority(ticket.id, 3)
-    expect(h.store.ticket(ticket.id)!.priority).toBe(3)
-    await expect(h.service.setTaskPriority(ticket.id, 4 as never)).rejects.toThrow('invalid priority')
-    await h.service.flushNotices()
-    expect(h.relayed).toEqual([])
-  })
-})
-
-describe('ticket service', () => {
-  it.each(['read', 'write'] as const)('queues a follow-up for a running %s task without interruption or permission mutation', async access => {
-    const h = setup()
+  it('refuses unavailable models and presets before creating a session', async () => {
+    const h = setup({ taskModels: { mode: 'deny', list: ['p/big'] } })
     const signal = new AbortController().signal
-    h.host.setReadOnly = async () => true
-    await h.service.startTask({ cwd: '/proj', title: 'work', instruction: 'begin', access }, signal)
-    const ticket = h.store.listTickets()[0]!
-    const session = ticket.sessions[0]!.sessionId
-    h.running.add(session)
-    h.host.listSessions = async () => [{ sessionId: session, cwd: '/proj', running: true, updatedAt: 1, blank: false, subagent: false, archived: false }]
-    const verify = vi.fn(async () => true)
-    const setReadOnly = vi.fn(async () => true)
-    const setWritable = vi.fn(async () => true)
-    h.host.verifyTaskPermission = verify
-    h.host.setReadOnly = setReadOnly
-    h.host.setWritable = setWritable
-    const inbox: string[] = []
-    h.host.relay = async (_target, _sender, text) => { inbox.push(text) }
-    await expect(h.service.send(session, 'additional requirement')).resolves.toContain('next turn')
-    expect(verify).toHaveBeenCalledWith(session, access, h.store.settings.taskPermission)
-    expect(setReadOnly).not.toHaveBeenCalled()
-    expect(setWritable).not.toHaveBeenCalled()
-    expect(h.calls.some(call => call.startsWith('cancel'))).toBe(false)
-    expect(inbox).toEqual(['additional requirement'])
-    h.running.delete(session)
-    const nextTurn = inbox.shift()
-    expect(nextTurn).toBe('additional requirement')
-  })
-
-  it('rejects a running follow-up when another conflicting task session is running', async () => {
-    const h = setup()
-    const signal = new AbortController().signal
-    await h.service.startTask({ cwd: '/proj', title: 'writer', instruction: 'begin' }, signal)
-    const writer = h.store.listTickets()[0]!
-    const session = writer.sessions[0]!.sessionId
-    h.host.setReadOnly = async () => true
-    await h.service.startTask({ cwd: '/proj', title: 'reader', instruction: 'inspect', access: 'read' }, signal)
-    const other = h.store.listTickets().find(row => row.id !== writer.id)!.sessions[0]!.sessionId
-    h.host.listSessions = async () => [session, other].map(sessionId => ({ sessionId, cwd: '/proj', running: true, updatedAt: 1, blank: false, subagent: false, archived: false }))
-    h.host.verifyTaskPermission = async () => true
-    await expect(h.service.send(session, 'follow-up')).rejects.toMatchObject({ code: 'dot/locked' })
-    expect(h.relayed).toEqual([])
-  })
-
-  it('does not queue a running follow-up when permission verification fails', async () => {
-    const h = setup()
-    await h.service.startTask({ cwd: '/proj', title: 'work', instruction: 'begin' }, new AbortController().signal)
-    const ticket = h.store.listTickets()[0]!
-    const session = ticket.sessions[0]!.sessionId
-    h.running.add(session)
-    h.host.verifyTaskPermission = async () => false
-    await expect(h.service.send(session, 'follow-up')).rejects.toMatchObject({ code: 'dot/permission-failed' })
-    expect(h.relayed).toEqual([])
-    expect(h.store.ticketLockHolders('/proj').map(row => row.id)).toEqual([ticket.id])
-  })
-  it.each(['workspace-write', 'default'] as const)('reapplies %s before reusing a read session for writing', async permission => {
-    const h = setup({ taskPermission: permission })
-    const signal = new AbortController().signal
-    h.host.setReadOnly = async id => { h.calls.push(`readonly ${id}`); return true }
-    h.host.setWritable = async (id, preset) => { h.timeline.push(`writable ${id} ${preset}`); return true }
-    await h.service.startTask({ cwd: '/proj', title: 'Research', instruction: 'inspect', access: 'read' }, signal)
-    const ticket = h.store.listTickets()[0]!
-    const session = ticket.sessions[0]!.sessionId
-    await h.service.manageTask({ action: 'move', task_id: ticket.id, to: 'todo', reason: 'ready to implement' })
-    await h.service.manageTask({ action: 'update', task_id: ticket.id, access: 'write' })
-    await h.service.manageTask({ action: 'move', task_id: ticket.id, to: 'active', reason: 'implement' })
-    await expect(h.service.send(session, 'implement')).resolves.toContain('Delivered')
-    expect(h.timeline).toEqual([`writable ${session} ${permission}`, 'relay implement'])
-    expect(h.store.ticketLockHolders('/proj').map(row => row.id)).toEqual([ticket.id])
-  })
-
-  it('keeps the write lock and refuses delivery when writable restoration fails', async () => {
-    const h = setup({ taskPermission: 'default' })
-    const signal = new AbortController().signal
-    h.host.setReadOnly = async () => true
-    await h.service.startTask({ cwd: '/proj', title: 'Research', instruction: 'inspect', access: 'read' }, signal)
-    const ticket = h.store.listTickets()[0]!
-    const session = ticket.sessions[0]!.sessionId
-    await h.service.manageTask({ action: 'move', task_id: ticket.id, to: 'todo', reason: 'ready' })
-    await h.service.manageTask({ action: 'update', task_id: ticket.id, access: 'write' })
-    await h.service.manageTask({ action: 'move', task_id: ticket.id, to: 'active', reason: 'implement' })
-    h.running.add(session)
-    const restore = vi.fn(async () => true)
-    h.host.setWritable = restore
-    await expect(h.service.send(session, 'implement')).rejects.toMatchObject({ code: 'dot/permission-failed', message: expect.stringContaining('running') })
-    expect(restore).not.toHaveBeenCalled()
-    h.running.delete(session)
-    h.host.setWritable = async () => false
-    await expect(h.service.send(session, 'implement')).rejects.toMatchObject({ code: 'dot/permission-failed', message: expect.stringContaining('new work session') })
-    h.host.setWritable = async () => { throw new Error('unavailable') }
-    await expect(h.service.send(session, 'implement')).rejects.toMatchObject({ code: 'dot/permission-failed' })
-    expect(h.relayed).toEqual([])
-    expect(h.store.ticketLockHolders('/proj').map(row => row.id)).toEqual([ticket.id])
-  })
-  it('traces a failed first instruction without recording it or changing the error', async () => {
-    const warn = vi.fn(() => true)
-    const h = setup(undefined, { info: () => true, debug: () => true, warn })
-    h.host.prompt = async () => { throw new Error('pipe closed') }
-    await expect(h.service.startTask({ cwd: '/proj', title: 'Build', instruction: 'SECRET-INSTRUCTION' }, new AbortController().signal)).rejects.toMatchObject({ code: 'dot/prompt-failed', message: expect.stringContaining('pipe closed') })
-    const ticket = h.store.listTickets()[0]!
-    const session = ticket.sessions[0]!.sessionId
-    expect(warn).toHaveBeenCalledWith('session.send-refused', expect.stringContaining(session), undefined, expect.objectContaining({ ticketId: ticket.id, sessionId: session, code: 'dot/prompt-failed' }))
-    expect(JSON.stringify(warn.mock.calls)).not.toContain('SECRET-INSTRUCTION')
-    expect(h.store.ticketLockHolders('/proj').map(row => row.id)).toEqual([ticket.id])
-  })
-  it('traces a failed writable restore on an idle session and keeps the lock', async () => {
-    const warn = vi.fn(() => true)
-    const h = setup({ taskPermission: 'default' }, { info: () => true, debug: () => true, warn })
-    h.host.setReadOnly = async () => true
-    await h.service.startTask({ cwd: '/proj', title: 'Research', instruction: 'inspect', access: 'read' }, new AbortController().signal)
-    const ticket = h.store.listTickets()[0]!
-    const session = ticket.sessions[0]!.sessionId
-    await h.service.manageTask({ action: 'move', task_id: ticket.id, to: 'todo', reason: 'ready' })
-    await h.service.manageTask({ action: 'update', task_id: ticket.id, access: 'write' })
-    await h.service.manageTask({ action: 'move', task_id: ticket.id, to: 'active', reason: 'implement' })
-    h.host.setWritable = async () => false
-    await expect(h.service.send(session, 'SECRET-INSTRUCTION')).rejects.toMatchObject({ code: 'dot/permission-failed', message: expect.stringContaining('new work session') })
-    expect(h.relayed).toEqual([])
-    expect(h.store.ticketLockHolders('/proj').map(row => row.id)).toEqual([ticket.id])
-    expect(warn).toHaveBeenCalledWith('session.send-refused', expect.any(String), undefined, expect.objectContaining({ ticketId: ticket.id, sessionId: session, code: 'dot/permission-failed' }))
-    expect(JSON.stringify(warn.mock.calls)).not.toContain('SECRET-INSTRUCTION')
-  })
-  it('traces a relay failure and rethrows the original error', async () => {
-    const warn = vi.fn(() => true)
-    const h = setup(undefined, { info: () => true, debug: () => true, warn })
-    await h.service.startTask({ cwd: '/proj', title: 'Build', instruction: 'go' }, new AbortController().signal)
-    const ticket = h.store.listTickets()[0]!
-    const session = ticket.sessions[0]!.sessionId
-    h.host.setWritable = async () => true
-    const boom = new Error('relay down')
-    h.host.relay = async () => { throw boom }
-    await expect(h.service.send(session, 'SECRET-INSTRUCTION')).rejects.toBe(boom)
-    expect(warn).toHaveBeenCalledWith('session.send-refused', expect.any(String), undefined, expect.objectContaining({ ticketId: ticket.id, sessionId: session, code: 'dot/send-failed' }))
-    expect(JSON.stringify(warn.mock.calls)).not.toContain('SECRET-INSTRUCTION')
-    expect(h.store.ticketLockHolders('/proj').map(row => row.id)).toEqual([ticket.id])
-  })
-  it('drains a delayed session creation and rejects queued or new work during disposal', async () => {
-    const h = setup()
-    let enter!: () => void
-    let release!: () => void
-    const entered = new Promise<void>(resolve => { enter = resolve })
-    const gate = new Promise<void>(resolve => { release = resolve })
-    const create = h.host.createSession.bind(h.host)
-    h.host.createSession = async place => { enter(); await gate; return create(place) }
-    const start = h.service.startTask({ cwd: '/proj', title: 'delayed', instruction: 'go' }, new AbortController().signal)
-    await entered
-    const queued = h.service.startTask({ cwd: '/other', title: 'queued', instruction: 'go' }, new AbortController().signal)
-    let disposed = false
-    const stopping = h.service.dispose().then(() => { disposed = true })
-    await expect(h.service.send('other', 'go')).rejects.toMatchObject({ code: 'dot/disposed' })
-    await Promise.resolve()
-    expect(disposed).toBe(false)
-    release()
-    await expect(start).rejects.toMatchObject({ code: 'dot/disposed' })
-    await expect(queued).rejects.toMatchObject({ code: 'dot/disposed' })
-    await stopping
-    expect(h.calls.some(call => call.startsWith('permit ') || call.startsWith('prompt '))).toBe(false)
-    expect(h.calls.filter(call => call.startsWith('create s'))).toHaveLength(1)
-    await expect(h.service.startTask({ cwd: '/x', title: 'late', instruction: 'go' }, new AbortController().signal)).rejects.toMatchObject({ code: 'dot/disposed' })
-  })
-  it('enforces read-only before resuming a former writer when another task holds the lock', async () => {
-    const h = setup()
-    const signal = new AbortController().signal
-    await h.service.startTask({ cwd: '/proj', title: 'A', instruction: 'go' }, signal)
-    const a = h.store.listTickets()[0]!
-    const sessionId = a.sessions[0]!.sessionId
-    await h.service.manageTask({ action: 'move', task_id: a.id, to: 'todo', reason: 'pause' })
-    await h.service.manageTask({ action: 'update', task_id: a.id, access: 'read' })
-    await h.service.startTask({ cwd: '/proj', title: 'B', instruction: 'go' }, signal)
-    await h.service.manageTask({ action: 'move', task_id: a.id, to: 'active', reason: 'resume' })
-    h.host.setReadOnly = async () => false
-    await expect(h.service.send(sessionId, 'resume')).rejects.toMatchObject({ code: 'dot/read-only-unavailable' })
-    expect(h.relayed).toEqual([])
-    h.host.setReadOnly = async id => { h.calls.push(`readonly ${id}`); return true }
-    await expect(h.service.send(sessionId, 'inspect')).resolves.toContain('Delivered')
-    expect(h.calls).toContain(`readonly ${sessionId}`)
-    expect(h.relayed).toEqual([{ target: sessionId, text: 'inspect' }])
-  })
-
-  it('treats a running old session as a possible writer after its task changes to read', async () => {
-    const h = setup()
-    const signal = new AbortController().signal
-    await h.service.startTask({ cwd: '/proj', title: 'A', instruction: 'go' }, signal)
-    const a = h.store.listTickets()[0]!
-    const sessionId = a.sessions[0]!.sessionId
-    await h.service.manageTask({ action: 'move', task_id: a.id, to: 'todo', reason: 'pause' })
-    await h.service.manageTask({ action: 'update', task_id: a.id, access: 'read' })
-    h.host.listSessions = async () => [{ sessionId, cwd: '/proj', running: true, updatedAt: 0, blank: false, subagent: false, archived: false }]
-    await expect(h.service.startTask({ cwd: '/proj', title: 'B', instruction: 'go' }, signal)).rejects.toThrow(/still running/)
-    expect(h.calls.filter(call => call.startsWith('create s'))).toHaveLength(1)
-  })
-  it('does not wake an old todo session after another task takes its directory', async () => {
-    const h = setup()
-    const signal = new AbortController().signal
-    await h.service.startTask({ cwd: '/proj', title: 'A', instruction: 'go' }, signal)
-    const a = h.store.listTickets()[0]!
-    const oldSession = a.sessions[0]!.sessionId
-    await h.service.manageTask({ action: 'move', task_id: a.id, to: 'todo', reason: 'pause' })
-    await h.service.startTask({ cwd: '/proj', title: 'B', instruction: 'go' }, signal)
-    await expect(h.service.send(oldSession, 'resume')).rejects.toThrow(/todo/)
-    expect(h.relayed).toEqual([])
-    await expect(h.service.startTask({ taskId: a.id, title: 'retry', instruction: 'go' }, signal)).rejects.toMatchObject({ code: 'dot/locked' })
-  })
-
-  it.each(['draft', 'done', 'cancelled'] as const)('rejects starting or sending to a %s task', async status => {
-    const h = setup()
-    const signal = new AbortController().signal
-    await h.service.startTask({ cwd: '/proj', title: 'A', instruction: 'go' }, signal)
-    const ticket = h.store.listTickets()[0]!
-    if (status === 'draft') {
-      const draft = await h.store.createTicket({ title: 'draft', goal: 'g', dir: '/draft', access: 'write', draft: true })
-      await expect(h.service.startTask({ taskId: draft.id, title: 'retry', instruction: 'go', role: 'review' }, signal)).rejects.toMatchObject({ code: 'dot/task-closed' })
-      return
-    }
-    await h.service.manageTask({ action: 'move', task_id: ticket.id, to: status, reason: 'closed' })
-    await expect(h.service.startTask({ taskId: ticket.id, title: 'retry', instruction: 'go', role: 'review' }, signal)).rejects.toMatchObject({ code: 'dot/task-closed' })
-    await expect(h.service.send(ticket.sessions[0]!.sessionId, 'resume')).rejects.toMatchObject({ code: 'dot/task-closed' })
-    expect(h.relayed).toEqual([])
-  })
-
-  it('blocks a second running writer in the same task and rejects an old directory', async () => {
-    const h = setup()
-    const signal = new AbortController().signal
-    await h.service.startTask({ cwd: '/proj', title: 'A', instruction: 'go' }, signal)
-    const ticket = h.store.listTickets()[0]!
-    const sessionId = ticket.sessions[0]!.sessionId
-    h.host.listSessions = async () => [{ sessionId, cwd: '/proj', running: true, updatedAt: 0, blank: false, subagent: false, archived: false }]
-    await expect(h.service.startTask({ taskId: ticket.id, title: 'retry', instruction: 'go' }, signal)).rejects.toThrow(/still running/)
-    h.host.listSessions = async () => [{ sessionId, cwd: '/elsewhere', running: false, updatedAt: 0, blank: false, subagent: false, archived: false }]
-    await expect(h.service.send(sessionId, 'resume')).rejects.toThrow(/current directory/)
-    h.host.listSessions = async () => []
-    await h.service.manageTask({ action: 'move', task_id: ticket.id, to: 'todo', reason: 'pause' })
-    await h.service.manageTask({ action: 'update', task_id: ticket.id, dir: '/other' })
-    await h.service.manageTask({ action: 'move', task_id: ticket.id, to: 'active', reason: 'resume' })
-    await expect(h.service.send(sessionId, 'resume')).rejects.toThrow(/current directory/)
-  })
-  it('enforces a write lock before creating another session, while read and check-only do not take it', async () => {
-    const h = setup()
-    const signal = new AbortController().signal
-    const first = await h.service.startTask({ cwd: '/proj', title: 'first', instruction: 'go' }, signal)
-    expect(first).toContain('t-1')
-    const count = h.calls.filter(call => call.startsWith('create s')).length
-    const check = await h.service.startTask({ cwd: '/proj/sub', title: 'check', instruction: '', checkOnly: true }, signal)
-    expect(check).toContain('t-1')
-    expect(h.calls.filter(call => call.startsWith('create s'))).toHaveLength(count)
-    await expect(h.service.startTask({ cwd: '/proj/sub', title: 'blocked', instruction: 'go' }, signal)).rejects.toThrow('t-1')
-    expect(h.store.listTickets().find(row => row.title === 'blocked')?.status).toBe('todo')
-    expect(h.calls.filter(call => call.startsWith('create s'))).toHaveLength(count)
-    h.host.setReadOnly = async () => true
-    const read = await h.service.startTask({ cwd: '/proj', title: 'read', instruction: 'inspect', access: 'read' }, signal)
-    expect(read).toContain('read-only permissions')
-  })
-  it('reports conflicting human sessions in check-only and does not create a session', async () => {
-    const h = setup()
-    h.host.listSessions = async () => [
-      { sessionId: 'human', cwd: '/proj/sub', running: true, updatedAt: 0, blank: false, subagent: false, archived: false },
-      { sessionId: 'blank', cwd: '/proj', running: false, updatedAt: 0, blank: true, subagent: false, archived: false },
-    ]
-    h.host.titles = async () => new Map([['human', 'My work']])
-    const result = await h.service.startTask({ cwd: '/proj', title: 'check', instruction: '', checkOnly: true }, new AbortController().signal)
-    expect(result).toContain('human RUNNING "My work"')
-    expect(result).not.toContain('blank')
-    expect(h.calls.some(call => call.startsWith('create s'))).toBe(false)
-  })
-  it('refuses to send an instruction when read-only enforcement fails', async () => {
-    const h = setup()
-    await expect(h.service.startTask({ cwd: '/proj', title: 'inspect', instruction: 'look', access: 'read' }, new AbortController().signal)).rejects.toMatchObject({ code: 'dot/read-only-unavailable' })
-    expect(h.calls.some(call => call.startsWith('prompt '))).toBe(false)
-    expect(h.calls.some(call => call.startsWith('permit '))).toBe(false)
-    expect(h.store.listTickets()[0]?.status).toBe('todo')
-  })
-  it('dispatches updated ticket directories and checks locks on the actual target', async () => {
-    const h = setup()
-    const workspace = await h.host.createWorkspace('/original')
-    const ticket = JSON.parse(await h.service.manageTask({ action: 'create', title: 'Move', goal: 'g', workspace_id: workspace.id, access: 'write' }))
-    await h.service.manageTask({ action: 'update', task_id: ticket.id, dir: '/new-target' })
-    expect(h.store.ticket(ticket.id)).not.toHaveProperty('workspaceId')
-    await h.service.startTask({ taskId: ticket.id, title: 'work', instruction: 'go' }, new AbortController().signal)
-    expect(h.calls).toContain('create s1 /new-target')
-    expect(h.store.ticketLockHolders('/new-target').map(row => row.id)).toContain(ticket.id)
-    expect(h.store.ticketLockHolders('/original')).toEqual([])
-  })
-  it('never inherits the dot preset when it is the host default', async () => {
-    const h = setup()
-    h.host.listPresets = async () => ({ fallback: 'dot', presets: [{ id: 'dot' }, { id: 'standard' }] })
-    await h.service.startTask({ cwd: '/proj', title: 't', instruction: 'go' }, new AbortController().signal)
-    expect(h.calls).toContain('create s1 /proj preset=standard')
-  })
-  it('lists one task per line without exposing full records', async () => {
-    const h = setup()
-    await h.service.manageTask({ action: 'create', title: 'Alpha', goal: 'secret goal', dir: '/a', access: 'read' })
-    await h.service.manageTask({ action: 'create', title: 'Beta', goal: 'second goal', dir: '/b', access: 'write' })
-    const lines = (await h.service.manageTask({ action: 'list' })).split('\n')
-    expect(lines).toHaveLength(2)
-    expect(lines[0]).toMatch(/^t-1 TODO P2 read .* "Alpha"$/)
-    expect(lines[1]).toMatch(/^t-2 TODO P2 write .* "Beta"$/)
-    expect(lines.join('\n')).not.toContain('secret goal')
-  })
-  it('supports all task actions and multiple session roles', async () => {
-    const h = setup()
-    const signal = new AbortController().signal
-    const created = JSON.parse(await h.service.manageTask({ action: 'create', title: 'Test', goal: 'done', dir: '/proj', access: 'write', draft: true }))
-    expect(await h.service.manageTask({ action: 'list' })).toContain(created.id)
-    expect(await h.service.manageTask({ action: 'read', task_id: created.id })).toContain('Test')
-    await h.service.manageTask({ action: 'update', task_id: created.id, title: 'New' })
-    await h.service.manageTask({ action: 'move', task_id: created.id, to: 'todo', reason: 'ready' })
-    for (const role of ['work', 'review', 'rework'] as const) await h.service.startTask({ taskId: created.id, title: role, instruction: 'go', role }, signal)
-    await h.service.manageTask({ action: 'note', task_id: created.id, role: 'review', summary: 'checked', verdict: 'fail' })
-    expect(h.store.ticket(created.id)?.sessions.map(row => row.role)).toEqual(['work', 'review', 'rework'])
-    expect(h.store.list().every(row => row.ticketId === created.id && row.role)).toBe(true)
-    expect(h.store.ticket(created.id)?.rounds[0]?.verdict).toBe('fail')
-    const draft = JSON.parse(await h.service.manageTask({ action: 'create', title: 'Draft', goal: 'g', dir: '/x', access: 'read', draft: true }))
-    expect(await h.service.manageTask({ action: 'delete', task_id: draft.id })).toContain('Deleted')
-  })
-})
-
-describe('DotService tasks', () => {
-  it('starts a task under default permissions when Dorothy screens approvals, tracks it and reports its finished turn', async () => {
-    const h = setup()
-    const dot = await h.service.ensureDot()
-    const workspace = await h.host.createWorkspace('/proj', 'proj')
-    const reply = await h.service.startTask({ workspaceId: workspace.id, title: 'hello', instruction: 'write hello.txt' }, new AbortController().signal)
-    const task = h.store.list()[0]!
-    expect(reply).toContain(task.sessionId)
-    expect(reply).not.toContain('full access')
-    expect(task).toMatchObject({ origin: 'started', cwd: '/proj', goal: 'write hello.txt' })
-    expect(h.calls).toContain(`permit ${task.sessionId} workspace-write`)
-
-    await h.service.onTurnEnd(task.sessionId)
-    expect(h.store.task(task.sessionId)).toMatchObject({ status: 'idle', unseenTurns: 1 })
-    await h.service.flushNotices()
-    expect(h.relayed).toHaveLength(1)
-    expect(h.relayed[0]).toMatchObject({ target: dot })
-    expect(h.relayed[0]!.text).toContain('finished a turn')
-  })
-
-  it('applies the saved full access choice before the first instruction independently of approval mode', async () => {
-    const h = setup({ taskPermission: 'danger-full-access' })
-    await h.service.ensureDot()
-    const workspace = await h.host.createWorkspace('/proj', 'proj')
-    const reply = await h.service.startTask({ workspaceId: workspace.id, title: 'hello', instruction: 'write hello.txt' }, new AbortController().signal)
-    const task = h.store.list()[0]!
-    expect(reply).toContain('danger-full-access permissions')
-    const permitAt = h.calls.indexOf(`permit ${task.sessionId} ${FULL_ACCESS}`)
-    expect(permitAt).toBeGreaterThan(-1)
-    expect(permitAt).toBeLessThan(h.calls.indexOf(`prompt ${task.sessionId} write hello.txt`))
-  })
-
-  it('holds a watched turn until a task dot started wakes her, with status only on the ledger', async () => {
-    const h = setup()
-    const dot = await h.service.ensureDot()
-    await h.service.watch('watched-task', 'keep an eye on it')
-    h.service.onStatus('watched-task', 'running')
-    expect(h.store.task('watched-task')!.status).toBe('running')
-    expect(h.delays()).toEqual([])
-
-    await h.service.onTurnEnd('watched-task')
-    expect(h.store.task('watched-task')).toMatchObject({ status: 'idle', unseenTurns: 1 })
-    expect(h.delays()).toEqual([])
-    expect(h.relayed).toEqual([])
-
-    await h.service.startTask({ cwd: '/proj', title: 'own-task', instruction: 'go' }, new AbortController().signal)
-    const started = h.store.list().find(task => task.origin === 'started')!.sessionId
-    await h.service.onTurnEnd(started)
-    await h.service.flushNotices()
-    expect(h.relayed).toHaveLength(1)
-    expect(h.relayed[0]).toMatchObject({ target: dot })
-    expect(h.relayed[0]!.text.indexOf('own-task')).toBeLessThan(h.relayed[0]!.text.indexOf('watched-task'))
-  })
-
-  it('carries held updates in the human message instead of waking dot separately', async () => {
-    const h = setup()
-    await h.service.ensureDot()
-    await h.service.watch('watched-task', 'keep an eye on it')
-    await h.service.onTurnEnd('watched-task')
-    expect(h.relayed).toEqual([])
-    expect(h.delays()).toEqual([])
-
-    await h.service.say('please check it')
-    expect(h.relayed).toEqual([])
-    expect(h.said).toHaveLength(1)
-    expect(h.said[0]!.text).toBe('please check it')
-    expect(h.said[0]!.carriedNotices).toContain('watched-task')
-    expect(h.timeline).toEqual(['say please check it'])
-    expect(h.calls).toContain(`say ${h.store.dotSessionId} please check it`)
-  })
-
-  it('does not send an instruction if the saved permission cannot be applied', async () => {
-    const h = setup({ taskPermission: 'danger-full-access' })
-    h.failPermission()
-    await h.service.ensureDot()
-    await expect(h.service.startTask({ cwd: '/proj', title: 't', instruction: 'go' }, new AbortController().signal)).rejects.toMatchObject({ code: 'dot/permission-failed' })
-    expect(h.calls.some(call => call.startsWith('prompt '))).toBe(false)
-  })
-
-  it('preserves the explicit host-default permission choice', async () => {
-    const h = setup({ taskPermission: 'default' })
-    await h.service.ensureDot()
-    const reply = await h.service.startTask({ cwd: '/proj', title: 't', instruction: 'go' }, new AbortController().signal)
-    expect(reply).toContain('host default permissions')
-    expect(h.calls.some(call => call.startsWith('permit '))).toBe(false)
-  })
-
-  it("registers dot's own workspace and runs a task there when no place is given", async () => {
-    const h = setup()
-    await h.service.ensureDot()
-    await h.service.ensureDot()
-    expect(h.workspaces).toHaveLength(1)
-    const home = h.workspaces[0]!
-    expect(home.title).toBe(HOME_TITLE)
-    await h.host.createWorkspace('/proj', 'proj')
-    const listed = await h.service.listWorkspaces()
-    expect(listed.split('\n').filter(line => line.includes('your own workspace'))).toEqual([expect.stringContaining(home.id)])
-    const reply = await h.service.startTask({ title: 'look it up', instruction: 'find out' }, new AbortController().signal)
-    expect(h.calls).toContain(`create s${reply.match(/task s(\d+)/)![1]} ${home.id}`)
-    expect(h.store.list()[0]).toMatchObject({ cwd: home.path, workspaceId: home.id })
-  })
-
-  it('leaves a task on the default model unless dot names one', async () => {
-    const h = setup()
-    await h.service.ensureDot()
-    await h.service.startTask({ cwd: '/proj', title: 'a', instruction: 'go' }, new AbortController().signal)
-    expect(h.calls.some(call => call.startsWith('model '))).toBe(false)
-    const reply = await h.service.startTask({ cwd: '/proj', taskId: h.store.listTickets()[0]!.id, title: 'b', instruction: 'go', model: 'p/big' }, new AbortController().signal)
-    const id = h.store.list().find(task => task.title === 'b')!.sessionId
-    expect(reply).toContain('on p/big')
-    expect(h.calls.indexOf(`model ${id} p/big`)).toBeGreaterThan(-1)
-    expect(h.calls.indexOf(`model ${id} p/big`)).toBeLessThan(h.calls.indexOf(`prompt ${id} go`))
-  })
-
-  it('leaves a task on the default preset unless dot names another', async () => {
-    const h = setup()
-    await h.service.ensureDot()
-    const signal = new AbortController().signal
-    const plain = await h.service.startTask({ cwd: '/proj', title: 'a', instruction: 'go' }, signal)
-    const taskId = h.store.listTickets()[0]!.id
-    const named = await h.service.startTask({ cwd: '/proj', taskId, title: 'b', instruction: 'go', preset: 'standard' }, signal)
-    const word = await h.service.startTask({ cwd: '/proj', taskId, title: 'c', instruction: 'go', preset: 'Default' }, signal)
-    // The default is never named to the host, so these sessions are created like any other.
-    expect(h.calls.filter(call => call.startsWith('create s'))).toEqual(['create s2 /proj', 'create s3 /proj', 'create s4 /proj'])
-    for (const reply of [plain, named, word]) expect(reply).not.toContain('preset')
-    expect(h.store.list().map(task => task.preset)).toEqual(['standard', 'standard', 'standard'])
-
-    const scripted = await h.service.startTask({ cwd: '/proj', taskId, title: 'd', instruction: 'rename them all', preset: 'PTC' }, signal)
-    const id = h.store.list().find(task => task.title === 'd')!.sessionId
-    expect(h.calls).toContain(`create ${id} /proj preset=ptc`)
-    expect(scripted).toContain('with the ptc preset')
-    expect(h.store.task(id)!.preset).toBe('ptc')
-  })
-
-  it('refuses a preset that is not on the roster, is broken, or is its own, before any session exists', async () => {
-    const h = setup()
-    await h.service.ensureDot()
-    const signal = new AbortController().signal
-    await expect(h.service.startTask({ cwd: '/proj', title: 't', instruction: 'go', preset: 'turbo' }, signal)).rejects.toMatchObject({ code: 'dot/unknown-preset', message: expect.stringContaining('standard (the default), ptc, cordis, minimal') })
+    await expect(h.service.startTask({ cwd: '/proj', title: 't', instruction: 'go', model: 'p/big' }, signal)).rejects.toMatchObject({ code: 'dot/model-not-allowed' })
     await expect(h.service.startTask({ cwd: '/proj', title: 't', instruction: 'go', preset: 'dot' }, signal)).rejects.toMatchObject({ code: 'dot/unknown-preset' })
-    await expect(h.service.startTask({ cwd: '/proj', title: 't', instruction: 'go', preset: 'mine' }, signal)).rejects.toMatchObject({ code: 'dot/preset-broken' })
-    expect(h.calls.some(call => call.startsWith('create s'))).toBe(false)
+    expect(h.calls.some(call => call.startsWith('create '))).toBe(false)
     expect(h.store.list()).toEqual([])
+    await h.service.dispose()
   })
 
-  it('refuses session creation when the preset roster cannot be read', async () => {
+  it('refuses read-only dispatch when the host cannot enforce its access', async () => {
     const h = setup()
-    await h.service.ensureDot()
-    h.failPresets()
-    const signal = new AbortController().signal
-    await expect(h.service.startTask({ cwd: '/proj', title: 'a', instruction: 'go' }, signal)).rejects.toMatchObject({ code: 'dot/presets-unavailable' })
-    await expect(h.service.startTask({ cwd: '/elsewhere', title: 'b', instruction: 'go', preset: 'ptc' }, signal)).rejects.toMatchObject({ code: 'dot/presets-unavailable' })
-    expect(h.calls.some(call => call.startsWith('create s'))).toBe(false)
-  })
-
-  it('routes cordis tasks through the same dot approval rules as other presets', async () => {
-    const h = setup()
-    await h.service.ensureDot()
-    const reply = await h.service.startTask({ cwd: '/proj', title: 'new plugin', instruction: 'scaffold it', preset: 'cordis' }, new AbortController().signal)
-    const id = h.store.list()[0]!.sessionId
-    expect(h.calls).toContain(`create ${id} /proj preset=cordis`)
-    expect(h.calls).toContain(`permit ${id} workspace-write`)
-    expect(reply).toContain('workspace-write permissions')
-
-    const approval = h.service.relayRequest({ kind: 'approval', sessionId: id, subject: 'bash', detail: 'dsh plugin add x' })
-    if (approval.decided !== 'pending') throw new Error('expected a pending relay')
-    const question = h.service.relayRequest({ kind: 'question', sessionId: id, subject: 'which name?' })
-    if (question.decided !== 'pending') throw new Error('expected a pending relay')
-    await h.service.flushNotices()
-    const text = h.relayed.map(item => item.text).join('\n')
-    const [approvalPart, questionPart] = [text.slice(text.indexOf(approval.id), text.indexOf(question.id)), text.slice(text.indexOf(question.id))]
-    expect(approvalPart).toContain('dsh plugin add x')
-    expect(approvalPart).not.toContain('Never decide it yourself')
-    expect(questionPart).toContain('which name?')
-
-    // Under deny all, even cordis approvals are rejected immediately.
-    await h.store.setSettings({ ...DEFAULT_SETTINGS, approvals: 'deny' })
-    expect(h.service.relayRequest({ kind: 'approval', sessionId: id, subject: 'bash' })).toEqual({ decided: 'deny' })
-  })
-
-  it("refuses a model the human's list excludes before any session exists", async () => {
-    const h = setup({ taskModels: { mode: 'deny', list: ['p/big'] } })
-    await h.service.ensureDot()
-    await expect(h.service.startTask({ cwd: '/proj', title: 't', instruction: 'go', model: 'p/big' }, new AbortController().signal)).rejects.toMatchObject({ code: 'dot/model-not-allowed' })
-    await expect(h.service.startTask({ cwd: '/proj', title: 't', instruction: 'go', model: 'nope' }, new AbortController().signal)).rejects.toMatchObject({ code: 'dot/unknown-model' })
-    expect(h.calls.some(call => call.startsWith('create s'))).toBe(false)
-    expect(h.store.list()).toHaveLength(0)
-    // The default is not on the list, so a task without a model still starts on it.
-    await h.service.startTask({ cwd: '/proj', title: 't', instruction: 'go' }, new AbortController().signal)
-    expect(h.calls.some(call => call.startsWith('model '))).toBe(false)
-  })
-
-  it('makes dot choose when the default model is excluded, and chooses itself when one model is left', async () => {
-    const h = setup({ taskModels: { mode: 'allow', list: ['p/big', 'q/small'] } })
-    await h.service.ensureDot()
-    const refused = h.service.startTask({ cwd: '/proj', title: 't', instruction: 'go' }, new AbortController().signal)
-    await expect(refused).rejects.toMatchObject({ code: 'dot/model-not-allowed' })
-    await expect(refused).rejects.toThrow(/p\/big, q\/small/)
-    expect(await h.service.listModels()).toContain('The default p/base is excluded, so pass model')
-
-    await h.store.setSettings({ ...h.store.settings, taskModels: { mode: 'allow', list: ['q/small'] } })
-    const reply = await h.service.startTask({ cwd: '/proj', title: 't', instruction: 'go' }, new AbortController().signal)
-    expect(reply).toContain('on q/small')
-  })
-
-  it('does not start a task when the list cannot be checked', async () => {
-    const h = setup({ taskModels: { mode: 'deny', list: ['p/big'] } })
-    await h.service.ensureDot()
-    h.failCatalog()
-    await expect(h.service.startTask({ cwd: '/proj', title: 't', instruction: 'go' }, new AbortController().signal)).rejects.toMatchObject({ code: 'dot/models-unavailable' })
-    expect(h.calls.some(call => call.startsWith('create s'))).toBe(false)
-  })
-
-  it('reading a tracked task clears its unread counter', async () => {
-    const h = setup()
-    await h.service.ensureDot()
-    const workspace = await h.host.createWorkspace('/proj')
-    await h.service.startTask({ workspaceId: workspace.id, title: 't', instruction: 'go' }, new AbortController().signal)
-    const id = h.store.list()[0]!.sessionId
-    await h.service.onTurnEnd(id)
-    expect(await h.service.read(id)).toContain('done: wrote hello.txt')
-    expect(h.store.task(id)!.unseenTurns).toBe(0)
-  })
-
-  it('refuses messages to dot itself', async () => {
-    const h = setup()
-    const dot = await h.service.ensureDot()
-    await expect(h.service.send(dot, 'hi')).rejects.toThrow(/dot itself/)
+    h.failPermission()
+    const result = await h.service.startTask({ cwd: '/proj', title: 't', instruction: 'go', access: 'read' }, new AbortController().signal)
+    expect(result).toContain('not started')
+    expect(h.calls.some(call => call.startsWith('prompt '))).toBe(false)
+    expect(h.store.work.occupying()).toHaveLength(1)
+    await h.service.dispose()
   })
 })
 
@@ -1939,6 +1228,22 @@ describe('DotService approval grace', () => {
 })
 
 describe('DotService.relayRequest', () => {
+  it('forwards structured notice facts without parsing user text or storing undefined members', async () => {
+    const h = setup()
+    await h.service.ensureDot()
+    h.service.relayRequest({ kind: 'question', sessionId: 'other', subject: 'A | B {literal}', questions: [{ id: 'pick', question: 'Which | one?' }] })
+    await h.service.flushNotices()
+    const notice = h.relayed.at(-1)?.notice
+    expect(notice?.entries[0]).toMatchObject({ kind: 'question', subject: 'A | B {literal}', questions: [{ id: 'pick', question: 'Which | one?' }] })
+    const question = (notice?.entries[0] as { questions: readonly object[] }).questions[0]!
+    expect(Object.hasOwn(question, 'options')).toBe(false)
+    expect(Object.hasOwn(question, 'multiSelect')).toBe(false)
+    h.service.notify({ kind: 'error', sessionId: 'other', text: 'raw | status', at: 1 })
+    await h.service.say('continue')
+    expect(h.said.at(-1)?.notice?.entries).toContainEqual({ kind: 'error', sessionId: 'other', summary: 'raw | status' })
+    await h.service.dispose()
+  })
+
   it('takes over untracked sessions when scope is all and lets dot judge a routine approval', async () => {
     const h = setup({ scope: 'all' })
     await h.service.ensureDot()
@@ -2171,6 +1476,8 @@ describe('DotService.relayRequest', () => {
     const id = h.store.list()[0]!.sessionId
     const routed = h.service.relayRequest({ kind: 'approval', sessionId: id, subject: 'bash' })
     if (routed.decided !== 'pending') throw new Error('expected a pending relay')
+    const run = h.store.work.sessionRun(id)!
+    expect((await h.service.finishWorkRun(run.id, 'completed')).ok).toBe(true)
     expect(await h.service.archive(id)).toBe(`Archived ${id}.`)
     await expect(routed.settled).resolves.toEqual({ kind: 'approval', allow: false })
     expect(h.calls).toContain(`archive ${id}`)
@@ -2198,13 +1505,15 @@ describe('DotService.relayRequest', () => {
     const id = h.store.list()[0]!.sessionId
     await h.service.watch(id, 'new goal')
     expect(h.store.task(id)!.origin).toBe('started')
+    const run = h.store.work.sessionRun(id)!
+    expect((await h.service.finishWorkRun(run.id, 'completed')).ok).toBe(true)
     await expect(h.service.archive(id)).resolves.toBe(`Archived ${id}.`)
   })
 })
 
 describe('closed legacy work entries', () => {
   it('refuses ticket dispatch, mutation and review without creating a ticket or a run', async () => {
-    const h = setup(undefined, undefined, false)
+    const h = setup()
     await expect(h.service.manageTask({ action: 'move', task_id: 't-1', to: 'active', reason: 'go' })).rejects.toMatchObject({ code: 'dot/legacy-closed' })
     await expect(h.service.cancelTask('t-1')).rejects.toMatchObject({ code: 'dot/legacy-closed' })
     await expect(h.service.reviewTask('t-1', true)).rejects.toMatchObject({ code: 'dot/legacy-closed' })
@@ -2266,6 +1575,7 @@ describe('closed legacy work entries', () => {
 
   it('does not create a session when the reserved id cannot be read back', async () => {
     const h = setup()
+    h.host.findSession = async () => { throw new Error('lookup unavailable') }
     const change = await h.service.createWorkChange({ title: 'Read', cwd: 'H:\\repo', goal: 'look', at: 1 })
     const reserved = await h.service.reserveWorkRun({ changeId: change.id, cwd: 'H:\\repo', writeScope: { kind: 'paths', paths: [] }, at: 2 })
     if (!reserved.ok) throw new Error(reserved.message)
@@ -2291,111 +1601,35 @@ describe('closed legacy work entries', () => {
     expect(matched.occupied).toBe(0)
   })
 
-  it('keeps a stopped review occupied until closeout, and the tool path accepts a real snapshot', async () => {
-    const held = setup(undefined, undefined, false)
-    const project = mkdtempSync(join(tmpdir(), 'dot-hold-'))
-    mkdirSync(project, { recursive: true })
-    const change = await held.service.createWorkChange({ title: 'Hold', cwd: project, goal: 'wait', requirements: [{ requirementRef: 'r1', text: 'builds', required: true }], at: 1 })
-    const review = await held.service.reserveWorkRun({
-      changeId: change.id, kind: 'review', cwd: project, root: { workspaceRoot: project },
-      writeScope: { kind: 'workspace-exclusive' }, at: 2,
-    })
-    if (!review.ok) throw new Error(review.message)
-    await held.store.work.prepareFinish(review.run.id, 'completed', 3)
-    await held.service.reconcile()
-    expect(held.store.work.run(review.run.id)).toMatchObject({ phase: 'settling' })
-    expect(held.store.work.occupying().map(run => run.id)).toEqual([review.run.id])
-    expect(held.store.work.change(change.id)?.closeout).toBeUndefined()
-    const missed = await held.service.acceptWork(change.id, 'v-none', change.currentInputRef, 'missing', 'user', {
-      expectedInputRevision: change.currentRevision, expectedVerificationId: 'v-none',
-    })
-    expect(missed).toMatchObject({ code: 'missing' })
-
-    const loop = setup(undefined, undefined, false)
+  it('dispatches, verifies explicit checks, and closes only the user-approved delivery', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'dot-loop-'))
-    writeFileSync(join(dir, 'a.ts'), 'before')
-    writeFileSync(join(dir, 'gone.ts'), 'gone')
-    const sessions = new Map<string, { cwd?: string }>()
-    const host = loop.host as DotHost
-    let stops = 0
-    host.findSession = async id => sessions.get(id)
-    host.createSession = async input => {
-      const id = input.sessionId ?? `s${sessions.size}`
-      sessions.set(id, { cwd: input.cwd })
-      return id
-    }
-    host.setWritable = async () => true
-    host.setReadOnly = async () => true
-    host.verifyTaskPermission = async () => true
-    host.stopActivity = async () => { stops += 1; return { cancelAccepted: true, queueCleared: true, idle: true, jobsSettled: true } }
-    const signal = new AbortController().signal
-    const first = await loop.service.startTask({ cwd: dir, title: 'Ship', instruction: 'land', goal: 'land', access: 'write' }, signal)
-    expect(first).toMatch(/reserved (run-\d+)/)
-    const runId = /reserved (run-\d+)/.exec(first)![1]!
-    const changeId = /on (c-\d+)/.exec(first)![1]!
-    expect(loop.store.work.run(runId)?.writeScope.kind).toBe('paths')
-    expect(loop.store.listTickets()).toEqual([])
-    expect(await loop.service.manageTask({ action: 'baseline', task_id: changeId, run_id: runId })).toContain('baseline')
-    const second = await loop.service.startTask({ taskId: changeId, cwd: dir, title: 'Ship', instruction: 'land', access: 'write' }, signal)
-    expect(second).toContain(`started ${runId}`)
-    expect(loop.store.work.listRuns().filter(run => run.kind === 'work')).toHaveLength(1)
-    rmSync(join(dir, 'gone.ts'))
-    writeFileSync(join(dir, 'a.ts'), 'after')
-    expect(await loop.service.manageTask({ action: 'finish', task_id: changeId, run_id: runId, verdict: 'pass' })).toContain(`completed ${runId}`)
-    const reviewer = await loop.service.startTask({ taskId: changeId, title: 'Ship', instruction: 'check', role: 'review', access: 'write' }, signal)
-    expect(reviewer).toMatch(/reserved (run-\d+)/)
-    const reviewId = /reserved (run-\d+)/.exec(reviewer)![1]!
-    stops = 0
-    await expect(loop.service.manageTask({ action: 'hold', task_id: changeId, review_run_id: reviewId })).rejects.toThrow(/not sent|not confirmed/)
-    expect(stops).toBe(0)
-    expect(await loop.service.manageTask({ action: 'baseline', task_id: changeId, run_id: reviewId })).toContain('baseline')
-    expect(await loop.service.startTask({ taskId: changeId, title: 'Ship', instruction: 'check', role: 'review' }, signal)).toContain(`started ${reviewId}`)
-    expect(await loop.service.manageTask({ action: 'hold', task_id: changeId, review_run_id: reviewId })).toContain('settling')
-    expect(await loop.service.manageTask({ action: 'evidence', task_id: changeId, evidence_ref: 'build-log', summary: 'ok' })).toContain('build-log')
-    const subject = JSON.parse(await loop.service.manageTask({ action: 'subject', task_id: changeId })) as { changes: { path: string; kind: string }[]; artifactRef: string }
-    expect(subject.changes).toEqual(expect.arrayContaining([expect.objectContaining({ path: 'gone.ts', kind: 'deleted' })]))
-    const current = loop.store.work.change(changeId)!
-    const verified = JSON.parse(await loop.service.manageTask({
-      action: 'verify', task_id: changeId, run_ids: JSON.stringify([runId]), review_run_id: reviewId,
-      session_id: loop.store.work.run(reviewId)!.sessionId,
-      expected_input_ref: current.currentInputRef, expected_input_revision: current.currentRevision,
-      checks: JSON.stringify([{ requirementRef: 'goal', applicability: 'applicable', verdict: 'pass', evidenceRefs: ['build-log'] }]),
-      subject: JSON.stringify(subject),
-    })) as { id: string; verdict: string; subjectKey: string }
-    expect(verified.verdict).toBe('accept')
-    writeFileSync(join(dir, 'late.ts'), 'later')
-    await expect(loop.service.manageTask({
-      action: 'accept', task_id: changeId, verification_id: verified.id,
-      expected_input_ref: current.currentInputRef, expected_input_revision: current.currentRevision,
-      expected_subject_key: verified.subjectKey,
-    })).rejects.toThrow(/live file|not in the delivery/)
-    rmSync(join(dir, 'late.ts'))
-    const asked = await loop.service.manageTask({
-      action: 'decide', task_id: changeId, verification_id: verified.id,
-      expected_input_revision: current.currentRevision, expected_subject_key: verified.subjectKey, verdict: 'pass',
-    })
-    expect(asked).toContain('pending')
-    expect(loop.store.work.change(changeId)?.oversight?.decision).toBeUndefined()
-    await expect(loop.service.manageTask({
-      action: 'accept', task_id: changeId, verification_id: verified.id,
-      expected_input_ref: current.currentInputRef, expected_input_revision: current.currentRevision,
-      expected_subject_key: verified.subjectKey,
-    })).rejects.toThrow(/asked to see/)
-    await loop.service.answerWorkReview(/pending (\S+)/.exec(asked)![1]!, true)
-    expect(await loop.service.manageTask({
-      action: 'accept', task_id: changeId, verification_id: verified.id,
-      expected_input_ref: current.currentInputRef, expected_input_revision: current.currentRevision,
-      expected_subject_key: verified.subjectKey,
-    })).toContain('accepted')
-    expect(loop.store.work.workView(changeId)?.status).toBe('done')
-    expect(loop.store.listTickets()).toEqual([])
-    rmSync(project, { recursive: true, force: true })
-    rmSync(dir, { recursive: true, force: true })
+    const home = mkdtempSync(join(tmpdir(), 'dot-loop-home-'))
+    const h = setup(undefined, undefined, home)
+    try {
+      writeFileSync(join(dir, 'a.ts'), 'before')
+      const created = JSON.parse(await h.service.manageTask({ action: 'create', title: 'Ship', goal: 'land', dir, human_review: true })) as { id: string }
+      const first = await h.service.manageTask({ action: 'dispatch', task_id: created.id, instruction: 'edit', access: 'write' })
+      const runId = /started (run-\d+)/.exec(first)![1]!
+      writeFileSync(join(dir, 'a.ts'), 'after')
+      await h.service.manageTask({ action: 'finish', task_id: created.id, run_id: runId })
+      const current = h.store.work.change(created.id)!
+      const args = { action: 'closeout', task_id: created.id, expected_input_ref: current.currentInputRef, expected_input_revision: current.currentRevision, checks: [{ requirementRef: 'goal', applicability: 'applicable', verdict: 'pass', evidenceRefs: ['event:session-run-1:1'], note: 'the edit is present' }] }
+      const asked = await h.service.manageTask(args)
+      expect(asked).toContain('pending')
+      expect(h.store.work.change(created.id)?.closeout).toBeUndefined()
+      await h.service.answerWorkReview(/pending (\S+)/.exec(asked)![1]!, true)
+      writeFileSync(join(dir, 'late.ts'), 'later')
+      await expect(h.service.manageTask(args)).rejects.toThrow(/live file|not in the delivery/)
+      rmSync(join(dir, 'late.ts'))
+      expect(await h.service.manageTask(args)).toContain('accepted')
+      expect(h.store.work.workView(created.id)?.status).toBe('done')
+      expect(h.store.listTickets()).toEqual([])
+    } finally { await h.service.dispose(); rmSync(dir, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }) }
   })
 
   it('continues a reserved run by run_id and rejects an unknown or mismatched one', async () => {
     const home = mkdtempSync(join(tmpdir(), 'dot-run-id-home-'))
-    const loop = setup(undefined, undefined, false, home)
+    const loop = setup(undefined, undefined, home)
     const dir = mkdtempSync(join(tmpdir(), 'dot-run-id-'))
     writeFileSync(join(dir, 'a.ts'), 'before')
     const sessions = new Map<string, { cwd?: string }>()
@@ -2416,17 +1650,14 @@ describe('closed legacy work entries', () => {
     await expect(loop.service.startTask({ cwd: dir, title: 'Ghost', instruction: 'again', goal: 'other', runId: 'run-missing' }, signal)).rejects.toThrow(/unknown run run-missing/)
     await expect(loop.service.startTask({ cwd: dir, title: 'Ghost', instruction: 'again', runId, role: 'review' }, signal)).rejects.toThrow(new RegExp(`${runId} is not a reserved review run`))
     expect(loop.store.work.listChanges()).toHaveLength(1)
-    expect(await loop.service.manageTask({ action: 'baseline', task_id: changeId, run_id: runId })).toContain('baseline')
+    expect(await loop.service.captureWorkBaseline(runId)).toMatchObject({ applied: true })
     const started = await loop.service.startTask({ cwd: dir, title: 'Ignored', instruction: 'land', runId }, signal)
     expect(started).toContain(`started ${runId}`)
     expect(started).toContain(changeId)
     expect(loop.store.work.listChanges().map(change => change.id)).toEqual([changeId])
     expect(loop.store.work.listRuns()).toHaveLength(1)
-    await expect(loop.service.manageTask({
-      action: 'verify', task_id: changeId,
-      checks: JSON.stringify([{ requirementRef: 'goal', applicability: 'required', verdict: 'pass', evidenceRefs: [] }]),
-      subject: JSON.stringify({ workspaceRoot: dir, cwd: dir, baselineRefs: [], artifactRef: 'none', changes: [], protectedDirty: [], exclusions: [] }),
-    })).rejects.toThrow(/applicability must be applicable or not-applicable, not required/)
+    const current = loop.store.work.change(changeId)!
+    expect(await loop.service.recordWorkVerification(changeId, [{ requirementRef: 'goal', applicability: 'required' as 'applicable', verdict: 'pass', evidenceRefs: [] }], [], { inputRef: current.currentInputRef, inputRevision: current.currentRevision })).toMatchObject({ code: 'stale' })
     expect(loop.store.work.latestVerification(changeId)).toBeUndefined()
     rmSync(dir, { recursive: true, force: true })
     rmSync(home, { recursive: true, force: true })
@@ -2434,7 +1665,7 @@ describe('closed legacy work entries', () => {
 
   it('keeps a later review baseline from hiding the pre-work change', async () => {
     const home = mkdtempSync(join(tmpdir(), 'dot-attr-home-'))
-    const h = setup(undefined, undefined, false, home)
+    const h = setup(undefined, undefined, home)
     const dir = mkdtempSync(join(tmpdir(), 'dot-attr-'))
     writeFileSync(join(dir, 'a.ts'), 'before')
     const change = await h.service.createWorkChange({ title: 'Attr', cwd: dir, goal: 'edit', at: 1 })
@@ -2463,7 +1694,7 @@ describe('closed legacy work entries', () => {
 
   it('keeps a shared writer baseline when review reuses it, so an unchanged file is not added', async () => {
     const home = mkdtempSync(join(tmpdir(), 'dot-share-home-'))
-    const h = setup(undefined, undefined, false, home)
+    const h = setup(undefined, undefined, home)
     const dir = mkdtempSync(join(tmpdir(), 'dot-share-'))
     writeFileSync(join(dir, 'a.ts'), 'keep')
     const change = await h.service.createWorkChange({ title: 'Share', cwd: dir, goal: 'keep', at: 1 })
@@ -2493,7 +1724,7 @@ describe('closed legacy work entries', () => {
 
   it('accepts a same-scope review without dropping the writer baseline', async () => {
     const home = mkdtempSync(join(tmpdir(), 'dot-exclusive-home-'))
-    const h = setup(undefined, undefined, false, home)
+    const h = setup(undefined, undefined, home)
     const dir = mkdtempSync(join(tmpdir(), 'dot-exclusive-'))
     writeFileSync(join(dir, 'a.ts'), 'before')
     writeFileSync(join(dir, 'gone.ts'), 'gone')
@@ -2553,7 +1784,7 @@ describe('closed legacy work entries', () => {
     expect(subject.protectedDirty).toContain('keep.ts')
     expect(subject.protectedDirty).not.toContain('a.ts')
     expect(subject.baselineRefs.map(item => item.artifactRef)).toEqual([writerBase, reviewBase])
-    h.service.saveWorkEvidence('log-1', 'seen')
+
     const current = h.store.work.change(change.id)!
     const verified = await h.service.recordWorkVerification(change.id, [
       { requirementRef: 'r1', applicability: 'applicable', verdict: 'pass', evidenceRefs: ['log-1'] },
@@ -2574,7 +1805,7 @@ describe('closed legacy work entries', () => {
   })
 
   it('claims the pending answer before writing a user decision', async () => {
-    const h = setup(undefined, undefined, false)
+    const h = setup()
     const change = await h.service.createWorkChange({ title: 'Look', cwd: 'H:\\repo', goal: 'see', at: 1 })
     let withdraw = (): void => {}
     const open = h.service.pending.open.bind(h.service.pending)
@@ -2626,30 +1857,27 @@ describe('closed legacy work entries', () => {
 
   it('captures every reserved path and continues the reserved run that matches them', async () => {
     const home = mkdtempSync(join(tmpdir(), 'dot-paths-home-'))
-    const h = setup(undefined, undefined, false, home)
+    const h = setup(undefined, undefined, home)
     const dir = mkdtempSync(join(tmpdir(), 'dot-paths-'))
     const fileA = join(dir, 'a.ts')
     const fileB = join(dir, 'b.ts')
     writeFileSync(fileA, 'a')
     writeFileSync(fileB, 'b')
     const change = await h.service.createWorkChange({ title: 'Paths', cwd: dir, goal: 'both', maxConcurrentRuns: 2, at: 1 })
-    const both = JSON.stringify([{ path: fileA, type: 'file' }, { path: fileB, type: 'file' }])
-    const reserved = JSON.parse(await h.service.manageTask({ action: 'reserve', task_id: change.id, role: 'work', access: 'write', paths: both })) as { runId: string }
-    expect(await h.service.manageTask({ action: 'baseline', task_id: change.id, run_id: reserved.runId })).toContain('baseline')
+    const reserve = async (paths: readonly { path: string; type: 'file' }[]) => {
+      const result = await h.service.reserveWorkRun({ changeId: change.id, root: { workspaceRoot: dir }, writeScope: { kind: 'paths', paths } })
+      if (!result.ok) throw new Error(result.message)
+      return { runId: result.run.id }
+    }
+    const reserved = await reserve([{ path: fileA, type: 'file' }, { path: fileB, type: 'file' }])
+    expect(await h.service.captureWorkBaseline(reserved.runId)).toMatchObject({ applied: true })
     const ref = h.store.work.run(reserved.runId)!.baselineRefs.at(-1)!.artifactRef
     expect(readSnapshot(join(home, 'artifacts', ref)).manifest.saved.map(item => item.path).sort()).toEqual(['a.ts', 'b.ts'])
     const prepared = await h.store.work.prepareFinish(reserved.runId, 'completed', 2)
     if (!prepared.ok) throw new Error(prepared.message)
     expect((await h.store.work.finishSettled(reserved.runId, prepared.updatedAt, 'completed', { queueCleared: true, agentIdle: true, jobsSettled: true }, 3)).ok).toBe(true)
-
-    const runA = JSON.parse(await h.service.manageTask({
-      action: 'reserve', task_id: change.id, role: 'work', access: 'write',
-      paths: JSON.stringify([{ path: fileA, type: 'file' }]),
-    })) as { runId: string }
-    const runB = JSON.parse(await h.service.manageTask({
-      action: 'reserve', task_id: change.id, role: 'work', access: 'write',
-      paths: JSON.stringify([{ path: fileB, type: 'file' }]),
-    })) as { runId: string }
+    const runA = await reserve([{ path: fileA, type: 'file' }])
+    const runB = await reserve([{ path: fileB, type: 'file' }])
     await expect(h.service.startTask({ taskId: change.id, title: 'Paths', instruction: '', access: 'write' }, new AbortController().signal)).rejects.toThrow(/name the run or its paths/)
     const chosen = await h.service.startTask({
       taskId: change.id, title: 'Paths', instruction: '', access: 'write',
@@ -2743,6 +1971,44 @@ async function startupPreset(actual: string | undefined) {
 }
 
 describe('factory reset', () => {
+  it('resets released Dorothy segments and reflections without resuming their agents', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'dsh-dot-reset-cold-'))
+    const h = setup(undefined, undefined, home)
+    const current = await h.service.ensureDot()
+    await h.store.beginSegment({ sessionId: 'dot-released', startedAt: 2, persona: '' })
+    await h.store.beginSegment({ sessionId: current, startedAt: 3, persona: '' })
+    await h.store.addReflectionRun({ sessionId: 'reflection-released', startedAt: 1, endedAt: 2, ok: true })
+    await h.store.track({ sessionId: 'human-watched', origin: 'watched', title: 'human', goal: 'work', cwd: home, at: 1 })
+    await h.store.setAgreements('old agreement')
+    const resolveAgent = vi.fn(async () => ({ error: { message: 'session is owned by subagent routing' } }))
+    const adapter = bindHost(name => {
+      if (name === 'agents') return { get: () => undefined }
+      if (name === 'jobs') return { list: () => [] }
+      if (name === 'workspaceRegistry') return { archivedSessionIds: [] }
+      if (name === 'sessionQuery') return { readSession: async () => ({ events: [] }) }
+      if (name === 'sessionController') return {
+        cancel: async () => ({ accepted: true }),
+        state: async () => ({ active: false, running: false, queue: null, cursor: 1, pendingInput: [] }),
+        resolveAgent,
+      }
+      return undefined
+    })
+    h.host.stopActivity = adapter.stopActivity
+    try {
+      const result = await h.service.confirmFactoryReset(h.service.previewFactoryReset().token)
+      expect(result.archiveFailed).toEqual([])
+      expect(result.archived).toEqual(expect.arrayContaining([current, 'dot-released', 'reflection-released']))
+      expect(result.archived).not.toContain('human-watched')
+      expect(resolveAgent).not.toHaveBeenCalled()
+      expect(h.store.agreements).toBe('')
+      expect(h.store.dotSessionId).not.toBe(current)
+    } finally {
+      await h.service.dispose()
+      await adapter.dispose()
+      rmSync(home, { recursive: true, force: true })
+    }
+  })
+
   it('archives owned and Dorothy sessions, not a watched human session, then starts clean', async () => {
     const h = setup()
     const dot = await h.service.ensureDot()
@@ -2774,7 +2040,7 @@ describe('factory reset', () => {
 
   it('resets an unsent reservation without trying to stop its placeholder session', async () => {
     const home = mkdtempSync(join(tmpdir(), 'dsh-dot-reset-unsent-'))
-    const h = setup(undefined, undefined, true, home)
+    const h = setup(undefined, undefined, home)
     await h.service.ensureDot()
     const change = await h.store.work.createChange({ title: 'Reserved', cwd: home, goal: 'edit later', at: 1 })
     const reserved = await h.store.work.reserveRun({ changeId: change.id, cwd: home, root: { workspaceRoot: home }, writeScope: { kind: 'workspace-exclusive' }, at: 2 })
@@ -2798,7 +2064,7 @@ describe('factory reset', () => {
 
   it('retains ownership and settings when archive fails, then retries the reset', async () => {
     const home = mkdtempSync(join(tmpdir(), 'dsh-dot-reset-retry-'))
-    const h = setup(undefined, undefined, true, home)
+    const h = setup(undefined, undefined, home)
     await h.service.ensureDot()
     await h.store.track({ sessionId: 'owned-retry', origin: 'started', title: 'job', goal: 'g', cwd: home, at: 1 })
     await h.store.setAgreements('retained until cleanup succeeds')
@@ -2820,7 +2086,7 @@ describe('factory reset', () => {
 
   it('reports partial artifact cleanup and retains records so the remaining cleanup can be retried', async () => {
     const home = mkdtempSync(join(tmpdir(), 'dsh-dot-reset-artifact-retry-'))
-    const h = setup(undefined, undefined, true, home)
+    const h = setup(undefined, undefined, home)
     await h.service.ensureDot()
     await h.store.setAgreements('still recorded')
     const wipe = vi.spyOn(artifacts, 'wipeArtifacts').mockImplementationOnce(() => { throw new Error('artifact folder is busy') })
@@ -2841,7 +2107,7 @@ describe('factory reset', () => {
 
   it('reports that data was cleared if restarting Dorothy fails, and allows a fresh retry', async () => {
     const home = mkdtempSync(join(tmpdir(), 'dsh-dot-reset-start-retry-'))
-    const h = setup(undefined, undefined, true, home)
+    const h = setup(undefined, undefined, home)
     await h.service.ensureDot()
     await h.store.setAgreements('clear me')
     h.failCreate(true)

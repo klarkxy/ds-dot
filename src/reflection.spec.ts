@@ -77,7 +77,7 @@ function reflectionHost() {
   const host = {
     async createInternal(_cwd: string, preset: string) { calls.push(`create ${preset}`); return 'ref-1' },
     async promptInternal(sessionId: string) { calls.push(`prompt ${sessionId}`); promptResolve(sessionId) },
-    async waitIdle() { await idle; return true },
+    async waitIdle() { await idle },
     async releaseInternal(sessionId: string) { calls.push(`release ${sessionId}`); releaseResolve() },
     async stop(sessionId: string) { calls.push(`stop ${sessionId}`); idleResolve() },
     async readEvents() { return events },
@@ -281,11 +281,10 @@ describe('buildReflectionInstruction', () => {
 describe('reflection preset tool row', () => {
   it('registers only the three internal tools and hides inherited global tools', () => {
     const registered: Array<Record<string, unknown>> = []
-    const denied: string[] = []
+    const filters: Array<{ allow?: readonly string[] }> = []
     const ctx = {
       tools: {
-        schemas: () => [{ name: 'bash' }, { name: 'fs_read' }],
-        restrict: (filter: { deny?: readonly string[] }) => { denied.push(...filter.deny ?? []); return () => {} },
+        restrict: (filter: { allow?: readonly string[] }) => { filters.push(filter); return () => {} },
         register: (definition: Record<string, unknown>) => { registered.push(definition); return () => {} },
       },
       dot: {},
@@ -296,8 +295,7 @@ describe('reflection preset tool row', () => {
     expect(registered.map(tool => tool.name).sort()).toEqual([TOOL.searchHistory, TOOL.readHistory, REFLECTION_SUBMIT_TOOL].sort())
     // Model-facing reflection tools never bind cognition to a fixed character.
     expect(JSON.stringify(registered)).not.toMatch(/Dorothy|桃乐丝/)
-    // The helper denies the inherited tools so the reflection session sees only its own three.
-    expect(denied).toContain('bash')
-    expect(denied).toContain('fs_read')
+    // Inherited global tools are hidden; only the scope-local three remain.
+    expect(filters).toEqual([{ allow: [] }])
   })
 })

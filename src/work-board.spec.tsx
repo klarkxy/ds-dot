@@ -73,7 +73,9 @@ describe('WorkBoard', () => {
       <WorkBoard locale="en" items={[item]} pending={[]} notice="The look request was withdrawn or is gone. No decision was recorded." onAccept={onAccept} onReject={vi.fn()} onAnswer={onAnswer} onResume={vi.fn()} />,
     ))
     expect(document.body.textContent).toContain('Version 4')
-    expect(document.body.textContent).toContain('v-3 Acceptable')
+    await act(async () => { document.querySelector<HTMLDetailsElement>('details.dsh-dot-work-facts')!.open = true })
+    expect(document.body.textContent).toContain('v-3')
+    expect(document.body.textContent).toContain('Acceptable')
     expect(document.body.textContent).toContain('No decision was recorded')
     expect(document.body.textContent).not.toContain('Looks good')
     await click('Accept')
@@ -84,41 +86,48 @@ describe('WorkBoard', () => {
     await act(async () => root.unmount())
   })
 
-  it('reloads the projection when a pending update rerenders the panel', async () => {
+  it('renders the parent board.work as it is: a background update with an unchanged pending set redraws the card', async () => {
     const running = {
       ...item, title: 'Version 1', revision: 1, status: 'running' as const,
       runs: [{ id: 'run-1', kind: 'work', phase: 'active', cwd: 'H:/repo' }],
       blockers: ['run-1'], verification: undefined, oversight: undefined, humanAction: undefined,
     }
-    const done = { ...running, title: 'Version 2', revision: 2, status: 'done' as const, runs: [{ id: 'run-1', kind: 'work', phase: 'completed', cwd: 'H:/repo' }], blockers: [] }
-    let rows: readonly WorkBoardItem[] = [running]
-    let calls = 0
-    const api = {
-      workList: async () => { calls += 1; return rows },
-      workAccept: async () => {},
-      workReject: async () => {},
-      workAnswer: async () => {},
-      workResume: async () => {},
-    }
+    const finishing = { ...running, title: 'Version 2', revision: 2, runs: [{ id: 'run-1', kind: 'work', phase: 'settling', cwd: 'H:/repo' }] }
+    const done = { ...finishing, title: 'Version 3', revision: 3, status: 'done' as const, blockers: [] }
+    const api = { workAccept: async () => {}, workReject: async () => {}, workAnswer: async () => {}, workResume: async () => {} }
+    const pending = [{ id: 'p-2', kind: 'approval' }]
+    const onChanged = vi.fn()
+    const draw = (items: readonly WorkBoardItem[]) => root.render(<WorkBoardPanel locale="en" api={api} items={items} pending={pending} onChanged={onChanged} />)
     const root = createRoot(document.getElementById('root')!)
-    await act(async () => { root.render(<WorkBoardPanel locale="en" api={api} pending={[]} />); await Promise.resolve() })
-    expect(calls).toBe(1)
+    await act(async () => draw([running]))
     expect(document.body.textContent).toContain('Version 1')
-    expect(document.body.textContent).toContain('Running')
-    rows = [done]
-    await act(async () => { root.render(<WorkBoardPanel locale="en" api={api} pending={[{ id: 'p-2', kind: 'approval' }]} />); await Promise.resolve() })
-    expect(calls).toBe(2)
-    // Finished work is folded; the fold counts it and opens on demand.
-    expect(document.body.textContent).not.toContain('Version 1')
-    await act(async () => { buttonIncluding('Finished · 1')!.click() })
+    await act(async () => draw([finishing]))
     expect(document.body.textContent).toContain('Version 2')
-    expect(document.body.textContent).toContain('Done')
-    // A fresh but identical pending list does not read again.
-    await act(async () => { root.render(<WorkBoardPanel locale="en" api={api} pending={[{ id: 'p-2', kind: 'approval' }]} />); await Promise.resolve() })
-    expect(calls).toBe(2)
+    expect(document.body.textContent).not.toContain('Version 1')
+    await act(async () => draw([done]))
+    expect(document.body.textContent).not.toContain('Version 2')
+    await act(async () => { buttonIncluding('Finished · 1')!.click() })
+    expect(document.body.textContent).toContain('Version 3')
     await act(async () => root.unmount())
   })
 
+  it('asks the parent to refresh after an action, also when it is refused', async () => {
+    const onChanged = vi.fn()
+    let refuse = false
+    const api = {
+      workAccept: async () => { if (refuse) throw new Error('stale version') },
+      workReject: async () => {}, workAnswer: async () => {}, workResume: async () => {},
+    }
+    const root = createRoot(document.getElementById('root')!)
+    await act(async () => root.render(<WorkBoardPanel locale="en" api={api} items={[item]} pending={[]} onChanged={onChanged} />))
+    await click('Accept')
+    expect(onChanged).toHaveBeenCalledTimes(1)
+    refuse = true
+    await click('Accept')
+    expect(onChanged).toHaveBeenCalledTimes(2)
+    expect(document.body.textContent).toContain('refused')
+    await act(async () => root.unmount())
+  })
   it('shows scope, delivery and evidence in Chinese without painting a refusal as done', async () => {
     const detailed: WorkBoardItem = {
       ...item, status: 'running', title: 'Ship', summary: 'land the fix',
@@ -171,11 +180,9 @@ describe('WorkBoard', () => {
     const marker = 'FINAL_C_EVIDENCE_BODY_7C: npm check exit=0, both A and B verified'
     try {
       const change = await service.createWorkChange({ title: 'Ship', cwd: project, goal: 'land it', requirements: [{ requirementRef: 'r1', text: 'edits', required: true }], at: 1 })
-      service.saveWorkEvidence('final-c-log', marker)
-      service.saveWorkEvidence('old-log', 'OLD_BODY_NOT_BOUND')
       const current = store.work.change(change.id)!
       const recorded = await service.recordWorkVerification(change.id, [
-        { requirementRef: 'r1', applicability: 'applicable', verdict: 'pass', evidenceRefs: ['final-c-log'], note: 'seen' },
+        { requirementRef: 'r1', applicability: 'applicable', verdict: 'pass', evidenceRefs: ['final-c-log'], note: marker },
       ], [], { inputRef: current.currentInputRef, inputRevision: current.currentRevision })
       if (!('id' in recorded)) throw new Error(recorded.message)
       const view = service.workBoard(change.id)
@@ -193,7 +200,6 @@ describe('WorkBoard', () => {
       const text = document.body.textContent ?? ''
       expect(document.querySelectorAll('a[data-evidence-ref]')).toHaveLength(1)
       expect(text).toContain(marker)
-      expect(text).not.toContain('OLD_BODY_NOT_BOUND')
       expect(service.readWorkSource(change.id, 'evidence', 'old-log', {
         verificationId: view.verification?.id ?? '', inputRef: view.verification?.inputRef ?? '', inputRevision: view.verification?.inputRevision ?? 0,
       })).toMatchObject({ ok: false, code: 'stale' })
@@ -207,7 +213,7 @@ describe('WorkBoard', () => {
       await openDetails()
       expect(document.body.textContent).toContain('证据不存在或是空的')
       expect(document.body.textContent).not.toContain('已完成')
-      expect(document.body.textContent).not.toContain(marker)
+      expect(document.querySelector('[data-evidence-body]')).toBeNull()
       await act(async () => failed.unmount())
     } finally {
       rmSync(project, { recursive: true, force: true })
@@ -332,10 +338,9 @@ describe('WorkBoard', () => {
     const body = `${'x'.repeat(262_145)}${tail}`
     try {
       const change = await service.createWorkChange({ title: 'Ship', cwd: project, goal: 'land it', requirements: [{ requirementRef: 'r1', text: 'edits', required: true }], at: 1 })
-      service.saveWorkEvidence('big-log', body)
       const current = store.work.change(change.id)!
       const recorded = await service.recordWorkVerification(change.id, [
-        { requirementRef: 'r1', applicability: 'applicable', verdict: 'pass', evidenceRefs: ['big-log'], note: 'seen' },
+        { requirementRef: 'r1', applicability: 'applicable', verdict: 'pass', evidenceRefs: ['big-log'], note: body },
       ], [], { inputRef: current.currentInputRef, inputRevision: current.currentRevision })
       if (!('id' in recorded)) throw new Error(recorded.message)
       const view = service.workBoard(change.id)
@@ -559,7 +564,7 @@ describe('WorkBoard', () => {
     const root = createRoot(document.getElementById('root')!)
     await act(async () => root.render(<WorkBoard locale="zh" items={[detailed]} pending={[]} onAccept={vi.fn()} onReject={vi.fn()} onAnswer={vi.fn()} onResume={vi.fn()} />))
     const details = document.querySelector('details')?.textContent ?? ''
-    expect(details).toContain('范围与证据')
+    expect(details).toContain('详情')
     expect(details).toContain('未纳入快照')
     expect(details).toContain('node_modules')
     expect(details).toContain('忽略的目录')

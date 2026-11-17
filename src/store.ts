@@ -15,6 +15,7 @@ import { deriveTicketViews } from './ticket-view.ts'
 import { lockHolders } from './lock.ts'
 import { ownedSessionIds, sessionIsOwned } from './peer.ts'
 import { WorkBook, isUnknownState, type WorkPersist } from './work.ts'
+import { projectWorkIdle, projectWorkLedger } from './work-actions.ts'
 
 type TableName = 'state' | 'tasks' | 'tickets' | 'schedules' | 'proposals' | 'changes' | 'inputs' | 'runs' | 'verifications' | 'peers'
 
@@ -698,15 +699,29 @@ export class DotStore {
     return op.then(() => true)
   }
 
+  workLedger() { return projectWorkLedger(this.work) }
+  workIdle() { return projectWorkIdle(this.work) }
+
   summary(pending: readonly PendingView[], now = Date.now()): string {
-    return ledgerSummary([...this.tasks.values()], pending, now)
+    const work = this.workLedger()
+    return work.length > 0
+      ? ledgerSummary([...this.tasks.values()], pending, now, this.listTickets(), work)
+      : ledgerSummary([...this.tasks.values()], pending, now)
   }
 
   board(pending: readonly PendingView[]): BoardView {
+    const all = this.list()
+    const watched = all.filter(task => task.origin === 'watched')
+    const started = all.filter(task => task.origin === 'started')
+    const work = this.work.listChanges()
+      .map(change => this.work.workView(change.id))
+      .filter((row): row is NonNullable<typeof row> => row !== undefined)
     return {
       ...this.state.dotSessionId === undefined ? {} : { dotSessionId: this.state.dotSessionId },
-      tasks: this.list().filter(task => task.origin === 'watched'),
+      tasks: watched,
+      ...(started.length > 0 ? { startedTasks: started } : {}),
       tickets: deriveTicketViews(this.tickets.values(), this.tasks.values(), pending),
+      ...(work.length > 0 ? { work } : {}),
       pending,
       schedules: this.schedules,
     }

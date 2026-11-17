@@ -82,30 +82,35 @@ function WorkFacts({ locale, item, onRead }: {
   const changeInputRef = item.inputRef
   const changeRevision = item.revision
   const identity = verificationId ? `${item.id}|${changeInputRef}|${changeRevision}|${verificationId}|${inputRef}|${inputRevision}` : ''
+  const [detailsOpen, setDetailsOpen] = useState(false)
   const [slot, setSlot] = useState<{ readonly identity: string; readonly loaded: Readonly<Record<string, { readonly ok: true; readonly body: string } | { readonly ok: false; readonly message: string }>> }>({ identity: '', loaded: {} })
   const loaded = slot.identity === identity ? slot.loaded : {}
+  const loadOne = useCallback((kind: 'evidence' | 'change', ref: string, token: string, isCancelled?: () => boolean) => {
+    if (!onRead || !verificationId) return
+    const key = `${kind}:${ref}`
+    void onRead({ id: item.id, kind, ref, verificationId, inputRef, inputRevision }).then(result => {
+      if (isCancelled?.()) return
+      const clipped = result.body.length > 65_536 ? `${result.body.slice(0, 65_536)}\n… [truncated]` : result.body
+      setSlot(current => current.identity === token ? { identity: token, loaded: { ...current.loaded, [key]: { ok: true, body: clipped } } } : current)
+    }, failure => {
+      if (isCancelled?.()) return
+      const message = failure instanceof Error ? failure.message : String(failure)
+      setSlot(current => current.identity === token ? { identity: token, loaded: { ...current.loaded, [key]: { ok: false, message } } } : current)
+    })
+  }, [onRead, item.id, verificationId, inputRef, inputRevision])
   useEffect(() => {
     if (!onRead || !verificationId) return
     let cancel = false
     const token = identity
     setSlot(current => current.identity === token ? current : { identity: token, loaded: {} })
-    const jobs = [
-      ...evidenceKey.split('\n').filter(Boolean).map(ref => ({ kind: 'evidence' as const, ref })),
-      ...changeKey.split('\n').filter(Boolean).filter(row => !row.startsWith('deleted:')).map(row => ({ kind: 'change' as const, ref: row.slice(row.indexOf(':') + 1) })),
-    ]
-    for (const job of jobs) {
-      const key = `${job.kind}:${job.ref}`
-      void onRead({ id: item.id, kind: job.kind, ref: job.ref, verificationId, inputRef, inputRevision }).then(result => {
-        if (cancel) return
-        setSlot(current => current.identity === token ? { identity: token, loaded: { ...current.loaded, [key]: { ok: true, body: result.body } } } : current)
-      }, failure => {
-        if (cancel) return
-        const message = failure instanceof Error ? failure.message : String(failure)
-        setSlot(current => current.identity === token ? { identity: token, loaded: { ...current.loaded, [key]: { ok: false, message } } } : current)
-      })
-    }
+    const evidenceJobs = evidenceKey.split('\n').filter(Boolean).map(ref => ({ kind: 'evidence' as const, ref }))
+    const changeJobs = changeKey.split('\n').filter(Boolean).filter(row => !row.startsWith('deleted:')).map(row => ({ kind: 'change' as const, ref: row.slice(row.indexOf(':') + 1) }))
+    const allJobs = [...evidenceJobs, ...changeJobs]
+    // Eagerly preload small deliveries (<= 8 sources); defer large file sets until expanded or clicked.
+    const eager = allJobs.length <= 8 || detailsOpen ? allJobs : evidenceJobs.slice(0, 8)
+    for (const job of eager) loadOne(job.kind, job.ref, token, () => cancel)
     return () => { cancel = true }
-  }, [onRead, item.id, evidenceKey, changeKey, identity, verificationId, inputRef, inputRevision, changeInputRef, changeRevision])
+  }, [onRead, loadOne, detailsOpen, evidenceKey, changeKey, identity, verificationId, changeInputRef, changeRevision])
   const visible = Boolean(item.summary) || item.runs.some(run => run.writeScope || (run.deliveries?.length ?? 0) > 0) || checks.length > 0 || changes.length > 0
   if (!visible) return null
   const outcome = (key: string) => {
@@ -118,7 +123,7 @@ function WorkFacts({ locale, item, onRead }: {
     return <p role="alert">{stale ? t(locale, 'workEvidenceStale') : missing ? t(locale, 'workEvidenceMissing') : `${t(locale, 'workEvidenceFailed')}${row.message}`}</p>
   }
   return (
-    <details className="dsh-ui-hint">
+    <details className="dsh-ui-hint" onToggle={event => setDetailsOpen((event.currentTarget as HTMLDetailsElement).open)}>
       <summary>{t(locale, 'workDetails')}</summary>
       {item.summary ? <p>{t(locale, 'workSummary')}: {item.summary}</p> : null}
       {item.runs.map(run => <RunFacts key={run.id} locale={locale} run={run} />)}
@@ -136,7 +141,7 @@ function WorkFacts({ locale, item, onRead }: {
       ) : null}
       {evidence.map(ref => (
         <div key={ref}>
-          <a href={`#evidence-${encodeURIComponent(ref)}`} data-evidence-ref={ref} onClick={event => event.preventDefault()}>{t(locale, 'workEvidence')} {ref}</a>
+          <a href={`#evidence-${encodeURIComponent(ref)}`} data-evidence-ref={ref} onClick={event => { event.preventDefault(); if (identity && !loaded[`evidence:${ref}`]) loadOne('evidence', ref, identity) }}>{t(locale, 'workEvidence')} {ref}</a>
           {outcome(`evidence:${ref}`)}
         </div>
       ))}
@@ -145,7 +150,7 @@ function WorkFacts({ locale, item, onRead }: {
           <p>{t(locale, 'workFiles')}</p>
           {changes.map(change => (
             <div key={change.path}>
-              {change.kind === 'deleted' ? <span>{change.path} ({factLabel(locale, 'change', change.kind)})</span> : <a href={`#change-${encodeURIComponent(change.path)}`} data-change-path={change.path} onClick={event => event.preventDefault()}>{change.path} ({factLabel(locale, 'change', change.kind)})</a>}
+              {change.kind === 'deleted' ? <span>{change.path} ({factLabel(locale, 'change', change.kind)})</span> : <a href={`#change-${encodeURIComponent(change.path)}`} data-change-path={change.path} onClick={event => { event.preventDefault(); if (identity && !loaded[`change:${change.path}`]) loadOne('change', change.path, identity) }}>{change.path} ({factLabel(locale, 'change', change.kind)})</a>}
               {outcome(`change:${change.path}`)}
             </div>
           ))}
@@ -230,8 +235,8 @@ function WorkRow({ locale, item, pending, onAccept, onReject, onAnswer, onResume
 }
 
 /** Loads the projection and sends versioned actions. A refusal stays on screen and is not treated as done. */
-export function WorkBoardPanel({ locale, api, pending }: { readonly locale: CopyLocale; readonly api: WorkApi; readonly pending: readonly PendingGlance[] }) {
-  const [items, setItems] = useState<readonly WorkBoardItem[]>([])
+export function WorkBoardPanel({ locale, api, pending, initialItems }: { readonly locale: CopyLocale; readonly api: WorkApi; readonly pending: readonly PendingGlance[]; readonly initialItems?: readonly WorkBoardItem[] }) {
+  const [items, setItems] = useState<readonly WorkBoardItem[]>(initialItems ?? [])
   const [notice, setNotice] = useState<string>()
   const [tick, setTick] = useState(0)
   const refresh = useCallback(() => setTick(value => value + 1), [])

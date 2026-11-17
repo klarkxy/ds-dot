@@ -5,9 +5,30 @@
  * Restore refuses to follow a symlink or junction out of the target root.
  */
 import { createHash } from 'node:crypto'
-import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
-import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
+import { constants, copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import path, { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { absoluteScopePath, canonicalPath, scopeWrites, type WriteScope } from './work.ts'
+
+/**
+ * Dependency, VCS, and transient build caches skipped during directory walks.
+ * Explicit `type: 'file'` scopes still read the named file directly.
+ */
+export const SNAPSHOT_IGNORED_DIRS: ReadonlySet<string> = new Set([
+  '.git',
+  'node_modules',
+  '.pnpm-store',
+  '.venv',
+  '__pycache__',
+  '.turbo',
+  '.next',
+  '.nuxt',
+  '.cache',
+  '.pytest_cache',
+])
+
+const SNAPSHOT_IGNORED_FILES: ReadonlySet<string> = new Set([
+  '.DS_Store',
+])
 
 export interface SnapshotEntry {
   readonly path: string
@@ -43,12 +64,57 @@ export function sha256(body: Uint8Array): string {
   return createHash('sha256').update(body).digest('hex')
 }
 
+/**
+ * Sibling CAS directory (`<home>/cas-blobs`) used when `dir` lives under `<home>/artifacts/<id>`.
+ * Kept outside `artifacts/` so directory listings of `artifacts/` only see snapshot ids.
+ */
+function sharedCasDir(dir: string): string | undefined {
+  const parent = dirname(resolve(dir))
+  if (basename(parent) !== 'artifacts') return undefined
+  return join(dirname(parent), 'cas-blobs')
+}
+
+/**
+ * Store one content-addressed body for a snapshot, reusing the shared CAS copy.
+ * Copies are block clones when the filesystem supports them and plain copies
+ * otherwise — never hard links. A snapshot's blobs must stay independent files:
+ * a hard link would share its inode with the CAS and with every other snapshot,
+ * so one in-place write could corrupt snapshots that still claim to be immutable.
+ */
+function writeBlobWithCas(blobsDir: string, casDir: string | undefined, hash: string, body: Uint8Array): void {
+  const target = join(blobsDir, hash)
+  if (existsSync(target)) return
+  if (!casDir) {
+    writeFileSync(target, body)
+    return
+  }
+  mkdirSync(casDir, { recursive: true })
+  const casBlob = join(casDir, hash)
+  if (!existsSync(casBlob)) {
+    const temp = `${casBlob}.tmp-${process.pid}-${Date.now()}`
+    writeFileSync(temp, body)
+    try {
+      renameSync(temp, casBlob)
+    } catch {
+      // Another writer landed the same content-addressed body first; its bytes are identical.
+    } finally {
+      rmSync(temp, { force: true })
+    }
+  }
+  try {
+    copyFileSync(casBlob, target, constants.COPYFILE_FICLONE)
+  } catch {
+    try { copyFileSync(casBlob, target) } catch { writeFileSync(target, body) }
+  }
+}
+
 /** Save bodies first and the manifest only after every body is on disk. */
 export function saveSnapshot(dir: string, files: readonly SnapshotSource[], failOn?: string, capture?: SnapshotCapture): SnapshotManifest {
   const manifestPath = join(dir, 'manifest.json')
   if (existsSync(manifestPath)) throw new SnapshotError(`snapshot ${dir} is immutable`)
   const blobs = join(dir, 'blobs')
   mkdirSync(blobs, { recursive: true })
+  const casDir = sharedCasDir(dir)
   const saved: SnapshotEntry[] = []
   const deleted: string[] = []
   for (const file of files) {
@@ -59,12 +125,18 @@ export function saveSnapshot(dir: string, files: readonly SnapshotSource[], fail
     }
     if (!file.body) throw new SnapshotError(`missing body for ${file.path}`)
     const hash = sha256(file.body)
-    writeFileSync(join(blobs, hash), file.body)
+    writeBlobWithCas(blobs, casDir, hash, file.body)
     saved.push({ path: file.path, sha256: hash, bytes: file.body.byteLength })
   }
   const manifest: SnapshotManifest = { root: capture?.root ?? '', empty: capture?.empty === true, saved, deleted }
   writeFileSync(manifestPath, JSON.stringify(manifest))
   return manifest
+}
+
+/** Remove all snapshots, evidence, subject records, and shared CAS blobs under `homeDir`. */
+export function wipeArtifacts(homeDir: string): void {
+  rmSync(join(homeDir, 'artifacts'), { recursive: true, force: true })
+  rmSync(join(homeDir, 'cas-blobs'), { recursive: true, force: true })
 }
 
 /** Read the live scope into snapshot sources. The caller saves them with {@link saveSnapshot}. */
@@ -233,11 +305,21 @@ function liveFiles(root: string, scope: string, type: 'file' | 'directory'): str
   const found: string[] = []
   const walk = (dir: string) => {
     for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      if (entry.name === '.' || entry.name === '..') continue
       const full = join(dir, entry.name)
-      if (entry.isSymbolicLink() || isLink(full)) throw new SnapshotError(`refusing to follow a link at ${full}`)
-      if (entry.isDirectory()) walk(full)
-      else if (entry.isFile()) found.push(relativePath(root, full))
-      else throw new SnapshotError(`unsupported file in scope: ${full}`)
+      // Skip ignored dependency/VCS directories and non-regular entries (symlinks, junctions, sockets)
+      // during directory scans so real repositories with pnpm/venv links do not abort baseline/subject capture.
+      if (entry.isSymbolicLink()) continue
+      let linked = false
+      try { linked = isLink(full) } catch { linked = true }
+      if (linked) continue
+      if (entry.isDirectory()) {
+        if (SNAPSHOT_IGNORED_DIRS.has(entry.name)) continue
+        walk(full)
+      } else if (entry.isFile()) {
+        if (SNAPSHOT_IGNORED_FILES.has(entry.name)) continue
+        found.push(relativePath(root, full))
+      }
     }
   }
   walk(scope)
@@ -249,9 +331,10 @@ function absoluteScope(root: string, scope: string, platform: NodeJS.Platform): 
 }
 
 function pathIsInside(parent: string, child: string, platform: NodeJS.Platform): boolean {
-  const rel = relative(parent, child)
+  const api = platform === 'win32' ? path.win32 : path.posix
+  const rel = api.relative(parent, child)
   const folded = platform === 'win32' ? rel.toLowerCase() : rel
-  return folded === '' || (folded !== '..' && !folded.startsWith(`..${sepOf(folded)}`) && !folded.startsWith('../') && !isAbsolute(rel))
+  return folded === '' || (folded !== '..' && !folded.startsWith(`..${api.sep}`) && !folded.startsWith('../') && !api.isAbsolute(rel))
 }
 
 function sameRel(left: string, right: string, platform: NodeJS.Platform): boolean {
@@ -260,7 +343,8 @@ function sameRel(left: string, right: string, platform: NodeJS.Platform): boolea
 }
 
 function scopeMentions(scope: string, root: string, entry: string, platform: NodeJS.Platform): boolean {
-  const absolute = resolve(root, entry)
+  const api = platform === 'win32' ? path.win32 : path.posix
+  const absolute = api.isAbsolute(root) ? api.resolve(root, entry) : resolve(root, entry)
   return pathIsInside(canonicalPath(scope, platform), canonicalPath(absolute, platform), platform)
 }
 

@@ -1249,6 +1249,13 @@ export class WorkBook {
       }
       const later = [...this.verifications.values()].some(row => row.changeId === changeId && row.id !== verification.id && row.inputRef === verification.inputRef && (row.verdict === 'rework' || row.verdict === 'unverified') && newerVerification(row, verification))
       if (later) return { ok: false, code: 'stale', message: `${verificationId} was superseded` }
+      // A review released as rework is an explicit rejection of this delivery. Direct
+      // closeout must not overrule it: only a verification recorded after that rework
+      // (that is, work done in answer to it) may close the change.
+      const rejectedAfter = changeRuns.filter(run => run.kind === 'review' && run.phase === 'stopped' && run.closeReason === 'rework' && run.updatedAt > verification.createdAt)
+      if (rejectedAfter.length > 0) {
+        return { ok: false, code: 'conflict', message: `${rejectedAfter[0]!.id} rejected this delivery; record a new verification after the rework`, blockers: rejectedAfter.map(run => run.id) }
+      }
       const next: ChangeRecord = {
         ...current,
         closeout: { verificationId, source, inputRef: current.currentInputRef, subjectKey: verification.subjectKey, at },

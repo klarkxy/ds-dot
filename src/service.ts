@@ -2413,7 +2413,10 @@ export class DotService {
       const published = await this.captureWorkBaseline(runId)
       if (!('applied' in published) || !published.applied) {
         const msg = 'message' in published ? published.message : 'baseline was not published'
-        return `reserved ${runId} on ${changeId}; not started: ${msg}${note}`
+        // Report the failure as a failure: this run was never prompted, but it keeps
+        // holding its write scope until it is cancelled, so the caller must not read
+        // a plain result string as "started".
+        throw new DotError('dot/baseline', `baseline for ${runId} on ${changeId} was not published, so nothing was started: ${msg}. ${runId} still holds its scope and was not sent an instruction; cancel it before reserving the same paths again.`)
       }
     }
     const instruction = input.instruction.trim()

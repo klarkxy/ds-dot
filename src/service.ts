@@ -10,7 +10,7 @@ import { mkdir } from 'node:fs/promises'
 import { isAbsolute, join } from 'node:path'
 import { APPROVAL_DETAIL_LIMIT, approvalNotice } from './approval-risk.ts'
 import { writerPrior, evidenceRefGap, isForeignEvidenceId, type DeliverySubject, type SubjectLook } from './acceptance.ts'
-import { captureScope, readSnapshot, saveSnapshot, baselineCaptures, sha256, wipeArtifacts, type SnapshotSource } from './artifacts.ts'
+import { captureScope, defaultIgnoreCover, foldRel, ignoreCovered, isLinkReason, readSnapshot, relativePath, saveSnapshot, scanScope, baselineCaptures, sha256, wipeArtifacts, type SnapshotExclusion, type SnapshotSource } from './artifacts.ts'
 import { bindRunSession, cancelWork, countRelayInserts, finishWork, launchReservedRun, observeRun, reconcileRun, supplementRun } from './execution.ts'
 import { detectWorkspaceRoot } from './git-root.ts'
 import {
@@ -507,11 +507,9 @@ export class DotService {
       this.resetArmed = undefined
       if (error) throw new DotError('dot/invalid', error)
       const archiveIds = factoryResetArchiveIds(this.store)
+      // The ownership list includes confirmed and uncertain host calls, but not
+      // placeholder ids belonging to reservations that never reached the host.
       const stopIds = new Set(archiveIds)
-      for (const run of this.store.work.occupying()) {
-        if (run.sessionId) stopIds.add(run.sessionId)
-        if (run.requestedSessionId) stopIds.add(run.requestedSessionId)
-      }
       const unsettled: string[] = []
       for (const sessionId of stopIds) {
         const gap = factoryResetStopGap(sessionId, await this.proveFactoryResetStopped(sessionId))
@@ -523,10 +521,7 @@ export class DotService {
           `factory reset aborted: ${unsettled.length} session(s) not settled (${unsettled.join('; ')}). Stop them first, then retry.`,
         )
       }
-      this.pending.reset()
-      this.batcher.take()
       this.idleChecker.cancel()
-      this.releaseChildSeals()
       const archived: string[] = []
       const archiveFailed: { sessionId: string; message: string }[] = []
       for (const sessionId of archiveIds) {
@@ -538,17 +533,36 @@ export class DotService {
           this.options.log?.(`dsh-dot: factory reset did not archive ${sessionId}: ${messageOf(failure)}`)
         }
       }
-      await this.store.factoryReset(this.now())
-      await this.options.peers?.clear()
-      try { wipeArtifacts(this.options.homeDir) } catch (failure) {
-        this.options.log?.(`dsh-dot: factory reset did not wipe artifacts: ${messageOf(failure)}`)
+      if (archiveFailed.length > 0) {
+        throw new DotError('dot/reset-incomplete', `Factory reset is incomplete: sessions were stopped, but ${archiveFailed.length} could not be archived (${archiveFailed.map(row => `${row.sessionId}: ${row.message}`).join('; ')}). Dorothy's records and settings are retained. Request a new preview to retry.`)
       }
+      // Keep the ledger until external cleanup succeeds, so a failed reset can be
+      // retried with its original session ownership and cleanup scope still known.
+      try {
+        await this.options.peers?.clear()
+        wipeArtifacts(this.options.homeDir)
+      } catch (failure) {
+        throw new DotError('dot/reset-incomplete', `Factory reset is incomplete: sessions were stopped and archived, but cleanup failed (${messageOf(failure)}). Some files may already have been removed; Dorothy's records and settings are retained. Request a new preview to retry.`)
+      }
+      try {
+        await this.store.factoryReset(this.now())
+      } catch (failure) {
+        throw new DotError('dot/reset-incomplete', `Factory reset is incomplete: sessions were archived and artifact files were removed, but clearing Dorothy's records failed (${messageOf(failure)}). Request a new preview to retry the remaining cleanup.`)
+      }
+      this.pending.reset()
+      this.batcher.take()
+      this.releaseChildSeals()
       this.reminders.refresh()
       this.homeRegistered = false
       this.ensuring = undefined
       this.migration = undefined
       this.requestedSegment = undefined
-      const sessionId = await this.ensureDot()
+      let sessionId: string
+      try {
+        sessionId = await this.ensureDot()
+      } catch (failure) {
+        throw new DotError('dot/reset-incomplete', `Dorothy's data and settings were reset, but starting the new conversation failed (${messageOf(failure)}). Request a new preview to retry.`)
+      }
       this.applyModel(sessionId)
       this.armIdleCheck()
       this.emit({
@@ -1638,23 +1652,38 @@ export class DotService {
       ? [{ path: root, type: 'directory' as const }]
       : run.writeScope.paths
     if (scopes.length === 0) throw new DotError('dot/invalid', `${runId} has no path to capture`)
+    if (run.writeScope.kind !== 'workspace-exclusive') {
+      for (const scope of scopes) {
+        const rel = relativePath(root, this.scopeTarget(root, scope.path))
+        const cover = defaultIgnoreCover(rel, process.platform, scope.type)
+        if (cover) throw new DotError('dot/invalid', `explicit ${scope.type} target ${rel} is a default-ignored path/file (${cover}) and is not supported by delivery capture`)
+      }
+    }
     const files: SnapshotSource[] = []
+    const exclusions: SnapshotExclusion[] = []
     const seen = new Set<string>()
+    const seenExclusion = new Set<string>()
     for (const scope of scopes) {
       const absolute = this.scopeTarget(root, scope.path)
-      let captured: { files: Parameters<typeof saveSnapshot>[1]; empty: boolean }
+      let captured: ReturnType<typeof captureScope>
       try { captured = captureScope(root, absolute, scope.type) } catch (error) {
         throw new DotError('dot/invalid', error instanceof Error ? error.message : 'scope could not be read')
       }
       for (const file of captured.files) {
-        const key = file.path.replaceAll('\\', '/').toLowerCase()
+        const key = foldRel(file.path)
         if (seen.has(key)) continue
         seen.add(key)
         files.push(file)
       }
+      for (const item of captured.exclusions) {
+        const key = `${foldRel(item.path)}|${item.reason}`
+        if (seenExclusion.has(key)) continue
+        seenExclusion.add(key)
+        exclusions.push(item)
+      }
     }
     const id = this.nextBaselineArtifact(run.id, this.store.work.revision)
-    saveSnapshot(join(this.options.homeDir, 'artifacts', id), files, attempt?.failOn, { root, empty: files.length === 0 })
+    saveSnapshot(join(this.options.homeDir, 'artifacts', id), files, attempt?.failOn, { root, empty: files.length === 0, exclusions })
     return this.publishWorkBaseline(runId, this.store.work.revision, id)
   }
 
@@ -1663,38 +1692,52 @@ export class DotService {
     const change = this.store.work.change(changeId)
     if (!change) throw new DotError('dot/invalid', `unknown change ${changeId}`)
     const root = change.cwd
-    let captured: { files: Parameters<typeof saveSnapshot>[1]; empty: boolean }
+    let captured: ReturnType<typeof captureScope>
     try { captured = captureScope(root, root, 'directory') } catch (error) {
       throw new DotError('dot/invalid', error instanceof Error ? error.message : 'workspace could not be read')
     }
-    const id = artifactName(`sub-${change.id}-${change.currentRevision}-${this.store.work.revision}`)
     const runs = this.store.work.listRuns().filter(run => run.changeId === change.id)
+    for (const run of runs) {
+      if (run.kind === 'review' || !scopeWrites(run.writeScope) || run.writeScope.kind === 'workspace-exclusive') continue
+      for (const scope of run.writeScope.paths) {
+        const rel = relativePath(root, this.scopeTarget(root, scope.path))
+        const cover = defaultIgnoreCover(rel, process.platform, scope.type)
+        if (cover) throw new DotError('dot/invalid', `explicit ${scope.type} target ${rel} is a default-ignored path/file (${cover}) and is not supported by delivery capture`)
+      }
+    }
+    const id = artifactName(`sub-${change.id}-${change.currentRevision}-${this.store.work.revision}`)
     const prior = writerPrior(change.baselineRefs, runs, ref => this.subjectLook().read(ref))
     if (prior.missing) throw new DotError('dot/invalid', `baseline ${prior.missing} is missing or incomplete`)
-    const before = new Map(prior.files.map(file => [file.path.toLowerCase(), file]))
+    const before = new Map(prior.files.map(file => [foldRel(file.path), file]))
     const deleted = [...before.values()]
-      .filter(entry => !captured.files.some(file => file.path.toLowerCase() === entry.path.toLowerCase()))
+      .filter(entry => !captured.files.some(file => foldRel(file.path) === foldRel(entry.path)))
+      .filter(entry => !ignoreCovered(captured.exclusions, entry.path) && !captured.exclusions.some(item => isLinkReason(item.reason) && foldRel(item.path) === foldRel(entry.path)))
       .map(entry => ({ path: entry.path, deleted: true as const }))
-    const manifest = saveSnapshot(join(this.options.homeDir, 'artifacts', id), [...captured.files, ...deleted], undefined, { root, empty: captured.empty && deleted.length === 0 })
+    const manifest = saveSnapshot(join(this.options.homeDir, 'artifacts', id), [...captured.files, ...deleted], undefined, {
+      root, empty: captured.empty && deleted.length === 0, exclusions: captured.exclusions,
+    })
     const changes: DeliverySubject['changes'][number][] = []
     const protectedDirty: string[] = []
     for (const entry of manifest.saved) {
-      const prior = before.get(entry.path.toLowerCase())
+      const prior = before.get(foldRel(entry.path))
       if (!prior) changes.push({ path: entry.path, kind: 'added', sha256: entry.sha256 })
       else if (prior.sha256 !== entry.sha256) changes.push({ path: entry.path, kind: 'modified', sha256: entry.sha256 })
       else protectedDirty.push(entry.path)
     }
     for (const entry of before.values()) {
-      const still = manifest.saved.some(item => item.path.toLowerCase() === entry.path.toLowerCase())
-      const noted = manifest.deleted.some(item => item.toLowerCase() === entry.path.toLowerCase())
-      if (!still && !noted) changes.push({ path: entry.path, kind: 'deleted' })
+      const still = manifest.saved.some(item => foldRel(item.path) === foldRel(entry.path))
+      const noted = manifest.deleted.some(item => foldRel(item) === foldRel(entry.path))
+      if (!still && !noted) {
+        if (ignoreCovered(captured.exclusions, entry.path)) continue
+        changes.push({ path: entry.path, kind: 'deleted' })
+      }
     }
     for (const name of manifest.deleted) {
-      if (!changes.some(item => item.kind === 'deleted' && item.path.toLowerCase() === name.toLowerCase())) changes.push({ path: name, kind: 'deleted' })
+      if (!changes.some(item => item.kind === 'deleted' && foldRel(item.path) === foldRel(name))) changes.push({ path: name, kind: 'deleted' })
     }
     const subject: DeliverySubject = {
       workspaceRoot: root, cwd: root, baselineRefs: change.baselineRefs, artifactRef: id,
-      changes, protectedDirty, exclusions: [],
+      changes, protectedDirty, exclusions: [...captured.exclusions],
     }
     this.rememberSubject(change.id, change.currentInputRef, change.currentRevision, subject)
     return subject
@@ -1712,7 +1755,7 @@ export class DotService {
    * The verification has to be the one requested and it has to match the current input.
    * An older input, an unbound id, or a path outside that delivery is refused before any file is opened.
    */
-  readWorkSource(changeId: string, kind: 'evidence' | 'change', ref: string, bound: { readonly verificationId: string; readonly inputRef: string; readonly inputRevision: number }): { readonly ok: true; readonly source: string; readonly body: string } | { readonly ok: false; readonly code: 'missing' | 'stale' | 'invalid'; readonly message: string } {
+  readWorkSource(changeId: string, kind: 'evidence' | 'change', ref: string, bound: { readonly verificationId: string; readonly inputRef: string; readonly inputRevision: number }, options?: { readonly forceFull?: boolean }): { readonly ok: true; readonly source: string; readonly body: string; readonly truncated?: boolean; readonly totalBytes?: number } | { readonly ok: false; readonly code: 'missing' | 'stale' | 'invalid'; readonly message: string } {
     const change = this.store.work.change(changeId)
     if (!change) return { ok: false, code: 'missing', message: `unknown change ${changeId}` }
     if (!bound.verificationId || !bound.inputRef || !Number.isInteger(bound.inputRevision) || bound.inputRevision < 1) {
@@ -1723,13 +1766,23 @@ export class DotService {
     if (bound.inputRef !== verification.inputRef || bound.inputRevision !== verification.inputRevision || verification.inputRef !== change.currentInputRef || verification.inputRevision !== change.currentRevision) {
       return { ok: false, code: 'stale', message: `${bound.verificationId} is not bound to the current input` }
     }
+    const asText = (source: string, bytes: Uint8Array) => {
+      const maxBytes = options?.forceFull ? bytes.byteLength : 262_144
+      const truncated = bytes.byteLength > maxBytes
+      const slice = truncated ? bytes.subarray(0, maxBytes) : bytes
+      const decoded = new TextDecoder('utf-8', { fatal: kind === 'change' && !truncated }).decode(slice)
+      return {
+        ok: true as const, source, totalBytes: bytes.byteLength, truncated,
+        body: truncated ? `${decoded}\n… [truncated at 256 KiB; total ${bytes.byteLength} bytes]` : decoded,
+      }
+    }
     if (kind === 'evidence') {
       if (!artifactName(ref) || artifactName(ref) !== ref) return { ok: false, code: 'invalid', message: `evidence ${ref} is not a single relative id` }
       if (!verification.checks.some(check => check.evidenceRefs.includes(ref))) return { ok: false, code: 'stale', message: `${ref} is not bound to ${verification.id}` }
       try {
-        const body = readFileSync(join(this.options.homeDir, 'artifacts', 'evidence', ref), 'utf8')
-        if (!body) return { ok: false, code: 'missing', message: `evidence ${ref} is empty` }
-        return { ok: true, source: `evidence:${ref}`, body }
+        const body = readFileSync(join(this.options.homeDir, 'artifacts', 'evidence', ref))
+        if (body.byteLength === 0) return { ok: false, code: 'missing', message: `evidence ${ref} is empty` }
+        return asText(`evidence:${ref}`, body)
       } catch {
         return { ok: false, code: 'missing', message: `evidence ${ref} is missing` }
       }
@@ -1742,11 +1795,7 @@ export class DotService {
     try {
       const bodyBytes = readSnapshot(join(this.options.homeDir, 'artifacts', subject.artifactRef)).bodies.get(named.path)
       if (!bodyBytes || bodyBytes.byteLength === 0) return { ok: false, code: 'missing', message: `${ref} is missing from the delivery snapshot` }
-      const maxBytes = 262_144
-      const slice = bodyBytes.byteLength > maxBytes ? bodyBytes.subarray(0, maxBytes) : bodyBytes
-      const decoded = new TextDecoder('utf-8', { fatal: bodyBytes.byteLength <= maxBytes }).decode(slice)
-      const body = bodyBytes.byteLength > maxBytes ? `${decoded}\n… [truncated at 256 KiB; total ${bodyBytes.byteLength} bytes]` : decoded
-      return { ok: true, source: `change:${named.path}`, body }
+      return asText(`change:${named.path}`, bodyBytes)
     } catch {
       return { ok: false, code: 'missing', message: `${ref} could not be read` }
     }
@@ -1775,7 +1824,7 @@ export class DotService {
         if (!artifactName(ref) || artifactName(ref) !== ref) return undefined
         try {
           const manifest = readSnapshot(join(root, ref)).manifest
-          return { root: manifest.root, saved: manifest.saved, deleted: manifest.deleted }
+          return { root: manifest.root, saved: manifest.saved, deleted: manifest.deleted, exclusions: manifest.exclusions }
         } catch { return undefined }
       },
       evidence: ref => {
@@ -1783,7 +1832,10 @@ export class DotService {
         try { return readFileSync(join(root, 'evidence', ref)).byteLength > 0 } catch { return false }
       },
       live: workspaceRoot => {
-        try { return captureScope(workspaceRoot, workspaceRoot, 'directory').files.map(file => file.path) } catch { return undefined }
+        try { return [...scanScope(workspaceRoot, workspaceRoot, 'directory').files] } catch { return undefined }
+      },
+      boundaries: workspaceRoot => {
+        try { return [...scanScope(workspaceRoot, workspaceRoot, 'directory').exclusions] } catch { return undefined }
       },
       body: (workspaceRoot, path) => {
         try { return new Uint8Array(readFileSync(join(workspaceRoot, ...path.split('/')))) } catch { return undefined }
@@ -2128,24 +2180,28 @@ export class DotService {
   }
 
   /**
-   * Atomic closeout pipeline: optionally registers inline evidence, holds an open
-   * review run (if present), captures the fresh delivery subject, records checks
-   * against all required items, and either closes out immediately (via review or
-   * deterministic `acceptDirect`) or opens the human oversight `decide` request.
+   * One-call closeout. The caller must name the input it read and pass an explicit
+   * check per required item. Evidence text does not invent those verdicts.
+   * A review already released as rework still blocks this same input.
    */
   private async closeoutFromTool(args: Record<string, unknown>): Promise<string> {
     const changeId = typeof args.task_id === 'string' ? args.task_id : ''
     const change = this.store.work.change(changeId)
     if (!change) throw new DotError('dot/invalid', `unknown change ${changeId}`)
-    const expectedRef = typeof args.expected_input_ref === 'string' ? args.expected_input_ref : change.currentInputRef
-    const expectedRevision = typeof args.expected_input_revision === 'number' ? args.expected_input_revision : change.currentRevision
+    const expectedRef = typeof args.expected_input_ref === 'string' ? args.expected_input_ref : ''
+    const expectedRevision = typeof args.expected_input_revision === 'number' && Number.isInteger(args.expected_input_revision)
+      ? args.expected_input_revision
+      : undefined
+    if (!expectedRef || expectedRevision === undefined) {
+      throw new DotError('dot/invalid', `closeout requires expected_input_ref and expected_input_revision for ${change.currentInputRef}@${change.currentRevision}. Copy inputRef and revision from action=read. Do not omit them.`)
+    }
     if (expectedRef !== change.currentInputRef || expectedRevision !== change.currentRevision) {
       throw new DotError('dot/invalid', `expected input ${expectedRef}@${expectedRevision} is not current ${change.currentInputRef}@${change.currentRevision}`)
     }
-    // If the human already approved a verification for the current input revision, finalize that exact verification
-    // (acceptWork still re-verifies live workspace SHA-256 bytes against its snapshot before closing out).
-    const approvedDecision = change.oversight?.inputRef === change.currentInputRef
-      && change.oversight.inputRevision === change.currentRevision
+    // The human's approval is for this same named input. Omitting the fields never selects current.
+    // acceptWork still re-verifies live workspace SHA-256 bytes against its snapshot before closing out.
+    const approvedDecision = change.oversight?.inputRef === expectedRef
+      && change.oversight.inputRevision === expectedRevision
       && change.oversight.decision?.result === 'accept'
       && change.oversight.decision.source === 'user'
       ? change.oversight.decision
@@ -2159,21 +2215,74 @@ export class DotService {
       const accepted = await this.acceptWork(
         changeId,
         decidedVerificationId,
-        change.currentInputRef,
+        expectedRef,
         decidedSubjectKey,
         'tool',
-        { expectedInputRevision: change.currentRevision, expectedVerificationId: decidedVerificationId },
+        { expectedInputRevision: expectedRevision, expectedVerificationId: decidedVerificationId },
       )
       if (!('id' in accepted)) throw new DotError('dot/invalid', accepted.message)
       return `accepted ${changeId} at ${accepted.closeout?.subjectKey ?? decidedSubjectKey}`
     }
     const evidenceRef = typeof args.evidence_ref === 'string' ? args.evidence_ref.trim() : ''
     const summary = typeof args.summary === 'string' ? args.summary : ''
-    if (evidenceRef && summary) {
-      if (isForeignEvidenceId(evidenceRef)) throw new DotError('dot/invalid', `evidence_ref ${evidenceRef} is a snapshot, baseline, or session id`)
-      this.saveWorkEvidence(evidenceRef, summary)
+    const rawChecks = jsonArray(args.checks)
+    if (!rawChecks || rawChecks.length === 0) {
+      throw new DotError('dot/invalid', 'closeout requires checks, a JSON array of {requirementRef, applicability, verdict, evidenceRefs}. Include every required item. When the input has no requirements, include an explicit goal check. evidence_ref and summary only register evidence; they do not pass checks.')
+    }
+    const checks: { requirementRef: string; applicability: 'applicable' | 'not-applicable'; verdict: 'pass' | 'fail' | 'not-applicable'; evidenceRefs: string[]; note?: string }[] = []
+    for (const item of rawChecks) {
+      if (!item || typeof item !== 'object') throw new DotError('dot/invalid', 'each check must be an object')
+      const row = item as { requirementRef?: unknown; applicability?: unknown; verdict?: unknown; evidenceRefs?: unknown; note?: unknown }
+      if (typeof row.requirementRef !== 'string' || !row.requirementRef) throw new DotError('dot/invalid', 'each check needs requirementRef')
+      if (row.applicability !== 'applicable' && row.applicability !== 'not-applicable') {
+        throw new DotError('dot/invalid', `applicability must be applicable or not-applicable, not ${String(row.applicability)}`)
+      }
+      if (row.verdict !== 'pass' && row.verdict !== 'fail' && row.verdict !== 'not-applicable') {
+        throw new DotError('dot/invalid', 'each check needs verdict pass, fail, or not-applicable')
+      }
+      if (!Array.isArray(row.evidenceRefs) || row.evidenceRefs.some(ref => typeof ref !== 'string')) {
+        throw new DotError('dot/invalid', 'each check needs evidenceRefs')
+      }
+      checks.push({
+        requirementRef: row.requirementRef,
+        applicability: row.applicability,
+        verdict: row.verdict,
+        evidenceRefs: row.evidenceRefs,
+        ...(typeof row.note === 'string' ? { note: row.note } : {}),
+      })
+    }
+    const material = this.store.work.input(expectedRef)
+    if (!material || material.changeId !== changeId) throw new DotError('dot/invalid', `unknown input ${expectedRef}`)
+    const requiredReqs = material.requirements.filter(item => item.required)
+    if (requiredReqs.length === 0) {
+      const goal = checks.find(item => item.requirementRef === 'goal')
+      if (!goal || goal.applicability !== 'applicable' || goal.verdict !== 'pass' || goal.evidenceRefs.length === 0) {
+        throw new DotError('dot/invalid', 'closeout with no requirements needs an explicit goal check: applicable, verdict pass, and evidenceRefs. A summary does not pass it.')
+      }
+    } else {
+      const covered = new Set(checks.map(item => item.requirementRef))
+      const missing = requiredReqs.filter(item => !covered.has(item.requirementRef)).map(item => item.requirementRef)
+      if (missing.length) throw new DotError('dot/invalid', `checks are incomplete: required ${missing.join(', ')} has no check. Add those checks. Do not remove requirements to make closeout pass.`)
     }
     const allRuns = this.store.work.listRuns().filter(run => run.changeId === changeId)
+    // Same rule as acceptDirect: a rework rejection blocks only a delivery that has nothing newer.
+    // A writer/rework that settled after it, a later review, or a verification already recorded after it may close out.
+    // The checks on this call are not that later verification.
+    const latestReject = allRuns.reduce<RunRecord | undefined>((latest, run) => {
+      if (run.kind !== 'review' || run.phase !== 'stopped' || run.closeReason !== 'rework') return latest
+      if (run.inputRef !== expectedRef || run.inputRevision !== expectedRevision) return latest
+      if (!latest || run.updatedAt > latest.updatedAt || (run.updatedAt === latest.updatedAt && run.id > latest.id)) return run
+      return latest
+    }, undefined)
+    if (latestReject) {
+      const produced = allRuns.some(run => run.kind !== 'review' && run.createdAt > latestReject.updatedAt && (run.phase === 'completed' || run.phase === 'failed') && !!run.closureEvidence?.jobsSettled)
+      const laterReview = allRuns.some(run => run.kind === 'review' && run.id !== latestReject.id && run.createdAt > latestReject.updatedAt)
+      const recorded = this.store.work.latestVerification(changeId)
+      const laterVerification = !!recorded && recorded.inputRef === expectedRef && recorded.inputRevision === expectedRevision && recorded.createdAt > latestReject.updatedAt
+      if (!produced && !laterReview && !laterVerification) {
+        throw new DotError('dot/invalid', `${latestReject.id} rejected this delivery; record a new verification after the rework`)
+      }
+    }
     const namedReviewId = typeof args.review_run_id === 'string' ? args.review_run_id.trim() : ''
     // Validate a named review before any host side effect: holding stops a session,
     // so a review run of another change must be refused here, not after it was held.
@@ -2185,54 +2294,38 @@ export class DotService {
       throw new DotError('dot/invalid', `review run ${namedReview.id} is already ${namedReview.phase}`)
     }
     const openReview = namedReview ?? allRuns.find(run => run.kind === 'review' && !['completed', 'failed', 'stopped'].includes(run.phase))
+    if (evidenceRef && isForeignEvidenceId(evidenceRef)) throw new DotError('dot/invalid', `evidence_ref ${evidenceRef} is a snapshot, baseline, or session id`)
+    if (evidenceRef && summary) this.saveWorkEvidence(evidenceRef, summary)
+    for (const check of checks) {
+      for (const ref of check.evidenceRefs) {
+        const gap = evidenceRefGap(ref, this.registeredEvidence(ref))
+        if (gap) throw new DotError('dot/invalid', gap)
+      }
+    }
     if (openReview) {
       const held = await this.holdWorkReview(openReview.id)
       if (!('id' in held)) throw new DotError('dot/invalid', held.message)
     }
     const subject = await this.captureWorkSubject(changeId)
-    const material = this.store.work.input(change.currentInputRef)
-    const rawChecks = jsonArray(args.checks)
-    const requiredReqs = (material?.requirements ?? []).filter(item => item.required)
-    const checks = rawChecks
-      ? rawChecks
-      : evidenceRef && this.registeredEvidence(evidenceRef)
-        ? (requiredReqs.length > 0 ? requiredReqs.map(item => item.requirementRef) : ['goal']).map(requirementRef => ({
-            requirementRef,
-            applicability: 'applicable' as const,
-            verdict: 'pass' as const,
-            evidenceRefs: [evidenceRef],
-          }))
-        : undefined
-    if (!checks || checks.length === 0) {
-      throw new DotError('dot/invalid', 'closeout requires checks (JSON array) or both evidence_ref and summary covering required items')
-    }
-    for (const check of checks) {
-      const refs = check && typeof check === 'object' ? (check as { evidenceRefs?: unknown }).evidenceRefs : undefined
-      if (!Array.isArray(refs)) throw new DotError('dot/invalid', 'each check needs evidenceRefs')
-      for (const ref of refs) {
-        const gap = typeof ref === 'string' ? evidenceRefGap(ref, this.registeredEvidence(ref)) : evidenceRefGap('missing', false)
-        if (gap) throw new DotError('dot/invalid', gap)
-      }
-    }
     const writerIds = allRuns.filter(run => run.kind !== 'review' && scopeWrites(run.writeScope)).map(run => run.id)
     const listedRuns = jsonArray(args.run_ids)?.map(item => String(item))
     const runIds = listedRuns ?? writerIds
     const refreshedReview = openReview ? this.store.work.run(openReview.id) : undefined
     const recorded = await this.recordWorkVerification(
       changeId,
-      checks as Parameters<DotStore['work']['recordVerification']>[1],
+      checks,
       runIds,
       refreshedReview
         ? {
-            inputRef: change.currentInputRef,
-            inputRevision: change.currentRevision,
+            inputRef: expectedRef,
+            inputRevision: expectedRevision,
             reviewRunId: refreshedReview.id,
             reviewerSessionId: typeof args.session_id === 'string' ? args.session_id : refreshedReview.sessionId,
             subject,
           }
         : {
-            inputRef: change.currentInputRef,
-            inputRevision: change.currentRevision,
+            inputRef: expectedRef,
+            inputRevision: expectedRevision,
             subject,
             direct: true,
           },
@@ -2241,9 +2334,13 @@ export class DotService {
     if (recorded.verdict !== 'accept' || !recorded.subjectKey) {
       return JSON.stringify({ id: recorded.id, verdict: recorded.verdict, inputRef: recorded.inputRef, subjectKey: recorded.subjectKey })
     }
-    const latest = this.store.work.change(changeId)!
+    const latest = this.store.work.change(changeId)
+    if (!latest || latest.currentInputRef !== expectedRef || latest.currentRevision !== expectedRevision) {
+      throw new DotError('dot/invalid', `input moved during closeout of ${expectedRef}@${expectedRevision}. Read it again. Nothing was accepted.`)
+    }
     const needsHumanDecision = latest.oversight?.requested
-      && latest.oversight.inputRef === latest.currentInputRef
+      && latest.oversight.inputRef === expectedRef
+      && latest.oversight.inputRevision === expectedRevision
       && (latest.oversight.decision?.result !== 'accept'
         || latest.oversight.decision.verificationId !== recorded.id
         || latest.oversight.decision.subjectKey !== recorded.subjectKey)
@@ -2251,12 +2348,12 @@ export class DotService {
       return this.decideFromTool({
         task_id: changeId,
         verification_id: recorded.id,
-        expected_input_revision: latest.currentRevision,
+        expected_input_revision: expectedRevision,
         expected_subject_key: recorded.subjectKey,
       })
     }
-    const accepted = await this.acceptWork(changeId, recorded.id, latest.currentInputRef, recorded.subjectKey, 'tool', {
-      expectedInputRevision: latest.currentRevision,
+    const accepted = await this.acceptWork(changeId, recorded.id, expectedRef, recorded.subjectKey, 'tool', {
+      expectedInputRevision: expectedRevision,
       expectedVerificationId: recorded.id,
     })
     if (!('id' in accepted)) throw new DotError('dot/invalid', accepted.message)
@@ -2363,6 +2460,23 @@ export class DotService {
     return undefined
   }
 
+  /**
+   * Release one reservation this start created, and only while the book still says it never reached the host.
+   * claimSession marks creation inflight before any host find or create, and releaseUnsent repeats that check.
+   * A host lookup is not required, and a failed lookup must not keep the scope.
+   */
+  private async releaseFreshReservation(runId: string): Promise<boolean> {
+    const ready = (run: RunRecord | undefined): run is RunRecord => {
+      if (!run || run.phase !== 'reserved' || run.creation !== 'intent' || run.actionClaim || run.sessionId) return false
+      return !run.deliveries.some(item => item.status === 'accepted' || item.status === 'unknown' || item.hostRequestId !== undefined)
+    }
+    if (!ready(this.store.work.run(runId))) return false
+    const prepared = await this.store.work.prepareFinish(runId, 'failed', this.now())
+    if (!prepared.ok) return false
+    const released = await this.store.work.releaseUnsent(runId, prepared.updatedAt, this.now())
+    return released.ok === true
+  }
+
   private async startWorkSession(input: { workspaceId?: string; cwd?: string; title: string; instruction: string; goal?: string; model?: string; taskId?: string; role?: SessionRole; access?: TicketAccess; preset?: string; checkOnly?: boolean; paths?: string; runId?: string; captureBaseline?: boolean }): Promise<string> {
     const role = input.role ?? 'work'
     if (role !== 'work' && role !== 'rework' && role !== 'review') throw new DotError('dot/invalid', 'invalid role')
@@ -2403,20 +2517,34 @@ export class DotService {
     const report = await this.scopeReport(change.cwd, change.id, selected ? occupantOf(selected) : plannedOccupant(change.cwd, scope))
     if (scopeWrites(scope) && report.blocked) throw new DotError('dot/locked', report.text)
     const note = report.text === 'Directory lock is available.' ? '' : `\n${report.text}`
+    let createdHere = false
     let runId = selected?.id
     if (!runId) {
       const reserved = await this.reserveFromTool({ task_id: changeId, role, access: input.access ?? (role === 'review' ? 'write' : 'read'), ...(input.paths ? { paths: input.paths } : {}) })
       runId = JSON.parse(reserved).runId as string
+      createdHere = true
     }
     const currentRun = this.store.work.run(runId)
     if (input.captureBaseline === true && currentRun && scopeWrites(currentRun.writeScope) && currentRun.baselineRefs.length === 0) {
-      const published = await this.captureWorkBaseline(runId)
-      if (!('applied' in published) || !published.applied) {
-        const msg = 'message' in published ? published.message : 'baseline was not published'
-        // Report the failure as a failure: this run was never prompted, but it keeps
-        // holding its write scope until it is cancelled, so the caller must not read
-        // a plain result string as "started".
-        throw new DotError('dot/baseline', `baseline for ${runId} on ${changeId} was not published, so nothing was started: ${msg}. ${runId} still holds its scope and was not sent an instruction; cancel it before reserving the same paths again.`)
+      let failure: string | undefined
+      try {
+        const published = await this.captureWorkBaseline(runId)
+        if (!('applied' in published) || !published.applied) {
+          const msg = 'message' in published ? published.message : ''
+          failure = msg || 'baseline was not published'
+        }
+      } catch (error) {
+        const msg = error instanceof Error ? error.message : ''
+        failure = msg || 'baseline capture failed'
+      }
+      if (failure !== undefined) {
+        const released = createdHere ? await this.releaseFreshReservation(runId) : false
+        const kept = !createdHere
+          ? `${runId} was already reserved and still holds its scope so the baseline can be retried.`
+          : released
+            ? `${runId} was released because this start created it and it had not launched.`
+            : `${runId} was not released because it is no longer an unsent reservation. It still holds its scope.`
+        throw new DotError('dot/baseline', `baseline for ${runId} on ${changeId} was not published, so nothing was started: ${failure}. ${kept} ${changeId} was not cancelled.`)
       }
     }
     const instruction = input.instruction.trim()

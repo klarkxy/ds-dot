@@ -1,5 +1,5 @@
 import { Button, StateDot, Tag, type TagTone } from '@deepseek-ai/dsh-client-ui-primitives'
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { BOARD_ROOT } from './board.tsx'
 import { t, type CopyLocale, type TextKey } from './ui-copy.ts'
 import {
@@ -25,8 +25,10 @@ export interface WorkApi {
   workReject(payload: WorkRejectPayload): Promise<void>
   workAnswer(payload: { readonly id: string; readonly allow: boolean }): Promise<void>
   workResume(payload: { readonly id: string }): Promise<void>
-  workRead?(request: WorkReadRequest): Promise<{ readonly source: string; readonly body: string }>
+  workRead?(request: WorkReadRequest): Promise<{ readonly source: string; readonly body: string; readonly truncated?: boolean; readonly totalBytes?: number }>
 }
+
+type WorkRead = NonNullable<WorkApi['workRead']>
 
 export function WorkBoard({ locale, items, pending, notice, onAccept, onReject, onAnswer, onResume, onRead }: {
   readonly locale: CopyLocale
@@ -37,9 +39,9 @@ export function WorkBoard({ locale, items, pending, notice, onAccept, onReject, 
   readonly onReject: (payload: WorkRejectPayload) => void
   readonly onAnswer: (payload: { readonly id: string; readonly allow: boolean }) => void
   readonly onResume: (payload: { readonly id: string }) => void
-  readonly onRead?: (request: WorkReadRequest) => Promise<{ readonly source: string; readonly body: string }>
+  readonly onRead?: WorkRead
 }) {
-  const groups = groupWork(items)
+  const groups = groupWork(items, pending)
   const section = (title: TextKey, rows: readonly WorkBoardItem[]) => rows.length === 0 ? null : (
     <section className="dsh-ui-stack" aria-label={t(locale, title)}>
       <span className="dsh-ui-meta">{t(locale, title)} · {rows.length}</span>
@@ -65,14 +67,39 @@ function factLabel(locale: CopyLocale, group: 'kind' | 'phase' | 'verdict' | 'ch
   return key ? t(locale, key) : value
 }
 
+const PREVIEW_LIMIT = 65_536
+
+type SourceBody = { readonly ok: true; readonly body: string; readonly truncated: boolean; readonly totalBytes?: number } | { readonly ok: false; readonly message: string }
+type FullBody = { readonly phase: 'loading' } | { readonly phase: 'ready'; readonly body: string } | { readonly phase: 'error'; readonly message: string }
+type SourceSlot = { readonly identity: string; readonly loaded: Readonly<Record<string, SourceBody>>; readonly full: Readonly<Record<string, FullBody>> }
+
+function previewFrom(result: { readonly body: string; readonly truncated?: boolean; readonly totalBytes?: number }): SourceBody {
+  const cut = result.body.length > PREVIEW_LIMIT
+  const body = cut ? `${result.body.slice(0, PREVIEW_LIMIT)}\n… [truncated]` : result.body
+  const truncated = cut || result.truncated === true
+  return { ok: true, body, truncated, ...(typeof result.totalBytes === 'number' ? { totalBytes: result.totalBytes } : {}) }
+}
+
+function exclusionReason(locale: CopyLocale, reason: string): string {
+  if (reason === 'ignored directory') return t(locale, 'workExcludeDir')
+  if (reason === 'ignored file') return t(locale, 'workExcludeFile')
+  if (reason === 'symlink' || reason.startsWith('symlink:')) {
+    const target = reason.startsWith('symlink:') ? reason.slice('symlink:'.length) : ''
+    const label = t(locale, 'workExcludeLink')
+    return target ? `${label} → ${target}` : label
+  }
+  return reason
+}
+
 function WorkFacts({ locale, item, onRead }: {
   readonly locale: CopyLocale
   readonly item: WorkBoardItem
-  readonly onRead?: (request: WorkReadRequest) => Promise<{ readonly source: string; readonly body: string }>
+  readonly onRead?: WorkRead
 }) {
   const verification = item.verification
   const checks = verification?.checks ?? []
   const changes = verification?.changes ?? []
+  const exclusions = verification?.exclusions ?? []
   const evidence = [...new Set(checks.flatMap(check => check.evidenceRefs))]
   const evidenceKey = evidence.join('\n')
   const changeKey = changes.map(change => `${change.kind}:${change.path}`).join('\n')
@@ -82,67 +109,122 @@ function WorkFacts({ locale, item, onRead }: {
   const changeInputRef = item.inputRef
   const changeRevision = item.revision
   const identity = verificationId ? `${item.id}|${changeInputRef}|${changeRevision}|${verificationId}|${inputRef}|${inputRevision}` : ''
-  const [detailsOpen, setDetailsOpen] = useState(false)
-  const [slot, setSlot] = useState<{ readonly identity: string; readonly loaded: Readonly<Record<string, { readonly ok: true; readonly body: string } | { readonly ok: false; readonly message: string }>> }>({ identity: '', loaded: {} })
+  const [slot, setSlot] = useState<SourceSlot>({ identity: '', loaded: {}, full: {} })
   const loaded = slot.identity === identity ? slot.loaded : {}
-  const loadOne = useCallback((kind: 'evidence' | 'change', ref: string, token: string, isCancelled?: () => boolean) => {
+  const fullState = slot.identity === identity ? slot.full : {}
+  const fullFlights = useRef(new Set<string>())
+  const life = useRef(0)
+  useEffect(() => () => { life.current += 1 }, [])
+  const loadPreview = useCallback((kind: 'evidence' | 'change', ref: string, token: string, isCancelled?: () => boolean) => {
     if (!onRead || !verificationId) return
     const key = `${kind}:${ref}`
+    const ticket = life.current
     void onRead({ id: item.id, kind, ref, verificationId, inputRef, inputRevision }).then(result => {
-      if (isCancelled?.()) return
-      const clipped = result.body.length > 65_536 ? `${result.body.slice(0, 65_536)}\n… [truncated]` : result.body
-      setSlot(current => current.identity === token ? { identity: token, loaded: { ...current.loaded, [key]: { ok: true, body: clipped } } } : current)
+      if (isCancelled?.() || life.current !== ticket) return
+      const row = previewFrom(result)
+      setSlot(current => current.identity === token ? { ...current, loaded: { ...current.loaded, [key]: row } } : current)
     }, failure => {
-      if (isCancelled?.()) return
+      if (isCancelled?.() || life.current !== ticket) return
       const message = failure instanceof Error ? failure.message : String(failure)
-      setSlot(current => current.identity === token ? { identity: token, loaded: { ...current.loaded, [key]: { ok: false, message } } } : current)
+      setSlot(current => current.identity === token ? { ...current, loaded: { ...current.loaded, [key]: { ok: false, message } } } : current)
+    })
+  }, [onRead, item.id, verificationId, inputRef, inputRevision])
+  const loadFull = useCallback((kind: 'evidence' | 'change', ref: string, token: string) => {
+    if (!onRead || !verificationId || !token) return
+    const key = `${kind}:${ref}`
+    const flight = `${token}\0${key}`
+    if (fullFlights.current.has(flight)) return
+    fullFlights.current.add(flight)
+    const ticket = life.current
+    setSlot(current => current.identity === token ? { ...current, full: { ...current.full, [key]: { phase: 'loading' } } } : current)
+    void onRead({ id: item.id, kind, ref, verificationId, inputRef, inputRevision, forceFull: true }).then(result => {
+      fullFlights.current.delete(flight)
+      if (life.current !== ticket) return
+      setSlot(current => current.identity === token ? { ...current, full: { ...current.full, [key]: { phase: 'ready', body: result.body } } } : current)
+    }, failure => {
+      fullFlights.current.delete(flight)
+      if (life.current !== ticket) return
+      const message = failure instanceof Error ? failure.message : String(failure)
+      setSlot(current => current.identity === token ? { ...current, full: { ...current.full, [key]: { phase: 'error', message } } } : current)
     })
   }, [onRead, item.id, verificationId, inputRef, inputRevision])
   useEffect(() => {
     if (!onRead || !verificationId) return
     let cancel = false
     const token = identity
-    setSlot(current => current.identity === token ? current : { identity: token, loaded: {} })
+    setSlot(current => current.identity === token ? current : { identity: token, loaded: {}, full: {} })
     const evidenceJobs = evidenceKey.split('\n').filter(Boolean).map(ref => ({ kind: 'evidence' as const, ref }))
     const changeJobs = changeKey.split('\n').filter(Boolean).filter(row => !row.startsWith('deleted:')).map(row => ({ kind: 'change' as const, ref: row.slice(row.indexOf(':') + 1) }))
-    const allJobs = [...evidenceJobs, ...changeJobs]
-    // Eagerly preload small deliveries (<= 8 sources); defer large file sets until expanded or clicked.
-    const eager = allJobs.length <= 8 || detailsOpen ? allJobs : evidenceJobs.slice(0, 8)
-    for (const job of eager) loadOne(job.kind, job.ref, token, () => cancel)
+    for (const job of [...evidenceJobs, ...changeJobs]) loadPreview(job.kind, job.ref, token, () => cancel)
     return () => { cancel = true }
-  }, [onRead, loadOne, detailsOpen, evidenceKey, changeKey, identity, verificationId, changeInputRef, changeRevision])
-  const visible = Boolean(item.summary) || item.runs.some(run => run.writeScope || (run.deliveries?.length ?? 0) > 0) || checks.length > 0 || changes.length > 0
+  }, [onRead, loadPreview, evidenceKey, changeKey, identity, verificationId])
+  const visible = Boolean(item.summary) || item.runs.some(run => run.writeScope || (run.deliveries?.length ?? 0) > 0) || checks.length > 0 || changes.length > 0 || exclusions.length > 0
   if (!visible) return null
-  const outcome = (key: string) => {
+  const outcome = (kind: 'evidence' | 'change', ref: string) => {
+    const key = `${kind}:${ref}`
     const row = loaded[key]
     if (!row) return null
-    if (row.ok && (inputRef !== changeInputRef || inputRevision !== changeRevision)) return null
-    if (row.ok) return <pre data-evidence-body={key}>{row.body}</pre>
-    const stale = /not bound|not a delivered|no current verification/.test(row.message)
-    const missing = /missing|empty|deleted/.test(row.message)
-    return <p role="alert">{stale ? t(locale, 'workEvidenceStale') : missing ? t(locale, 'workEvidenceMissing') : `${t(locale, 'workEvidenceFailed')}${row.message}`}</p>
+    if (!row.ok) {
+      const stale = /not bound|not a delivered|no current verification/.test(row.message)
+      const missing = /missing|empty|deleted/.test(row.message)
+      return (
+        <>
+          <p role="alert">{stale ? t(locale, 'workEvidenceStale') : missing ? t(locale, 'workEvidenceMissing') : `${t(locale, 'workEvidenceFailed')}${row.message}`}</p>
+          <Button variant="ghost" size="sm" onClick={() => loadPreview(kind, ref, identity)}>{t(locale, 'workEvidenceRetry')}</Button>
+        </>
+      )
+    }
+    if (inputRef !== changeInputRef || inputRevision !== changeRevision) return null
+    const full = fullState[key]
+    if (full?.phase === 'ready') return <pre data-evidence-body={key}>{full.body}</pre>
+    const loading = full?.phase === 'loading'
+    const failed = full?.phase === 'error'
+    const bytes = row.totalBytes === undefined ? '' : ` (${row.totalBytes} bytes)`
+    return (
+      <>
+        <pre data-evidence-body={key}>{row.body}</pre>
+        {row.truncated || loading || failed ? (
+          <Button variant="ghost" size="sm" disabled={loading} aria-busy={loading || undefined} onClick={() => loadFull(kind, ref, identity)}>
+            {loading ? t(locale, 'workEvidenceLoading') : failed ? t(locale, 'workEvidenceRetry') : `${t(locale, 'workEvidenceFull')}${bytes}`}
+          </Button>
+        ) : null}
+        {full?.phase === 'error' ? <p role="alert">{`${t(locale, 'workEvidenceFailed')}${full.message}`}</p> : null}
+      </>
+    )
   }
   return (
-    <details className="dsh-ui-hint" onToggle={event => setDetailsOpen((event.currentTarget as HTMLDetailsElement).open)}>
+    <details className="dsh-ui-hint">
       <summary>{t(locale, 'workDetails')}</summary>
       {item.summary ? <p>{t(locale, 'workSummary')}: {item.summary}</p> : null}
       {item.runs.map(run => <RunFacts key={run.id} locale={locale} run={run} />)}
       {item.verification ? (
-        <p>
-          {t(locale, 'workVerification')} {item.verification.id} {factLabel(locale, 'verdict', item.verification.verdict)}
-          {checks.map(check => (
-            <span key={check.requirementRef}>
-              {` · ${check.requirementRef} `}
-              <Tag tone={workFactTone(check.verdict)}>{factLabel(locale, 'check', check.verdict)}</Tag>
-              {check.note ? ` ${check.note}` : ''}
-            </span>
-          ))}
-        </p>
+        <>
+          <p>
+            {t(locale, 'workVerification')} {item.verification.id} {factLabel(locale, 'verdict', item.verification.verdict)}
+            {checks.map(check => (
+              <span key={check.requirementRef}>
+                {` · ${check.requirementRef} `}
+                <Tag tone={workFactTone(check.verdict)}>{factLabel(locale, 'check', check.verdict)}</Tag>
+                {check.note ? ` ${check.note}` : ''}
+              </span>
+            ))}
+          </p>
+          {exclusions.length > 0 ? (
+            <p>
+              {t(locale, 'workExcluded')}:
+              {exclusions.map((ex, index) => (
+                <span key={`${ex.path}\0${index}`}>
+                  {` · ${ex.path} (${exclusionReason(locale, ex.reason)})`}
+                </span>
+              ))}
+            </p>
+          ) : null}
+        </>
       ) : null}
       {evidence.map(ref => (
         <div key={ref}>
-          <a href={`#evidence-${encodeURIComponent(ref)}`} data-evidence-ref={ref} onClick={event => { event.preventDefault(); if (identity && !loaded[`evidence:${ref}`]) loadOne('evidence', ref, identity) }}>{t(locale, 'workEvidence')} {ref}</a>
-          {outcome(`evidence:${ref}`)}
+          <a href={`#evidence-${encodeURIComponent(ref)}`} data-evidence-ref={ref} onClick={event => { event.preventDefault(); if (identity && loaded[`evidence:${ref}`]?.ok !== true) loadPreview('evidence', ref, identity) }}>{t(locale, 'workEvidence')} {ref}</a>
+          {outcome('evidence', ref)}
         </div>
       ))}
       {changes.length > 0 ? (
@@ -150,8 +232,8 @@ function WorkFacts({ locale, item, onRead }: {
           <p>{t(locale, 'workFiles')}</p>
           {changes.map(change => (
             <div key={change.path}>
-              {change.kind === 'deleted' ? <span>{change.path} ({factLabel(locale, 'change', change.kind)})</span> : <a href={`#change-${encodeURIComponent(change.path)}`} data-change-path={change.path} onClick={event => { event.preventDefault(); if (identity && !loaded[`change:${change.path}`]) loadOne('change', change.path, identity) }}>{change.path} ({factLabel(locale, 'change', change.kind)})</a>}
-              {outcome(`change:${change.path}`)}
+              {change.kind === 'deleted' ? <span>{change.path} ({factLabel(locale, 'change', change.kind)})</span> : <a href={`#change-${encodeURIComponent(change.path)}`} data-change-path={change.path} onClick={event => { event.preventDefault(); if (identity && loaded[`change:${change.path}`]?.ok !== true) loadPreview('change', change.path, identity) }}>{change.path} ({factLabel(locale, 'change', change.kind)})</a>}
+              {outcome('change', change.path)}
             </div>
           ))}
         </div>
@@ -188,7 +270,7 @@ function WorkRow({ locale, item, pending, onAccept, onReject, onAnswer, onResume
   readonly onReject: (payload: WorkRejectPayload) => void
   readonly onAnswer: (payload: { readonly id: string; readonly allow: boolean }) => void
   readonly onResume: (payload: { readonly id: string }) => void
-  readonly onRead?: (request: WorkReadRequest) => Promise<{ readonly source: string; readonly body: string }>
+  readonly onRead?: WorkRead
 }) {
   const accept = acceptPayload(item)
   const reject = rejectPayload(item)
@@ -268,7 +350,7 @@ export function WorkBoardPanel({ locale, api, pending, initialItems }: { readonl
       onReject={payload => run(api.workReject(payload))}
       onAnswer={payload => run(api.workAnswer(payload))}
       onResume={payload => run(api.workResume(payload))}
-      {...api.workRead ? { onRead: (request: WorkReadRequest) => api.workRead!(request) } : {}}
+      {...api.workRead ? { onRead: api.workRead } : {}}
     />
   )
 }

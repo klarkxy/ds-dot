@@ -54,7 +54,7 @@ export interface ChatApi extends SettingsApi, ContextApi, TrajectoryApi, Knowled
   workReject?(payload: WorkRejectPayload): Promise<void>
   workAnswer?(payload: { readonly id: string; readonly allow: boolean }): Promise<void>
   workResume?(payload: { readonly id: string }): Promise<void>
-  workRead?(request: WorkReadRequest): Promise<{ readonly source: string; readonly body: string }>
+  workRead?(request: WorkReadRequest): Promise<{ readonly source: string; readonly body: string; readonly truncated?: boolean; readonly totalBytes?: number }>
   settings(signal: AbortSignal): Promise<DotSettings>
 }
 

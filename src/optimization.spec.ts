@@ -242,6 +242,9 @@ describe('WorkBook observability seams & atomic closeout pipeline', () => {
       const closed = await h.taskTool.execute({
         action: 'closeout',
         task_id: changeId!,
+        expected_input_ref: h.store.work.change(changeId!)!.currentInputRef,
+        expected_input_revision: h.store.work.change(changeId!)!.currentRevision,
+        checks: JSON.stringify([{ requirementRef: 'goal', applicability: 'applicable', verdict: 'pass', evidenceRefs: ['doc-check'] }]),
         evidence_ref: 'doc-check',
         summary: 'Verified doc.md updated to new-link',
       })
@@ -287,6 +290,9 @@ describe('WorkBook observability seams & atomic closeout pipeline', () => {
       const gate = await h.taskTool.execute({
         action: 'closeout',
         task_id: created.id,
+        expected_input_ref: h.store.work.change(created.id)!.currentInputRef,
+        expected_input_revision: h.store.work.change(created.id)!.currentRevision,
+        checks: JSON.stringify([{ requirementRef: 'R1', applicability: 'applicable', verdict: 'pass', evidenceRefs: ['r1-log'] }]),
         evidence_ref: 'r1-log',
         summary: 'doc.md now contains approved-link',
       })
@@ -300,6 +306,9 @@ describe('WorkBook observability seams & atomic closeout pipeline', () => {
       const accepted = await h.taskTool.execute({
         action: 'closeout',
         task_id: created.id,
+        expected_input_ref: h.store.work.change(created.id)!.currentInputRef,
+        expected_input_revision: h.store.work.change(created.id)!.currentRevision,
+        checks: JSON.stringify([{ requirementRef: 'R1', applicability: 'applicable', verdict: 'pass', evidenceRefs: ['r1-log'] }]),
         evidence_ref: 'r1-log',
         summary: 'doc.md now contains approved-link',
       })

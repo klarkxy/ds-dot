@@ -618,6 +618,11 @@ export class WorkBook {
       : open.length ? 'running' as const
       : 'waiting' as const
     const material = this.inputs.get(change.currentInputRef)
+    const oversight = change.oversight
+    const awaitsHumanDecision = oversight?.requested && oversight.inputRef === change.currentInputRef
+      && !(oversight.inputRevision === change.currentRevision && oversight.decision?.result === 'accept'
+        && oversight.decision.source === 'user' && oversight.decision.verificationId === verification?.id
+        && oversight.decision.subjectKey === verification?.subjectKey)
     return {
       id: change.id, title: change.title, priority: change.priority, revision: change.currentRevision,
       inputRef: change.currentInputRef, control: change.control, status,
@@ -641,10 +646,14 @@ export class WorkBook {
         ...(verification.subject && verification.subject.changes.length > 0 ? {
           changes: verification.subject.changes.map(change => ({ path: change.path, kind: change.kind })),
         } : {}),
+        ...(verification.subject && verification.subject.exclusions.length > 0 ? {
+          exclusions: verification.subject.exclusions.map(item => ({ path: item.path, reason: item.reason })),
+        } : {}),
       } : undefined,
       closeout: closeoutCurrent ? change.closeout : undefined,
       oversight: change.oversight,
-      humanAction: !change.closeout && !verdictBlocks && verification?.verdict === 'accept' && verification.subjectKey ? {
+      humanAction: !change.closeout && !verdictBlocks && !awaitsHumanDecision && verification?.verdict === 'accept' && verification.subjectKey
+        && verification.inputRef === change.currentInputRef && verification.inputRevision === change.currentRevision ? {
         action: 'accept' as const,
         expectedInputRef: change.currentInputRef,
         expectedInputRevision: change.currentRevision,

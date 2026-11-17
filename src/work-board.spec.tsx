@@ -33,6 +33,10 @@ const click = (text: string) => act(async () => {
   button?.click()
 })
 
+const buttonIncluding = (text: string) => [...document.querySelectorAll('button')].find(node => (node.textContent ?? '').includes(text))
+
+const longBody = (head: string, tail: string, size = 80_000) => `${head}${'a'.repeat(size)}${tail}`
+
 describe('WorkBoard', () => {
   it('sends the versions on the projection and does not claim a withdrawn look succeeded', async () => {
     const onAccept = vi.fn()
@@ -269,6 +273,279 @@ describe('WorkBoard', () => {
     })
     expect(document.body.textContent).not.toContain('OLD_MARKED_BODY')
     expect(document.querySelectorAll('[data-evidence-body]')).toHaveLength(0)
+    await act(async () => root.unmount())
+  })
+
+  it('shows a short preview when the backend truncates above 256KiB and the full tail after forceFull', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'dot-evidence-full-'))
+    const project = mkdtempSync(join(tmpdir(), 'dot-evidence-full-proj-'))
+    const store = new DotStore(undefined)
+    void store.setSettings({ ...DEFAULT_SETTINGS, reflection: false, idleCheckMinutes: 0 })
+    const service = new DotService({
+      host: { isRunning: () => false, listSessions: async () => [], readEvents: async () => [], listModels: async () => ({ fallback: { provider: 'p', model: 'ok' }, models: [] }), listPresets: async () => ({ fallback: 'standard', presets: [] }) } as never,
+      store, homeDir: home, notes: { path: '/dot/memory.md', text: '', cognition: '', read: async () => '', readCognition: async () => '' },
+      approvalGraceMs: 0,
+      timer: { set: (cb, ms) => setTimeout(cb, ms), clear: handle => clearTimeout(handle as ReturnType<typeof setTimeout>), now: () => Date.now() },
+      now: () => 1000,
+    })
+    const tail = 'TAIL_MARK_AFTER_256K'
+    const body = `${'x'.repeat(262_145)}${tail}`
+    try {
+      const change = await service.createWorkChange({ title: 'Ship', cwd: project, goal: 'land it', requirements: [{ requirementRef: 'r1', text: 'edits', required: true }], at: 1 })
+      service.saveWorkEvidence('big-log', body)
+      const current = store.work.change(change.id)!
+      const recorded = await service.recordWorkVerification(change.id, [
+        { requirementRef: 'r1', applicability: 'applicable', verdict: 'pass', evidenceRefs: ['big-log'], note: 'seen' },
+      ], [], { inputRef: current.currentInputRef, inputRevision: current.currentRevision })
+      if (!('id' in recorded)) throw new Error(recorded.message)
+      const view = service.workBoard(change.id)
+      if (!view) throw new Error('missing projection')
+      const read = (request: WorkReadRequest) => {
+        const result = service.readWorkSource(request.id, request.kind, request.ref, {
+          verificationId: request.verificationId, inputRef: request.inputRef, inputRevision: request.inputRevision,
+        }, { forceFull: request.forceFull === true })
+        if (!result.ok) throw new Error(result.message)
+        return Promise.resolve({ source: result.source, body: result.body, truncated: result.truncated, totalBytes: result.totalBytes })
+      }
+      const root = createRoot(document.getElementById('root')!)
+      await act(async () => { root.render(<WorkBoard locale="en" items={[view]} pending={[]} onAccept={vi.fn()} onReject={vi.fn()} onAnswer={vi.fn()} onResume={vi.fn()} onRead={read} />); await Promise.resolve(); await Promise.resolve() })
+      const preview = document.querySelector('[data-evidence-body="evidence:big-log"]')?.textContent ?? ''
+      expect(preview).not.toContain(tail)
+      expect(preview.length).toBeLessThan(70_000)
+      expect(preview).toContain('[truncated]')
+      await act(async () => { buttonIncluding('View full content')?.click(); await Promise.resolve(); await Promise.resolve() })
+      const shown = document.querySelector('[data-evidence-body="evidence:big-log"]')?.textContent ?? ''
+      expect(shown.endsWith(tail)).toBe(true)
+      expect(buttonIncluding('View full content')).toBeUndefined()
+      await act(async () => root.unmount())
+    } finally {
+      rmSync(project, { recursive: true, force: true })
+      rmSync(home, { recursive: true, force: true })
+    }
+  })
+
+  it('does not mistake UTF-8 byte counts for a truncated short Chinese source', async () => {
+    const body = '验收通过，证据完整。'
+    const row: WorkBoardItem = {
+      ...item,
+      verification: {
+        id: 'v-3', verdict: 'accept', subjectKey: 'subject-key-long', inputRef: 'in-4', inputRevision: 4,
+        checks: [{ requirementRef: 'r1', verdict: 'pass', evidenceRefs: ['log-1'] }],
+      },
+    }
+    const onRead = async () => ({ source: 'evidence:log-1', body, truncated: false, totalBytes: Buffer.byteLength(body) })
+    const root = createRoot(document.getElementById('root')!)
+    await act(async () => { root.render(<WorkBoard locale="zh" items={[row]} pending={[]} onAccept={vi.fn()} onReject={vi.fn()} onAnswer={vi.fn()} onResume={vi.fn()} onRead={onRead} />); await Promise.resolve(); await Promise.resolve() })
+    expect(document.querySelector('[data-evidence-body="evidence:log-1"]')?.textContent).toBe(body)
+    expect(buttonIncluding('查看全文')).toBeUndefined()
+    await act(async () => root.unmount())
+  })
+
+  it('keeps a 64KiB preview when the server reports truncated false and expands the unmarked full body', async () => {
+    const tail = 'END_MARK_64'
+    const body = longBody('HEAD64_', tail)
+    const checks = [{ requirementRef: 'r1', verdict: 'pass', evidenceRefs: ['log-1'] }]
+    const row: WorkBoardItem = {
+      ...item,
+      verification: { id: 'v-3', verdict: 'accept', subjectKey: 'subject-key-long', inputRef: 'in-4', inputRevision: 4, checks },
+    }
+    const calls: boolean[] = []
+    const onRead = (request: WorkReadRequest) => {
+      calls.push(request.forceFull === true)
+      if (request.forceFull === true) return Promise.resolve({ source: 'evidence:log-1', body })
+      return Promise.resolve({ source: 'evidence:log-1', body, truncated: false, totalBytes: body.length })
+    }
+    const root = createRoot(document.getElementById('root')!)
+    await act(async () => { root.render(<WorkBoard locale="en" items={[row]} pending={[]} onAccept={vi.fn()} onReject={vi.fn()} onAnswer={vi.fn()} onResume={vi.fn()} onRead={onRead} />); await Promise.resolve(); await Promise.resolve() })
+    const preview = document.querySelector('[data-evidence-body="evidence:log-1"]')?.textContent ?? ''
+    expect(preview.startsWith('HEAD64_')).toBe(true)
+    expect(preview).not.toContain(tail)
+    expect(preview).toContain('[truncated]')
+    expect(calls).toEqual([false])
+    await act(async () => { buttonIncluding('View full content')?.click(); await Promise.resolve() })
+    const shown = document.querySelector('[data-evidence-body="evidence:log-1"]')?.textContent ?? ''
+    expect(shown).toContain(tail)
+    expect(shown).not.toContain('[truncated]')
+    expect(calls).toEqual([false, true])
+    await act(async () => root.unmount())
+  })
+
+  it('retries a failed preview without reloading the board', async () => {
+    const row: WorkBoardItem = {
+      ...item,
+      verification: {
+        id: 'v-3', verdict: 'accept', subjectKey: 'subject-key-long', inputRef: 'in-4', inputRevision: 4,
+        checks: [{ requirementRef: 'r1', verdict: 'pass', evidenceRefs: ['log-1'] }],
+      },
+    }
+    let attempts = 0
+    const onRead = async () => {
+      attempts += 1
+      if (attempts === 1) throw new Error('preview temporarily unavailable')
+      return { source: 'evidence:log-1', body: 'PREVIEW_RECOVERED', truncated: false }
+    }
+    const root = createRoot(document.getElementById('root')!)
+    await act(async () => { root.render(<WorkBoard locale="en" items={[row]} pending={[]} onAccept={vi.fn()} onReject={vi.fn()} onAnswer={vi.fn()} onResume={vi.fn()} onRead={onRead} />); await Promise.resolve(); await Promise.resolve() })
+    expect(document.body.textContent).toContain('preview temporarily unavailable')
+    await act(async () => { buttonIncluding('Retry')?.click(); await Promise.resolve() })
+    expect(attempts).toBe(2)
+    expect(document.querySelector('[data-evidence-body="evidence:log-1"]')?.textContent).toBe('PREVIEW_RECOVERED')
+    expect(document.querySelector('[role="alert"]')).toBeNull()
+    await act(async () => root.unmount())
+  })
+
+  it('keeps the preview when a full read fails and shows the tail after retry', async () => {
+    const tail = 'RETRY_TAIL'
+    const body = longBody('KEEP_PREVIEW_', tail)
+    const checks = [{ requirementRef: 'r1', verdict: 'pass', evidenceRefs: ['log-1'] }]
+    const row: WorkBoardItem = {
+      ...item,
+      verification: { id: 'v-3', verdict: 'accept', subjectKey: 'subject-key-long', inputRef: 'in-4', inputRevision: 4, checks },
+    }
+    let fail = true
+    let fullCalls = 0
+    const onRead = (request: WorkReadRequest) => {
+      if (request.forceFull !== true) return Promise.resolve({ source: 'evidence:log-1', body, truncated: false, totalBytes: body.length })
+      fullCalls += 1
+      if (fail) return Promise.reject(new Error('read broke'))
+      return Promise.resolve({ source: 'evidence:log-1', body })
+    }
+    const root = createRoot(document.getElementById('root')!)
+    await act(async () => { root.render(<WorkBoard locale="en" items={[row]} pending={[]} onAccept={vi.fn()} onReject={vi.fn()} onAnswer={vi.fn()} onResume={vi.fn()} onRead={onRead} />); await Promise.resolve(); await Promise.resolve() })
+    expect(document.body.textContent).toContain('KEEP_PREVIEW_')
+    expect(document.body.textContent).not.toContain(tail)
+    await act(async () => { buttonIncluding('View full content')?.click(); await Promise.resolve() })
+    expect(document.body.textContent).toContain('KEEP_PREVIEW_')
+    expect(document.body.textContent).not.toContain(tail)
+    expect(document.body.textContent).toContain('Could not be read: read broke')
+    expect(fullCalls).toBe(1)
+    fail = false
+    await act(async () => { buttonIncluding('Retry')?.click(); await Promise.resolve() })
+    expect(document.body.textContent).toContain(tail)
+    expect(fullCalls).toBe(2)
+    await act(async () => root.unmount())
+  })
+
+  it('does not send a second full read while one is in flight', async () => {
+    const tail = 'LATE_TAIL'
+    const body = longBody('HEAD_KEEP_', tail)
+    const checks = [{ requirementRef: 'r1', verdict: 'pass', evidenceRefs: ['log-1'] }]
+    const row: WorkBoardItem = {
+      ...item,
+      verification: { id: 'v-3', verdict: 'accept', subjectKey: 'subject-key-long', inputRef: 'in-4', inputRevision: 4, checks },
+    }
+    let fullCalls = 0
+    let release: (value: { source: string; body: string }) => void = () => undefined
+    const onRead = (request: WorkReadRequest) => {
+      if (request.forceFull !== true) return Promise.resolve({ source: 'evidence:log-1', body, truncated: false, totalBytes: body.length })
+      fullCalls += 1
+      return new Promise<{ source: string; body: string }>(resolve => { release = resolve })
+    }
+    const root = createRoot(document.getElementById('root')!)
+    await act(async () => { root.render(<WorkBoard locale="en" items={[row]} pending={[]} onAccept={vi.fn()} onReject={vi.fn()} onAnswer={vi.fn()} onResume={vi.fn()} onRead={onRead} />); await Promise.resolve(); await Promise.resolve() })
+    await act(async () => {
+      const open = buttonIncluding('View full content')
+      open?.click()
+      open?.click()
+    })
+    expect(fullCalls).toBe(1)
+    const busy = buttonIncluding('Loading') as HTMLButtonElement | undefined
+    expect(busy?.disabled).toBe(true)
+    expect(document.body.textContent).toContain('HEAD_KEEP_')
+    expect(document.body.textContent).not.toContain(tail)
+    await act(async () => { busy?.click() })
+    expect(fullCalls).toBe(1)
+    await act(async () => { release({ source: 'evidence:log-1', body }); await Promise.resolve() })
+    expect(document.body.textContent).toContain(tail)
+    expect(fullCalls).toBe(1)
+    await act(async () => root.unmount())
+  })
+
+  it('does not apply a pending full read after the input version changes', async () => {
+    const filler = 'd'.repeat(70_000)
+    const checks = [{ requirementRef: 'r1', verdict: 'pass', evidenceRefs: ['log-1'] }]
+    const first: WorkBoardItem = {
+      ...item, revision: 1, inputRef: 'in-1', title: 'Version 1',
+      verification: { id: 'v-old', verdict: 'accept', subjectKey: 'subject-old', inputRef: 'in-1', inputRevision: 1, checks },
+    }
+    const second: WorkBoardItem = {
+      ...first, revision: 2, inputRef: 'in-2', title: 'Version 2',
+      verification: { id: 'v-new', verdict: 'accept', subjectKey: 'subject-new', inputRef: 'in-2', inputRevision: 2, checks },
+    }
+    let resolveFull: ((value: { source: string; body: string }) => void) | undefined
+    const onRead = (request: WorkReadRequest) => {
+      if (request.forceFull === true) return new Promise<{ source: string; body: string }>(resolve => { resolveFull = resolve })
+      const head = request.verificationId === 'v-old' ? 'OLD_PREVIEW_HEAD' : 'NEW_PREVIEW_HEAD'
+      return Promise.resolve({ source: 'evidence:log-1', body: `${head}${filler}`, truncated: false, totalBytes: head.length + filler.length })
+    }
+    const root = createRoot(document.getElementById('root')!)
+    await act(async () => { root.render(<WorkBoard locale="en" items={[first]} pending={[]} onAccept={vi.fn()} onReject={vi.fn()} onAnswer={vi.fn()} onResume={vi.fn()} onRead={onRead} />); await Promise.resolve(); await Promise.resolve() })
+    expect(document.body.textContent).toContain('OLD_PREVIEW_HEAD')
+    await act(async () => { buttonIncluding('View full content')?.click() })
+    expect(buttonIncluding('Loading')).toBeTruthy()
+    await act(async () => { root.render(<WorkBoard locale="en" items={[second]} pending={[]} onAccept={vi.fn()} onReject={vi.fn()} onAnswer={vi.fn()} onResume={vi.fn()} onRead={onRead} />); await Promise.resolve(); await Promise.resolve() })
+    expect(document.body.textContent).toContain('Version 2')
+    expect(document.body.textContent).toContain('NEW_PREVIEW_HEAD')
+    expect(document.body.textContent).not.toContain('OLD_PREVIEW_HEAD')
+    expect(document.body.textContent).not.toContain('OLD_FULL_BODY_MARK')
+    await act(async () => { resolveFull?.({ source: 'evidence:log-1', body: `OLD_FULL_BODY_MARK${filler}` }); await Promise.resolve() })
+    expect(document.body.textContent).not.toContain('OLD_FULL_BODY_MARK')
+    expect(document.body.textContent).toContain('NEW_PREVIEW_HEAD')
+    await act(async () => root.unmount())
+  })
+
+  it('shows localized exclusion reasons inside the current details', async () => {
+    const detailed: WorkBoardItem = {
+      ...item,
+      verification: {
+        id: 'v-3', verdict: 'accept', subjectKey: 'subject-key-long', inputRef: 'in-4', inputRevision: 4,
+        checks: [{ requirementRef: 'goal', verdict: 'pass', evidenceRefs: [] }],
+        exclusions: [
+          { path: 'node_modules', reason: 'ignored directory' },
+          { path: 'tmp/skip.log', reason: 'ignored file' },
+          { path: 'src/vendor', reason: 'symlink:D:/outside/vendor' },
+          { path: 'src/bare-link', reason: 'symlink' },
+        ],
+      },
+    }
+    const root = createRoot(document.getElementById('root')!)
+    await act(async () => root.render(<WorkBoard locale="zh" items={[detailed]} pending={[]} onAccept={vi.fn()} onReject={vi.fn()} onAnswer={vi.fn()} onResume={vi.fn()} />))
+    const details = document.querySelector('details')?.textContent ?? ''
+    expect(details).toContain('范围与证据')
+    expect(details).toContain('未纳入快照')
+    expect(details).toContain('node_modules')
+    expect(details).toContain('忽略的目录')
+    expect(details).toContain('tmp/skip.log')
+    expect(details).toContain('忽略的文件')
+    expect(details).toContain('src/vendor')
+    expect(details).toContain('符号链接 → D:/outside/vendor')
+    expect(details).toContain('src/bare-link')
+    expect(details).toContain('符号链接)')
+    expect(details).not.toContain('ignored directory')
+    expect(details).not.toContain('ignored file')
+    expect(details).not.toContain('symlink')
+    await act(async () => root.unmount())
+  })
+
+  it('loads every listed source on mount without an 8-item cap or opening details', async () => {
+    const refs = Array.from({ length: 9 }, (_, index) => `log-${index}`)
+    const calls: string[] = []
+    const onRead = (request: WorkReadRequest) => {
+      calls.push(`${request.kind}:${request.ref}:${request.forceFull === true}`)
+      return Promise.resolve({ source: request.ref, body: `BODY_${request.ref}` })
+    }
+    const row: WorkBoardItem = {
+      ...item,
+      verification: {
+        id: 'v-3', verdict: 'accept', subjectKey: 'subject-key-long', inputRef: 'in-4', inputRevision: 4,
+        checks: [{ requirementRef: 'goal', verdict: 'pass', evidenceRefs: refs }],
+      },
+    }
+    const root = createRoot(document.getElementById('root')!)
+    await act(async () => { root.render(<WorkBoard locale="en" items={[row]} pending={[]} onAccept={vi.fn()} onReject={vi.fn()} onAnswer={vi.fn()} onResume={vi.fn()} onRead={onRead} />); await Promise.resolve(); await Promise.resolve() })
+    expect(calls).toEqual(refs.map(ref => `evidence:${ref}:false`))
+    for (const ref of refs) expect(document.body.textContent).toContain(`BODY_${ref}`)
+    expect((document.querySelector('details') as HTMLDetailsElement | null)?.open).toBe(false)
     await act(async () => root.unmount())
   })
 })

@@ -1,5 +1,5 @@
 import type { BoardView, PendingView, TaskRecord, TicketView } from './contracts.ts'
-import { lookRequest } from './work-board.ts'
+import { acceptPayload, lookRequest, parseWorkLook } from './work-board.ts'
 
 /** How many finished tasks the collapsed group lists once opened. */
 export const FINISHED_SHOWN = 50
@@ -55,18 +55,27 @@ export function groupBoard(view: BoardView): BoardGroups {
  */
 export function headerBoardCounts(view: BoardView | undefined): { readonly liveCount: number; readonly waitingCount: number } {
   if (!view) return { liveCount: 0, waitingCount: 0 }
-  const base = groupBoard(view)
   const work = view.work ?? []
+  const pending = view.pending.filter(row => {
+    const request = parseWorkLook(row)
+    if (!request) return true
+    const item = work.find(item => item.id === request.changeId)
+    if (!item || item.status === 'done' || item.status === 'cancelled') return false
+    const current = lookRequest(item, [row])
+    return typeof current === 'object' && current.id === row.id
+  })
+  const base = groupBoard({ ...view, pending })
   if (work.length === 0) return { liveCount: base.liveCount, waitingCount: base.waitingCount }
   let workLive = 0
   let workExtraWaiting = 0
   for (const item of work) {
     if (item.status === 'done' || item.status === 'cancelled') continue
     workLive += 1
-    const look = lookRequest(item, view.pending)
-    // If `look` is a bound PendingGlance object, `base.waitingCount` already counted it via `view.pending`.
+    const look = lookRequest(item, pending)
+    // A current request is already counted in pending. An independent current
+    // action still counts when an older oversight request is stale or withdrawn.
     const coveredByPending = typeof look === 'object' && look !== null
-    if (!coveredByPending && item.humanAction && !item.oversight?.requested) workExtraWaiting += 1
+    if (!coveredByPending && acceptPayload(item)) workExtraWaiting += 1
   }
   return {
     liveCount: base.liveCount + workLive,

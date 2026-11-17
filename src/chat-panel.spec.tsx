@@ -573,9 +573,16 @@ describe('ChatPanel activity and notice cards', () => {
     await act(async () => { gear.click() })
     await act(async () => { await Promise.resolve() })
 
-    const drawer = document.querySelector('[role="dialog"]')!
-    expect(drawer.querySelector('.dsh-dot-nav-badge')?.textContent).toBe('1')
-    expect(drawer.querySelector('.dsh-dot-settings-title')?.textContent).toBe('设置')
+    // One docked drawer, no backdrop: the composer stays reachable beside it.
+    const drawer = document.querySelector('aside.dsh-dot-drawer')!
+    expect(document.querySelector('[role="dialog"]')).toBeNull()
+    expect(document.querySelector('.dsh-dot-chatcol .dsh-dot-input')).not.toBeNull()
+    expect(gear.querySelector('.dsh-dot-gear-dot')).not.toBeNull()
+    const region = () => drawer.querySelector('[role="region"]')!.getAttribute('aria-label')
+    const navButtons = [...drawer.querySelectorAll<HTMLButtonElement>('.dsh-dot-drawer-tabs button')]
+    expect(navButtons.map(node => node.querySelector('.dsh-dot-nav-label')?.textContent)).toEqual(['任务', '设置', '人设', '上下文', '轨迹'])
+    expect(navButtons[1]!.querySelector('.dsh-dot-nav-badge')?.textContent).toBe('1')
+    expect(region()).toBe('设置')
 
     // Trigger a save and confirm the non-jumping header status appears.
     const trackedTab = [...drawer.querySelectorAll<HTMLButtonElement>('[role="tab"]')].find(node => node.textContent === '所有会话')!
@@ -583,21 +590,37 @@ describe('ChatPanel activity and notice cards', () => {
     await act(async () => { await Promise.resolve() })
     expect(drawer.querySelector('.dsh-dot-settings-status')?.textContent).toContain('已保存')
 
-    // Switch across the other 3 pages and check header titles.
-    const navButtons = [...drawer.querySelectorAll<HTMLButtonElement>('.dsh-dot-settings-nav button')]
-    await act(async () => { navButtons[1]!.click() })
-    expect(drawer.querySelector('.dsh-dot-settings-title')?.textContent).toBe('人设与约定')
+    // Switch across the other pages, tasks included, inside the same drawer.
+    await act(async () => { navButtons[2]!.click() })
+    expect(region()).toBe('人设与约定')
     expect(drawer.querySelector('.dsh-dot-settings-status')).toBeNull()
 
-    await act(async () => { navButtons[2]!.click() })
-    expect(drawer.querySelector('.dsh-dot-settings-title')?.textContent).toBe('上下文用量')
-
     await act(async () => { navButtons[3]!.click() })
-    expect(drawer.querySelector('.dsh-dot-settings-title')?.textContent).toBe('运行轨迹')
+    expect(region()).toBe('上下文用量')
 
-    const close = drawer.querySelector<HTMLButtonElement>('button[aria-label="关闭设置"]')!
+    await act(async () => { navButtons[4]!.click() })
+    expect(region()).toBe('运行轨迹')
+
+    await act(async () => { navButtons[0]!.click() })
+    expect(region()).toBe('任务')
+    expect(drawer.querySelector('.dsh-dot-filters')).not.toBeNull()
+    expect(document.querySelectorAll('aside.dsh-dot-drawer')).toHaveLength(1)
+
+    // The gear closes the drawer only from a settings page; from tasks it switches to settings.
+    await act(async () => { gear.click() })
+    expect(region()).toBe('设置')
+
+    const widen = drawer.querySelector<HTMLButtonElement>('button[aria-label="加宽抽屉"]')!
+    await act(async () => { widen.click() })
+    expect(drawer.hasAttribute('data-wide')).toBe(true)
+
+    await act(async () => { document.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'Escape' })) })
+    expect(document.querySelector('aside.dsh-dot-drawer')).toBeNull()
+
+    await act(async () => { gear.click() })
+    const close = document.querySelector<HTMLButtonElement>('aside.dsh-dot-drawer button[aria-label="关闭抽屉"]')!
     await act(async () => { close.click() })
-    expect(document.querySelector('[role="dialog"]')).toBeNull()
+    expect(document.querySelector('aside.dsh-dot-drawer')).toBeNull()
 
     await act(async () => { root.unmount() })
   })

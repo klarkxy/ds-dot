@@ -31,12 +31,24 @@ export interface BoardActions {
   readonly onPriority: (id: string, priority: TicketPriority) => void
 }
 
+/** Which part of the board the drawer shows: everything, or one of its three tabs. */
+export type BoardFilter = 'all' | 'waiting' | 'active' | 'watch'
+
+/** Items under each filter tab, from the same grouping the board draws. */
+export function boardCounts(view: BoardView | undefined): Record<Exclude<BoardFilter, 'all'>, number> {
+  if (!view) return { waiting: 0, active: 0, watch: 0 }
+  const groups = groupBoard(view)
+  return { waiting: groups.waitingCount, active: groups.active.length + groups.todo.length, watch: groups.watched.length + view.schedules.length }
+}
+
 export interface BoardProps extends BoardActions {
   readonly locale: CopyLocale
   readonly view: BoardView | undefined
   readonly error?: string
   /** The last board action that failed, shown above the groups. */
   readonly notice?: string
+  /** Defaults to 'all'; finished tasks only show there. */
+  readonly filter?: BoardFilter
   readonly onOpen: (sessionId: string) => void
   readonly onRetry: () => void
   readonly onRemoveSchedule: (id: string) => void
@@ -204,7 +216,7 @@ function GroupTitle({ title, count }: { title: string; count?: number }) {
  * recently finished tasks, watched sessions and Dorothy's reminders. Pure
  * render over a board snapshot; every action goes out through a callback.
  */
-export function Board({ locale, view, error, notice, onOpen, onRetry, onRemoveSchedule, ...actions }: BoardProps) {
+export function Board({ locale, view, error, notice, filter = 'all', onOpen, onRetry, onRemoveSchedule, ...actions }: BoardProps) {
   const [expanded, setExpanded] = useState<string>()
   const [showFinished, setShowFinished] = useState(false)
   if (view === undefined) {
@@ -231,14 +243,18 @@ export function Board({ locale, view, error, notice, onOpen, onRetry, onRemoveSc
       onOpen={onOpen}
     />
   )
-  const empty = groups.liveCount === 0 && groups.finished.length === 0 && view.pending.length === 0 && view.schedules.length === 0
+  const shows = (section: BoardFilter) => filter === 'all' || filter === section
+  const counts = boardCounts(view)
+  const empty = filter === 'all'
+    ? groups.liveCount === 0 && groups.finished.length === 0 && view.pending.length === 0 && view.schedules.length === 0
+    : counts[filter] === 0 && !(filter === 'watch' && groups.watchedArchived > 0)
   return (
     <div className={BOARD_ROOT}>
       <div className="dsh-ui-stack">
         {error !== undefined ? <div className="dsh-ui-row" role="alert"><span className="dsh-ui-error">{t(locale, 'loadFailed')}: {error}</span><Button variant="ghost" onClick={onRetry}>{t(locale, 'retry')}</Button></div> : null}
         {notice ? <div className="dsh-ui-error" role="alert">{t(locale, 'taskActionFailed')}{notice}</div> : null}
         {empty ? <p className="dsh-ui-hint">{t(locale, 'empty')}</p> : null}
-        {groups.waitingCount > 0 ? (
+        {shows('waiting') && groups.waitingCount > 0 ? (
           <section className="dsh-ui-stack" aria-label={t(locale, 'boardWaiting')}>
             <GroupTitle title={t(locale, 'boardWaiting')} count={groups.waitingCount} />
             {groups.requests.map(item => (
@@ -253,19 +269,19 @@ export function Board({ locale, view, error, notice, onOpen, onRetry, onRemoveSc
             {groups.drafts.map(row)}
           </section>
         ) : null}
-        {groups.active.length > 0 ? (
+        {shows('active') && groups.active.length > 0 ? (
           <section className="dsh-ui-stack" aria-label={t(locale, 'boardActive')}>
             <GroupTitle title={t(locale, 'boardActive')} count={groups.active.length} />
             {groups.active.map(row)}
           </section>
         ) : null}
-        {groups.todo.length > 0 ? (
+        {shows('active') && groups.todo.length > 0 ? (
           <section className="dsh-ui-stack" aria-label={t(locale, 'boardTodo')}>
             <GroupTitle title={t(locale, 'boardTodo')} count={groups.todo.length} />
             {groups.todo.map(row)}
           </section>
         ) : null}
-        {groups.finished.length > 0 ? (
+        {filter === 'all' && groups.finished.length > 0 ? (
           <section className="dsh-ui-stack" aria-label={t(locale, 'boardDone')}>
             <Button
               variant="ghost"
@@ -280,7 +296,7 @@ export function Board({ locale, view, error, notice, onOpen, onRetry, onRemoveSc
             {showFinished ? groups.finished.slice(0, FINISHED_SHOWN).map(row) : null}
           </section>
         ) : null}
-        {groups.watched.length > 0 || groups.watchedArchived > 0 ? (
+        {shows('watch') && (groups.watched.length > 0 || groups.watchedArchived > 0) ? (
           <section className="dsh-ui-stack" aria-label={t(locale, 'boardWatched')}>
             <GroupTitle title={t(locale, 'boardWatched')} count={groups.watched.length} />
             {groups.watched.map(task => (
@@ -298,7 +314,7 @@ export function Board({ locale, view, error, notice, onOpen, onRetry, onRemoveSc
             {groups.watchedArchived > 0 ? <span className="dsh-ui-hint">{t(locale, 'archived')} · {groups.watchedArchived}</span> : null}
           </section>
         ) : null}
-        {view.schedules.length > 0 ? (
+        {shows('watch') && view.schedules.length > 0 ? (
           <section className="dsh-ui-stack" aria-label={t(locale, 'reminders')}>
             <span className="dsh-ui-meta">{t(locale, 'reminders')}</span>
             {view.schedules.map(item => (

@@ -1,7 +1,7 @@
 import { act } from 'react'
 import { JSDOM } from 'jsdom'
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
-import { Board, type BoardProps } from './board.tsx'
+import { Board, boardCounts, type BoardProps } from './board.tsx'
 import type { BoardView, TicketStatus, TicketView } from './contracts.ts'
 import { t } from './ui-copy.ts'
 
@@ -55,6 +55,22 @@ const click = (element: Element) => act(async () => { (element as HTMLElement).c
 const named = (scope: ParentNode, text: string) => buttons(scope).find(button => button.textContent === text)!
 
 describe('Board', () => {
+  it('shows only the sections of the chosen drawer filter', async () => {
+    expect(boardCounts(full)).toEqual({ waiting: 3, active: 2, watch: 2 })
+    const waiting = await render(full, { filter: 'waiting' })
+    expect(labels()).toEqual(['Needs you'])
+    await act(async () => waiting.root.unmount())
+    const active = await render(full, { filter: 'active' })
+    expect(labels()).toEqual(['In progress', 'To do'])
+    await act(async () => active.root.unmount())
+    const watch = await render(full, { filter: 'watch' })
+    expect(labels()).toEqual(['Watched sessions', 'Reminders'])
+    await act(async () => watch.root.unmount())
+    const empty = await render({ ...full, tasks: [], schedules: [] }, { filter: 'watch' })
+    expect(document.body.textContent).toContain('No tasks yet.')
+    await act(async () => empty.root.unmount())
+  })
+
   it('keeps the last snapshot visible and offers retry after a later read fails', async () => {
     const { root, props } = await render(full, { error: 'offline' })
     expect(document.body.textContent).toContain('offline')

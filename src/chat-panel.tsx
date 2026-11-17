@@ -6,12 +6,11 @@
  * the host feed and redraws on every change.
  */
 import {
-  Button, DisclosureRow, IconCheckOutlineRegular, IconChecklistOutlineRegular, IconCloseOutlineRegular,
-  IconDataOutlineRegular, IconSettingsOutlineRegular, IconUserOutlineRegular,
+  Button, DisclosureRow, IconCheckOutlineRegular, IconCloseOutlineRegular,
   MarkdownText, StateDot, Tag, TextShimmer, UserMessageBubble, type MarkdownLabels, type StateDotState, type TagTone,
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ChangeEvent, type ClipboardEvent, type ComponentType, type KeyboardEvent, type ReactNode } from 'react'
-import { Board, type BoardActions } from './board.tsx'
+import { Board, boardCounts, type BoardActions, type BoardFilter } from './board.tsx'
 import { groupBoard, sessionLookup } from './board-groups.ts'
 import { filterVisibleChat } from './chat-filter.ts'
 import { formatToolDetail, parseNotice, permissionLabel, resolveSessionBadge, summarizeNotice, summarizeToolCall, summarizeToolGroup, type NoticeEntry, type SessionBadge, type TaskLookup } from './chat-format.ts'
@@ -152,11 +151,34 @@ export function rowsOf(items: readonly ChatItem[]): Row[] {
   return rows
 }
 
-type SettingsTab = 'settings' | 'persona' | 'context' | 'trajectory'
+export type DrawerTab = 'tasks' | 'settings' | 'persona' | 'context' | 'trajectory'
+const CONFIG_TABS: ReadonlySet<DrawerTab> = new Set(['settings', 'persona', 'context', 'trajectory'])
 
-function SettingsDrawer({ locale, api, settings, tab, trajectoryRev, running, onTab, onSaved, onClose, renderFactorySlot }: { locale: CopyLocale; api: ChatApi; settings?: DotSettings; tab: SettingsTab; trajectoryRev?: number; running: boolean; onTab: (tab: SettingsTab) => void; onSaved: (next: DotSettings) => void; onClose: () => void; renderFactorySlot?: RenderFactorySlot }) {
+interface DrawerProps {
+  readonly locale: CopyLocale
+  readonly api: ChatApi
+  readonly tab: DrawerTab
+  readonly wide: boolean
+  readonly settings?: DotSettings
+  readonly trajectoryRev?: number
+  readonly running: boolean
+  readonly waiting: number
+  readonly proposalCount: number
+  readonly tasks: ReactNode
+  readonly renderFactorySlot?: RenderFactorySlot
+  readonly onTab: (tab: DrawerTab) => void
+  readonly onWide: () => void
+  readonly onSaved: (next: DotSettings) => void
+  readonly onProposalCount: (count: number) => void
+  readonly onClose: () => void
+}
+
+/**
+ * One drawer docked beside the chat for the board and every settings page.
+ * It has no backdrop, so the conversation and the composer stay usable while it is open.
+ */
+function WorkDrawer({ locale, api, tab, wide, settings, trajectoryRev, running, waiting, proposalCount, tasks, renderFactorySlot, onTab, onWide, onSaved, onProposalCount, onClose }: DrawerProps) {
   const [saveNotice, setSaveNotice] = useState<SaveNotice>()
-  const [proposalCount, setProposalCount] = useState(0)
   useEffect(() => {
     const close = (event: globalThis.KeyboardEvent) => { if (event.key === 'Escape' && !event.defaultPrevented) onClose() }
     document.addEventListener('keydown', close)
@@ -168,73 +190,105 @@ function SettingsDrawer({ locale, api, settings, tab, trajectoryRev, running, on
     const timer = setTimeout(() => setSaveNotice(undefined), 2200)
     return () => clearTimeout(timer)
   }, [saveNotice])
-  useEffect(() => {
-    const life = new AbortController()
-    api.settingProposals(life.signal).then(rows => { if (!life.signal.aborted) setProposalCount(rows.length) }, () => {})
-    return () => life.abort()
-  }, [api])
-  const items: readonly { value: SettingsTab; label: string; title: string; icon: ReactNode }[] = [
-    { value: 'settings', label: t(locale, 'settings'), title: t(locale, 'settings'), icon: <IconSettingsOutlineRegular size={14} /> },
-    { value: 'persona', label: t(locale, 'tabPersona'), title: t(locale, 'personaTitle'), icon: <IconUserOutlineRegular size={14} /> },
-    { value: 'context', label: t(locale, 'tabContext'), title: t(locale, 'ctxTitle'), icon: <IconDataOutlineRegular size={14} /> },
-    { value: 'trajectory', label: t(locale, 'viewTrajectory'), title: t(locale, 'trTitle'), icon: <IconChecklistOutlineRegular size={14} /> },
+  const items: readonly { value: DrawerTab; label: string; title: string; badge: number }[] = [
+    { value: 'tasks', label: t(locale, 'tasks'), title: t(locale, 'tasks'), badge: waiting },
+    { value: 'settings', label: t(locale, 'settings'), title: t(locale, 'settings'), badge: proposalCount },
+    { value: 'persona', label: t(locale, 'tabPersona'), title: t(locale, 'personaTitle'), badge: 0 },
+    { value: 'context', label: t(locale, 'tabContext'), title: t(locale, 'ctxTitle'), badge: 0 },
+    { value: 'trajectory', label: t(locale, 'viewTrajectory'), title: t(locale, 'trTitle'), badge: 0 },
   ]
   const activeItem = items.find(item => item.value === tab) ?? items[0]!
   return (
-    <div className="dsh-dot-settings-layer">
-      <button type="button" tabIndex={-1} className="dsh-dot-settings-backdrop" aria-label={t(locale, 'closeSettings')} onClick={onClose} />
-      <section className="dsh-dot-settings-drawer" role="dialog" aria-label={t(locale, 'settings')}>
-        <nav className="dsh-dot-settings-nav" aria-label={t(locale, 'tabsLabel')}>
-          <div className="dsh-dot-settings-brand">{t(locale, 'dot')}</div>
+    <aside className="dsh-dot-drawer" data-wide={wide ? '' : undefined} aria-label={t(locale, 'drawerLabel')}>
+      <header className="dsh-dot-drawer-head">
+        <nav className="dsh-dot-drawer-tabs" aria-label={t(locale, 'drawerTabs')}>
           {items.map(item => (
             <button
               key={item.value}
               type="button"
               aria-pressed={tab === item.value}
-              aria-controls={`dsh-dot-settings-panel-${item.value}`}
+              aria-controls={`dsh-dot-drawer-panel-${item.value}`}
               onClick={() => onTab(item.value)}
             >
-              {item.icon}
               <span className="dsh-dot-nav-label">{item.label}</span>
-              {item.value === 'settings' && proposalCount > 0 ? <span className="dsh-dot-nav-badge">{proposalCount}</span> : null}
+              {item.badge > 0 ? <span className="dsh-dot-nav-badge">{item.badge}</span> : null}
             </button>
           ))}
         </nav>
-        <div className="dsh-dot-settings-right">
-          <header className="dsh-dot-settings-head">
-            <h2 className="dsh-dot-settings-title">{activeItem.title}</h2>
-            <span className="dsh-dot-spacer" />
-            {saveNotice?.kind === 'saved' ? (
-              <span className="dsh-dot-settings-status" role="status">
-                <IconCheckOutlineRegular size={13} />
-                {t(locale, 'saved')}
-              </span>
-            ) : null}
-            {saveNotice?.kind === 'error' ? (
-              <span className="dsh-dot-settings-status dsh-dot-settings-status--error" role="alert">
-                {t(locale, 'saveFailed')}{saveNotice.message}
-              </span>
-            ) : null}
-            <Button variant="ghost" size="sm" icon={<IconCloseOutlineRegular size={15} />} aria-label={t(locale, 'closeSettings')} onClick={onClose} />
-          </header>
-          <div className="dsh-dot-settings-scroll">
-            <div className="dsh-dot-settings" data-tab={tab} id={`dsh-dot-settings-panel-${tab}`} role="region" aria-label={activeItem.title}>
-              {tab === 'settings'
-                ? <SettingsPanel locale={locale} api={api} {...settings ? { settings } : {}} onSaved={onSaved} onStatusChange={setSaveNotice} onProposalCount={setProposalCount} {...renderFactorySlot ? { renderFactorySlot } : {}} />
-                : tab === 'persona'
-                  ? <PersonaPanel locale={locale} api={api} {...settings ? { settings } : {}} onSaved={onSaved} onStatusChange={setSaveNotice} />
-                  : tab === 'context'
-                    ? <ContextPanel locale={locale} api={api} running={running} />
-                    : <TrajectoryPanel locale={locale} api={api} {...trajectoryRev === undefined ? {} : { rev: trajectoryRev }} running={running} />}
-            </div>
-          </div>
+        <span className="dsh-dot-spacer" />
+        {saveNotice?.kind === 'saved' ? (
+          <span className="dsh-dot-settings-status" role="status">
+            <IconCheckOutlineRegular size={13} />
+            {t(locale, 'saved')}
+          </span>
+        ) : null}
+        {saveNotice?.kind === 'error' ? (
+          <span className="dsh-dot-settings-status dsh-dot-settings-status--error" role="alert" title={saveNotice.message}>
+            {t(locale, 'saveFailed')}{saveNotice.message}
+          </span>
+        ) : null}
+        <Button variant="ghost" size="sm" className="dsh-dot-drawer-widen" icon={wide ? <NarrowGlyph /> : <WidenGlyph />} aria-label={t(locale, wide ? 'narrowDrawer' : 'widenDrawer')} title={t(locale, wide ? 'narrowDrawer' : 'widenDrawer')} aria-pressed={wide} onClick={onWide} />
+        <Button variant="ghost" size="sm" icon={<IconCloseOutlineRegular size={15} />} aria-label={t(locale, 'closeDrawer')} title={t(locale, 'closeDrawer')} onClick={onClose} />
+      </header>
+      <div className="dsh-dot-settings-scroll">
+        <div className="dsh-dot-settings" data-tab={tab} id={`dsh-dot-drawer-panel-${tab}`} role="region" aria-label={activeItem.title}>
+          {tab === 'tasks'
+            ? tasks
+            : tab === 'settings'
+              ? <SettingsPanel locale={locale} api={api} {...settings ? { settings } : {}} onSaved={onSaved} onStatusChange={setSaveNotice} onProposalCount={onProposalCount} {...renderFactorySlot ? { renderFactorySlot } : {}} />
+              : tab === 'persona'
+                ? <PersonaPanel locale={locale} api={api} {...settings ? { settings } : {}} onSaved={onSaved} onStatusChange={setSaveNotice} />
+                : tab === 'context'
+                  ? <ContextPanel locale={locale} api={api} running={running} />
+                  : <TrajectoryPanel locale={locale} api={api} {...trajectoryRev === undefined ? {} : { rev: trajectoryRev }} running={running} />}
         </div>
-      </section>
+      </div>
+    </aside>
+  )
+}
+
+/** The board tab: a filter row, the work changes waiting on the human, then the ticket board. */
+function TasksTab({ locale, view, workApi, boardError, boardNotice, onOpen, onRetry, onRemoveSchedule, actions }: {
+  locale: CopyLocale; view?: BoardView; workApi?: WorkApi; boardError?: string; boardNotice?: string
+  onOpen: (sessionId: string) => void; onRetry: () => void; onRemoveSchedule: (id: string) => void; actions: BoardActions
+}) {
+  const [filter, setFilter] = useState<BoardFilter>('all')
+  const counts = boardCounts(view)
+  const filters: readonly { value: BoardFilter; label: string }[] = [
+    { value: 'all', label: t(locale, 'filterAll') },
+    { value: 'waiting', label: `${t(locale, 'filterWaiting')} (${counts.waiting})` },
+    { value: 'active', label: `${t(locale, 'filterActive')} (${counts.active})` },
+    { value: 'watch', label: `${t(locale, 'filterWatch')} (${counts.watch})` },
+  ]
+  return (
+    <div className="dsh-dot-tasks">
+      <div className="dsh-dot-filters" role="group" aria-label={t(locale, 'tasks')}>
+        {filters.map(item => <button key={item.value} type="button" aria-pressed={filter === item.value} onClick={() => setFilter(item.value)}>{item.label}</button>)}
+      </div>
+      {workApi && filter !== 'watch' ? <WorkBoardPanel locale={locale} api={workApi} pending={view?.pending ?? NO_PENDING} /> : null}
+      <Board locale={locale} view={view} filter={filter} {...boardError === undefined ? {} : { error: boardError }} {...boardNotice === undefined ? {} : { notice: boardNotice }} onOpen={onOpen} onRetry={onRetry} onRemoveSchedule={onRemoveSchedule} {...actions} />
     </div>
   )
 }
 
+/** Live context occupancy for the header pill; read again whenever the log changes or a turn ends. */
+function useContextUse(api: ChatApi, rev: number | undefined, running: boolean): { used: number; window: number } | undefined {
+  const [use, setUse] = useState<{ used: number; window: number }>()
+  useEffect(() => {
+    if (rev === undefined || running) return
+    const life = new AbortController()
+    api.context(life.signal).then(view => {
+      if (life.signal.aborted) return
+      setUse(view.usedTokens !== undefined && view.contextWindow ? { used: view.usedTokens, window: view.contextWindow } : undefined)
+    }, () => {})
+    return () => life.abort()
+  }, [api, rev, running])
+  return use
+}
 
+function compactTokens(value: number): string {
+  return value >= 1000 ? `${(value / 1000).toFixed(value >= 100_000 ? 0 : 1)}K` : String(value)
+}
 export interface ChatPanelProps {
   readonly locale: CopyLocale
   readonly api: ChatApi
@@ -274,10 +328,17 @@ export function ChatPanel({ locale, api, Card, onOpenSession, renderFactorySlot 
   const streaming = snapshot?.streaming ?? ''
   const [echoes, setEchoes] = useState<{ text: string; at: number; images: readonly ChatImage[] }[]>([])
   const [sendError, setSendError] = useState<string>()
-  const [boardOpen, setBoardOpen] = useState(false)
-  const [settingsOpen, setSettingsOpen] = useState(false)
-  const [settingsTab, setSettingsTab] = useState<SettingsTab>('settings')
+  const [drawerTab, setDrawerTab] = useState<DrawerTab | null>(null)
+  const [drawerWide, setDrawerWide] = useState(false)
   const [settings, setSettings] = useSettings(api)
+  const [proposalCount, setProposalCount] = useState(0)
+  useEffect(() => {
+    const life = new AbortController()
+    api.settingProposals(life.signal).then(rows => { if (!life.signal.aborted) setProposalCount(rows.length) }, () => {})
+    return () => life.abort()
+  }, [api])
+  const closeDrawer = useCallback(() => setDrawerTab(null), [])
+  const configOpen = drawerTab !== null && CONFIG_TABS.has(drawerTab)
   const labels = useMemo<MarkdownLabels>(() => ({ code: { copyLabel: locale === 'zh' ? '复制' : 'Copy', copiedLabel: locale === 'zh' ? '已复制' : 'Copied' }, footnotes: locale === 'zh' ? '脚注' : 'Footnotes' }), [locale])
 
   // A local echo leaves once the log holds a matching message sent after it.
@@ -326,6 +387,8 @@ export function ChatPanel({ locale, api, Card, onOpenSession, renderFactorySlot 
   const tasksBySession = useMemo<TaskLookup>(() => sessionLookup(board), [board])
   const lastTool = rows.at(-1)?.kind === 'tools'
   const showThinking = running && !preparingCard && !lastTool && !filtered.silentTail
+  const contextUse = useContextUse(api, snapshot?.itemsRev, running)
+  const contextPct = contextUse ? Math.min(100, (contextUse.used / contextUse.window) * 100) : undefined
 
   return (
     <div className={CHAT_ROOT}>
@@ -336,15 +399,22 @@ export function ChatPanel({ locale, api, Card, onOpenSession, renderFactorySlot 
           <span className="dsh-dot-status" data-running={running ? '' : undefined}>{running ? t(locale, 'working') : t(locale, 'online')}</span>
         </div>
         <span className="dsh-dot-spacer" />
-        <Button variant="ghost" size="sm" aria-expanded={boardOpen} onClick={() => setBoardOpen(open => !open)}>
+        {contextUse && contextPct !== undefined ? (
+          <Button variant="ghost" size="sm" className="dsh-dot-ctx-pill" aria-pressed={drawerTab === 'context'} title={t(locale, 'ctxPill').replace('{pct}', `${contextPct.toFixed(1)}%`)} onClick={() => setDrawerTab(current => current === 'context' ? null : 'context')}>
+            <span className="dsh-dot-ctx-track" aria-hidden="true"><span style={{ width: `${contextPct}%` }} /></span>
+            <span className="dsh-dot-ctx-num">{compactTokens(contextUse.used)}</span>
+          </Button>
+        ) : null}
+        <Button variant="ghost" size="sm" aria-expanded={drawerTab === 'tasks'} aria-pressed={drawerTab === 'tasks'} onClick={() => setDrawerTab(current => current === 'tasks' ? null : 'tasks')}>
           {t(locale, 'tasks')} {live}{waiting > 0 ? <span className="dsh-dot-badge">{waiting}</span> : null}
         </Button>
-        <Button variant="ghost" size="sm" aria-label={t(locale, 'settings')} aria-pressed={settingsOpen} title={t(locale, 'settings')} onClick={() => setSettingsOpen(open => !open)}>
+        <Button variant="ghost" size="sm" className="dsh-dot-gear" aria-label={t(locale, 'settings')} aria-pressed={configOpen} title={t(locale, 'settings')} onClick={() => setDrawerTab(configOpen ? null : 'settings')}>
           <GearGlyph />
+          {proposalCount > 0 ? <span className="dsh-dot-gear-dot" aria-hidden="true" /> : null}
         </Button>
       </header>
-      <div className="dsh-dot-main">
-      {boardOpen ? <div className="dsh-dot-boardwrap">{workApi ? <WorkBoardPanel locale={locale} api={workApi} pending={board?.pending ?? NO_PENDING} /> : null}<Board locale={locale} view={board} {...boardError === undefined ? {} : { error: boardError }} {...boardNotice === undefined ? {} : { notice: boardNotice }} onOpen={onOpenSession} onRetry={refreshBoard} onRemoveSchedule={removeSchedule} {...boardActions} /></div> : null}
+      <div className="dsh-dot-stage">
+      <section className="dsh-dot-chatcol">
       <div className="dsh-dot-scroll" ref={scroller} onScroll={onScroll}>
         <div className="dsh-dot-log">
           {snapshot === undefined && error === undefined ? <div className="dsh-dot-center"><DotAvatar size={56} /><span className="dsh-dot-muted">{t(locale, 'loading')}</span></div> : null}
@@ -368,7 +438,27 @@ export function ChatPanel({ locale, api, Card, onOpenSession, renderFactorySlot 
         </div>
       ) : null}
       <Composer locale={locale} running={running} disabled={snapshot === undefined} onSend={send} onStop={() => { void api.stop() }} {...sendError === undefined ? {} : { error: sendError }} />
-      {settingsOpen ? <SettingsDrawer locale={locale} api={api} {...settings ? { settings } : {}} tab={settingsTab} {...snapshot ? { trajectoryRev: snapshot.itemsRev } : {}} running={running} onTab={setSettingsTab} onSaved={setSettings} onClose={() => setSettingsOpen(false)} {...renderFactorySlot ? { renderFactorySlot } : {}} /> : null}
+      </section>
+      {drawerTab !== null ? (
+        <WorkDrawer
+          locale={locale}
+          api={api}
+          tab={drawerTab}
+          wide={drawerWide}
+          {...settings ? { settings } : {}}
+          {...snapshot ? { trajectoryRev: snapshot.itemsRev } : {}}
+          running={running}
+          waiting={waiting}
+          proposalCount={proposalCount}
+          tasks={<TasksTab locale={locale} {...board ? { view: board } : {}} {...workApi ? { workApi } : {}} {...boardError === undefined ? {} : { boardError }} {...boardNotice === undefined ? {} : { boardNotice }} onOpen={onOpenSession} onRetry={refreshBoard} onRemoveSchedule={removeSchedule} actions={boardActions} />}
+          {...renderFactorySlot ? { renderFactorySlot } : {}}
+          onTab={setDrawerTab}
+          onWide={() => setDrawerWide(value => !value)}
+          onSaved={setSettings}
+          onProposalCount={setProposalCount}
+          onClose={closeDrawer}
+        />
+      ) : null}
       </div>
     </div>
   )
@@ -825,6 +915,22 @@ function ToolGlyph() {
   )
 }
 
+function WidenGlyph() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M9.5 2.5h4v4M13.5 2.5 9 7M6.5 13.5h-4v-4M2.5 13.5 7 9" />
+    </svg>
+  )
+}
+
+function NarrowGlyph() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M13.5 6.5h-4v-4M9.5 6.5 14 2M2.5 9.5h4v4M6.5 9.5 2 14" />
+    </svg>
+  )
+}
+
 function GearGlyph() {
   return (
     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
@@ -864,7 +970,7 @@ export const chatCss = settingsCss + `
   border-bottom: 0.5px solid var(--dsw-alias-border-l1);
 }
 .dsh-dot-chat .dsh-dot-head > button,
-.dsh-dot-chat .dsh-dot-settings-head > button,
+.dsh-dot-chat .dsh-dot-drawer-head > button,
 .dsh-dot-chat .dsh-dot-inputrow > button,
 .dsh-dot-chat .dsh-dot-banner > button,
 .dsh-dot-chat .dsh-ui-actions > button { flex-shrink: 0; white-space: nowrap; }
@@ -879,69 +985,76 @@ export const chatCss = settingsCss + `
   margin-left: 6px; padding: 0 4px; border-radius: 8px; font-size: 11px;
   background: var(--dsw-alias-state-warn-primary); color: var(--dsw-alias-label-primary-foreground);
 }
-.dsh-dot-chat .dsh-dot-boardwrap {
-  max-height: 40%; overflow-y: auto; border-bottom: 0.5px solid var(--dsw-alias-border-l1);
-  background: var(--dsw-alias-bg-layer-1);
+.dsh-dot-chat .dsh-dot-head .dsh-dot-gear { position: relative; }
+.dsh-dot-chat .dsh-dot-gear-dot {
+  position: absolute; top: 5px; right: 5px; width: 6px; height: 6px; border-radius: 3px;
+  background: var(--dsw-alias-state-warn-primary);
 }
+.dsh-dot-chat .dsh-dot-ctx-pill { gap: 8px; font-variant-numeric: tabular-nums; }
+.dsh-dot-chat .dsh-dot-ctx-track {
+  display: inline-block; width: 40px; height: 6px; border-radius: 3px; overflow: hidden;
+  background: var(--dsw-alias-bg-layer-2);
+}
+.dsh-dot-chat .dsh-dot-ctx-track > span { display: block; height: 100%; border-radius: 3px; background: var(--dsw-alias-label-secondary); }
+.dsh-dot-chat .dsh-dot-ctx-num { font: 12px/16px var(--ds-font-family-code); color: var(--dsw-alias-label-secondary); }
+.dsh-dot-chat .dsh-dot-stage { position: relative; flex: 1; min-height: 0; display: flex; flex-direction: row; container-type: inline-size; }
+.dsh-dot-chat .dsh-dot-chatcol { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; }
 .dsh-dot-chat .dsh-dot-scroll { flex: 1; min-height: 0; overflow-y: auto; }
-.dsh-dot-chat .dsh-dot-main { position: relative; flex: 1; min-height: 0; display: flex; flex-direction: column; }
-.dsh-dot-chat .dsh-dot-settings-layer { position: absolute; inset: 0; z-index: 10; display: flex; justify-content: flex-end; overflow: hidden; }
-.dsh-dot-chat .dsh-dot-settings-backdrop { position: absolute; inset: 0; padding: 0; border: 0; border-radius: 0; background: var(--dsw-alias-bg-mask-1); cursor: default; }
-.dsh-dot-chat .dsh-dot-settings-drawer {
-  position: relative; display: flex; width: min(680px, 100%); height: 100%; min-width: 0;
-  border-left: 0.5px solid var(--dsw-alias-border-l1); background: var(--dsw-alias-bg-base);
-  box-shadow: var(--dsw-elevation-prominent); animation: dsh-dot-settings-enter var(--ds-transition-duration, 0.2s) var(--ds-ease-in-out, ease-out);
+.dsh-dot-chat .dsh-dot-drawer {
+  flex: 0 0 auto; width: 460px; max-width: 100%; min-height: 0; display: flex; flex-direction: column;
+  border-left: 0.5px solid var(--dsw-alias-border-l1); background: var(--dsw-alias-bg-layer-1);
+  transition: width var(--ds-transition-duration, 0.2s) var(--ds-ease-in-out, ease-out);
 }
-.dsh-dot-chat .dsh-dot-settings-nav {
-  flex: 0 0 136px; display: flex; flex-direction: column; gap: 2px; padding: 14px 8px;
-  background: var(--dsw-alias-bg-layer-1); border-right: 0.5px solid var(--dsw-alias-border-l2);
+.dsh-dot-chat .dsh-dot-drawer[data-wide] { width: 580px; }
+.dsh-dot-chat .dsh-dot-drawer-head {
+  display: flex; align-items: center; gap: 4px; min-height: 46px; padding: 6px 8px 6px 10px; box-sizing: border-box;
+  border-bottom: 0.5px solid var(--dsw-alias-border-l2);
 }
-.dsh-dot-chat .dsh-dot-settings-brand {
-  padding: 2px 10px 10px; font-size: 12px; line-height: 16px; font-weight: 600;
-  color: var(--dsw-alias-label-tertiary);
+.dsh-dot-chat .dsh-dot-drawer-head > button { flex-shrink: 0; }
+.dsh-dot-chat .dsh-dot-drawer-tabs { display: flex; align-items: center; gap: 2px; min-width: 0; overflow-x: auto; scrollbar-width: none; }
+.dsh-dot-chat .dsh-dot-drawer-tabs button,
+.dsh-dot-chat .dsh-dot-filters button {
+  display: inline-flex; align-items: center; gap: 6px; flex-shrink: 0; padding: 5px 10px;
+  border: 0; border-radius: var(--dsw-radius-sm); background: transparent; white-space: nowrap;
+  color: var(--dsw-alias-label-secondary); font: inherit; font-size: 13px; line-height: 20px; cursor: pointer;
 }
-.dsh-dot-chat .dsh-dot-settings-nav button {
-  display: flex; align-items: center; gap: 8px; padding: 7px 10px;
-  border: 0; border-radius: var(--dsw-radius-sm); background: transparent;
-  color: var(--dsw-alias-label-secondary); font: inherit; font-size: 13px; line-height: 20px; text-align: left; cursor: pointer;
-}
+.dsh-dot-chat .dsh-dot-drawer-tabs button:hover,
+.dsh-dot-chat .dsh-dot-filters button:hover { background: var(--dsw-alias-interactive-bg-hover); color: var(--dsw-alias-label-primary); }
+.dsh-dot-chat .dsh-dot-drawer-tabs button[aria-pressed='true'],
+.dsh-dot-chat .dsh-dot-filters button[aria-pressed='true'] { background: var(--dsw-alias-interactive-bg-active); color: var(--dsw-alias-label-primary); font-weight: 500; }
+.dsh-dot-chat .dsh-dot-drawer-tabs button:focus-visible,
+.dsh-dot-chat .dsh-dot-filters button:focus-visible { outline: 2px solid var(--dsw-alias-brand-primary); outline-offset: -2px; }
 .dsh-dot-chat .dsh-dot-nav-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .dsh-dot-chat .dsh-dot-nav-badge {
-  margin-left: auto; display: inline-flex; align-items: center; justify-content: center;
+  display: inline-flex; align-items: center; justify-content: center;
   min-width: 16px; height: 16px; padding: 0 4px; border-radius: 8px; font-size: 11px; line-height: 16px; font-weight: 500;
   background: var(--dsw-alias-state-warn-primary); color: var(--dsw-alias-label-primary-foreground);
 }
-.dsh-dot-chat .dsh-dot-settings-nav button:hover { background: var(--dsw-alias-interactive-bg-hover); color: var(--dsw-alias-label-primary); }
-.dsh-dot-chat .dsh-dot-settings-nav button[aria-pressed='true'] { background: var(--dsw-alias-interactive-bg-active); color: var(--dsw-alias-label-primary); font-weight: 500; }
-.dsh-dot-chat .dsh-dot-settings-nav button:focus-visible { outline: 2px solid var(--dsw-alias-brand-primary); outline-offset: -2px; }
-.dsh-dot-chat .dsh-dot-settings-right { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; }
-.dsh-dot-chat .dsh-dot-settings-head {
-  display: flex; align-items: center; gap: 10px; min-height: 46px; padding: 8px 16px 8px 24px;
-  border-bottom: 0.5px solid var(--dsw-alias-border-l2); background: var(--dsw-alias-bg-base);
-}
-.dsh-dot-chat .dsh-dot-settings-title { margin: 0; font-size: 14px; line-height: 20px; font-weight: 600; color: var(--dsw-alias-label-primary); }
 .dsh-dot-chat .dsh-dot-settings-status {
-  display: inline-flex; align-items: center; gap: 4px; font-size: 12px; line-height: 18px;
-  color: var(--dsw-alias-state-success-primary); max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  display: inline-flex; align-items: center; gap: 4px; flex-shrink: 1; min-width: 0; margin-right: 2px; font-size: 12px; line-height: 18px;
+  color: var(--dsw-alias-state-success-primary); max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .dsh-dot-chat .dsh-dot-settings-status--error { color: var(--dsw-alias-label-error); }
-.dsh-dot-chat .dsh-dot-settings-scroll { flex: 1; min-width: 0; overflow-y: auto; overscroll-behavior: contain; container-type: inline-size; }
-.dsh-dot-chat .dsh-dot-settings { display: flex; flex-direction: column; padding: 20px 24px 32px; }
+.dsh-dot-chat .dsh-dot-settings-scroll { flex: 1; min-width: 0; min-height: 0; overflow-y: auto; overscroll-behavior: contain; container-type: inline-size; }
+.dsh-dot-chat .dsh-dot-settings { display: flex; flex-direction: column; padding: 16px 18px 28px; }
+.dsh-dot-chat .dsh-dot-settings[data-tab='tasks'] { padding: 12px 12px 24px; }
 .dsh-dot-chat .dsh-dot-settings[data-tab='trajectory'] { padding: 0; }
 .dsh-dot-chat .dsh-dot-settings[data-tab='trajectory'] .dsh-dot-tr { flex: none; }
 .dsh-dot-chat .dsh-dot-settings[data-tab='trajectory'] .dsh-dot-tr-list { overflow: visible; }
 .dsh-dot-chat .dsh-dot-trajectory-wrap { flex: 1; min-height: 0; display: flex; flex-direction: column; }
-@keyframes dsh-dot-settings-enter { from { transform: translateX(24px); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
-@media (max-width: 520px) {
-  .dsh-dot-chat .dsh-dot-settings-drawer { flex-direction: column; border-left: 0; }
-  .dsh-dot-chat .dsh-dot-settings-nav { flex: none; flex-direction: row; padding: 8px 12px; border-right: 0; border-bottom: 0.5px solid var(--dsw-alias-border-l2); }
-  .dsh-dot-chat .dsh-dot-settings-brand { display: none; }
-  .dsh-dot-chat .dsh-dot-settings-nav button { flex: 1; justify-content: center; padding: 6px 8px; text-align: center; }
-  .dsh-dot-chat .dsh-dot-settings-head { padding: 8px 12px 8px 16px; }
-  .dsh-dot-chat .dsh-dot-settings { padding: 16px 16px 28px; }
+.dsh-dot-chat .dsh-dot-tasks { display: flex; flex-direction: column; gap: 12px; }
+.dsh-dot-chat .dsh-dot-tasks .dsh-dot-board { padding: 0; height: auto; overflow: visible; }
+.dsh-dot-chat .dsh-dot-filters { display: flex; gap: 2px; overflow-x: auto; scrollbar-width: none; }
+.dsh-dot-chat .dsh-dot-filters button { padding: 3px 9px; font-size: 12px; line-height: 18px; }
+/* A narrow panel cannot hold the chat and the drawer side by side: the drawer covers the chat instead. */
+@container (max-width: 760px) {
+  .dsh-dot-chat .dsh-dot-drawer, .dsh-dot-chat .dsh-dot-drawer[data-wide] {
+    position: absolute; inset: 0 0 0 auto; z-index: 10; width: min(460px, 100%);
+    box-shadow: var(--dsw-elevation-prominent);
+  }
+  .dsh-dot-chat .dsh-dot-drawer-widen { display: none; }
 }
-@media (prefers-reduced-motion: reduce) { .dsh-dot-chat .dsh-dot-settings-drawer { animation: none; } }
-.dsh-dot-chat .dsh-dot-settings-pane { gap: 0; }
+@media (prefers-reduced-motion: reduce) { .dsh-dot-chat .dsh-dot-drawer { transition: none; } }.dsh-dot-chat .dsh-dot-settings-pane { gap: 0; }
 .dsh-dot-chat .dsh-dot-settings-pane > .dsh-ui-notice,
 .dsh-dot-chat .dsh-dot-settings-pane > .dsh-ui-error { margin-bottom: 16px; }
 .dsh-dot-chat .dsh-dot-pane-section { padding: 18px 0; border-bottom: 0.5px solid var(--dsw-alias-border-l2); }

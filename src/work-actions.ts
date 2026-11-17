@@ -11,9 +11,11 @@ import {
   absoluteScopePath,
   canonicalPath,
   workspaceIdentity,
+  type Constraint,
   type Occupant,
   type Requirement,
   type RunRecord,
+  type Scenario,
   type StepSpec,
   type WorkBook,
   type WriteScope,
@@ -31,11 +33,18 @@ export function stepList(value: unknown): StepSpec[] {
   if (!rows) throw new DotError('dot/invalid', 'steps must be a JSON array of {stepRef, text}')
   return rows.map(row => {
     if (!row || typeof row !== 'object') throw new DotError('dot/invalid', 'steps must be objects')
-    const item = row as { stepRef?: unknown; text?: unknown }
+    const item = row as { stepRef?: unknown; text?: unknown; covers?: unknown; after?: unknown }
     if (typeof item.stepRef !== 'string' || !item.stepRef || typeof item.text !== 'string' || !item.text) {
       throw new DotError('dot/invalid', 'steps must include stepRef and text')
     }
-    return { stepRef: item.stepRef, text: item.text }
+    const covers = refList(item.covers, 'covers')
+    const after = refList(item.after, 'after')
+    return {
+      stepRef: item.stepRef,
+      text: item.text,
+      ...(covers ? { covers } : {}),
+      ...(after ? { after } : {}),
+    }
   })
 }
 
@@ -44,12 +53,60 @@ export function requirementList(value: unknown): Requirement[] | undefined {
   if (!rows) return undefined
   return rows.map(row => {
     if (!row || typeof row !== 'object') throw new DotError('dot/invalid', 'requirements must be objects')
-    const item = row as { requirementRef?: unknown; text?: unknown; required?: unknown }
+    const item = row as { requirementRef?: unknown; text?: unknown; required?: unknown; scenarios?: unknown }
     if (typeof item.requirementRef !== 'string' || !item.requirementRef || typeof item.text !== 'string' || typeof item.required !== 'boolean') {
       throw new DotError('dot/invalid', 'requirements must include requirementRef, text, and required')
     }
-    return { requirementRef: item.requirementRef, text: item.text, required: item.required }
+    const scenarios = scenarioList(item.scenarios)
+    return {
+      requirementRef: item.requirementRef,
+      text: item.text,
+      required: item.required,
+      ...(scenarios ? { scenarios } : {}),
+    }
   })
+}
+
+export function constraintList(value: unknown): Constraint[] | undefined {
+  if (value === undefined) return undefined
+  if (typeof value === 'string' && !value.trim()) return undefined
+  const rows = jsonArray(value)
+  if (!rows) throw new DotError('dot/invalid', 'constraints must be a JSON array of {constraintRef, text}')
+  return rows.map(row => {
+    if (!row || typeof row !== 'object' || Array.isArray(row)) throw new DotError('dot/invalid', 'constraints must be objects')
+    const item = row as { constraintRef?: unknown; text?: unknown }
+    if (typeof item.constraintRef !== 'string' || !item.constraintRef || typeof item.text !== 'string') {
+      throw new DotError('dot/invalid', 'constraints must include constraintRef and text')
+    }
+    return { constraintRef: item.constraintRef, text: item.text }
+  })
+}
+
+function scenarioList(value: unknown): Scenario[] | undefined {
+  if (value === undefined) return undefined
+  if (!Array.isArray(value)) throw new DotError('dot/invalid', 'scenarios must be an array of {scenarioRef, given?, when, then}')
+  return value.map(row => {
+    if (!row || typeof row !== 'object' || Array.isArray(row)) throw new DotError('dot/invalid', 'scenarios must be objects')
+    const item = row as { scenarioRef?: unknown; given?: unknown; when?: unknown; then?: unknown }
+    if (typeof item.scenarioRef !== 'string' || !item.scenarioRef || typeof item.when !== 'string' || typeof item.then !== 'string') {
+      throw new DotError('dot/invalid', 'scenarios must include scenarioRef, when, and then')
+    }
+    if (item.given !== undefined && typeof item.given !== 'string') throw new DotError('dot/invalid', 'scenario given must be a string')
+    return {
+      scenarioRef: item.scenarioRef,
+      when: item.when,
+      then: item.then,
+      ...(typeof item.given === 'string' ? { given: item.given } : {}),
+    }
+  })
+}
+
+function refList(value: unknown, label: string): string[] | undefined {
+  if (value === undefined) return undefined
+  if (!Array.isArray(value) || value.some(item => typeof item !== 'string' || item.length === 0)) {
+    throw new DotError('dot/invalid', `${label} must be an array of non-empty strings`)
+  }
+  return value
 }
 
 export function jsonArray(value: unknown): unknown[] | undefined {

@@ -131,6 +131,19 @@ describe('dot approval instructions', () => {
     expect(DOT_INSTRUCTIONS).toContain('changing it alone does not make a new input')
   })
 
+  it('writes agent-facing work in English and keeps the human\'s words verbatim', () => {
+    const lines = DOT_INSTRUCTIONS.split('\n')
+    const language = lines.find((entry) => entry.startsWith('- Language:'))
+    expect(language).toBeDefined()
+    for (const phrase of ['is written in English', 'user_request', 'verbatim', 'never translate them', 'deliverable_language', 'in the human\'s language']) expect(language).toContain(phrase)
+  })
+
+  it('specifies requirements by scenario and leaves the contract to the rendered brief', () => {
+    for (const phrase of ['scenarios', 'scenarioRef', 'constraintRef', 'covers', 'Write each fact once', 'The service renders the run\'s first prompt from the stored input', 'Do not restate requirements or scope there', 'is not checked, so revise the input instead', 'Report section', 'a claim, not a verdict', 'every one of its scenarios is backed by evidence']) {
+      expect(DOT_INSTRUCTIONS).toContain(phrase)
+    }
+  })
+
   it('keeps identity in the persona section and facts independent of its tone', () => {
     expect(DOT_INSTRUCTIONS).not.toMatch(/Dorothy|桃乐丝/)
     expect(DOT_INSTRUCTIONS).not.toContain('persona lives in your tone and in small talk')

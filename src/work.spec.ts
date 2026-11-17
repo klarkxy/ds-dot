@@ -3,7 +3,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { filesMatch, restoreSnapshot, saveSnapshot, sha256, baselineCaptures } from './artifacts.ts'
-import { WorkBook, judgeVerification, occupantsConflict, workspaceIdentity, type ExternalOccupant, type WorkPersist } from './work.ts'
+import { inputConstraints } from './brief.ts'
+import { WorkBook, judgeVerification, occupantsConflict, parseInput, workspaceIdentity, type ExternalOccupant, type WorkPersist } from './work.ts'
 
 function memoryPersist(fail?: () => boolean): { persist: WorkPersist; rows: Map<string, unknown> } {
   const rows = new Map<string, unknown>()
@@ -537,5 +538,139 @@ describe('content snapshots', () => {
       { requirementRef: 'r1', verdict: 'fail', evidenceRefs: ['log-1'], note: 'build failed' },
     ])
     expect(view?.humanAction).toBeUndefined()
+  })
+})
+
+/** The stored shape of input-2 from a version-5 domain row, without the newer fields. */
+const legacyInput = {
+  id: 'input-2',
+  changeId: 'c-1',
+  revision: 2,
+  goal: '在交付目录写入 site/r10.txt，第一行「R10 标记」、第二行尾注「R10 confirmed」',
+  requirements: [
+    { requirementRef: 'R1', text: 'site/r10.txt 存在且两行内容精确', required: true },
+    { requirementRef: 'R2', text: '后台作业在校验通过之后才结束', required: true },
+  ],
+  steps: [
+    { stepRef: 'S1', text: '启动后台作业' },
+    { stepRef: 'S2', text: '写入 site/r10.txt' },
+  ],
+  source: 'revision',
+  createdAt: 1794832206080,
+  behaviorNotes: '["写入必须发生在后台作业运行期间","不得写入交付目录以外的任何路径","第二行尾注必须精确为「R10 confirmed」"]',
+  supersedes: 'input-1',
+}
+
+describe('work input contract', () => {
+  it('reads a stored input that has no scenarios, constraints or step links', () => {
+    const parsed = parseInput(legacyInput)
+    expect(parsed?.behaviorNotes).toBe(legacyInput.behaviorNotes)
+    expect(parsed?.constraints).toBeUndefined()
+    expect(parsed?.requirements[0]?.scenarios).toBeUndefined()
+    expect(parsed?.steps[0]?.covers).toBeUndefined()
+    const stored = memoryPersist()
+    const restored = WorkBook.restore({ inputs: [legacyInput] }, stored.persist, 'win32')
+    expect(restored.recoveryError).toBeUndefined()
+    expect(restored.input('input-2')?.goal).toContain('site/r10.txt')
+    expect(inputConstraints(restored.input('input-2')!)).toEqual([
+      { constraintRef: 'C1', text: '写入必须发生在后台作业运行期间' },
+      { constraintRef: 'C2', text: '不得写入交付目录以外的任何路径' },
+      { constraintRef: 'C3', text: '第二行尾注必须精确为「R10 confirmed」' },
+    ])
+  })
+
+  it('stores scenarios, constraints and step links, and carries unspecified fields into the next input', async () => {
+    const { book } = openBook()
+    const change = await book.createChange({
+      title: 'Ship', cwd: 'H:\\proj', goal: 'land',
+      userRequest: 'please write the note',
+      deliverableLanguage: 'zh-CN',
+      constraints: [{ constraintRef: 'k1', text: 'do not add files' }],
+      requirements: [{
+        requirementRef: 'R1', text: 'note exists', required: true,
+        scenarios: [{ scenarioRef: 'R1.a', given: 'a fresh dir', when: 'the file is read', then: 'it says hi' }],
+      }],
+      steps: [
+        { stepRef: 's1', text: 'prepare' },
+        { stepRef: 's2', text: 'write', covers: ['R1', 'R1.a'], after: ['s1'] },
+      ],
+      at: 1,
+    })
+    expect(book.input(change.currentInputRef)).toMatchObject({
+      userRequest: 'please write the note',
+      deliverableLanguage: 'zh-CN',
+      constraints: [{ constraintRef: 'k1', text: 'do not add files' }],
+      requirements: [{ scenarios: [{ scenarioRef: 'R1.a', given: 'a fresh dir', when: 'the file is read', then: 'it says hi' }] }],
+      steps: [{ stepRef: 's1', text: 'prepare' }, { stepRef: 's2', covers: ['R1', 'R1.a'], after: ['s1'] }],
+    })
+    const renamed = await book.reviseChange(change.id, { title: 'Renamed', at: 2 })
+    if (!('id' in renamed)) throw new Error(renamed.message)
+    expect(renamed.currentRevision).toBe(1)
+    const revised = await book.reviseChange(change.id, { goal: 'land later', at: 3 })
+    if (!('id' in revised)) throw new Error(revised.message)
+    expect(revised.currentRevision).toBe(2)
+    expect(book.input(revised.currentInputRef)).toMatchObject({
+      goal: 'land later',
+      userRequest: 'please write the note',
+      deliverableLanguage: 'zh-CN',
+      constraints: [{ constraintRef: 'k1', text: 'do not add files' }],
+      supersedes: change.currentInputRef,
+    })
+    const before = book.change(change.id)?.currentInputRef
+    const ignored = await book.reviseChange(change.id, { behaviorNotes: 'would be ignored', at: 4 })
+    expect('id' in ignored).toBe(false)
+    expect(book.change(change.id)?.currentInputRef).toBe(before)
+    const cleared = await book.reviseChange(change.id, { constraints: [], at: 5 })
+    if (!('id' in cleared)) throw new Error(cleared.message)
+    expect(book.input(cleared.currentInputRef)?.constraints).toEqual([])
+    expect(book.input(cleared.currentInputRef)?.behaviorNotes).toBeUndefined()
+  })
+
+  it('refuses duplicate refs, unknown links and step cycles without storing them', async () => {
+    const { book } = openBook()
+    await expect(book.createChange({
+      title: 'A', cwd: 'H:\\proj', goal: 'a',
+      requirements: [
+        { requirementRef: 'R1', text: 'a', required: true, scenarios: [{ scenarioRef: 'R1.a', when: 'now', then: 'yes' }] },
+        { requirementRef: 'R1', text: 'b', required: false },
+      ],
+      at: 1,
+    })).rejects.toThrow('duplicate requirementRef R1')
+    await expect(book.createChange({
+      title: 'A', cwd: 'H:\\proj', goal: 'a',
+      requirements: [
+        { requirementRef: 'R1', text: 'a', required: true, scenarios: [{ scenarioRef: 'S', when: 'now', then: 'yes' }] },
+        { requirementRef: 'R2', text: 'b', required: true, scenarios: [{ scenarioRef: 'S', when: 'later', then: 'no' }] },
+      ],
+      at: 1,
+    })).rejects.toThrow('duplicate scenarioRef S')
+    await expect(book.createChange({
+      title: 'A', cwd: 'H:\\proj', goal: 'a',
+      constraints: [{ constraintRef: 'k1', text: 'a' }, { constraintRef: 'k1', text: 'b' }],
+      at: 1,
+    })).rejects.toThrow('duplicate constraintRef k1')
+    await expect(book.createChange({
+      title: 'A', cwd: 'H:\\proj', goal: 'a',
+      steps: [{ stepRef: 's1', text: 'a', covers: ['missing'] }],
+      at: 1,
+    })).rejects.toThrow('step s1 covers missing, which is not a requirement or scenario')
+    await expect(book.createChange({
+      title: 'A', cwd: 'H:\\proj', goal: 'a',
+      steps: [{ stepRef: 's1', text: 'a', after: ['s9'] }],
+      at: 1,
+    })).rejects.toThrow('step s1 is after s9, which is not a step')
+    expect(book.listChanges()).toEqual([])
+
+    const change = await book.createChange({ title: 'A', cwd: 'H:\\proj', goal: 'a', at: 2 })
+    const cycled = await book.reviseChange(change.id, {
+      steps: [
+        { stepRef: 's1', text: 'a', after: ['s2'] },
+        { stepRef: 's2', text: 'b', after: ['s1'] },
+      ],
+      at: 3,
+    })
+    expect(cycled).toMatchObject({ ok: false, code: 'invalid', message: 'step order cycles: s1 → s2 → s1' })
+    expect(book.change(change.id)?.currentRevision).toBe(1)
+    expect(book.inputsFor(change.id)).toHaveLength(1)
   })
 })

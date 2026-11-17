@@ -6,6 +6,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
+import { renderSupplement } from './brief.ts'
 import { DEFAULT_SETTINGS, TOOL } from './contracts.ts'
 import { DotService } from './service.ts'
 import { DotStore } from './store.ts'
@@ -132,14 +133,19 @@ describe('dot_task supplement', () => {
         goal: 'hijack the input', sender: 'forged',
       })
       const extra = contextDeliveries(h, runId)
+      const rendered = renderSupplement({
+        changeId: change.id, inputRef: current.currentInputRef, inputRevision: current.currentRevision, runId, message: 'the file is named a.ts',
+      })
       expect(result).toContain(`supplemented ${runId}`)
       expect(result).not.toContain('Error')
       expect(extra).toHaveLength(1)
       expect(extra[0]).toMatchObject({
-        kind: 'context', status: 'accepted', contentRef: 'the file is named a.ts',
+        kind: 'context', status: 'accepted', contentRef: rendered,
         source: 'dot-session', inputRevision: current.currentRevision,
       })
-      expect(h.relays).toEqual([{ sessionId: h.store.work.run(runId)?.sessionId, senderId: 'dot-session', text: 'the file is named a.ts', deliveryId: extra[0]!.id }])
+      expect(rendered.startsWith(`# Supplement · ${change.id} · ${current.currentInputRef} (rev ${current.currentRevision}) · ${runId}`)).toBe(true)
+      expect(rendered).toContain('the file is named a.ts')
+      expect(h.relays).toEqual([{ sessionId: h.store.work.run(runId)?.sessionId, senderId: 'dot-session', text: rendered, deliveryId: extra[0]!.id }])
       const after = h.store.work.change(change.id)!
       expect(after.currentRevision).toBe(current.currentRevision)
       expect(after.currentInputRef).toBe(current.currentInputRef)

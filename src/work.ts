@@ -21,8 +21,25 @@ const TERMINAL: ReadonlySet<RunPhase> = new Set(['completed', 'failed', 'stopped
 export interface WritePath { readonly path: string; readonly type: 'file' | 'directory' }
 export type WriteScope = { readonly kind: 'paths'; readonly paths: readonly WritePath[] } | { readonly kind: 'workspace-exclusive' }
 
-export interface Requirement { readonly requirementRef: string; readonly text: string; readonly required: boolean }
-export interface StepSpec { readonly stepRef: string; readonly text: string }
+export interface Scenario {
+  readonly scenarioRef: string
+  readonly given?: string
+  readonly when: string
+  readonly then: string
+}
+export interface Requirement {
+  readonly requirementRef: string
+  readonly text: string
+  readonly required: boolean
+  readonly scenarios?: readonly Scenario[]
+}
+export interface StepSpec {
+  readonly stepRef: string
+  readonly text: string
+  readonly covers?: readonly string[]
+  readonly after?: readonly string[]
+}
+export interface Constraint { readonly constraintRef: string; readonly text: string }
 export interface StepView { readonly stepRef: string; readonly done: boolean; readonly runId?: string; readonly inputRef: string; readonly subjectRef?: string }
 export interface BaselineRef { readonly workspaceRoot: string; readonly scopeKey: string; readonly artifactRef: string }
 export interface DeliveryRecord {
@@ -62,6 +79,10 @@ export interface InputRecord {
   readonly goal: string
   readonly requirements: readonly Requirement[]
   readonly steps: readonly StepSpec[]
+  readonly constraints?: readonly Constraint[]
+  readonly userRequest?: string
+  readonly deliverableLanguage?: string
+  /** Free text from inputs written before constraints existed. */
   readonly behaviorNotes?: string
   readonly designNotes?: string
   readonly supersedes?: string
@@ -154,8 +175,25 @@ export interface ExternalOccupant {
   readonly writeScope: WriteScope
 }
 
-const requirementSchema = z.object({ requirementRef: z.string().min(1), text: z.string(), required: z.boolean() }).strict()
-const stepSpecSchema = z.object({ stepRef: z.string().min(1), text: z.string() }).strict()
+const scenarioSchema = z.object({
+  scenarioRef: z.string().min(1),
+  given: z.string().optional(),
+  when: z.string(),
+  then: z.string(),
+}).strict()
+const requirementSchema = z.object({
+  requirementRef: z.string().min(1),
+  text: z.string(),
+  required: z.boolean(),
+  scenarios: z.array(scenarioSchema).optional(),
+}).strict()
+const stepSpecSchema = z.object({
+  stepRef: z.string().min(1),
+  text: z.string(),
+  covers: z.array(z.string().min(1)).optional(),
+  after: z.array(z.string().min(1)).optional(),
+}).strict()
+const constraintSchema = z.object({ constraintRef: z.string().min(1), text: z.string() }).strict()
 const stepViewSchema = z.object({ stepRef: z.string().min(1), done: z.boolean(), runId: z.string().optional(), inputRef: z.string().min(1), subjectRef: z.string().min(1).optional() }).strict()
 const baselineSchema = z.object({ workspaceRoot: z.string().min(1), scopeKey: z.string().min(1), artifactRef: z.string().min(1) }).strict()
 const writePathSchema = z.object({ path: z.string().min(1), type: z.enum(['file', 'directory']) }).strict()
@@ -192,6 +230,8 @@ export const changeSchema = z.object({
 export const inputSchema = z.object({
   id: z.string().min(1), changeId: z.string().min(1), revision: z.number().int().positive(), goal: z.string(),
   requirements: z.array(requirementSchema), steps: z.array(stepSpecSchema),
+  constraints: z.array(constraintSchema).optional(),
+  userRequest: z.string().optional(), deliverableLanguage: z.string().optional(),
   behaviorNotes: z.string().optional(), designNotes: z.string().optional(), supersedes: z.string().optional(),
   source: z.string(), createdAt: z.number(),
 }).strict()
@@ -472,7 +512,16 @@ export function judgeVerification(requirements: readonly Requirement[], checks: 
 }
 
 export type WorkRefusal =
-  | { readonly ok: false; readonly code: 'paused' | 'cancelled' | 'closed' | 'quota' | 'conflict' | 'baseline' | 'closed-run' | 'stale' | 'ownership' | 'missing' | 'recovery' | 'unknown'; readonly message: string; readonly blockers?: readonly string[] }
+  | { readonly ok: false; readonly code: 'paused' | 'cancelled' | 'closed' | 'quota' | 'conflict' | 'baseline' | 'closed-run' | 'stale' | 'ownership' | 'missing' | 'recovery' | 'unknown' | 'invalid'; readonly message: string; readonly blockers?: readonly string[] }
+
+/** A create or revise that would store an input the schema cannot read back. */
+export class InputShapeError extends Error {
+  readonly code = 'invalid' as const
+  constructor(message: string) {
+    super(message)
+    this.name = 'InputShapeError'
+  }
+}
 
 export interface ReserveInput {
   readonly changeId: string
@@ -709,12 +758,21 @@ export class WorkBook {
     })
   }
 
-  createChange(input: { title: string; cwd: string; goal: string; requirements?: readonly Requirement[]; steps?: readonly StepSpec[]; source?: string; priority?: 1 | 2 | 3; maxConcurrentRuns?: number; behaviorNotes?: string; at?: number }): Promise<ChangeRecord> {
+  createChange(input: { title: string; cwd: string; goal: string; requirements?: readonly Requirement[]; steps?: readonly StepSpec[]; source?: string; priority?: 1 | 2 | 3; maxConcurrentRuns?: number; behaviorNotes?: string; constraints?: readonly Constraint[]; userRequest?: string; deliverableLanguage?: string; at?: number }): Promise<ChangeRecord> {
     return this.exclusive(async () => {
       this.assertRecovered()
+      const requirements = input.requirements ?? []
+      const steps = input.steps ?? []
+      const problem = inputContractError(requirements, steps, input.constraints)
+      if (problem) throw new InputShapeError(problem)
       const at = input.at ?? Date.now()
       const changeId = `c-${++this.changeSeq}`
-      const inputRow = this.inputRow(changeId, 1, input.goal, input.requirements ?? [], input.steps ?? [], input.source ?? 'user', at, input.behaviorNotes)
+      const inputRow = this.inputRow(changeId, 1, input.goal, requirements, steps, input.source ?? 'user', at, {
+        behaviorNotes: input.behaviorNotes,
+        constraints: input.constraints,
+        userRequest: input.userRequest,
+        deliverableLanguage: input.deliverableLanguage,
+      })
       await this.commit('inputs', inputRow.id, inputRow)
       this.inputs.set(inputRow.id, inputRow)
       const change: ChangeRecord = {
@@ -731,14 +789,14 @@ export class WorkBook {
     })
   }
 
-  reviseChange(changeId: string, patch: { goal?: string; requirements?: readonly Requirement[]; steps?: readonly StepSpec[]; cwd?: string; behaviorNotes?: string; title?: string; priority?: 1 | 2 | 3; maxConcurrentRuns?: number; source?: string; at?: number }): Promise<ChangeRecord | WorkRefusal> {
+  reviseChange(changeId: string, patch: { goal?: string; requirements?: readonly Requirement[]; steps?: readonly StepSpec[]; cwd?: string; behaviorNotes?: string; constraints?: readonly Constraint[]; userRequest?: string; deliverableLanguage?: string; title?: string; priority?: 1 | 2 | 3; maxConcurrentRuns?: number; source?: string; at?: number }): Promise<ChangeRecord | WorkRefusal> {
     return this.exclusive(async () => {
       const refused = this.recoveryRefusal()
       if (refused) return refused
       const current = this.changes.get(changeId)
       if (!current) return { ok: false, code: 'missing', message: `unknown change ${changeId}` }
       const at = patch.at ?? Date.now()
-      const semantic = patch.goal !== undefined || patch.requirements !== undefined || patch.steps !== undefined || patch.cwd !== undefined || patch.behaviorNotes !== undefined
+      const semantic = patch.goal !== undefined || patch.requirements !== undefined || patch.steps !== undefined || patch.cwd !== undefined || patch.behaviorNotes !== undefined || patch.constraints !== undefined || patch.userRequest !== undefined || patch.deliverableLanguage !== undefined
       if (!semantic) {
         const next: ChangeRecord = {
           ...current,
@@ -754,7 +812,22 @@ export class WorkBook {
       }
       const previous = this.inputs.get(current.currentInputRef)
       if (!previous) return { ok: false, code: 'missing', message: `missing input ${current.currentInputRef}` }
-      const inputRow = this.inputRow(changeId, current.currentRevision + 1, patch.goal ?? previous.goal, patch.requirements ?? previous.requirements, patch.steps ?? previous.steps, patch.source ?? 'revision', at, patch.behaviorNotes ?? previous.behaviorNotes, previous.id)
+      const requirements = patch.requirements ?? previous.requirements
+      const steps = patch.steps ?? previous.steps
+      const constraints = patch.constraints !== undefined ? patch.constraints : previous.constraints
+      if (patch.behaviorNotes !== undefined && patch.constraints === undefined && previous.constraints !== undefined) {
+        return { ok: false, code: 'invalid', message: `${previous.id} uses structured constraints, so behavior_notes would be ignored. Revise with constraints instead.` }
+      }
+      const problem = inputContractError(requirements, steps, constraints)
+      if (problem) return { ok: false, code: 'invalid', message: problem }
+      const inputRow = this.inputRow(changeId, current.currentRevision + 1, patch.goal ?? previous.goal, requirements, steps, patch.source ?? 'revision', at, {
+        // Structured constraints replace legacy notes; carrying both would let old notes resurface.
+        ...(patch.constraints !== undefined ? {} : { behaviorNotes: patch.behaviorNotes ?? previous.behaviorNotes }),
+        constraints,
+        userRequest: patch.userRequest !== undefined ? patch.userRequest : previous.userRequest,
+        deliverableLanguage: patch.deliverableLanguage !== undefined ? patch.deliverableLanguage : previous.deliverableLanguage,
+        supersedes: previous.id,
+      })
       await this.commit('inputs', inputRow.id, inputRow)
       this.inputs.set(inputRow.id, inputRow)
       const { closeout: _closed, ...kept } = current
@@ -2000,12 +2073,18 @@ export class WorkBook {
     return found
   }
 
-  private inputRow(changeId: string, revision: number, goal: string, requirements: readonly Requirement[], steps: readonly StepSpec[], source: string, at: number, behaviorNotes?: string, supersedes?: string): InputRecord {
+  private inputRow(changeId: string, revision: number, goal: string, requirements: readonly Requirement[], steps: readonly StepSpec[], source: string, at: number, fields: { readonly behaviorNotes?: string; readonly constraints?: readonly Constraint[]; readonly userRequest?: string; readonly deliverableLanguage?: string; readonly supersedes?: string } = {}): InputRecord {
     const id = `input-${++this.inputSeq}`
     return {
-      id, changeId, revision, goal, requirements: [...requirements], steps: [...steps], source, createdAt: at,
-      ...(behaviorNotes !== undefined ? { behaviorNotes } : {}),
-      ...(supersedes !== undefined ? { supersedes } : {}),
+      id, changeId, revision, goal,
+      requirements: requirements.map(copyRequirement),
+      steps: steps.map(copyStep),
+      source, createdAt: at,
+      ...(fields.behaviorNotes !== undefined ? { behaviorNotes: fields.behaviorNotes } : {}),
+      ...(fields.constraints !== undefined ? { constraints: fields.constraints.map(item => ({ constraintRef: item.constraintRef, text: item.text })) } : {}),
+      ...(fields.userRequest !== undefined ? { userRequest: fields.userRequest } : {}),
+      ...(fields.deliverableLanguage !== undefined ? { deliverableLanguage: fields.deliverableLanguage } : {}),
+      ...(fields.supersedes !== undefined ? { supersedes: fields.supersedes } : {}),
     }
   }
 
@@ -2018,6 +2097,105 @@ export class WorkBook {
 
 function sameBaseline(left: BaselineRef, right: BaselineRef): boolean {
   return left.workspaceRoot === right.workspaceRoot && left.scopeKey === right.scopeKey && left.artifactRef === right.artifactRef
+}
+
+/** Why this input must not be stored. Undefined means the refs and the step order are usable. */
+export function inputContractError(requirements: readonly Requirement[], steps: readonly StepSpec[], constraints?: readonly Constraint[]): string | undefined {
+  const requirementRefs = new Set<string>()
+  const scenarioRefs = new Set<string>()
+  for (const item of requirements) {
+    if (typeof item?.requirementRef !== 'string' || item.requirementRef.length === 0) return 'requirementRef must be a non-empty string'
+    if (requirementRefs.has(item.requirementRef)) return `duplicate requirementRef ${item.requirementRef}`
+    requirementRefs.add(item.requirementRef)
+    for (const scenario of item.scenarios ?? []) {
+      if (typeof scenario?.scenarioRef !== 'string' || scenario.scenarioRef.length === 0) return 'scenarioRef must be a non-empty string'
+      if (typeof scenario.when !== 'string' || typeof scenario.then !== 'string') return `scenario ${scenario.scenarioRef} must include when and then`
+      if (scenario.given !== undefined && typeof scenario.given !== 'string') return `scenario ${scenario.scenarioRef} given must be a string`
+      if (scenarioRefs.has(scenario.scenarioRef)) return `duplicate scenarioRef ${scenario.scenarioRef}`
+      scenarioRefs.add(scenario.scenarioRef)
+    }
+  }
+  const constraintRefs = new Set<string>()
+  for (const item of constraints ?? []) {
+    if (typeof item?.constraintRef !== 'string' || item.constraintRef.length === 0) return 'constraintRef must be a non-empty string'
+    if (typeof item.text !== 'string') return `constraint ${item.constraintRef} text must be a string`
+    if (constraintRefs.has(item.constraintRef)) return `duplicate constraintRef ${item.constraintRef}`
+    constraintRefs.add(item.constraintRef)
+  }
+  const stepRefs = new Set<string>()
+  for (const step of steps) {
+    if (typeof step?.stepRef !== 'string' || step.stepRef.length === 0) return 'stepRef must be a non-empty string'
+    if (typeof step.text !== 'string') return `step ${step.stepRef} text must be a string`
+    if (stepRefs.has(step.stepRef)) return `duplicate stepRef ${step.stepRef}`
+    stepRefs.add(step.stepRef)
+  }
+  const covered = new Set([...requirementRefs, ...scenarioRefs])
+  for (const step of steps) {
+    for (const ref of step.covers ?? []) {
+      if (typeof ref !== 'string' || ref.length === 0) return `step ${step.stepRef} covers an empty ref`
+      if (!covered.has(ref)) return `step ${step.stepRef} covers ${ref}, which is not a requirement or scenario`
+    }
+    for (const ref of step.after ?? []) {
+      if (typeof ref !== 'string' || ref.length === 0) return `step ${step.stepRef} is after an empty ref`
+      if (!stepRefs.has(ref)) return `step ${step.stepRef} is after ${ref}, which is not a step`
+    }
+  }
+  return stepOrderCycle(steps)
+}
+
+function stepOrderCycle(steps: readonly StepSpec[]): string | undefined {
+  const after = new Map(steps.map(step => [step.stepRef, [...(step.after ?? [])]]))
+  const state = new Map<string, 0 | 1 | 2>()
+  const stack: string[] = []
+  const visit = (ref: string): string | undefined => {
+    const mark = state.get(ref) ?? 0
+    if (mark === 1) {
+      const start = stack.indexOf(ref)
+      return `step order cycles: ${[...stack.slice(start), ref].join(' → ')}`
+    }
+    if (mark === 2) return undefined
+    state.set(ref, 1)
+    stack.push(ref)
+    for (const next of after.get(ref) ?? []) {
+      const found = visit(next)
+      if (found) return found
+    }
+    stack.pop()
+    state.set(ref, 2)
+    return undefined
+  }
+  for (const step of steps) {
+    const found = visit(step.stepRef)
+    if (found) return found
+  }
+  return undefined
+}
+
+function copyRequirement(item: Requirement): Requirement {
+  return {
+    requirementRef: item.requirementRef,
+    text: item.text,
+    required: item.required,
+    ...(item.scenarios ? { scenarios: item.scenarios.map(copyScenario) } : {}),
+  }
+}
+
+function copyScenario(item: Scenario): Scenario {
+  return {
+    scenarioRef: item.scenarioRef,
+    when: item.when,
+    then: item.then,
+    ...(item.given !== undefined ? { given: item.given } : {}),
+  }
+}
+
+function copyStep(item: StepSpec): StepSpec {
+  return {
+    stepRef: item.stepRef,
+    text: item.text,
+    ...(item.covers ? { covers: [...item.covers] } : {}),
+    ...(item.after ? { after: [...item.after] } : {}),
+  }
 }
 
 function clampConcurrency(value: number | undefined): number {

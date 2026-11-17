@@ -112,7 +112,15 @@ describe('step result ownership', () => {
       const step = JSON.parse(await h.task.execute({ action: 'read', task_id: changeId })).steps[0]
       expect(step.done).toBe(false)
       expect(step.subjectRef).toBeUndefined()
-      expect(h.store.work.run(runId)?.deliveries.find(item => item.kind === 'initial')?.contentRef).toBe('write result.txt')
+      const initial = h.store.work.run(runId)?.deliveries.find(item => item.kind === 'initial')?.contentRef ?? ''
+      expect(initial.startsWith(`# Work order ${changeId}`)).toBe(true)
+      expect(initial).toContain('## Notes from dot')
+      expect(initial).toContain('write result.txt')
+      expect(initial).not.toBe('write result.txt')
+      const tracked = h.store.task(sessionId!)
+      const bound = h.store.work.run(runId)!
+      expect(tracked?.title).toBe(`Ship · ${changeId}/${runId}`)
+      expect(tracked?.goal).toBe(`${bound.changeId} ${bound.id} input ${bound.inputRef}@${bound.inputRevision}`)
     } finally { h.cleanup() }
   })
 
@@ -166,6 +174,13 @@ describe('step result ownership', () => {
         action: 'step', task_id: created.id, step_ref: 's1', run_id: first.runId, expected_input_revision: current.currentRevision,
       })
       expect(quiet).toContain('Error')
+      const firstSession = h.store.work.run(first.runId)?.sessionId
+      const brief = h.store.work.run(first.runId)?.deliveries.find(item => item.kind === 'initial')?.contentRef
+      h.events.set(firstSession!, [{ type: 'assistant/message', seq: 2, data: { message: { content: brief } } }])
+      const echo = await h.task.execute({
+        action: 'step', task_id: created.id, step_ref: 's1', run_id: first.runId, expected_input_revision: current.currentRevision,
+      })
+      expect(echo).toContain('Error')
       const sessionId = h.store.work.run(second.runId)?.sessionId
       h.events.set(sessionId!, [{ type: 'assistant/message', seq: 4, data: { message: { content: [{ type: 'text', text: 'reported the tree' }] } } }])
       const borrowed = await h.task.execute({
@@ -257,6 +272,63 @@ describe('step result ownership', () => {
       expect(nextDone).toContain('step s1 done')
       const nextStep = JSON.parse(await h.task.execute({ action: 'read', task_id: next.changeId })).steps[0]
       expect(nextStep).toMatchObject({ done: true, runId: next.runId, subjectRef: `file:result.txt:${sha256(new TextEncoder().encode(later))}` })
+    } finally { h.cleanup() }
+  })
+
+  it('stores the new input fields, refuses a bad contract, and dispatches the rendered brief', async () => {
+    const h = harness()
+    try {
+      const created = JSON.parse(await h.task.execute({
+        action: 'create', title: 'Ship', goal: 'land it', dir: h.project,
+        user_request: 'write the note',
+        deliverable_language: 'zh-CN',
+        constraints: JSON.stringify([{ constraintRef: 'k1', text: 'do not add files' }]),
+        requirements: JSON.stringify([{
+          requirementRef: 'R1', text: 'note exists', required: true,
+          scenarios: [{ scenarioRef: 'R1.a', when: 'the file is read', then: 'it says hi' }],
+        }]),
+        steps: JSON.stringify([{ stepRef: 's1', text: 'write note', covers: ['R1.a'] }]),
+      })) as { id: string }
+      expect(await h.task.execute({
+        action: 'create', title: 'Nope', goal: 'nope', dir: h.project, constraints: '[]', behavior_notes: 'also',
+      })).toContain('not both')
+      const read = JSON.parse(await h.task.execute({ action: 'read', task_id: created.id }))
+      expect(read.userRequest).toBe('write the note')
+      expect(read.deliverableLanguage).toBe('zh-CN')
+      expect(read.constraints).toEqual([{ constraintRef: 'k1', text: 'do not add files' }])
+      expect(read.requirements[0].scenarios[0].scenarioRef).toBe('R1.a')
+      expect(read.steps[0].covers).toEqual(['R1.a'])
+      const revised = JSON.parse(await h.task.execute({ action: 'revise', task_id: created.id, goal: 'land it later' })) as { revision: number }
+      expect(revised.revision).toBe(2)
+      const carried = JSON.parse(await h.task.execute({ action: 'read', task_id: created.id }))
+      expect(carried.goal).toBe('land it later')
+      expect(carried.userRequest).toBe('write the note')
+      expect(carried.constraints).toEqual([{ constraintRef: 'k1', text: 'do not add files' }])
+      const cycle = await h.task.execute({
+        action: 'revise', task_id: created.id,
+        steps: JSON.stringify([
+          { stepRef: 's1', text: 'a', after: ['s2'], covers: ['R1'] },
+          { stepRef: 's2', text: 'b', after: ['s1'] },
+        ]),
+      })
+      expect(cycle).toContain('step order cycles')
+      expect(h.store.work.change(created.id)?.currentRevision).toBe(2)
+      const dispatched = await h.task.execute({
+        action: 'dispatch', task_id: created.id, instruction: 'start with the note', role: 'work', access: 'read',
+      })
+      const runId = /started (run-\d+)/.exec(dispatched)?.[1]
+      expect(runId).toBeTruthy()
+      const body = h.store.work.run(runId!)?.deliveries.find(item => item.kind === 'initial')?.contentRef ?? ''
+      expect(body.startsWith('# Work order')).toBe(true)
+      expect(body).toContain('## Notes from dot')
+      expect(body).toContain('start with the note')
+      expect(body).toContain('R1.a')
+      expect(body).toContain('- k1: do not add files')
+      expect(body).not.toBe('start with the note')
+      const sessionId = h.store.work.run(runId!)?.sessionId
+      const run = h.store.work.run(runId!)!
+      expect(h.store.task(sessionId!)?.title).toBe(`Ship · ${created.id}/${runId}`)
+      expect(h.store.task(sessionId!)?.goal).toBe(`${run.changeId} ${run.id} input ${run.inputRef}@${run.inputRevision}`)
     } finally { h.cleanup() }
   })
 })

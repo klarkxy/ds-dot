@@ -207,7 +207,7 @@ describe('WorkBook observability seams & atomic closeout pipeline', () => {
       const boardSnap = h.service.board()
       expect(headerBoardCounts(boardSnap)).toEqual({ liveCount: 1, waitingCount: 0 })
       const run = h.store.work.run(runId!)!
-      expect(sessionLookup(boardSnap).get(run.sessionId!)?.title).toBe('Fix broken link')
+      expect(sessionLookup(boardSnap).get(run.sessionId!)?.title).toBe(`Fix broken link · ${changeId}/${runId}`)
 
       // Read-only Run triggers forced human escalation on write-like shell command
       const roRun = await h.service.reserveWorkRun({

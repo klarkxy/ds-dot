@@ -11,6 +11,7 @@ import { isAbsolute, join } from 'node:path'
 import { APPROVAL_DETAIL_LIMIT, approvalNotice } from './approval-risk.ts'
 import { writerPrior, evidenceRefGap, isForeignEvidenceId, type DeliverySubject, type SubjectLook } from './acceptance.ts'
 import { captureScope, defaultIgnoreCover, foldRel, ignoreCovered, isLinkReason, readSnapshot, relativePath, saveSnapshot, scanScope, baselineCaptures, sha256, wipeArtifacts, type SnapshotExclusion, type SnapshotSource } from './artifacts.ts'
+import { inputConstraints, renderBrief, renderSupplement, runTitle } from './brief.ts'
 import { bindRunSession, cancelWork, countRelayInserts, finishWork, launchReservedRun, observeRun, reconcileRun, supplementRun } from './execution.ts'
 import { detectWorkspaceRoot } from './git-root.ts'
 import {
@@ -18,11 +19,11 @@ import {
   reviewLegacyTask, setLegacyTaskPriority, startLegacyTicketSession, type LegacyTicketDeps,
 } from './legacy-tickets.ts'
 import {
-  WRITE_PATHS_EXAMPLE, artifactName, assistantText, foldPath, jsonArray, jsonObject,
+  WRITE_PATHS_EXAMPLE, artifactName, assistantText, constraintList, foldPath, jsonArray, jsonObject,
   occupantOf, pathScope, plannedOccupant, plannedScope, requirementList, samePathList,
   sameSubject, snapshotId, stepList, stringField, verifyRefusal,
 } from './work-actions.ts'
-import { absoluteScopePath, occupantsConflict, scopeWithinRoot, scopeWrites, type ChangeRecord, type Occupant, type RunRecord, type WorkRefusal } from './work.ts'
+import { absoluteScopePath, InputShapeError, occupantsConflict, scopeWithinRoot, scopeWrites, type ChangeRecord, type Occupant, type RunRecord, type WorkRefusal } from './work.ts'
 import type { ShownView, ViewAnswer } from '@klarkxy/dsh-deep-view/contracts'
 import { DotCards, cardAnswerText, type DotCardRecord } from './card-state.ts'
 import { checkChatImages, type ChatImage } from './chat-images.ts'
@@ -1579,7 +1580,8 @@ export class DotService {
     if (!run || !sessionId || run.creation !== 'confirmed' || sessionId !== run.requestedSessionId) return
     const change = this.store.work.change(run.changeId)
     await this.store.track({
-      sessionId, origin: 'started', title: change?.title ?? run.id,
+      sessionId, origin: 'started',
+      title: change ? runTitle(change.title, `${run.changeId}/${run.id}`) : run.id,
       goal: `${run.changeId} ${run.id} input ${run.inputRef}@${run.inputRevision}`,
       cwd: run.cwd, at: this.now(),
     })
@@ -1602,9 +1604,13 @@ export class DotService {
     if (namedChange && current && namedChange !== current.changeId) throw new DotError('dot/invalid', `${runId} is not a run of ${namedChange}`)
     const senderId = this.store.dotSessionId
     if (!senderId) throw new DotError('dot/not-ready', 'your conversation is not ready yet')
-    const sent = await this.supplementWorkRun(runId, text, senderId, { inputRef, inputRevision })
+    const rendered = renderSupplement({
+      changeId: current?.changeId ?? namedChange,
+      inputRef, inputRevision, runId, message: text,
+    })
+    const sent = await this.supplementWorkRun(runId, rendered, senderId, { inputRef, inputRevision })
     if (!sent.ok) throw new DotError(sent.code === 'unknown' ? 'dot/unknown' : sent.code === 'stale' ? 'dot/stale' : 'dot/invalid', sent.message)
-    const delivery = [...(this.store.work.run(runId)?.deliveries ?? [])].reverse().find(item => item.kind !== 'initial' && item.contentRef === text && item.source === senderId)
+    const delivery = [...(this.store.work.run(runId)?.deliveries ?? [])].reverse().find(item => item.kind !== 'initial' && item.contentRef === rendered && item.source === senderId)
     return `supplemented ${runId} delivery ${delivery?.id ?? 'recorded'} ${delivery?.status ?? sent.phase} for ${inputRef}@${inputRevision}`
   }
   cancelWorkChange(changeId: string) {
@@ -1851,19 +1857,35 @@ export class DotService {
     const dir = text('dir')
     const requirements = requirementList(args.requirements)
     const steps = args.steps === undefined ? undefined : stepList(args.steps)
+    const constraints = constraintList(args.constraints)
     const behaviorNotes = text('behavior_notes')
+    const userRequest = text('user_request')
+    const deliverableLanguage = text('deliverable_language')
+    if (constraints !== undefined && behaviorNotes !== undefined) throw new DotError('dot/invalid', 'pass constraints or behavior_notes, not both')
     const maxConcurrentRuns = typeof args.max_concurrent === 'number' ? args.max_concurrent : undefined
+    const inputFields = {
+      ...(constraints !== undefined ? { constraints } : {}),
+      ...(behaviorNotes !== undefined ? { behaviorNotes } : {}),
+      ...(userRequest !== undefined ? { userRequest } : {}),
+      ...(deliverableLanguage !== undefined ? { deliverableLanguage } : {}),
+    }
     if (action === 'create') {
       if (!title?.trim() || !goal?.trim() || !dir || !isAbsolute(dir)) throw new DotError('dot/invalid', 'title, goal and an absolute dir are required')
-      const change = await this.store.work.createChange({
-        title, cwd: dir, goal,
-        requirements: requirements ?? [{ requirementRef: 'goal', text: goal, required: true }],
-        ...(steps ? { steps } : {}),
-        ...(behaviorNotes !== undefined ? { behaviorNotes } : {}),
-        ...(maxConcurrentRuns !== undefined ? { maxConcurrentRuns } : {}),
-        ...(typeof args.priority === 'number' ? { priority: args.priority as 1 | 2 | 3 } : {}),
-        at: this.now(),
-      })
+      let change: ChangeRecord
+      try {
+        change = await this.store.work.createChange({
+          title, cwd: dir, goal,
+          requirements: requirements ?? [{ requirementRef: 'goal', text: goal, required: true }],
+          ...(steps ? { steps } : {}),
+          ...inputFields,
+          ...(maxConcurrentRuns !== undefined ? { maxConcurrentRuns } : {}),
+          ...(typeof args.priority === 'number' ? { priority: args.priority as 1 | 2 | 3 } : {}),
+          at: this.now(),
+        })
+      } catch (error) {
+        if (error instanceof InputShapeError) throw new DotError('dot/invalid', error.message)
+        throw error
+      }
       if (args.human_review === true) await this.store.work.requestOversight(change.id, this.now())
       return JSON.stringify(this.store.work.workView(change.id))
     }
@@ -1875,7 +1897,7 @@ export class DotService {
       ...(dir !== undefined ? { cwd: dir } : {}),
       ...(requirements ? { requirements } : {}),
       ...(steps ? { steps } : {}),
-      ...(behaviorNotes !== undefined ? { behaviorNotes } : {}),
+      ...inputFields,
       ...(maxConcurrentRuns !== undefined ? { maxConcurrentRuns } : {}),
       ...(typeof args.priority === 'number' ? { priority: args.priority as 1 | 2 | 3 } : {}),
       at: this.now(),
@@ -1916,7 +1938,7 @@ export class DotService {
     if (inputRef) {
       const row = this.store.work.input(inputRef)
       if (!row || row.changeId !== changeId) throw new DotError('dot/invalid', `unknown input ${inputRef}`)
-      return JSON.stringify(row)
+      return JSON.stringify({ ...row, constraints: inputConstraints(row) })
     }
     const view = this.workBoard(changeId)
     const material = this.store.work.input(change.currentInputRef)
@@ -1924,15 +1946,23 @@ export class DotService {
       ...view,
       goal: material?.goal,
       requirements: material?.requirements ?? [],
-      steps: change.steps.map(step => ({
-        stepRef: step.stepRef,
-        text: material?.steps.find(item => item.stepRef === step.stepRef)?.text ?? '',
-        done: step.done,
-        inputRef: step.inputRef,
-        ...(step.runId ? { runId: step.runId } : {}),
-        ...(step.subjectRef ? { subjectRef: step.subjectRef } : {}),
-      })),
+      steps: change.steps.map(step => {
+        const spec = material?.steps.find(item => item.stepRef === step.stepRef)
+        return {
+          stepRef: step.stepRef,
+          text: spec?.text ?? '',
+          done: step.done,
+          inputRef: step.inputRef,
+          ...(spec?.covers ? { covers: spec.covers } : {}),
+          ...(spec?.after ? { after: spec.after } : {}),
+          ...(step.runId ? { runId: step.runId } : {}),
+          ...(step.subjectRef ? { subjectRef: step.subjectRef } : {}),
+        }
+      }),
       behaviorNotes: material?.behaviorNotes ?? null,
+      constraints: material ? inputConstraints(material) : [],
+      userRequest: material?.userRequest ?? null,
+      deliverableLanguage: material?.deliverableLanguage ?? null,
       maxConcurrentRuns: change.maxConcurrentRuns,
       history: this.store.work.inputsFor(changeId).map(row => ({ id: row.id, revision: row.revision, goal: row.goal })),
     })
@@ -2549,7 +2579,17 @@ export class DotService {
     }
     const instruction = input.instruction.trim()
     if (!instruction) return `reserved ${runId} on ${changeId}${note}`
-    const launched = await this.launchWorkRun(runId, instruction, preset.named ? preset.id : undefined, model)
+    const live = this.store.work.run(runId)
+    const material = live ? this.store.work.input(live.inputRef) : undefined
+    if (!live || !material) throw new DotError('dot/invalid', `unknown run ${runId}`)
+    const brief = renderBrief({
+      changeId: live.changeId,
+      title: this.store.work.change(live.changeId)?.title ?? change.title,
+      input: material,
+      run: live,
+      notes: instruction,
+    })
+    const launched = await this.launchWorkRun(runId, brief, preset.named ? preset.id : undefined, model)
     if (!launched.ok) return `reserved ${runId} on ${changeId}; not started: ${launched.message}${note}`
     return `started ${runId} on ${changeId}${note}`
   }

@@ -17,11 +17,11 @@ import { formatToolDetail, parseNotice, permissionLabel, resolveSessionBadge, su
 import { ContextPanel, type ContextApi } from './context-panel.tsx'
 import { PersonaPanel, type KnowledgeApi } from './persona-panel.tsx'
 import { TrajectoryPanel, type TrajectoryApi } from './trajectory-panel.tsx'
-import type { BoardView, ChatItem, ChatSnapshot, DotSettings, TicketPriority } from './contracts.ts'
+import type { BoardView, ChatItem, ChatSnapshot, DotSettings, RolloverReason, TicketPriority } from './contracts.ts'
 import { CHAT_IMAGE_LIMIT, ChatImageRejected, imageName, inspectImageBytes, type ChatImage, type ChatImageError } from './chat-images.ts'
 import { SettingsPanel, settingsCss, type SaveNotice, type SettingsApi } from './settings-panel.tsx'
 import type { RenderFactorySlot } from '@klarkxy/dsh-plugin-kit/model-picker'
-import { t, toolLabel, type CopyLocale } from './ui-copy.ts'
+import { t, toolLabel, type CopyLocale, type TextKey } from './ui-copy.ts'
 import { WorkBoardPanel, type WorkApi } from './work-board.tsx'
 import type { WorkAcceptPayload, PendingGlance, WorkBoardItem, WorkReadRequest, WorkRejectPayload } from './work-board.ts'
 import { DotAvatar } from './whale.tsx'
@@ -265,7 +265,7 @@ function TasksTab({ locale, view, workApi, boardError, boardNotice, onOpen, onRe
       <div className="dsh-dot-filters" role="group" aria-label={t(locale, 'tasks')}>
         {filters.map(item => <button key={item.value} type="button" aria-pressed={filter === item.value} onClick={() => setFilter(item.value)}>{item.label}</button>)}
       </div>
-      {workApi && filter !== 'watch' ? <WorkBoardPanel locale={locale} api={workApi} pending={view?.pending ?? NO_PENDING} {...view?.work ? { initialItems: view.work } : {}} /> : null}
+      {workApi && filter !== 'watch' ? <WorkBoardPanel locale={locale} api={workApi} filter={filter} pending={view?.pending ?? NO_PENDING} {...view?.work ? { initialItems: view.work } : {}} /> : null}
       <Board locale={locale} view={view} filter={filter} suppressEmpty={(view?.work?.length ?? 0) > 0} {...boardError === undefined ? {} : { error: boardError }} {...boardNotice === undefined ? {} : { notice: boardNotice }} onOpen={onOpen} onRetry={onRetry} onRemoveSchedule={onRemoveSchedule} {...actions} />
     </div>
   )
@@ -387,16 +387,18 @@ export function ChatPanel({ locale, api, Card, onOpenSession, renderFactorySlot 
   const tasksBySession = useMemo<TaskLookup>(() => sessionLookup(board), [board])
   const lastTool = rows.at(-1)?.kind === 'tools'
   const showThinking = running && !preparingCard && !lastTool && !filtered.silentTail
+  const segmentCount = useMemo(() => 1 + state.items.filter(item => item.kind === 'segment').length, [state.items])
   const contextUse = useContextUse(api, snapshot?.itemsRev, running)
   const contextPct = contextUse ? Math.min(100, (contextUse.used / contextUse.window) * 100) : undefined
 
   return (
     <div className={CHAT_ROOT}>
       <header className="dsh-dot-head">
-        <DotAvatar size={32} />
+        <DotAvatar size={28} />
         <div className="dsh-dot-head-text">
           <span className="dsh-dot-name">{t(locale, 'dot')}</span>
-          <span className="dsh-dot-status" data-running={running ? '' : undefined}>{running ? t(locale, 'working') : t(locale, 'online')}</span>
+          <span className="dsh-dot-status" data-running={running ? '' : undefined}><span className="dsh-dot-status-dot" aria-hidden="true" />{running ? t(locale, 'working') : t(locale, 'online')}</span>
+          {segmentCount > 1 ? <span className="dsh-dot-segment-count" title={t(locale, 'segmentMark')}>{t(locale, 'segmentNumber').replace('{n}', String(segmentCount))}</span> : null}
         </div>
         <span className="dsh-dot-spacer" />
         {contextUse && contextPct !== undefined ? (
@@ -423,6 +425,11 @@ export function ChatPanel({ locale, api, Card, onOpenSession, renderFactorySlot 
               <DotAvatar size={72} />
               <span className="dsh-dot-greeting">{t(locale, 'greeting')}</span>
               <span className="dsh-dot-muted">{t(locale, 'greetingHint')}</span>
+              <div className="dsh-dot-starters">
+                {(['starter1', 'starter2', 'starter3'] as const).map(key => (
+                  <button key={key} type="button" className="dsh-dot-starter" disabled={running} onClick={() => { void send(t(locale, key), []).catch(() => {}) }}>{t(locale, key)}</button>
+                ))}
+              </div>
             </div>
           ) : null}
           {rows.map(row => <Fragment key={row.kind === 'tools' ? 'tools:' + row.key : row.item.key}>{renderRow(row, { locale, labels, Card, sessionId: snapshot?.sessionId ?? '', answers: state.answers, hiddenRequestIds: filtered.hiddenRequestIds, tasks: tasksBySession, onOpenSession })}</Fragment>)}
@@ -464,6 +471,33 @@ export function ChatPanel({ locale, api, Card, onOpenSession, renderFactorySlot 
   )
 }
 
+const SEGMENT_REASON: Record<RolloverReason, TextKey> = {
+  'context-full': 'segmentWhy_contextFull', 'idle-expired': 'segmentWhy_idle', 'model-switch': 'segmentWhy_model',
+  'prompt-changed': 'segmentWhy_prompt', lost: 'segmentWhy_lost', manual: 'segmentWhy_manual', 'dot-requested': 'segmentWhy_dot',
+}
+
+/** Where the conversation moved to a new session segment; opening it says why and when. */
+function SegmentMark({ locale, reason, at }: { locale: CopyLocale; reason?: RolloverReason; at: number }) {
+  const [open, setOpen] = useState(false)
+  const when = new Date(at).toLocaleString(locale === 'zh' ? 'zh-CN' : 'en-US', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
+  return (
+    <div className="dsh-dot-segment-wrap">
+      <div className="dsh-dot-segment" role="separator">
+        <button type="button" aria-expanded={open} onClick={() => setOpen(value => !value)}>
+          <span>{t(locale, 'segmentMark')}</span>
+          <span className="dsh-dot-segment-chevron" aria-hidden="true">{open ? '▾' : '▸'}</span>
+        </button>
+      </div>
+      {open ? (
+        <div className="dsh-dot-segment-note">
+          <span className="dsh-dot-segment-time">{when}</span>
+          <span>{t(locale, reason ? SEGMENT_REASON[reason] : 'segmentWhy_unknown')}</span>
+        </div>
+      ) : null}
+    </div>
+  )
+}
+
 function BotLine({ lead, children }: { lead: boolean; children: ReactNode }) {
   return (
     <div className="dsh-dot-bot">
@@ -500,7 +534,7 @@ function renderRow(row: Row, context: RenderContext): ReactNode {
     case 'notice':
       return <Notice locale={context.locale} text={item.text} hiddenRequestIds={context.hiddenRequestIds} tasks={context.tasks} onOpenSession={context.onOpenSession} />
     case 'segment':
-      return <div className="dsh-dot-segment" role="separator"><span>{t(context.locale, 'segmentMark')}</span></div>
+      return <SegmentMark locale={context.locale} reason={item.reason} at={item.at} />
     case 'bot':
       return <BotLine lead={row.lead}><MarkdownText text={item.text} labels={context.labels} variant="body" /></BotLine>
     case 'error':
@@ -975,10 +1009,40 @@ export const chatCss = settingsCss + `
 .dsh-dot-chat .dsh-dot-banner > button,
 .dsh-dot-chat .dsh-ui-actions > button { flex-shrink: 0; white-space: nowrap; }
 .dsh-dot-chat .dsh-ui-actions { flex-wrap: wrap; }
-.dsh-dot-chat .dsh-dot-head-text { display: flex; flex-direction: column; min-width: 0; }
+.dsh-dot-chat .dsh-dot-head-text { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .dsh-dot-chat .dsh-dot-name { font-size: 14px; line-height: 20px; font-weight: 600; }
-.dsh-dot-chat .dsh-dot-status { font-size: 12px; line-height: 16px; color: var(--dsw-alias-label-tertiary); }
+.dsh-dot-chat .dsh-dot-status { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; line-height: 16px; color: var(--dsw-alias-label-tertiary); white-space: nowrap; }
 .dsh-dot-chat .dsh-dot-status[data-running] { color: var(--dsw-alias-state-business-primary); }
+.dsh-dot-chat .dsh-dot-status-dot { width: 6px; height: 6px; border-radius: 3px; background: var(--dsw-alias-state-success-primary); }
+.dsh-dot-chat .dsh-dot-status[data-running] .dsh-dot-status-dot { background: var(--dsw-alias-state-business-primary); animation: dsh-dot-pulse 1.4s ease-in-out infinite; }
+@keyframes dsh-dot-pulse { 50% { opacity: 0.35; } }
+@media (prefers-reduced-motion: reduce) { .dsh-dot-chat .dsh-dot-status[data-running] .dsh-dot-status-dot { animation: none; } }
+.dsh-dot-chat .dsh-dot-head { min-height: 48px; box-sizing: border-box; padding: 6px 12px 6px 16px; gap: 8px; }
+.dsh-dot-chat .dsh-dot-segment-count {
+  padding: 1px 6px; border-radius: var(--dsw-radius-sm); background: var(--dsw-alias-bg-layer-1);
+  font: 11px/16px var(--ds-font-family-code); color: var(--dsw-alias-label-tertiary); white-space: nowrap;
+}
+@container (max-width: 420px) { .dsh-dot-chat .dsh-dot-segment-count { display: none; } }
+.dsh-dot-chat .dsh-dot-starters { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; max-width: 480px; margin-top: 12px; }
+.dsh-dot-chat .dsh-dot-starter {
+  padding: 6px 12px; border: 0; border-radius: var(--dsw-radius-sm); cursor: pointer;
+  background: var(--dsw-alias-bg-layer-1); box-shadow: var(--dsw-elevation-stroke);
+  color: var(--dsw-alias-label-secondary); font: inherit; font-size: 12px; line-height: 18px;
+}
+.dsh-dot-chat .dsh-dot-starter:hover:not(:disabled) { color: var(--dsw-alias-label-primary); background: var(--dsw-alias-interactive-bg-hover); }
+.dsh-dot-chat .dsh-dot-starter:disabled { opacity: 0.5; cursor: default; }
+.dsh-dot-chat .dsh-dot-segment-wrap { display: flex; flex-direction: column; gap: 6px; }
+.dsh-dot-chat .dsh-dot-segment button {
+  display: inline-flex; align-items: center; gap: 4px; padding: 0 2px; border: 0; background: none; cursor: pointer;
+  color: inherit; font: inherit;
+}
+.dsh-dot-chat .dsh-dot-segment button:hover { color: var(--dsw-alias-label-secondary); }
+.dsh-dot-chat .dsh-dot-segment-note {
+  display: flex; gap: 8px; align-items: baseline; align-self: center; max-width: 100%;
+  padding: 6px 12px; border-radius: var(--dsw-radius-sm); background: var(--dsw-alias-bg-layer-1);
+  font-size: 12px; line-height: 18px; color: var(--dsw-alias-label-secondary);
+}
+.dsh-dot-chat .dsh-dot-segment-time { font-family: var(--ds-font-family-code); color: var(--dsw-alias-label-tertiary); flex-shrink: 0; }
 .dsh-dot-chat .dsh-dot-spacer { flex: 1; }
 .dsh-dot-chat .dsh-dot-badge {
   display: inline-flex; align-items: center; justify-content: center; min-width: 16px; height: 16px;

@@ -313,6 +313,21 @@ function FactoryResetField({ locale, api, onSaved }: { locale: CopyLocale; api: 
   )
 }
 
+/** Placeholder blocks while a drawer page reads its data; the label stays for screen readers. */
+export function PaneSkeleton({ label, rows = 4 }: { label: string; rows?: number }) {
+  return (
+    <div className="dsh-dot-skeleton" role="status" aria-label={label}>
+      {Array.from({ length: rows }, (_, index) => (
+        <div key={index} className="dsh-dot-skeleton-card" aria-hidden="true">
+          <span className="dsh-dot-skeleton-bar" data-w="title" />
+          <span className="dsh-dot-skeleton-bar" data-w="field" />
+          <span className="dsh-dot-skeleton-bar" data-w="line" />
+        </div>
+      ))}
+    </div>
+  )
+}
+
 export function SettingsPanel({ locale, api, settings, onSaved, onStatusChange, onProposalCount, renderFactorySlot }: {
   locale: CopyLocale
   api: SettingsApi
@@ -342,7 +357,7 @@ export function SettingsPanel({ locale, api, settings, onSaved, onStatusChange, 
     api.settings(new AbortController().signal).then(onSaved, () => {})
   }, [api, onSaved])
 
-  if (!settings) return <div className="dsh-ui-loading">{t(locale, 'settingsLoading')}</div>
+  if (!settings) return <PaneSkeleton label={t(locale, 'settingsLoading')} />
 
   const chosen = settings.model
   const choices = [...models.choices ?? []]

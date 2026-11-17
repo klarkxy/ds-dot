@@ -1,6 +1,7 @@
 import { Button, Input, SegmentedTabs, StateDot, Tag, type SegmentedTab, type StateDotState, type TagTone } from '@deepseek-ai/dsh-client-ui-primitives'
 import { useId, useMemo, useState } from 'react'
-import { FINISHED_SHOWN, groupBoard } from './board-groups.ts'
+import { FINISHED_SHOWN, groupBoard, headerBoardCounts } from './board-groups.ts'
+import { groupWork } from './work-board.ts'
 import type { BoardView, SessionRole, TaskStatus, TicketAccess, TicketPriority, TicketStatus, TicketView } from './contracts.ts'
 import { formatWhen, t, timingLabel, type CopyLocale, type TextKey } from './ui-copy.ts'
 
@@ -38,7 +39,8 @@ export type BoardFilter = 'all' | 'waiting' | 'active' | 'watch'
 export function boardCounts(view: BoardView | undefined): Record<Exclude<BoardFilter, 'all'>, number> {
   if (!view) return { waiting: 0, active: 0, watch: 0 }
   const groups = groupBoard(view)
-  return { waiting: groups.waitingCount, active: groups.active.length + groups.todo.length, watch: groups.watched.length + view.schedules.length }
+  const work = groupWork(view.work ?? [], view.pending)
+  return { waiting: headerBoardCounts(view).waitingCount, active: groups.active.length + groups.todo.length + work.active.length, watch: groups.watched.length + view.schedules.length }
 }
 
 export interface BoardProps extends BoardActions {
@@ -349,9 +351,16 @@ export const boardCss = `
 .dsh-dot-board .dsh-dot-reminder { display: flex; align-items: center; gap: 8px; min-width: 0; padding: 4px 4px 4px 10px; }
 .dsh-dot-board .dsh-dot-reminder > button { flex-shrink: 0; white-space: nowrap; }
 .dsh-dot-board .dsh-dot-row > .dsh-ui-meta { white-space: nowrap; flex-shrink: 0; }
-.dsh-dot-board .dsh-dot-ticket { display: flex; flex-direction: column; min-width: 0; }
-.dsh-dot-board .dsh-dot-ticket-head { display: flex; align-items: center; gap: 4px; min-width: 0; }
-.dsh-dot-board .dsh-dot-ticket-head > .dsh-dot-row { flex: 1 1 auto; width: auto; min-width: 0; }
+.dsh-dot-board .dsh-dot-ticket,
+.dsh-dot-board .dsh-dot-work {
+  display: flex; flex-direction: column; min-width: 0;
+  border-radius: var(--dsw-radius-md); background: var(--dsw-alias-bg-layer-2);
+  box-shadow: var(--dsw-elevation-stroke); overflow: hidden;
+}
+.dsh-dot-board .dsh-dot-ticket[data-status='done'], .dsh-dot-board .dsh-dot-ticket[data-status='cancelled'],
+.dsh-dot-board .dsh-dot-work[data-status='done'], .dsh-dot-board .dsh-dot-work[data-status='cancelled'] { background: transparent; }
+.dsh-dot-board .dsh-ui-stack > .dsh-dot-row { background: var(--dsw-alias-bg-layer-2); box-shadow: var(--dsw-elevation-stroke); border-radius: var(--dsw-radius-md); }
+.dsh-dot-board .dsh-dot-ticket-head { display: flex; align-items: center; gap: 4px; min-width: 0; padding-right: 6px; }.dsh-dot-board .dsh-dot-ticket-head > .dsh-dot-row { flex: 1 1 auto; width: auto; min-width: 0; }
 .dsh-dot-board .dsh-dot-ticket-actions { display: flex; align-items: center; gap: 2px; flex-shrink: 0; }
 .dsh-dot-board .dsh-dot-ticket-actions > button { white-space: nowrap; }
 .dsh-dot-board .dsh-dot-titleline { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; min-width: 0; }
@@ -359,12 +368,70 @@ export const boardCss = `
 .dsh-dot-board .dsh-dot-reject-note { flex: 1 1 140px; min-width: 0; }
 .dsh-dot-board .dsh-dot-reject > button { flex-shrink: 0; white-space: nowrap; }
 .dsh-dot-board .dsh-dot-detail {
-  display: flex; flex-direction: column; gap: 10px; margin: 2px 10px 6px 28px; padding: 10px 12px;
-  border-radius: var(--dsw-radius-md); background: var(--dsw-alias-bg-layer-1); box-shadow: var(--dsw-elevation-stroke);
+  display: flex; flex-direction: column; gap: 10px; padding: 10px 14px 12px;
+  border-top: 0.5px solid var(--dsw-alias-border-l2); background: var(--dsw-alias-bg-base);
 }
 .dsh-dot-board .dsh-dot-block { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
 .dsh-dot-board .dsh-dot-entry { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .dsh-dot-board .dsh-dot-text { margin: 0; font-size: 12px; line-height: 18px; color: var(--dsw-alias-label-secondary); white-space: pre-wrap; overflow-wrap: anywhere; }
 .dsh-dot-board .dsh-dot-line { padding: 4px 6px; }
 .dsh-dot-board .dsh-dot-fold { align-self: flex-start; }
-`
+.dsh-dot-board .dsh-dot-work-head { display: flex; align-items: flex-start; gap: 8px; padding: 10px 12px 4px; min-width: 0; }
+.dsh-dot-board .dsh-dot-work-head > [data-state] { margin-top: 6px; flex-shrink: 0; }
+.dsh-dot-board .dsh-dot-work-main { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.dsh-dot-board .dsh-dot-work-meta { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; min-width: 0; }
+.dsh-dot-board .dsh-dot-work-mono { font: 11px/16px var(--ds-font-family-code); color: var(--dsw-alias-label-tertiary); }
+.dsh-dot-board .dsh-dot-work-facts-line { font: 11px/16px var(--ds-font-family-code); color: var(--dsw-alias-label-tertiary); overflow-wrap: anywhere; }
+.dsh-dot-board .dsh-dot-work-title { font-size: 13px; line-height: 19px; font-weight: 500; color: var(--dsw-alias-label-primary); overflow-wrap: anywhere; }
+.dsh-dot-board .dsh-dot-work-runs { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; padding: 4px 12px 6px 28px; min-width: 0; }
+.dsh-dot-board .dsh-dot-work-arrow { font-size: 11px; color: var(--dsw-alias-label-dimmed); }
+.dsh-dot-board .dsh-dot-work-pill {
+  display: inline-flex; align-items: center; gap: 5px; padding: 1px 8px; border-radius: var(--dsw-radius-sm);
+  background: var(--dsw-alias-bg-base); box-shadow: var(--dsw-elevation-stroke);
+  font-size: 11px; line-height: 18px; color: var(--dsw-alias-label-secondary);
+}
+.dsh-dot-board .dsh-dot-work-pill[data-terminal] { opacity: 0.75; }
+.dsh-dot-board .dsh-dot-work-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; padding: 2px 12px 8px 28px; }
+.dsh-dot-board .dsh-dot-work-actions > button { white-space: nowrap; }
+.dsh-dot-board .dsh-dot-work > .dsh-ui-hint { margin: 0; padding: 0 12px 8px 28px; }
+.dsh-dot-board .dsh-dot-work-facts { border-top: 0.5px solid var(--dsw-alias-border-l2); }
+.dsh-dot-board .dsh-dot-work-facts > summary {
+  display: flex; align-items: center; gap: 6px; padding: 7px 12px 7px 28px; cursor: pointer; list-style: none;
+  font-size: 12px; line-height: 18px; color: var(--dsw-alias-label-tertiary);
+}
+.dsh-dot-board .dsh-dot-work-facts > summary::-webkit-details-marker { display: none; }
+.dsh-dot-board .dsh-dot-work-facts > summary::after { content: '›'; font-size: 14px; transition: transform 0.15s; }
+.dsh-dot-board .dsh-dot-work-facts[open] > summary::after { transform: rotate(90deg); }
+.dsh-dot-board .dsh-dot-work-facts > summary:hover { color: var(--dsw-alias-label-primary); }
+.dsh-dot-board .dsh-dot-work-facts-body {
+  display: flex; flex-direction: column; gap: 10px; padding: 10px 14px 12px;
+  background: var(--dsw-alias-bg-base); font-size: 12px; line-height: 18px; color: var(--dsw-alias-label-secondary);
+}
+.dsh-dot-board .dsh-dot-work-summary { margin: 0; overflow-wrap: anywhere; }
+.dsh-dot-board .dsh-dot-work-list { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.dsh-dot-board .dsh-dot-work-run { display: flex; flex-direction: column; gap: 2px; }
+.dsh-dot-board .dsh-dot-work-run-line { overflow-wrap: anywhere; }
+.dsh-dot-board .dsh-dot-work-check {
+  display: flex; align-items: center; gap: 8px; min-width: 0; padding: 5px 10px;
+  border-radius: var(--dsw-radius-sm); background: var(--dsw-alias-bg-layer-1);
+}
+.dsh-dot-board .dsh-dot-work-check-ref { flex-shrink: 0; font-weight: 500; color: var(--dsw-alias-label-primary); }
+.dsh-dot-board .dsh-dot-work-check-note { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dsh-dot-board .dsh-dot-work-check > :last-child { margin-left: auto; flex-shrink: 0; }
+.dsh-dot-board .dsh-dot-work-pane { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.dsh-dot-board .dsh-dot-work-pane[hidden] { display: none; }
+.dsh-dot-board .dsh-dot-work-source { display: flex; flex-direction: column; gap: 4px; min-width: 0; border-radius: var(--dsw-radius-sm); }
+.dsh-dot-board .dsh-dot-work-source-head {
+  display: flex; align-items: center; gap: 6px; min-width: 0;
+  font: 11px/17px var(--ds-font-family-code); color: var(--dsw-alias-label-secondary); text-decoration: none;
+}
+.dsh-dot-board a.dsh-dot-work-source-head:hover { color: var(--dsw-alias-label-primary); }
+.dsh-dot-board .dsh-dot-work-source-head > span:first-of-type { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dsh-dot-board .dsh-dot-work-pre {
+  margin: 0; padding: 8px 10px; max-height: 240px; overflow: auto;
+  border-radius: var(--dsw-radius-sm); background: var(--dsw-alias-bg-layer-1); box-shadow: var(--dsw-elevation-stroke);
+  font: 11px/17px var(--ds-font-family-code); color: var(--dsw-alias-label-secondary); white-space: pre; tab-size: 2;
+}
+.dsh-dot-board .dsh-dot-work-source-note { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.dsh-dot-board .dsh-dot-work-source-note > p { margin: 0; color: var(--dsw-alias-label-error); }
+.dsh-dot-board .dsh-dot-work-subject { align-self: flex-end; font: 10px/14px var(--ds-font-family-code); color: var(--dsw-alias-label-dimmed); }`

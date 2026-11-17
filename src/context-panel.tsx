@@ -16,6 +16,7 @@ import { officialSurfaceParts } from './context-surface.ts'
 import { SurfaceBrowser, SURFACE_CATEGORIES, SURFACE_COLORS } from './context-surface-browser.tsx'
 import type { PartsPart, ViewKit } from './context-widget-types.ts'
 import { formatPercent, formatTokens, t, type CopyLocale, type TextKey } from './ui-copy.ts'
+import { PaneSkeleton } from './settings-panel.tsx'
 
 const REFRESH_MS = 5_000
 
@@ -169,7 +170,7 @@ export function ContextPanel({ locale, api, running = false }: { locale: CopyLoc
   if (!view) {
     return error
       ? <div className="dsh-ui-error" role="alert">{t(locale, 'ctxFailed')}{error}</div>
-      : <div className="dsh-ui-loading">{t(locale, 'ctxLoading')}</div>
+      : <PaneSkeleton label={t(locale, 'ctxLoading')} rows={3} />
   }
   if (!view.live) return <div className="dsh-ui-empty">{t(locale, 'ctxIdle')}</div>
 

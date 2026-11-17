@@ -7,7 +7,7 @@ import { Button, Input, Tag } from '@deepseek-ai/dsh-client-ui-primitives'
 import { useCallback, useEffect, useState } from 'react'
 import type { DotSettings, KnowledgeView, SettingField } from './contracts.ts'
 import { ADDRESS_MAX_CHARS, DEFAULT_ADDRESS, DEFAULT_PERSONA, PERSONA_MAX_CHARS } from './persona.ts'
-import { LockToggle, type SaveNotice, type SettingsApi, type SettingsPatch } from './settings-panel.tsx'
+import { LockToggle, PaneSkeleton, type SaveNotice, type SettingsApi, type SettingsPatch } from './settings-panel.tsx'
 import { formatWhen, t, type CopyLocale } from './ui-copy.ts'
 
 export interface KnowledgeApi {
@@ -229,7 +229,7 @@ export function PersonaPanel({ locale, api, settings, onSaved, onStatusChange }:
     if (text !== savedAddress) save({ address: text })
   }
 
-  if (!settings) return <div className="dsh-ui-loading">{t(locale, 'settingsLoading')}</div>
+  if (!settings) return <PaneSkeleton label={t(locale, 'settingsLoading')} rows={3} />
   const personaChanged = persona !== savedPersona
   const personaCustom = settings.persona !== undefined
   const addressCustom = settings.address !== undefined

@@ -38,6 +38,21 @@ const buttonIncluding = (text: string) => [...document.querySelectorAll('button'
 const longBody = (head: string, tail: string, size = 80_000) => `${head}${'a'.repeat(size)}${tail}`
 
 describe('WorkBoard', () => {
+  it('keeps only the groups of the drawer filter', async () => {
+    const running: WorkBoardItem = { ...item, id: 'c-2', title: 'Still going', status: 'running', humanAction: undefined }
+    const root = createRoot(document.getElementById('root')!)
+    const sections = () => [...document.querySelectorAll('section[aria-label]')].map(node => node.getAttribute('aria-label'))
+    const props = { locale: 'en' as const, items: [item, running], pending: [], onAccept: vi.fn(), onReject: vi.fn(), onAnswer: vi.fn(), onResume: vi.fn() }
+    await act(async () => root.render(<WorkBoard {...props} filter="waiting" />))
+    expect(sections()).toEqual(['Needs you'])
+    await act(async () => root.render(<WorkBoard {...props} filter="active" />))
+    expect(sections()).toEqual(['In progress'])
+    await act(async () => root.render(<WorkBoard {...props} />))
+    expect(sections()).toEqual(['Needs you', 'In progress'])
+    await act(async () => root.unmount())
+  })
+
+
   it('sends the versions on the projection and does not claim a withdrawn look succeeded', async () => {
     const onAccept = vi.fn()
     const onAnswer = vi.fn()

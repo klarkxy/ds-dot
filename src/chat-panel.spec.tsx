@@ -64,6 +64,32 @@ function makeApi(snapshot: ChatSnapshot): ChatApi {
 }
 
 describe('ChatPanel activity and notice cards', () => {
+  it('sends a starter prompt from the empty chat and explains a segment mark when opened', async () => {
+    const empty: ChatSnapshot = { sessionId: 'dot-1', running: false, streaming: '', rev: 1, itemsRev: 1, items: [] }
+    const api = makeApi(empty)
+    api.say = vi.fn(async () => {})
+    const root = createRoot(document.getElementById('root')!)
+    await act(async () => { root.render(<ChatPanel locale="en" api={api} onOpenSession={() => {}} />) })
+    await act(async () => { await Promise.resolve() })
+    const starter = document.querySelector<HTMLButtonElement>('.dsh-dot-starter')!
+    await act(async () => { starter.click() })
+    expect(api.say).toHaveBeenCalledWith(starter.textContent, [])
+    await act(async () => { root.unmount() })
+
+    const segmented: ChatSnapshot = { ...empty, items: [
+      { kind: 'user', key: 'u', text: 'hi', at: 1 },
+      { kind: 'segment', key: 's', reason: 'context-full', at: 2 },
+    ] }
+    const again = createRoot(document.getElementById('root')!)
+    await act(async () => { again.render(<ChatPanel locale="en" api={makeApi(segmented)} onOpenSession={() => {}} />) })
+    await act(async () => { await Promise.resolve() })
+    expect(document.querySelector('.dsh-dot-segment-note')).toBeNull()
+    await act(async () => { document.querySelector<HTMLButtonElement>('.dsh-dot-segment button')!.click() })
+    expect(document.querySelector('.dsh-dot-segment-note')?.textContent).toContain('rollover line')
+    await act(async () => { again.unmount() })
+  })
+
+
   it('shows a board failure and retries immediately', async () => {
     const snapshot: ChatSnapshot = { sessionId: 'dot-1', running: false, streaming: '', rev: 1, itemsRev: 1, items: [] }
     const api = makeApi(snapshot)

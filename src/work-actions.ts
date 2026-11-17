@@ -2,7 +2,6 @@
  * Pure argument parsers, workspace occupant helpers, and projection adapters
  * for WorkBook (`Change` / `Run` / `Verification`), extracted from `service.ts`.
  */
-import type { DeliverySubject } from './acceptance.ts'
 import { detectWorkspaceRoot } from './git-root.ts'
 import type { WorkIdleItem } from './idle-check.ts'
 import type { WorkLedgerItem } from './ledger.ts'
@@ -61,34 +60,6 @@ export function jsonArray(value: unknown): unknown[] | undefined {
   } catch {
     return undefined
   }
-}
-
-export function jsonObject(value: unknown): Record<string, unknown> | undefined {
-  if (value && typeof value === 'object' && !Array.isArray(value)) return value as Record<string, unknown>
-  if (typeof value !== 'string' || !value.trim()) return undefined
-  try {
-    const parsed = JSON.parse(value) as unknown
-    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed as Record<string, unknown> : undefined
-  } catch {
-    return undefined
-  }
-}
-
-export function foldPath(value: string): string {
-  return value.replaceAll('\\', '/').toLowerCase()
-}
-
-export function assistantText(event: { data?: unknown }): string {
-  const data = event.data
-  if (!data || typeof data !== 'object') return ''
-  const content = (data as { message?: { content?: unknown } }).message?.content
-  if (typeof content === 'string') return content
-  if (!Array.isArray(content)) return ''
-  return content.map(block => {
-    if (!block || typeof block !== 'object') return ''
-    const row = block as { type?: string; text?: unknown }
-    return row.type === 'text' && typeof row.text === 'string' ? row.text : ''
-  }).join('')
 }
 
 export function occupantOf(run: RunRecord): Occupant {
@@ -150,50 +121,12 @@ export function pathScope(value: unknown): { path: string; type: 'file' | 'direc
   })
 }
 
-/** A bare snapshot id, including one wrapped as a JSON string. An object is not an id. */
-export function snapshotId(value: unknown): string | undefined {
-  if (typeof value !== 'string') return undefined
-  const text = value.trim()
-  if (!text || text.startsWith('{') || text.startsWith('[')) return undefined
-  if (text.startsWith('"')) {
-    try {
-      const parsed = JSON.parse(text) as unknown
-      return typeof parsed === 'string' && parsed.trim() ? parsed.trim() : undefined
-    } catch {
-      return undefined
-    }
-  }
-  return text
-}
-
-export function stringField(value: unknown, key: string): string {
-  if (!value || typeof value !== 'object') return ''
-  const field = (value as Record<string, unknown>)[key]
-  return typeof field === 'string' ? field : ''
-}
-
-export function sameSubject(stored: DeliverySubject, passed: Record<string, unknown>): boolean {
-  const rest = { ...passed }
-  delete rest.subjectRef
-  return stable(stored) === stable(rest)
-}
-
-function stable(value: unknown): string {
-  if (Array.isArray(value)) return `[${value.map(stable).join(',')}]`
-  if (value && typeof value === 'object') {
-    const record = value as Record<string, unknown>
-    return `{${Object.keys(record).sort().map(key => `${JSON.stringify(key)}:${stable(record[key])}`).join(',')}}`
-  }
-  return JSON.stringify(value) ?? 'null'
-}
-
 export function verifyRefusal(message: string): string {
-  if (message.includes('scopeKey') || message.includes('delivery schema')) return `${message} Pass subject_ref from action=subject. Do not trim the subject or edit checks.`
   if (message.includes('no review run') || message.includes('is not a run of') || message.includes('reviewer session') || message.includes('review workspace') || message.includes('review cwd')) {
     return `${message} Use the review run and session for this change. Do not edit checks.`
   }
   if (message.includes('older input') || message.includes('current input') || message.includes('different input')) {
-    return `${message} Call action=subject again for the current input. Do not edit checks.`
+    return `${message} Read the current input and close out that version. Do not edit checks.`
   }
   return `${message} Do not edit checks to get past this.`
 }

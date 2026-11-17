@@ -4,7 +4,7 @@
  * carries the subagent origin, which the browser's session reader refuses, so
  * the host folds the log and the panel draws it. Pure over raw events.
  */
-import { textOf, type RawEvent } from './chat.ts'
+import { toolResultFailed, textOf, type RawEvent } from './chat.ts'
 import type { TrajectoryView, TrajRecord, TrajStep, TrajTurn, TrajUsage } from './contracts.ts'
 
 /** Longest text kept per record; the panel says when a record was cut. */
@@ -164,7 +164,7 @@ export function foldTrajectory(events: Iterable<RawEvent>, window = TURN_WINDOW)
         const call = found?.records[found.index]
         if (!found || call?.kind !== 'call') break
         const result = clip(textOf(message?.content).trim())
-        found.records[found.index] = { ...call, status: message?.isError === true ? 'error' : 'done', result: result.text, ...result.clipped ? { resultClipped: true } : {}, endedAt: at }
+        found.records[found.index] = { ...call, status: toolResultFailed(data) ? 'error' : 'done', result: result.text, ...result.clipped ? { resultClipped: true } : {}, endedAt: at }
         break
       }
       case 'compaction/summary': {

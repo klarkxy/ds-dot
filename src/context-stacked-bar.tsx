@@ -31,8 +31,6 @@ export interface StackedBarProps {
   height?: number
   hoverKey?: string | null
   onHoverKey?: (key: string | null) => void
-  onPickKey?: (key: string) => void
-  minBand?: number
   tip?: boolean
   reserve?: ContextReserve
 }
@@ -50,25 +48,10 @@ export function makeStackedBar(kit: ViewKit): (props: StackedBarProps) => ReactE
     const usedPct = scale > 0 ? total / scale * 100 : 0
     const hovering = props.hoverKey !== null && props.hoverKey !== undefined
     const showBox = free > 0 && hovering
-    const pickKey = props.onPickKey
-    const minBand = props.minBand !== undefined && props.minBand > 0 ? props.minBand : 0
 
     const visible = total > 0 ? props.parts.filter(p => p.value > 0) : []
     const animate = visible.length <= SEGMENT_ANIMATION_MAX
-    const widths = ((): number[] => {
-      if (minBand === 0 || visible.length < 2) return visible.map(p => p.value / scale * 100)
-      const shares = visible.map(p => p.value / total * 100)
-      const floor = Math.min(minBand, 100 / visible.length)
-      let pinned = 0
-      let pinnedRaw = 0
-      for (const s of shares) {
-        if (s < floor) { pinned += 1; pinnedRaw += s }
-      }
-      if (pinned === 0) return visible.map(p => p.value / scale * 100)
-      const restRoom = 100 - pinned * floor
-      const restRaw = 100 - pinnedRaw
-      return shares.map(s => (s < floor ? floor : s * restRoom / restRaw) * total / scale)
-    })()
+    const widths = visible.map(p => p.value / scale * 100)
 
     const win = props.max !== undefined && props.max > 0 ? props.max : undefined
     const reserve = win === undefined ? undefined : props.reserve
@@ -161,22 +144,9 @@ export function makeStackedBar(kit: ViewKit): (props: StackedBarProps) => ReactE
             return (
               <div
                 key={p.key}
-                className={'lc-stacked-seg' + (animate ? ' animate-lc-stacked-in motion-reduce:animate-none' : '') + (on ? ' lc-stacked-seg-on' : '') + (pickKey !== undefined ? ' lc-stacked-seg-pick' : '')}
+                className={'lc-stacked-seg' + (animate ? ' animate-lc-stacked-in motion-reduce:animate-none' : '') + (on ? ' lc-stacked-seg-on' : '')}
                 style={{ width: `${widths[i]}%`, backgroundColor: p.color, ...(animate ? { '--lc-i': Math.min(i, STAGGER_CAP) } : {}) }}
-                {...(pickKey !== undefined
-                  ? {
-                    role: 'button',
-                    tabIndex: 0,
-                    'aria-label': `${p.label ?? catLabel(p.key)} ${fmt(p.raw ?? p.value)}`,
-                    onKeyDown: (ev: { key: string; preventDefault: () => void }) => {
-                      if (ev.key !== 'Enter' && ev.key !== ' ') return
-                      ev.preventDefault()
-                      pickKey(p.key)
-                    },
-                  }
-                  : {})}
                 onMouseEnter={() => { if (props.onHoverKey !== undefined) props.onHoverKey(p.key) }}
-                onClick={pickKey !== undefined ? () => { pickKey(p.key) } : undefined}
               />
             )
           })}
@@ -233,7 +203,6 @@ export interface LegendProps {
   parts: PartsPart[]
   hoverKey?: string | null
   onHoverKey?: (key: string | null) => void
-  delta?: boolean
 }
 
 export function makeLegend(kit: ViewKit): (props: LegendProps) => ReactElement {
@@ -246,12 +215,11 @@ export function makeLegend(kit: ViewKit): (props: LegendProps) => ReactElement {
         {props.parts.map((p) => {
           const count = p.raw ?? p.value
           const on = props.hoverKey !== undefined && props.hoverKey === p.key
-          const sign = props.delta === true && count !== 0 ? ' lc-chip-nums-' + (count > 0 ? 'up' : 'down') : ''
           return (
             <span
               key={p.key}
               className={'lc-chip' + (on ? ' lc-chip-on' : '')}
-              title={props.delta === true ? undefined : t('overview.ofUsed')}
+              title={t('overview.ofUsed')}
               {...(props.onHoverKey !== undefined
                 ? {
                   tabIndex: 0,
@@ -265,9 +233,9 @@ export function makeLegend(kit: ViewKit): (props: LegendProps) => ReactElement {
             >
               <i style={{ background: p.color }} />
               <span className="lc-chip-label">{catLabel(p.key)}</span>
-              <span className={'lc-chip-nums' + sign}>
-                {props.delta === true ? (count > 0 ? '+' : '') + fmt(count) : '≈' + fmt(count)}
-                {props.delta !== true && total > 0 ? <em>{`${Math.round(count / total * 100)}%`}</em> : null}
+              <span className="lc-chip-nums">
+                {'≈' + fmt(count)}
+                {total > 0 ? <em>{`${Math.round(count / total * 100)}%`}</em> : null}
               </span>
             </span>
           )

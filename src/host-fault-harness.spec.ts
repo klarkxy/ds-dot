@@ -29,8 +29,9 @@ function stage(sessionId: string) {
   const killed: string[] = []
   let follows = 0
   const agent = {
-    session: { id: sessionId },
+    session: { id: sessionId, get seq() { return events.length }, eventAt: (seq: number) => events[seq] },
     status: 'idle' as const,
+    cancel() {},
     whenIdle: () => Promise.resolve(),
     followup(message: { content?: unknown; source?: Record<string, unknown> }) {
       follows += 1
@@ -131,8 +132,17 @@ describe('real host fault harness', () => {
     expect(work.occupying().map(item => item.id)).toEqual([run.id])
   })
 
+  it('forwards the final relay gate before injecting a lost acknowledgement', async () => {
+    const { live } = await activeRun()
+    const fault = createHostFault({ relayAckUnknown: true })
+    const host = fault.wrapHost(bindHost(live.get))
+    await expect(host.relay('target', 'sender', 'late', 'd1', () => false)).rejects.toThrow('closed before followup')
+    expect(live.follows()).toBe(0)
+    expect(fault.relayCalls).toBe(0)
+  })
+
   it('holds owned-job confirmation past jobs.wait(1500), then releases only that job', async () => {
-    const { work, run, live } = await activeRun()
+    const { work, run, live } = await activeRun(writeScope)
     const fault = createHostFault({ holdJobConfirm: true })
     const reports: { jobsSettled: boolean | 'unknown' }[] = []
     const bound = bindHost(name => fault.wrapService(name, live.get(name)))
@@ -169,11 +179,11 @@ describe('real host fault harness', () => {
     expect(live.jobs.find(item => item.id === 'job-other')?.status).toBe('running')
   }, 10_000)
 
-  it('finishes after the owned job settles when agents.get returns an AgentHandle', async () => {
+  it('finishes after the owned job settles with a bare registered Agent', async () => {
     const { work, run, live } = await activeRun()
     const inner = (live.get('agents') as { get: () => unknown }).get()
     const host = bindRunSession(bindHost(name => {
-      if (name === 'agents') return { get: () => ({ agent: inner, async dispose() {} }) }
+      if (name === 'agents') return { get: () => inner }
       return live.get(name)
     }))
     const finished = await finishWork(work, host, run.id, 'completed', 9)
@@ -187,7 +197,7 @@ describe('real host fault harness', () => {
   it('does not invent idle when the live agent is actually gone', async () => {
     const { work, run, live } = await activeRun()
     const host = bindRunSession(bindHost(name => {
-      if (name === 'agents') return { get: () => ({ id: run.requestedSessionId }) }
+      if (name === 'agents') return { get: () => undefined }
       if (name === 'sessionController') {
         const controller = live.get('sessionController') as { cancel: () => Promise<unknown>; state: () => Promise<unknown> }
         return { ...controller, async resolveAgent() { return { error: { message: 'session has no live agent' } } } }

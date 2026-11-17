@@ -90,7 +90,7 @@ function harness(settings: Partial<DotSettings> = {}, hooks: HostHooks = {}) {
     effect(fn: () => unknown) { fn() },
   } as never)
   const task = registered.find(row => row.name === TOOL.task) as { execute(args: Record<string, unknown>): Promise<string> }
-  const start = registered.find(row => row.name === TOOL.startTask) as { execute(args: Record<string, unknown>, exec: { signal?: AbortSignal }): Promise<string> }
+  const start = { ...task, execute: (args: Record<string, unknown>, _exec?: unknown) => task.execute({ ...args, action: 'dispatch', ...((args.cwd ?? args.dir) ? { dir: args.cwd ?? args.dir } : {}) }) }
   const exec = { signal: new AbortController().signal }
   return {
     home, project, store, service, calls, relays, task, start, exec,
@@ -111,14 +111,9 @@ describe('backend boundaries', () => {
       })
       if (!reserved.ok) throw new Error(reserved.message)
       await h.service.captureWorkBaseline(reserved.run.id)
-      const explicit = await h.start.execute({ task_id: change.id, instruction: 'edit', access: 'write' }, h.exec)
-      const omitted = await h.start.execute({ task_id: change.id, instruction: 'edit' }, h.exec)
-      const lowered = await h.start.execute({ task_id: change.id, instruction: 'edit', access: 'read' }, h.exec)
-      expect(explicit).toContain('Error [dot/locked]')
-      expect(explicit).toContain('human-running RUNNING')
-      expect(omitted).toContain('Error [dot/locked]')
-      expect(omitted).toContain('human-running RUNNING')
-      expect(lowered).toContain('Error [dot/locked]')
+      for (const access of ['write', undefined, 'read']) {
+        await expect(h.start.execute({ task_id: change.id, instruction: 'edit', ...(access ? { access } : {}) }, h.exec)).rejects.toMatchObject({ code: 'dot/locked', message: expect.stringContaining('human-running RUNNING') })
+      }
       expect(h.calls.some(call => call.startsWith('create '))).toBe(false)
       expect(h.calls).not.toContain('prompt')
       expect(h.store.work.run(reserved.run.id)?.phase).toBe('reserved')
@@ -145,50 +140,25 @@ describe('backend boundaries', () => {
       expect(started).not.toContain('dot/locked')
       const prompts = h.calls.filter(call => call === 'prompt').length
       const third = await h.service.createWorkChange({ title: 'Three', cwd: h.project, goal: 'overlap', at: 5 })
-      const overlap = await h.start.execute({
+      await expect(h.start.execute({
         task_id: third.id, instruction: 'edit a', access: 'write',
         paths: JSON.stringify([{ path: join(h.project, 'a.ts'), type: 'file' }]),
-      }, h.exec)
-      expect(overlap).toContain('Error [dot/locked]')
-      expect(overlap).toContain(left.run.id)
+      }, h.exec)).rejects.toMatchObject({ code: 'dot/locked', message: expect.stringContaining(left.run.id) })
       expect(h.calls.filter(call => call === 'prompt').length).toBe(prompts)
     } finally { h.cleanup() }
   })
 
-  it('refuses a step that has no readable result', async () => {
+  it('records progress without probing results and still refuses a stale input', async () => {
     const h = harness()
     try {
-      const created = JSON.parse(await h.task.execute({
-        action: 'create', title: 'Ship', goal: 'land it', dir: h.project,
-        steps: JSON.stringify([{ stepRef: 's1', text: 'edit a.ts' }]),
-      })) as { id: string }
-      const reserved = JSON.parse(await h.task.execute({
-        action: 'reserve', task_id: created.id, role: 'work', access: 'read', step_refs: JSON.stringify(['s1']),
-      })) as { runId: string }
-      const current = h.store.work.change(created.id)!
-      const early = await h.task.execute({
-        action: 'step', task_id: created.id, step_ref: 's1', run_id: reserved.runId, expected_input_revision: current.currentRevision,
-      })
-      expect(early).toContain('Error')
-      expect(h.store.work.run(reserved.runId)?.phase).toBe('reserved')
+      const change = await h.service.createWorkChange({ title: 'Ship', goal: 'land', cwd: h.project, steps: [{ stepRef: 's1', text: 'edit' }] })
+      const note = await h.task.execute({ action: 'step', task_id: change.id, step_ref: 's1', expected_input_revision: change.currentRevision })
+      expect(note).toContain('step s1 done')
       expect(h.calls).not.toContain('prompt')
-      expect(JSON.parse(await h.task.execute({ action: 'read', task_id: created.id })).steps[0].done).toBe(false)
-      const started = await h.start.execute({ task_id: created.id, instruction: 'edit', access: 'read' }, h.exec)
-      expect(started).toContain(`started ${reserved.runId}`)
-      const refused = await h.task.execute({
-        action: 'step', task_id: created.id, step_ref: 's1', run_id: reserved.runId, expected_input_revision: current.currentRevision,
-      })
-      expect(refused).toContain('Error')
-      const step = JSON.parse(await h.task.execute({ action: 'read', task_id: created.id })).steps[0]
-      expect(step.done).toBe(false)
-      expect(step.subjectRef).toBeUndefined()
-      await h.task.execute({ action: 'revise', task_id: created.id, goal: 'land it later' })
-      const revised = h.store.work.change(created.id)!
-      const stale = await h.task.execute({
-        action: 'step', task_id: created.id, step_ref: 's1', run_id: reserved.runId, expected_input_revision: revised.currentRevision,
-      })
-      expect(stale).toContain('Error')
-      expect(JSON.parse(await h.task.execute({ action: 'read', task_id: created.id })).steps[0].done).toBe(false)
+      expect(h.store.work.change(change.id)?.closeout).toBeUndefined()
+      await h.service.reviseWorkChange(change.id, { goal: 'later' })
+      await expect(h.task.execute({ action: 'step', task_id: change.id, step_ref: 's1', expected_input_revision: change.currentRevision })).rejects.toThrow(/not on revision/)
+      expect(h.store.work.change(change.id)?.steps[0]?.done).toBe(false)
     } finally { h.cleanup() }
   })
 

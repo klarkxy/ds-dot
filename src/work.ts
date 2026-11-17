@@ -23,7 +23,7 @@ export type WriteScope = { readonly kind: 'paths'; readonly paths: readonly Writ
 
 export interface Requirement { readonly requirementRef: string; readonly text: string; readonly required: boolean }
 export interface StepSpec { readonly stepRef: string; readonly text: string }
-export interface StepView { readonly stepRef: string; readonly done: boolean; readonly runId?: string; readonly inputRef: string; readonly subjectRef?: string }
+export interface StepView { readonly stepRef: string; readonly done: boolean; readonly runId?: string; readonly inputRef: string }
 export interface BaselineRef { readonly workspaceRoot: string; readonly scopeKey: string; readonly artifactRef: string }
 export interface DeliveryRecord {
   readonly id: string
@@ -156,7 +156,7 @@ export interface ExternalOccupant {
 
 const requirementSchema = z.object({ requirementRef: z.string().min(1), text: z.string(), required: z.boolean() }).strict()
 const stepSpecSchema = z.object({ stepRef: z.string().min(1), text: z.string() }).strict()
-const stepViewSchema = z.object({ stepRef: z.string().min(1), done: z.boolean(), runId: z.string().optional(), inputRef: z.string().min(1), subjectRef: z.string().min(1).optional() }).strict()
+const stepViewSchema = z.object({ stepRef: z.string().min(1), done: z.boolean(), runId: z.string().optional(), inputRef: z.string().min(1), subjectRef: z.unknown().optional() }).strict().transform(({ subjectRef: _oldProof, ...step }) => step)
 const baselineSchema = z.object({ workspaceRoot: z.string().min(1), scopeKey: z.string().min(1), artifactRef: z.string().min(1) }).strict()
 const writePathSchema = z.object({ path: z.string().min(1), type: z.enum(['file', 'directory']) }).strict()
 const writeScopeSchema = z.union([
@@ -171,7 +171,7 @@ const deliverySchema = z.object({
 }).strict()
 
 export const changeSchema = z.object({
-  id: z.string().min(1), title: z.string(), cwd: z.string().min(1), baselineRefs: z.array(baselineSchema),
+  id: z.string().min(1), title: z.string(), cwd: z.string().min(1), baselineRefs: z.unknown().optional().transform(() => [] as BaselineRef[]),
   currentRevision: z.number().int().positive(), currentInputRef: z.string().min(1),
   control: z.enum(['open', 'paused', 'cancelled']), steps: z.array(stepViewSchema),
   maxConcurrentRuns: z.number().int().min(1).max(8), priority: z.union([z.literal(1), z.literal(2), z.literal(3)]),
@@ -226,6 +226,7 @@ const subjectSchema = z.object({
   changes: z.array(z.object({ path: z.string().min(1), kind: z.enum(['added', 'modified', 'deleted']), sha256: z.string().optional() }).strict()),
   protectedDirty: z.array(z.string()),
   exclusions: z.array(z.object({ path: z.string().min(1), reason: z.string().min(1) }).strict()),
+  writeScope: writeScopeSchema.optional(), outOfScopePaths: z.array(z.string()).optional(),
 }).strict()
 export const verificationSchema = z.object({
   id: z.string().min(1), changeId: z.string().min(1), inputRevision: z.number().int(), inputRef: z.string().min(1),
@@ -514,7 +515,6 @@ export class WorkBook {
   /** Illegal verifications kept out of the usable map. They do not seal unknown-state and they are not deleted. */
   private verificationProblems?: string
   private readonly quarantined = new Map<string, IllegalVerification & { readonly record: unknown }>()
-  private repairs: RunRecord[] = []
   /** In-process session lookups. A restarted book does not have these, so a persisted claim is leftover. */
   private readonly liveSessionClaims = new Set<string>()
 
@@ -541,20 +541,12 @@ export class WorkBook {
     book.loadVerifications(rows.verifications, problems, quarantined)
     if (problems.length > 0) book.recovery = problems.join('; ')
     if (quarantined.length > 0) book.verificationProblems = quarantined.join('; ')
-    if (!problems.some(item => item.startsWith('unreadable changes') || item.startsWith('unreadable runs'))) book.stripUnmirroredBaselines()
     book.changeSeq = maxSeq([...book.changes.keys()], 'c-')
     book.inputSeq = maxSeq([...book.inputs.keys()], 'input-')
     book.runSeq = maxSeq([...book.runs.keys()], 'run-')
     book.verificationSeq = maxSeq([...book.verifications.keys(), ...book.quarantined.keys()], 'v-')
     book.deliverySeq = maxDelivery(book.runs.values())
     return book
-  }
-
-  /** Runs whose baselines were not on the change. The caller persists the stripped row. */
-  takeRepairs(): readonly RunRecord[] {
-    const pending = this.repairs
-    this.repairs = []
-    return pending
   }
 
   /** Empty the in-memory book. The caller deletes the durable rows. */
@@ -565,7 +557,6 @@ export class WorkBook {
     this.verifications.clear()
     this.quarantined.clear()
     this.liveSessionClaims.clear()
-    this.repairs = []
     this.chain = Promise.resolve()
     this.currentRevision = 0
     this.changeSeq = 0
@@ -577,8 +568,19 @@ export class WorkBook {
     this.verificationProblems = undefined
   }
 
-  listChanges(): readonly ChangeRecord[] { return [...this.changes.values()] }
-  change(id: string): ChangeRecord | undefined { return this.changes.get(id) }
+  listChanges(): readonly ChangeRecord[] { return [...this.changes.keys()].map(id => this.change(id)!) }
+  change(id: string): ChangeRecord | undefined {
+    const row = this.changes.get(id)
+    return row ? { ...row, baselineRefs: this.baselinesFor(id) } : undefined
+  }
+  /** Runs own baseline publication; this list is only a read projection. */
+  baselinesFor(changeId: string): readonly BaselineRef[] {
+    const refs: BaselineRef[] = []
+    for (const run of [...this.runs.values()].filter(run => run.changeId === changeId).sort((a, b) => a.createdAt - b.createdAt || Number(a.id.slice(4)) - Number(b.id.slice(4)))) {
+      for (const ref of run.baselineRefs) if (!refs.some(item => sameBaseline(item, ref))) refs.push(ref)
+    }
+    return refs
+  }
   input(id: string): InputRecord | undefined { return this.inputs.get(id) }
   inputsFor(changeId: string): readonly InputRecord[] {
     return [...this.inputs.values()].filter(row => row.changeId === changeId).sort((left, right) => left.revision - right.revision)
@@ -639,6 +641,7 @@ export class WorkBook {
       verification: verification ? {
         id: verification.id, verdict: verification.verdict, subjectKey: verification.subjectKey,
         inputRef: verification.inputRef, inputRevision: verification.inputRevision,
+        ...(verification.subject?.outOfScopePaths?.length ? { outOfScopePaths: verification.subject.outOfScopePaths } : {}),
         checks: verification.checks.map(check => ({
           requirementRef: check.requirementRef, verdict: check.verdict, evidenceRefs: check.evidenceRefs,
           ...(check.note ? { note: check.note } : {}),
@@ -777,7 +780,7 @@ export class WorkBook {
       await this.commit('changes', next.id, next)
       this.changes.set(next.id, next)
       this.currentRevision += 1
-      return next
+      return this.change(next.id)!
     })
   }
 
@@ -796,7 +799,7 @@ export class WorkBook {
       await this.commit('changes', next.id, next)
       this.changes.set(next.id, next)
       this.currentRevision += 1
-      return next
+      return this.change(next.id)!
     })
   }
 
@@ -830,7 +833,7 @@ export class WorkBook {
       await this.commit('changes', next.id, next)
       this.changes.set(next.id, next)
       this.currentRevision += 1
-      return next
+      return this.change(next.id)!
     })
   }
 
@@ -854,7 +857,7 @@ export class WorkBook {
       await this.commit('changes', next.id, next)
       this.changes.set(next.id, next)
       this.currentRevision += 1
-      return next
+      return this.change(next.id)!
     })
   }
 
@@ -868,44 +871,30 @@ export class WorkBook {
       await this.commit('changes', next.id, next)
       this.changes.set(next.id, next)
       this.currentRevision += 1
-      return next
+      return this.change(next.id)!
     })
   }
 
-  /**
-   * Record one current step done by the run that produced this result.
-   * The subject is a readable product or result event, never the instruction delivery.
-   * A reserved run, a different input, or a missing result stays untouched.
-   */
-  noteStep(changeId: string, stepRef: string, runId: string, expectedInputRevision: number, subjectRef: string, at = Date.now()): Promise<ChangeRecord | WorkRefusal> {
+  /** Steps are current-input progress notes; requirement checks decide completion. */
+  noteStep(changeId: string, stepRef: string, runId: string | undefined, expectedInputRevision: number, at = Date.now()): Promise<ChangeRecord | WorkRefusal> {
     return this.exclusive(async () => {
       const refused = this.recoveryRefusal()
       if (refused) return refused
       const current = this.changes.get(changeId)
       if (!current) return { ok: false, code: 'missing', message: `unknown change ${changeId}` }
       if (expectedInputRevision !== current.currentRevision) return { ok: false, code: 'stale', message: `${stepRef} is not on revision ${current.currentRevision}` }
-      const material = this.inputs.get(current.currentInputRef)
-      if (!material?.steps.some(step => step.stepRef === stepRef)) return { ok: false, code: 'stale', message: `${changeId} has no step ${stepRef}` }
-      const run = this.runs.get(runId)
-      if (!run || run.changeId !== changeId) return { ok: false, code: 'missing', message: `unknown run ${runId}` }
-      if (run.inputRef !== current.currentInputRef || run.inputRevision !== current.currentRevision || !run.stepRefs.includes(stepRef)) {
-        return { ok: false, code: 'stale', message: `${runId} is not bound to ${stepRef} on this input` }
-      }
-      if (run.phase === 'reserved' || run.creation !== 'confirmed' || !run.sessionId || run.sessionId !== run.requestedSessionId) {
-        return { ok: false, code: 'ownership', message: `${runId} has not run ${stepRef} on this input` }
-      }
-      if (!subjectRef || run.deliveries.some(item => item.id === subjectRef || item.contentRef === subjectRef)) {
-        return { ok: false, code: 'ownership', message: `${runId} has no result for ${stepRef} on this input` }
-      }
+      if (!this.inputs.get(current.currentInputRef)?.steps.some(step => step.stepRef === stepRef)) return { ok: false, code: 'stale', message: `${changeId} has no step ${stepRef}` }
+      const run = runId ? this.runs.get(runId) : undefined
+      if (runId && (!run || run.changeId !== changeId || run.inputRef !== current.currentInputRef)) return { ok: false, code: 'stale', message: `${runId} is not on this input` }
       const next: ChangeRecord = {
         ...current,
-        steps: current.steps.map(step => step.stepRef === stepRef && step.inputRef === current.currentInputRef ? { ...step, done: true, runId, subjectRef } : step),
+        steps: current.steps.map(step => step.stepRef === stepRef ? { stepRef, done: true, inputRef: current.currentInputRef, ...(runId ? { runId } : {}) } : step),
         updatedAt: at,
       }
       await this.commit('changes', next.id, next)
       this.changes.set(next.id, next)
       this.currentRevision += 1
-      return next
+      return this.change(next.id)!
     })
   }
 
@@ -955,12 +944,7 @@ export class WorkBook {
     })
   }
 
-  /**
-   * Attach a baseline that was read outside the lane. The run replaces its own
-   * scope ref. The change drops that ref only when no other run still needs it,
-   * so a later review of the same scope cannot erase the writer's pre-work evidence.
-   * A failed change write rolls the run back and never leaves the baseline dispatchable.
-   */
+  /** Publish the pre-write baseline on its run after the caller verifies the snapshot. */
   publishBaseline(runId: string, expectedRevision: number, artifactRef: string, at = Date.now(), confirm?: (run: RunRecord) => WorkRefusal | undefined): Promise<{ readonly applied: true; readonly run: RunRecord } | WorkRefusal & { readonly revision: number }> {
     return this.exclusive(async () => {
       const refused = this.recoveryRefusal()
@@ -973,28 +957,10 @@ export class WorkBook {
       if (gate) return { ...gate, revision: this.currentRevision }
       const confirmed = confirm?.(run)
       if (confirmed) return { ...confirmed, revision: this.currentRevision }
-      const change = this.changes.get(run.changeId)
-      if (!change) return { ok: false, code: 'missing', message: `unknown change ${run.changeId}`, revision: this.currentRevision }
       const ref: BaselineRef = { workspaceRoot: run.workspaceRoot, scopeKey: scopeKey(run.writeScope, run.workspaceRoot, this.platform), artifactRef }
-      const replaced = run.baselineRefs.filter(item => item.scopeKey === ref.scopeKey)
-      const heldByOther = (item: BaselineRef) => [...this.runs.values()].some(other => other.id !== run.id && other.baselineRefs.some(held => sameBaseline(held, item)))
       const next: RunRecord = { ...run, baselineRefs: [...run.baselineRefs.filter(item => item.scopeKey !== ref.scopeKey), ref], updatedAt: at }
-      const kept = change.baselineRefs.filter(item => !replaced.some(old => sameBaseline(old, item) && !heldByOther(item)))
-      const updated: ChangeRecord = { ...change, baselineRefs: kept.some(item => sameBaseline(item, ref)) ? kept : [...kept, ref], updatedAt: at }
       await this.commit('runs', next.id, next)
-      try {
-        await this.commit('changes', updated.id, updated)
-      } catch (error) {
-        // A known failure can roll the run row back. An unknown outcome cannot be guessed at with another write.
-        if (!isUnknownState(error)) {
-          try { await this.commit('runs', run.id, run) } catch (rollback) {
-            if (isUnknownState(rollback)) throw rollback
-          }
-        }
-        throw error
-      }
       this.runs.set(next.id, next)
-      this.changes.set(updated.id, updated)
       this.currentRevision += 1
       return { applied: true, run: next }
     })
@@ -1012,8 +978,7 @@ export class WorkBook {
     if (!scopeWrites(run.writeScope)) return { ok: true }
     const key = scopeKey(run.writeScope, run.workspaceRoot, this.platform)
     const ref = run.baselineRefs.find(item => item.scopeKey === key && item.workspaceRoot === run.workspaceRoot)
-    const mirrored = this.changes.get(run.changeId)?.baselineRefs.some(item => item.scopeKey === key && item.workspaceRoot === run.workspaceRoot && item.artifactRef === ref?.artifactRef)
-    if (!ref || !mirrored) return { ok: false, code: 'baseline', message: `${runId} has no published baseline for ${key}` }
+    if (!ref) return { ok: false, code: 'baseline', message: `${runId} has no published baseline for ${key}` }
     return { ok: true }
   }
 
@@ -1043,7 +1008,6 @@ export class WorkBook {
     readonly reviewRunId?: string
     readonly reviewerSessionId?: string
     readonly subject?: DeliverySubject
-    readonly direct?: boolean
   }): Promise<VerificationRecord | WorkRefusal> {
     return this.exclusive(async () => {
       const refused = this.recoveryRefusal()
@@ -1073,9 +1037,8 @@ export class WorkBook {
         return { ok: false, code: 'stale', message: 'verification names an input this change does not have' }
       }
       const subject = detail.subject
-      if (detail.direct === true && !detail.reviewRunId && !detail.reviewerSessionId) {
-        if (!subject) return { ok: false, code: 'stale', message: 'verification has no delivery subject' }
-        if (canonicalPath(change.cwd, this.platform) !== canonicalPath(subject.workspaceRoot, this.platform)) {
+      if (!detail.reviewRunId && !detail.reviewerSessionId) {
+        if (subject && canonicalPath(change.cwd, this.platform) !== canonicalPath(subject.workspaceRoot, this.platform)) {
           return { ok: false, code: 'ownership', message: 'delivery workspace does not match the change' }
         }
       } else if (detail.reviewRunId || detail.reviewerSessionId || subject) {
@@ -1085,13 +1048,16 @@ export class WorkBook {
         if (bound) return { ok: false, code: bound.code, message: bound.message }
       }
       const verdict = judgeVerification(material.requirements, checks)
-      const row: VerificationRecord = {
+      const row: VerificationRecord = freezeRecord(structuredClone({
         id: `v-${++this.verificationSeq}`, changeId, inputRevision: material.revision, inputRef: material.id,
         runIds: [...runIds], checks: [...checks], verdict, createdAt: at,
         ...(detail.reviewRunId ? { reviewRunId: detail.reviewRunId } : {}),
         ...(detail.reviewerSessionId ? { reviewerSessionId: detail.reviewerSessionId } : {}),
-        ...(subject ? { subject, subjectKey: subjectKey(subject) } : {}),
-      }
+        ...(subject ? { subject, subjectKey: subjectKey(subject, {
+          inputRef: material.id, inputRevision: material.revision, runIds, checks,
+          reviewRunId: detail.reviewRunId, reviewerSessionId: detail.reviewerSessionId,
+        }) } : {}),
+      }))
       await this.commit('verifications', row.id, row)
       this.verifications.set(row.id, row)
       this.currentRevision += 1
@@ -1101,7 +1067,7 @@ export class WorkBook {
 
   /** Closed. Closeout goes through accept, which checks the delivery and the review. */
   closeOut(_changeId: string, _verificationId: string, _source: string, _at = Date.now()): Promise<WorkRefusal> {
-    return Promise.resolve({ ok: false, code: 'closed', message: 'closeOut is closed; use accept' })
+    return Promise.resolve({ ok: false, code: 'closed', message: 'closeOut is closed; use dot_task action=closeout' })
   }
 
   /** Remember that a settling review has stopped. This does not release it. */
@@ -1120,10 +1086,7 @@ export class WorkBook {
     })
   }
 
-  /**
-   * The only closeout decision. A settling review may keep its workspace reservation.
-   * Anything else still in flight, a stale input, or a different subject refuses.
-   */
+  /** Closeout validates one input, delivery and set of checks; an independent review is optional. */
   accept(changeId: string, verificationId: string, expectedInputRef: string, expectedSubjectKey: string, source: string, at = Date.now(), human?: { readonly expectedInputRevision: number; readonly expectedVerificationId: string }, look?: SubjectLook): Promise<ChangeRecord | WorkRefusal> {
     return this.exclusive(async () => {
       const refused = this.recoveryRefusal()
@@ -1141,90 +1104,22 @@ export class WorkBook {
       if (!verification.subject || !verification.subjectKey || verification.subjectKey !== expectedSubjectKey) {
         return { ok: false, code: 'stale', message: `${verificationId} does not match the current delivery` }
       }
-      const writers = [...this.runs.values()].filter(run => run.changeId === changeId && run.kind !== 'review')
-      const review = verification.reviewRunId ? this.runs.get(verification.reviewRunId) : undefined
-      const bound = this.reviewGap(review, changeId, verification.subject, verification.reviewerSessionId, verification.inputRef, verification.inputRevision, writers)
-      if (bound) return { ok: false, code: bound.code, message: bound.message }
-      const gap = subjectMaterial(verification.subject, current.baselineRefs, [...this.runs.values()].filter(run => run.changeId === changeId), verification.checks.flatMap(check => check.evidenceRefs), look)
-      if (gap) return { ok: false, code: gap.startsWith('subject') || gap.includes('baseline') || gap.includes('snapshot') || gap.includes('evidence') || gap.includes('workspace') || gap.includes('changed') || gap.includes('deleted') || gap.includes('delivery') ? 'baseline' : 'baseline', message: gap }
-      const material = this.inputs.get(current.currentInputRef)
-      if (!material) return { ok: false, code: 'missing', message: 'missing input' }
-      if (judgeVerification(material.requirements, verification.checks) !== 'accept') {
-        return { ok: false, code: 'stale', message: `${verificationId} does not cover the current requirements` }
-      }
-      if (!human || human.expectedInputRevision !== current.currentRevision || human.expectedVerificationId !== verificationId) {
-        return { ok: false, code: 'stale', message: 'the decision is for an older version' }
-      }
-      if (current.oversight?.requested && current.oversight.inputRef === current.currentInputRef) {
-        const decision = current.oversight.decision
-        if (!decision || decision.result !== 'accept' || decision.source !== 'user' || decision.verificationId !== verificationId || decision.subjectKey !== verification.subjectKey || current.oversight.inputRevision !== current.currentRevision) {
-          return { ok: false, code: 'stale', message: 'the user asked to see this version' }
-        }
-      }
       const later = [...this.verifications.values()].some(row => row.changeId === changeId && row.id !== verification.id && row.inputRef === verification.inputRef && (row.verdict === 'rework' || row.verdict === 'unverified') && newerVerification(row, verification))
       if (later) return { ok: false, code: 'stale', message: `${verificationId} was superseded` }
-      if (!review || review.phase !== 'settling') return { ok: false, code: 'unknown', message: `${review?.id ?? verificationId} is not held for closeout` }
-      const evidence = review.closureEvidence
-      if (!evidence?.queueCleared || !evidence.agentIdle || !evidence.jobsSettled) return { ok: false, code: 'unknown', message: `${review.id} is not confirmed stopped` }
-      const open = writers.filter(run => !TERMINAL.has(run.phase))
-      if (open.length) return { ok: false, code: 'conflict', message: `${open[0]!.id} is still open`, blockers: open.map(run => run.id) }
-      const omitted = writers.filter(run => scopeWrites(run.writeScope) && !verification.runIds.includes(run.id))
-      if (omitted.length) return { ok: false, code: 'stale', message: `${omitted[0]!.id} is missing from the delivery` }
-      const inFlight = this.inFlight(writers.concat(review))
-      if (inFlight) return { ok: false, code: 'unknown', message: `${changeId} still has an in-flight delivery` }
-      const next: ChangeRecord = {
-        ...current,
-        closeout: { verificationId, source, inputRef: current.currentInputRef, subjectKey: verification.subjectKey, at },
-        updatedAt: at,
-      }
-      await this.commit('changes', next.id, next)
-      this.changes.set(next.id, next)
-      const released: RunRecord = { ...review, phase: 'stopped', closeReason: 'closeout', updatedAt: at }
-      await this.commit('runs', released.id, released)
-      this.runs.set(released.id, released)
-      this.currentRevision += 1
-      return next
-    })
-  }
-
-  /**
-   * Deterministic lightweight closeout when all writer runs are confirmed settled
-   * with closure evidence and no separate review session is open. Enforces the
-   * exact same input-version, snapshot SHA-256, evidence, and human-oversight gates
-   * as {@link accept} without blocking the whole workspace on a second LLM session.
-   */
-  acceptDirect(
-    changeId: string,
-    verificationId: string,
-    expectedInputRef: string,
-    expectedSubjectKey: string,
-    source: string,
-    at = Date.now(),
-    human?: { readonly expectedInputRevision: number; readonly expectedVerificationId: string },
-    look?: SubjectLook,
-  ): Promise<ChangeRecord | WorkRefusal> {
-    return this.exclusive(async () => {
-      const refused = this.recoveryRefusal()
-      if (refused) return refused
-      const current = this.changes.get(changeId)
-      if (!current) return { ok: false, code: 'missing', message: `unknown change ${changeId}` }
-      if (current.control !== 'open') return { ok: false, code: current.control, message: `${changeId} is ${current.control}` }
-      if (current.closeout) return { ok: false, code: 'closed', message: `${changeId} is already closed out` }
-      const verification = this.verifications.get(verificationId)
-      if (!verification || verification.changeId !== changeId) return { ok: false, code: 'missing', message: `unknown verification ${verificationId}` }
-      if (verification.verdict !== 'accept') return { ok: false, code: 'stale', message: `${verificationId} is ${verification.verdict}` }
-      if (verification.inputRef !== current.currentInputRef || expectedInputRef !== current.currentInputRef || verification.inputRevision !== current.currentRevision) {
-        return { ok: false, code: 'stale', message: `${verificationId} does not match the current input` }
-      }
-      if (!verification.subject || !verification.subjectKey || verification.subjectKey !== expectedSubjectKey) {
-        return { ok: false, code: 'stale', message: `${verificationId} does not match the current delivery` }
-      }
       const changeRuns = [...this.runs.values()].filter(run => run.changeId === changeId)
-      const openReviews = changeRuns.filter(run => run.kind === 'review' && !TERMINAL.has(run.phase))
-      if (openReviews.length > 0) {
-        return { ok: false, code: 'conflict', message: `${openReviews[0]!.id} is an open review; hold and accept through it or reject it first`, blockers: openReviews.map(run => run.id) }
-      }
+      const review = verification.reviewRunId ? this.runs.get(verification.reviewRunId) : undefined
       const writers = changeRuns.filter(run => run.kind !== 'review')
+      if (verification.reviewRunId || verification.reviewerSessionId) {
+        const bound = this.reviewGap(review, changeId, verification.subject, verification.reviewerSessionId, verification.inputRef, verification.inputRevision, writers)
+        if (bound) return { ok: false, code: bound.code, message: bound.message }
+        if (!review || review.phase !== 'settling') return { ok: false, code: 'unknown', message: `${review?.id ?? verificationId} is not held for closeout` }
+        const evidence = review.closureEvidence
+        if (!evidence?.queueCleared || !evidence.agentIdle || !evidence.jobsSettled) return { ok: false, code: 'unknown', message: `${review.id} is not confirmed stopped` }
+      }
+      const openReviews = changeRuns.filter(run => run.kind === 'review' && run.id !== review?.id && !TERMINAL.has(run.phase))
+      if (openReviews.length > 0) {
+        return { ok: false, code: 'conflict', message: `${openReviews[0]!.id} is an open review; use action=closeout through it or action=reject first`, blockers: openReviews.map(run => run.id) }
+      }
       const openWriters = writers.filter(run => !TERMINAL.has(run.phase))
       if (openWriters.length > 0) {
         return { ok: false, code: 'conflict', message: `${openWriters[0]!.id} is still open`, blockers: openWriters.map(run => run.id) }
@@ -1240,7 +1135,7 @@ export class WorkBook {
       const omitted = writers.filter(run => scopeWrites(run.writeScope) && !verification.runIds.includes(run.id))
       if (omitted.length > 0) return { ok: false, code: 'stale', message: `${omitted[0]!.id} is missing from the delivery` }
       if (this.inFlight(changeRuns)) return { ok: false, code: 'unknown', message: `${changeId} still has an in-flight delivery` }
-      const gap = subjectMaterial(verification.subject, current.baselineRefs, changeRuns, verification.checks.flatMap(check => check.evidenceRefs), look)
+      const gap = subjectMaterial(verification.subject, this.baselinesFor(changeId), changeRuns, verification.checks.flatMap(check => check.evidenceRefs), look)
       if (gap) return { ok: false, code: 'baseline', message: gap }
       const material = this.inputs.get(current.currentInputRef)
       if (!material) return { ok: false, code: 'missing', message: 'missing input' }
@@ -1256,8 +1151,6 @@ export class WorkBook {
           return { ok: false, code: 'stale', message: 'the user asked to see this version' }
         }
       }
-      const later = [...this.verifications.values()].some(row => row.changeId === changeId && row.id !== verification.id && row.inputRef === verification.inputRef && (row.verdict === 'rework' || row.verdict === 'unverified') && newerVerification(row, verification))
-      if (later) return { ok: false, code: 'stale', message: `${verificationId} was superseded` }
       // A review released as rework is an explicit rejection of this delivery. Direct
       // closeout must not overrule it: only a verification recorded after that rework
       // (that is, work done in answer to it) may close the change.
@@ -1272,9 +1165,18 @@ export class WorkBook {
       }
       await this.commit('changes', next.id, next)
       this.changes.set(next.id, next)
+      if (review) {
+        const released: RunRecord = { ...review, phase: 'stopped', closeReason: 'closeout', updatedAt: at }
+        await this.commit('runs', released.id, released)
+        this.runs.set(released.id, released)
+      }
       this.currentRevision += 1
       return next
     })
+  }
+
+  acceptDirect(...args: Parameters<WorkBook['accept']>): ReturnType<WorkBook['accept']> {
+    return this.accept(...args)
   }
 
   /**
@@ -1859,7 +1761,7 @@ export class WorkBook {
     for (const value of values ?? []) {
       const row = parseVerification(value)
       if (row) {
-        this.verifications.set(row.id, row)
+        this.verifications.set(row.id, freezeRecord(row))
         continue
       }
       const explained = explainVerification(value)
@@ -1886,17 +1788,6 @@ export class WorkBook {
       const row = parse(value)
       if (!row) problems.push(`illegal ${label}`)
       else sink.set(row.id, row)
-    }
-  }
-
-  private stripUnmirroredBaselines(): void {
-    for (const run of [...this.runs.values()]) {
-      const change = this.changes.get(run.changeId)
-      const mirrored = run.baselineRefs.filter(ref => change?.baselineRefs.some(item => sameBaseline(item, ref)))
-      if (mirrored.length === run.baselineRefs.length) continue
-      const stripped = { ...run, baselineRefs: mirrored }
-      this.runs.set(run.id, stripped)
-      this.repairs.push(stripped)
     }
   }
 
@@ -1958,7 +1849,10 @@ export class WorkBook {
 
   private async commit(table: Parameters<WorkPersist>[0], key: string, value: unknown): Promise<void> {
     try {
-      await this.persist(table, key, value)
+      if (table === 'changes') {
+        const { baselineRefs: _projection, ...stored } = value as ChangeRecord
+        await this.persist(table, key, stored)
+      } else await this.persist(table, key, value)
     } catch (error) {
       this.sealUnknown(error)
       throw error
@@ -2049,12 +1943,16 @@ function maxDelivery(runs: Iterable<RunRecord>): number {
   return max
 }
 
-/** Production refuses the old ticket write entries. Tests opt in explicitly. */
-export function legacyWorkClosed(enabled: boolean | undefined): boolean {
-  return enabled !== true
-}
-
 /** Domain `unknown-state`: the write may have landed, so the caller must stop guessing. */
 export function isUnknownState(error: unknown): boolean {
   return !!error && typeof error === 'object' && (error as { code?: unknown }).code === 'unknown-state'
+}
+
+/** Verification records own their review notes and subject rather than borrowing mutable tool arguments. */
+function freezeRecord<T>(value: T): T {
+  if (value && typeof value === 'object') {
+    for (const child of Object.values(value)) freezeRecord(child)
+    Object.freeze(value)
+  }
+  return value
 }

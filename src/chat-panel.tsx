@@ -10,14 +10,14 @@ import {
   MarkdownText, StateDot, Tag, TextShimmer, UserMessageBubble, type MarkdownLabels, type StateDotState, type TagTone,
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ChangeEvent, type ClipboardEvent, type ComponentType, type KeyboardEvent, type ReactNode } from 'react'
-import { Board, boardCounts, type BoardActions, type BoardFilter } from './board.tsx'
+import { Board, boardCounts, type BoardFilter } from './board.tsx'
 import { headerBoardCounts, sessionLookup } from './board-groups.ts'
 import { filterVisibleChat } from './chat-filter.ts'
-import { formatToolDetail, parseNotice, permissionLabel, resolveSessionBadge, summarizeNotice, summarizeToolCall, summarizeToolGroup, type NoticeEntry, type SessionBadge, type TaskLookup } from './chat-format.ts'
+import { formatToolDetail, parseNotice, permissionLabel, resolveSessionBadge, summarizeNotice, summarizeToolCall, summarizeToolGroup, type NoticeEntry, type ParsedNotice, type SessionBadge, type TaskLookup } from './chat-format.ts'
 import { ContextPanel, type ContextApi } from './context-panel.tsx'
 import { PersonaPanel, type KnowledgeApi } from './persona-panel.tsx'
 import { TrajectoryPanel, type TrajectoryApi } from './trajectory-panel.tsx'
-import type { BoardView, ChatItem, ChatSnapshot, DotSettings, RolloverReason, TicketPriority } from './contracts.ts'
+import type { BoardView, ChatItem, ChatSnapshot, DotSettings, RolloverReason } from './contracts.ts'
 import { CHAT_IMAGE_LIMIT, ChatImageRejected, imageName, inspectImageBytes, type ChatImage, type ChatImageError } from './chat-images.ts'
 import { SettingsPanel, settingsCss, type SaveNotice, type SettingsApi } from './settings-panel.tsx'
 import type { RenderFactorySlot } from '@klarkxy/dsh-plugin-kit/model-picker'
@@ -42,13 +42,6 @@ export interface ChatApi extends SettingsApi, ContextApi, TrajectoryApi, Knowled
   board(signal: AbortSignal): Promise<BoardView>
   /** Remove one of Dorothy's reminders from the board. */
   removeSchedule(id: string): Promise<boolean>
-  /** The human's board actions on a task; each one is recorded as the human's and, except the priority, queues a notice for dot. */
-  confirmTask(id: string): Promise<void>
-  deleteTask(id: string): Promise<void>
-  cancelTask(id: string): Promise<void>
-  reviewTask(id: string, pass: boolean, note?: string): Promise<void>
-  setTaskPriority(id: string, priority: TicketPriority): Promise<void>
-  workList?(signal: AbortSignal): Promise<readonly WorkBoardItem[]>
   workAccept?(payload: WorkAcceptPayload): Promise<void>
   workReject?(payload: WorkRejectPayload): Promise<void>
   workAnswer?(payload: { readonly id: string; readonly allow: boolean }): Promise<void>
@@ -135,6 +128,7 @@ function useSettings(api: ChatApi): [DotSettings | undefined, (next: DotSettings
 }
 
 const NO_PENDING: readonly PendingGlance[] = []
+const NO_WORK: readonly WorkBoardItem[] = []
 
 export type Row =
   | { kind: 'item'; item: ChatItem; lead: boolean }
@@ -265,9 +259,9 @@ function WorkDrawer({ locale, api, tab, wide, settings, trajectoryRev, running, 
 }
 
 /** The board tab: a filter row, the work changes waiting on the human, then the ticket board. */
-function TasksTab({ locale, view, workApi, boardError, boardNotice, onOpen, onRetry, onRemoveSchedule, actions }: {
-  locale: CopyLocale; view?: BoardView; workApi?: WorkApi; boardError?: string; boardNotice?: string
-  onOpen: (sessionId: string) => void; onRetry: () => void; onRemoveSchedule: (id: string) => void; actions: BoardActions
+function TasksTab({ locale, view, workApi, boardError, onOpen, onRetry, onRemoveSchedule }: {
+  locale: CopyLocale; view?: BoardView; workApi?: WorkApi; boardError?: string
+  onOpen: (sessionId: string) => void; onRetry: () => void; onRemoveSchedule: (id: string) => void
 }) {
   const [filter, setFilter] = useState<BoardFilter>('all')
   const counts = boardCounts(view)
@@ -282,8 +276,8 @@ function TasksTab({ locale, view, workApi, boardError, boardNotice, onOpen, onRe
       <div className="dsh-dot-filters" role="group" aria-label={t(locale, 'tasks')}>
         {filters.map(item => <button key={item.value} type="button" aria-pressed={filter === item.value} onClick={() => setFilter(item.value)}>{item.label}</button>)}
       </div>
-      {workApi && filter !== 'watch' ? <WorkBoardPanel locale={locale} api={workApi} filter={filter} pending={view?.pending ?? NO_PENDING} {...view?.work ? { initialItems: view.work } : {}} /> : null}
-      <Board locale={locale} view={view} filter={filter} suppressEmpty={(view?.work?.length ?? 0) > 0} {...boardError === undefined ? {} : { error: boardError }} {...boardNotice === undefined ? {} : { notice: boardNotice }} onOpen={onOpen} onRetry={onRetry} onRemoveSchedule={onRemoveSchedule} {...actions} />
+      {workApi && filter !== 'watch' ? <WorkBoardPanel locale={locale} api={workApi} filter={filter} items={view?.work ?? NO_WORK} pending={view?.pending ?? NO_PENDING} onChanged={onRetry} /> : null}
+      <Board locale={locale} view={view} filter={filter} suppressEmpty={(view?.work?.length ?? 0) > 0} {...boardError === undefined ? {} : { error: boardError }} onOpen={onOpen} onRetry={onRetry} onRemoveSchedule={onRemoveSchedule} />
     </div>
   )
 }
@@ -317,29 +311,14 @@ export interface ChatPanelProps {
 export function ChatPanel({ locale, api, Card, onOpenSession, renderFactorySlot }: ChatPanelProps) {
   const { state, error, retry } = useChatFeed(api)
   const [board, boardError, refreshBoard] = useBoard(api)
-  const [boardNotice, setBoardNotice] = useState<string>()
   const removeSchedule = useCallback((id: string) => { void api.removeSchedule(id).then(refreshBoard, refreshBoard) }, [api, refreshBoard])
   const workApi = useMemo<WorkApi | undefined>(() => {
-    if (!api.workList || !api.workAccept || !api.workReject || !api.workAnswer || !api.workResume) return undefined
+    if (!api.workAccept || !api.workReject || !api.workAnswer || !api.workResume) return undefined
     return {
-      workList: api.workList, workAccept: api.workAccept, workReject: api.workReject, workAnswer: api.workAnswer, workResume: api.workResume,
+      workAccept: api.workAccept, workReject: api.workReject, workAnswer: api.workAnswer, workResume: api.workResume,
       ...(api.workRead ? { workRead: api.workRead } : {}),
     }
   }, [api])
-  const boardActions = useMemo<BoardActions>(() => {
-    // A failed action keeps the board as it is and says why; either way the board is read again.
-    const run = (work: Promise<unknown>) => {
-      setBoardNotice(undefined)
-      void work.then(refreshBoard, failure => { setBoardNotice(failure instanceof Error ? failure.message : String(failure)); refreshBoard() })
-    }
-    return {
-      onConfirm: id => run(api.confirmTask(id)),
-      onDelete: id => run(api.deleteTask(id)),
-      onCancel: id => run(api.cancelTask(id)),
-      onReview: (id, pass, note) => run(api.reviewTask(id, pass, note)),
-      onPriority: (id, priority) => run(api.setTaskPriority(id, priority)),
-    }
-  }, [api, refreshBoard])
   const snapshot = state.snapshot
   const running = snapshot?.running === true
   const streaming = snapshot?.streaming ?? ''
@@ -478,7 +457,7 @@ export function ChatPanel({ locale, api, Card, onOpenSession, renderFactorySlot 
           running={running}
           waiting={waiting}
           proposalCount={proposalCount}
-          tasks={<TasksTab locale={locale} {...board ? { view: board } : {}} {...workApi ? { workApi } : {}} {...boardError === undefined ? {} : { boardError }} {...boardNotice === undefined ? {} : { boardNotice }} onOpen={onOpenSession} onRetry={refreshBoard} onRemoveSchedule={removeSchedule} actions={boardActions} />}
+          tasks={<TasksTab locale={locale} {...board ? { view: board } : {}} {...workApi ? { workApi } : {}} {...boardError === undefined ? {} : { boardError }} onOpen={onOpenSession} onRetry={refreshBoard} onRemoveSchedule={removeSchedule} />}
           {...renderFactorySlot ? { renderFactorySlot } : {}}
           onTab={setDrawerTab}
           onWide={() => setDrawerWide(value => !value)}
@@ -553,7 +532,7 @@ function renderRow(row: Row, context: RenderContext): ReactNode {
     case 'answer':
       return <div className="dsh-dot-user dsh-dot-answer"><UserMessageBubble>{item.text}</UserMessageBubble></div>
     case 'notice':
-      return <Notice locale={context.locale} text={item.text} hiddenRequestIds={context.hiddenRequestIds} tasks={context.tasks} onOpenSession={context.onOpenSession} />
+      return <Notice locale={context.locale} text={item.text} {...item.notice ? { structured: item.notice } : {}} hiddenRequestIds={context.hiddenRequestIds} tasks={context.tasks} onOpenSession={context.onOpenSession} />
     case 'segment':
       return <SegmentMark locale={context.locale} reason={item.reason} at={item.at} />
     case 'bot':
@@ -807,17 +786,17 @@ function NoticeCard({ entry, locale, tasks, onOpenSession }: { entry: NoticeEntr
   )
 }
 
-function Notice({ locale, text, hiddenRequestIds, tasks, onOpenSession }: { locale: CopyLocale; text: string; hiddenRequestIds?: ReadonlySet<string>; tasks: TaskLookup; onOpenSession: (sessionId: string) => void }) {
+function Notice({ locale, text, structured, hiddenRequestIds, tasks, onOpenSession }: { locale: CopyLocale; text: string; structured?: ParsedNotice; hiddenRequestIds?: ReadonlySet<string>; tasks: TaskLookup; onOpenSession: (sessionId: string) => void }) {
   const [open, setOpen] = useState(false)
   const toggle = useCallback(() => setOpen(value => !value), [])
   const parsed = useMemo(() => {
-    const base = parseNotice(text)
+    const base = structured ?? parseNotice(text)
     if (!hiddenRequestIds || hiddenRequestIds.size === 0 || base.isReminder || base.entries.length === 0) return base
     return {
       ...base,
       entries: base.entries.filter(entry => entry.kind === 'reminder' || !entry.requestId || !hiddenRequestIds.has(entry.requestId)),
     }
-  }, [text, hiddenRequestIds])
+  }, [text, structured, hiddenRequestIds])
   const summary = useMemo(() => summarizeNotice(parsed, locale, tasks), [parsed, locale, tasks])
   const collapsedNode = summary ? <RowSummary text={summary} /> : undefined
   return (

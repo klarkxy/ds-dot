@@ -48,6 +48,7 @@ export interface WorkVerificationView {
   readonly inputRevision: number
   readonly checks?: readonly WorkCheckView[]
   readonly changes?: readonly WorkChangeView[]
+  readonly outOfScopePaths?: readonly string[]
   readonly exclusions?: readonly { readonly path: string; readonly reason: string }[]
 }
 

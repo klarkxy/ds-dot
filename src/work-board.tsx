@@ -1,5 +1,5 @@
 import { Button, SegmentedTabs, StateDot, Tag, type SegmentedTab, type StateDotState, type TagTone } from '@deepseek-ai/dsh-client-ui-primitives'
-import { Fragment, useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
 import { BOARD_ROOT } from './board.tsx'
 import { FINISHED_SHOWN } from './board-groups.ts'
 import { t, type CopyLocale, type TextKey } from './ui-copy.ts'
@@ -21,7 +21,6 @@ const FAILURE_KEY: Record<ReturnType<typeof workFailure>, TextKey> = {
 }
 
 export interface WorkApi {
-  workList(signal: AbortSignal): Promise<readonly WorkBoardItem[]>
   workAccept(payload: WorkAcceptPayload): Promise<void>
   workReject(payload: WorkRejectPayload): Promise<void>
   workAnswer(payload: { readonly id: string; readonly allow: boolean }): Promise<void>
@@ -114,6 +113,7 @@ function WorkFacts({ locale, item, onRead }: {
   const checks = verification?.checks ?? []
   const changes = verification?.changes ?? []
   const exclusions = verification?.exclusions ?? []
+  const outOfScope = verification?.outOfScopePaths ?? []
   const evidence = [...new Set(checks.flatMap(check => check.evidenceRefs))]
   const evidenceKey = evidence.join('\n')
   const changeKey = changes.map(change => `${change.kind}:${change.path}`).join('\n')
@@ -179,8 +179,6 @@ function WorkFacts({ locale, item, onRead }: {
     for (const job of [...evidenceJobs, ...changeJobs]) if (known[`${job.kind}:${job.ref}`]?.ok !== true) loadPreview(job.kind, job.ref, token, () => cancel)
     return () => { cancel = true }
   }, [open, onRead, loadPreview, evidenceKey, changeKey, identity, verificationId])
-  const visible = Boolean(item.summary) || item.runs.some(run => run.writeScope || (run.deliveries?.length ?? 0) > 0) || checks.length > 0 || changes.length > 0 || exclusions.length > 0
-  if (!visible) return null
   const outcome = (kind: 'evidence' | 'change', ref: string) => {
     const key = `${kind}:${ref}`
     const row = loaded[key]
@@ -237,17 +235,14 @@ function WorkFacts({ locale, item, onRead }: {
     </div>
   ))
   const shownPane = evidencePane && filesPane ? pane : evidencePane ? 'evidence' : 'files'
+  const review = item.runs.find(run => run.kind === 'review')
   return (
     <details className="dsh-dot-work-facts" open={open} onToggle={event => setOpen(event.currentTarget.open)}>
       <summary>{t(locale, 'workDetails')}</summary>
       <div className="dsh-dot-work-facts-body">
         {item.summary ? <p className="dsh-dot-work-summary"><span className="dsh-ui-meta">{t(locale, 'workSummary')}</span> {item.summary}</p> : null}
-        {item.runs.some(run => run.writeScope || (run.deliveries?.length ?? 0) > 0) ? (
-          <div className="dsh-dot-work-list">{item.runs.map(run => <RunFacts key={run.id} locale={locale} run={run} />)}</div>
-        ) : null}
-        {item.verification ? (
+        {checks.length > 0 ? (
           <div className="dsh-dot-work-list">
-            <span className="dsh-ui-meta">{t(locale, 'workVerification')} {item.verification.id} {factLabel(locale, 'verdict', item.verification.verdict)}</span>
             {checks.map(check => (
               <div key={check.requirementRef} className="dsh-dot-work-check">
                 <span className="dsh-dot-work-check-ref">{check.requirementRef}</span>
@@ -257,20 +252,30 @@ function WorkFacts({ locale, item, onRead }: {
             ))}
           </div>
         ) : null}
-        {exclusions.length > 0 ? (
-          <p className="dsh-dot-work-summary">
-            <span className="dsh-ui-meta">{t(locale, 'workExcluded')}</span>
-            {exclusions.map((ex, index) => (
-              <span key={`${ex.path}\0${index}`}>
-                {` · ${ex.path} (${exclusionReason(locale, ex.reason)})`}
-              </span>
-            ))}
-          </p>
-        ) : null}
         {evidencePane && filesPane ? <SourceTabs locale={locale} value={pane} evidence={evidence.length} files={changes.length} onChange={setPane} /> : null}
         {evidencePane ? <div className="dsh-dot-work-pane" hidden={shownPane !== 'evidence'}>{evidencePane}</div> : null}
         {filesPane ? <div className="dsh-dot-work-pane" hidden={shownPane !== 'files'}>{!evidencePane ? <span className="dsh-ui-meta">{t(locale, 'workFiles')}</span> : null}{filesPane}</div> : null}
-        {item.verification?.subjectKey ? <span className="dsh-dot-work-subject">#{shortId(item.verification.subjectKey)}</span> : null}
+        <details className="dsh-dot-work-diag">
+          <summary>{t(locale, 'workDiagnostics')}</summary>
+          <div className="dsh-dot-work-list">
+            <span className="dsh-dot-work-facts-line">
+              {item.id} · {t(locale, 'workRevision').replace('{n}', String(item.revision))} · {t(locale, 'workInput')} {shortId(item.inputRef)}
+              {verification ? ` · ${t(locale, 'workVerification')} ${verification.id}` : ''}
+              {verification?.subjectKey ? ` · ${t(locale, 'workSubject')} ${shortId(verification.subjectKey)}` : ''}
+            </span>
+            {item.runs.map(run => <RunFacts key={run.id} locale={locale} run={run} />)}
+            {review ? <span className="dsh-dot-work-facts-line">{t(locale, 'workReview')} {review.id}</span> : null}
+            {item.closeout ? <span className="dsh-dot-work-facts-line">{t(locale, 'workCloseout')} {item.closeout.verificationId}</span> : null}
+            {item.blockers.length > 0 ? <span className="dsh-dot-work-facts-line">{t(locale, 'workBlockers')} {item.blockers.join(', ')}</span> : null}
+            {outOfScope.length > 0 ? <p className="dsh-dot-work-summary"><span className="dsh-ui-meta">{t(locale, 'workOutOfScope')}</span>{outOfScope.map(path => ` · ${path}`)}</p> : null}
+            {exclusions.length > 0 ? (
+              <p className="dsh-dot-work-summary">
+                <span className="dsh-ui-meta">{t(locale, 'workExcluded')}</span>
+                {exclusions.map((ex, index) => <span key={`${ex.path}\0${index}`}>{` · ${ex.path} (${exclusionReason(locale, ex.reason)})`}</span>)}
+              </p>
+            ) : null}
+          </div>
+        </details>
       </div>
     </details>
   )
@@ -314,16 +319,6 @@ function RunFacts({ locale, run }: { readonly locale: CopyLocale; readonly run: 
   )
 }
 
-const TERMINAL_PHASE = new Set(['completed', 'failed', 'stopped'])
-
-function runDot(run: WorkRunView): StateDotState {
-  if (run.phase === 'completed') return 'done'
-  if (run.phase === 'failed') return 'error'
-  if (run.phase === 'stopped') return 'idle'
-  if (run.phase === 'settling') return 'warning'
-  return 'ongoing'
-}
-
 function itemDot(item: WorkBoardItem, needsHuman: boolean): StateDotState {
   if (item.status === 'done') return 'done'
   if (item.status === 'cancelled') return 'idle'
@@ -348,41 +343,21 @@ function WorkRow({ locale, item, pending, onAccept, onReject, onAnswer, onResume
   const resume = resumePayload(item)
   const look = lookRequest(item, pending)
   const lookOpen = Boolean(look && look !== 'stale' && look !== 'withdrawn')
-  const review = item.runs.find(run => run.kind === 'review')
   const actions = lookOpen || accept || reject || resume
+  const delivery = item.runs.flatMap(run => run.deliveries ?? []).at(-1)
   return (
     <div className="dsh-dot-work" data-work={item.id} data-status={item.status}>
       <div className="dsh-dot-work-head">
         <StateDot state={itemDot(item, Boolean(accept) || lookOpen)} />
         <div className="dsh-dot-work-main">
+          <span className="dsh-dot-work-title">{item.title}</span>
           <span className="dsh-dot-work-meta">
-            <span className="dsh-dot-work-mono">{item.id}</span>
             <Tag tone={STATUS_TONE[item.status]}>{t(locale, STATUS_KEY[item.status])}</Tag>
             {item.priority === 3 ? <Tag tone="warning">{t(locale, 'priorityHigh')}</Tag> : null}
-            <span className="dsh-dot-work-facts-line">
-              {t(locale, 'workRevision').replace('{n}', String(item.revision))}
-              {` · ${t(locale, 'workInput')} ${shortId(item.inputRef)}`}
-              {item.verification ? ` · ${t(locale, 'workVerification')} ${item.verification.id} ${factLabel(locale, 'verdict', item.verification.verdict)}` : ''}
-              {item.verification?.subjectKey ? ` · ${t(locale, 'workSubject')} ${shortId(item.verification.subjectKey)}` : ''}
-            </span>
+            {item.verification ? <Tag tone={workFactTone(item.verification.verdict)}>{t(locale, 'workVerification')} {factLabel(locale, 'verdict', item.verification.verdict)}</Tag> : null}
+            {delivery ? <Tag tone={workFactTone(delivery.status)}>{t(locale, 'workSubject')} {factLabel(locale, 'delivery', delivery.status)}</Tag> : null}
           </span>
-          <span className="dsh-dot-work-title">{item.title}</span>
         </div>
-      </div>
-      <div className="dsh-dot-work-runs" title={item.runs.map(run => `${run.id} ${factLabel(locale, 'kind', run.kind)} ${factLabel(locale, 'phase', run.phase)}`).join(', ')}>
-        {item.runs.length === 0 ? <span className="dsh-ui-hint">{t(locale, 'workNoRuns')}</span> : item.runs.map((run, index) => (
-          <Fragment key={run.id}>
-            {index > 0 ? <span className="dsh-dot-work-arrow" aria-hidden="true">→</span> : null}
-            <span className="dsh-dot-work-pill" data-terminal={TERMINAL_PHASE.has(run.phase) ? '' : undefined}>
-              <StateDot state={runDot(run)} />
-              <span className="dsh-dot-work-mono">{run.id}</span>
-              <span>{factLabel(locale, 'kind', run.kind)}/{factLabel(locale, 'phase', run.phase)}</span>
-            </span>
-          </Fragment>
-        ))}
-        {review ? <span className="dsh-ui-hint">{` · ${t(locale, 'workReview')} ${review.id}`}</span> : null}
-        {item.closeout ? <span className="dsh-ui-hint">{` · ${t(locale, 'workCloseout')} ${item.closeout.verificationId}`}</span> : null}
-        {item.blockers.length > 0 ? <span className="dsh-ui-hint">{` · ${t(locale, 'workBlockers')} ${item.blockers.join(', ')}`}</span> : null}
       </div>
       {actions ? (
         <div className="dsh-dot-work-actions">
@@ -399,32 +374,23 @@ function WorkRow({ locale, item, pending, onAccept, onReject, onAnswer, onResume
     </div>
   )
 }
-/** Loads the projection and sends versioned actions. A refusal stays on screen and is not treated as done. */
-export function WorkBoardPanel({ locale, api, pending, initialItems, filter = 'all' }: { readonly locale: CopyLocale; readonly api: WorkApi; readonly pending: readonly PendingGlance[]; readonly initialItems?: readonly WorkBoardItem[]; readonly filter?: WorkFilter }) {
-  const [items, setItems] = useState<readonly WorkBoardItem[]>(initialItems ?? [])
+/** Renders the board's work and sends versioned actions. A refusal stays on screen; the parent re-reads the board after every action. */
+export function WorkBoardPanel({ locale, api, items, pending, filter = 'all', onChanged }: {
+  readonly locale: CopyLocale
+  readonly api: WorkApi
+  readonly items: readonly WorkBoardItem[]
+  readonly pending: readonly PendingGlance[]
+  readonly filter?: WorkFilter
+  readonly onChanged: () => void
+}) {
   const [notice, setNotice] = useState<string>()
-  const [tick, setTick] = useState(0)
-  const refresh = useCallback(() => setTick(value => value + 1), [])
-  const loadPrefix = t(locale, 'workLoadFailed')
-  // The board poll hands a fresh array every few seconds; read again only when the requests themselves change.
-  const pendingKey = pending.map(row => row.id).join('\n')
-  useEffect(() => {
-    const lifetime = new AbortController()
-    void api.workList(lifetime.signal).then(rows => {
-      // A good read clears a load failure; a refused action keeps its own notice until the next action.
-      if (!lifetime.signal.aborted) { setItems(rows); setNotice(current => current?.startsWith(loadPrefix) ? undefined : current) }
-    }, failure => {
-      if (!lifetime.signal.aborted) setNotice(`${loadPrefix}${failure instanceof Error ? failure.message : String(failure)}`)
-    })
-    return () => lifetime.abort()
-  }, [api, locale, tick, pendingKey])
   const run = (work: Promise<unknown>) => {
     setNotice(undefined)
-    void work.then(refresh, failure => {
+    void work.then(onChanged, failure => {
       const kind = workFailure(failure instanceof Error ? failure.message : String(failure))
       const text = t(locale, FAILURE_KEY[kind])
       setNotice(kind === 'unknown' ? `${text}${failure instanceof Error ? failure.message : String(failure)}` : text)
-      refresh()
+      onChanged()
     })
   }
   return (

@@ -1,4 +1,8 @@
-import { describe, expect, it } from 'vitest'
+import { Context } from '@deepseek-ai/cordis'
+import { createScope } from '@deepseek-ai/dsh-scope'
+import { SystemPrompt } from '@deepseek-ai/dsh-system-prompt'
+import { ToolsService, defineTool } from '@deepseek-ai/dsh-tools'
+import { describe, expect, it, vi } from 'vitest'
 import { deliverPeer, PeerLedger, PEER_TOOL, refreshChildSeals, sealChildSession, sessionIsOwned, type PeerDeliveryDeps, type PeerTable } from './peer.ts'
 import { parsePeerDelivery, type PeerDelivery } from './storage.ts'
 
@@ -30,7 +34,9 @@ function harness(partial: {
     put: row => ledger.write(row),
     prove: partial.prove ?? (async () => 0),
     relay: partial.relay ?? (async (target, sender, text, deliveryId) => { relays.push(`${sender}->${target}:${deliveryId}:${text}`) }),
-    ...(partial.admit ? { admit: partial.admit } : {}),
+    admit: partial.admit ?? (() => ({ ok: true })),
+    hold: async () => ({ ok: true }),
+    release: async () => {},
   }
   return {
     relays,
@@ -93,6 +99,9 @@ describe('peer delivery', () => {
       senderSessionId: 'session-a', targetSessionId: 'session-b', deliveryId: 'peer-1', text: 'hello',
     }, {
       now: () => 20,
+      admit: () => ({ ok: true }),
+      hold: async () => ({ ok: true }),
+      release: async () => {},
       owns: id => id === 'session-a' || id === 'session-b',
       get: id => reopened.read(id),
       put: row => reopened.write(row),
@@ -117,6 +126,9 @@ describe('peer delivery', () => {
       senderSessionId: 'session-a', targetSessionId: 'session-b', deliveryId: 'peer-1', text: 'hello',
     }, {
       now: () => 30,
+      admit: () => ({ ok: true }),
+      hold: async () => ({ ok: true }),
+      release: async () => {},
       owns: () => true,
       get: id => reopened.read(id),
       put: row => reopened.write(row),
@@ -151,6 +163,29 @@ describe('owned sessions', () => {
 })
 
 describe('child-session seal', () => {
+  it('seals late global tools under synchronous rc.3 tools/change notifications', async () => {
+    const ctx = new Context()
+    new SystemPrompt(ctx, {} as never)
+    new ToolsService(ctx)
+    const key = {}
+    const scope = createScope(ctx, key)
+    const refreshers = new Set<() => void>()
+    const release = ctx.on('tools/change', () => refreshChildSeals(refreshers))
+    const sealed = sealChildSession({ ctx: scope.ctx, session: { id: 'session-a' } }, async () => 'sent', refreshers)
+    try {
+      const restrict = vi.spyOn(scope.ctx.tools, 'restrict')
+      ctx.tools.register(defineTool({
+        name: 'subagent', description: 'late child tool', parameters: {},
+        output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: value }] },
+        execute: async () => 'ok',
+      }))
+      expect(restrict).toHaveBeenCalledTimes(1)
+      expect(ctx.tools.get('subagent', key)).toBeUndefined()
+      expect(ctx.tools.get('subagent')).toBeDefined()
+      expect(ctx.tools.get(PEER_TOOL, key)).toBeDefined()
+    } finally { sealed.release(); release(); await scope.dispose() }
+  })
+
   function agent(initial: string[]) {
     const names = [...initial]
     const denied: string[][] = []
@@ -163,18 +198,19 @@ describe('child-session seal', () => {
         restrict(filter: { deny: readonly string[] }) {
           const unknown = filter.deny.filter(name => !names.includes(name))
           if (unknown.length > 0) throw new Error(`unknown ${unknown.join(',')}`)
-          denied.push([...filter.deny])
-          return () => {}
+          const row = [...filter.deny]
+          denied.push(row)
+          return () => { denied.splice(denied.indexOf(row), 1) }
         },
         register(definition: { name?: string; execute?: (args: unknown) => Promise<string> }) {
           registered.push(definition)
-          return () => {}
+          return () => { registered.splice(registered.indexOf(definition), 1) }
         },
       },
-      systemPrompt: { section() { prompts += 1; return () => {} } },
+      systemPrompt: { section() { prompts += 1; return () => { prompts -= 1 } } },
       on(_event: string, listener: (exec: { name: string }, next: () => Promise<{ kind: string }>) => Promise<{ kind: string }>) {
         gates.push(listener)
-        return () => {}
+        return () => { gates.splice(gates.indexOf(listener), 1) }
       },
     }
     const live = { session: { id: 'session-a' }, ctx }
@@ -218,4 +254,30 @@ describe('child-session seal', () => {
     sealed.release()
     expect(refreshers.size).toBe(0)
   })
+  it.each(['schemas', 'restrict', 'on', 'section', 'register'] as const)('propagates %s failure, rolls back, and permits a successful retry', method => {
+    const host = agent(['subagent'])
+    const refreshers = new Set<() => void>()
+    const target = method === 'on' ? host.live.ctx : method === 'section' ? host.live.ctx.systemPrompt : host.live.ctx.tools
+    vi.spyOn(target as never, method as never).mockImplementationOnce(() => { throw new Error('install failed') })
+    expect(() => sealChildSession(host.live, async () => 'sent', refreshers)).toThrow('install failed')
+    expect(refreshers.size).toBe(0)
+    expect(host.registered).toHaveLength(0)
+    expect(host.gates).toHaveLength(0)
+    expect(host.promptCount()).toBe(0)
+    expect(sealChildSession(host.live, async () => 'sent', refreshers).applied).toBe(true)
+    expect(host.registered).toHaveLength(1)
+    expect(host.gates).toHaveLength(1)
+  })
+
+  it('propagates a refresh failure instead of claiming the new global tool is hidden', () => {
+    const host = agent(['bash'])
+    const refreshers = new Set<() => void>()
+    sealChildSession(host.live, async () => 'sent', refreshers)
+    host.add('subagent')
+    vi.spyOn(host.live.ctx.tools, 'restrict').mockImplementationOnce(() => { throw new Error('restriction failed') })
+    expect(() => refreshChildSeals(refreshers)).toThrow('restriction failed')
+    refreshChildSeals(refreshers)
+    expect(host.denied).toEqual([['subagent']])
+  })
+
 })

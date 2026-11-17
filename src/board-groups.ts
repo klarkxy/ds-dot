@@ -5,50 +5,29 @@ import { acceptPayload, lookRequest, parseWorkLook } from './work-board.ts'
 export const FINISHED_SHOWN = 50
 
 export interface BoardGroups {
-  /** Group 1: waiting requests, then tasks the human must look at, then drafts. */
+  /** Group 1: waiting requests. Legacy tickets never ask for the human; they are history. */
   readonly requests: readonly PendingView[]
-  readonly review: readonly TicketView[]
-  readonly drafts: readonly TicketView[]
-  /** Group 2: active tasks and tasks in review that dot has not handed to the human. */
-  readonly active: readonly TicketView[]
-  /** Group 3. */
-  readonly todo: readonly TicketView[]
-  /** Group 4: done and cancelled, newest first. */
-  readonly finished: readonly TicketView[]
+  /** Legacy tickets, read-only history, newest first. */
+  readonly legacy: readonly TicketView[]
   /** Group 5: sessions the human asked dot to watch. */
   readonly watched: readonly TaskRecord[]
   readonly watchedArchived: number
-  /** Size of group 1: what the legacy board group counts. */
-  readonly waitingCount: number
-  /** Tasks and watched sessions that are not finished. */
+  /** Watched sessions that are not archived. */
   readonly liveCount: number
 }
 
-const byPriority = (a: TicketView, b: TicketView) => b.priority - a.priority || b.updatedAt - a.updatedAt
-
 /** Split a board snapshot into the groups the board draws, in display order. */
 export function groupBoard(view: BoardView): BoardGroups {
-  const tickets = view.tickets
-  const review = tickets.filter(ticket => ticket.status === 'review' && ticket.humanReview === true).sort(byPriority)
-  const drafts = tickets.filter(ticket => ticket.status === 'draft').sort((a, b) => b.updatedAt - a.updatedAt)
-  const active = tickets.filter(ticket => ticket.status === 'active' || (ticket.status === 'review' && ticket.humanReview !== true)).sort(byPriority)
-  const todo = tickets.filter(ticket => ticket.status === 'todo').sort((a, b) => b.priority - a.priority || a.createdAt - b.createdAt)
-  const finished = tickets.filter(ticket => ticket.status === 'done' || ticket.status === 'cancelled').sort((a, b) => b.updatedAt - a.updatedAt)
+  const legacy = [...view.tickets].sort((a, b) => b.updatedAt - a.updatedAt)
   const watched = view.tasks.filter(task => task.status !== 'archived')
   return {
     requests: view.pending,
-    review,
-    drafts,
-    active,
-    todo,
-    finished,
+    legacy,
     watched,
     watchedArchived: view.tasks.length - watched.length,
-    waitingCount: view.pending.length + review.length + drafts.length,
-    liveCount: review.length + drafts.length + active.length + todo.length + watched.length,
+    liveCount: watched.length,
   }
 }
-
 /**
  * Header badge totals combining `BoardGroups` with `WorkBook` Changes (`view.work`).
  * Avoids double-counting a pending look request that is already in `view.pending`.
@@ -65,7 +44,7 @@ export function headerBoardCounts(view: BoardView | undefined): { readonly liveC
     return typeof current === 'object' && current.id === row.id
   })
   const base = groupBoard({ ...view, pending })
-  if (work.length === 0) return { liveCount: base.liveCount, waitingCount: base.waitingCount }
+  if (work.length === 0) return { liveCount: base.liveCount, waitingCount: base.requests.length }
   let workLive = 0
   let workExtraWaiting = 0
   for (const item of work) {
@@ -79,7 +58,7 @@ export function headerBoardCounts(view: BoardView | undefined): { readonly liveC
   }
   return {
     liveCount: base.liveCount + workLive,
-    waitingCount: base.waitingCount + workExtraWaiting,
+    waitingCount: base.requests.length + workExtraWaiting,
   }
 }
 

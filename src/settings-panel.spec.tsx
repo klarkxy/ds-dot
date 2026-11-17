@@ -118,12 +118,12 @@ describe('factory reset', () => {
     await act(async () => root.render(<Harness />))
     await act(async () => { await Promise.resolve() })
     expect(document.body.textContent).toContain('Factory reset')
-    expect(document.body.textContent).toContain('Your own sessions, project files and the host persona')
     const previewBtn = [...document.querySelectorAll('button')].find(button => button.textContent === 'Preview what will be cleared')!
     await act(async () => previewBtn.click())
     await act(async () => { await Promise.resolve() })
     expect(document.body.textContent).toContain('2 task(s)')
     expect(document.body.textContent).toContain('Agreements will be cleared')
+    expect(document.body.textContent).toContain('Your own sessions, project files and the host persona')
     const confirm = [...document.querySelectorAll('button')].find(button => button.textContent === 'Restore factory settings')!
     await act(async () => confirm.click())
     await act(async () => { await Promise.resolve() })

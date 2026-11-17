@@ -3,12 +3,11 @@
  * A saved manifest is never overwritten. Bodies are written first; a failure
  * leaves no manifest and does not delete one that already exists.
  * Directory walks skip dependency/VCS trees and record those paths plus source
- * link boundaries in `exclusions` without following them. Restore still refuses
- * to follow a symlink or junction out of the target root.
+ * link boundaries in `exclusions` without following them.
  */
 import { createHash } from 'node:crypto'
-import { constants, copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs'
-import path, { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path'
+import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import path, { dirname, join, relative, resolve } from 'node:path'
 import { absoluteScopePath, canonicalPath, scopeWrites, type WriteScope } from './work.ts'
 
 /**
@@ -83,57 +82,12 @@ export function sha256(body: Uint8Array): string {
   return createHash('sha256').update(body).digest('hex')
 }
 
-/**
- * Sibling CAS directory (`<home>/cas-blobs`) used when `dir` lives under `<home>/artifacts/<id>`.
- * Kept outside `artifacts/` so directory listings of `artifacts/` only see snapshot ids.
- */
-function sharedCasDir(dir: string): string | undefined {
-  const parent = dirname(resolve(dir))
-  if (basename(parent) !== 'artifacts') return undefined
-  return join(dirname(parent), 'cas-blobs')
-}
-
-/**
- * Store one content-addressed body for a snapshot, reusing the shared CAS copy.
- * Copies are block clones when the filesystem supports them and plain copies
- * otherwise — never hard links. A snapshot's blobs must stay independent files:
- * a hard link would share its inode with the CAS and with every other snapshot,
- * so one in-place write could corrupt snapshots that still claim to be immutable.
- */
-function writeBlobWithCas(blobsDir: string, casDir: string | undefined, hash: string, body: Uint8Array): void {
-  const target = join(blobsDir, hash)
-  if (existsSync(target)) return
-  if (!casDir) {
-    writeFileSync(target, body)
-    return
-  }
-  mkdirSync(casDir, { recursive: true })
-  const casBlob = join(casDir, hash)
-  if (!existsSync(casBlob)) {
-    const temp = `${casBlob}.tmp-${process.pid}-${Date.now()}`
-    writeFileSync(temp, body)
-    try {
-      renameSync(temp, casBlob)
-    } catch {
-      // Another writer landed the same content-addressed body first; its bytes are identical.
-    } finally {
-      rmSync(temp, { force: true })
-    }
-  }
-  try {
-    copyFileSync(casBlob, target, constants.COPYFILE_FICLONE)
-  } catch {
-    try { copyFileSync(casBlob, target) } catch { writeFileSync(target, body) }
-  }
-}
-
 /** Save bodies first and the manifest only after every body is on disk. */
 export function saveSnapshot(dir: string, files: readonly SnapshotSource[], failOn?: string, capture?: SnapshotCapture): SnapshotManifest {
   const manifestPath = join(dir, 'manifest.json')
   if (existsSync(manifestPath)) throw new SnapshotError(`snapshot ${dir} is immutable`)
   const blobs = join(dir, 'blobs')
   mkdirSync(blobs, { recursive: true })
-  const casDir = sharedCasDir(dir)
   const saved: SnapshotEntry[] = []
   const deleted: string[] = []
   for (const file of files) {
@@ -144,7 +98,9 @@ export function saveSnapshot(dir: string, files: readonly SnapshotSource[], fail
     }
     if (!file.body) throw new SnapshotError(`missing body for ${file.path}`)
     const hash = sha256(file.body)
-    writeBlobWithCas(blobs, casDir, hash, file.body)
+    const target = join(blobs, hash)
+    if (!existsSync(target)) writeFileSync(target, file.body, { flag: 'wx' })
+    if (sha256(readFileSync(target)) !== hash) throw new SnapshotError(`corrupt blob ${file.path}`)
     saved.push({ path: file.path, sha256: hash, bytes: file.body.byteLength })
   }
   const manifest: SnapshotManifest = {
@@ -178,42 +134,15 @@ export function readSnapshot(dir: string): { readonly manifest: SnapshotManifest
   const manifest = parseManifest(JSON.parse(readFileSync(join(dir, 'manifest.json'), 'utf8')))
   const bodies = new Map<string, Uint8Array>()
   for (const entry of manifest.saved) {
-    const body = readFileSync(join(dir, 'blobs', entry.sha256))
+    if (!/^[a-f0-9]{64}$/.test(entry.sha256)) throw new SnapshotError(`invalid blob hash ${entry.path}`)
+    const local = join(dir, 'blobs', entry.sha256)
+    // Older homes may store the body only in the sibling CAS directory.
+    const legacy = join(dirname(dirname(resolve(dir))), 'cas-blobs', entry.sha256)
+    const body = readFileSync(existsSync(local) ? local : legacy)
     if (sha256(body) !== entry.sha256 || body.byteLength !== entry.bytes) throw new SnapshotError(`corrupt blob ${entry.path}`)
     bodies.set(entry.path, body)
   }
   return { manifest, bodies }
-}
-
-/** Restore saved bytes and remove paths recorded as deleted. Does not touch other files. */
-export function restoreSnapshot(dir: string, root: string): SnapshotManifest {
-  mkdirSync(root, { recursive: true })
-  const { manifest, bodies } = readSnapshot(dir)
-  const writes = manifest.saved.map(entry => ({ entry, target: containedTarget(root, entry.path) }))
-  const deletions = manifest.deleted.map(name => containedTarget(root, name))
-  for (const { entry, target } of writes) {
-    mkdirSync(dirname(target), { recursive: true })
-    writeFileSync(target, bodies.get(entry.path)!)
-  }
-  for (const target of deletions) rmSync(target, { force: true })
-  return manifest
-}
-
-export function filesMatch(dir: string, root: string): boolean {
-  const { manifest, bodies } = readSnapshot(dir)
-  try {
-    for (const entry of manifest.saved) {
-      const target = containedTarget(root, entry.path)
-      if (!existsSync(target)) return false
-      const body = readFileSync(target)
-      if (sha256(body) !== entry.sha256) return false
-    }
-    for (const name of manifest.deleted) if (existsSync(containedTarget(root, name))) return false
-  } catch (error) {
-    if (error instanceof SnapshotError) return false
-    throw error
-  }
-  return bodies.size === manifest.saved.length
 }
 
 /**
@@ -330,49 +259,6 @@ export function ignoreCovered(exclusions: readonly SnapshotExclusion[], rel: str
   return exclusions.some(item => isIgnoredDirectoryReason(item.reason) && relUnder(item.path, rel, platform))
 }
 
-/** Lexical path of `entry` when it stays strictly inside `root`. */
-export function insideRoot(root: string, entry: string): string {
-  if (!entry || entry.includes('\0')) throw new SnapshotError('path escapes snapshot root')
-  const base = resolve(root)
-  const full = resolve(base, entry)
-  const rel = relative(base, full)
-  if (rel === '' || rel === '..' || rel.startsWith(`..${sepOf(rel)}`) || rel.startsWith('..\\') || rel.startsWith('../') || isAbsolute(rel)) {
-    throw new SnapshotError(`path escapes snapshot root: ${entry}`)
-  }
-  return full
-}
-
-/**
- * Same as {@link insideRoot}, then refuses an existing symlink, junction, or
- * any ancestor whose real path leaves the target root. Missing tail components
- * are not created here.
- */
-export function containedTarget(root: string, entry: string): string {
-  const lexical = insideRoot(root, entry)
-  const base = resolve(root)
-  let rootReal: string
-  try {
-    rootReal = realpathSync(base)
-  } catch (error) {
-    throw new SnapshotError(`snapshot root is not available: ${messageOf(error)}`)
-  }
-  if (isLink(base)) throw new SnapshotError('refusing to follow a link at the snapshot root')
-  let cursor = base
-  for (const part of relative(base, lexical).split(/[\\/]/).filter(Boolean)) {
-    cursor = join(cursor, part)
-    if (!existsSync(cursor)) return lexical
-    if (isLink(cursor)) throw new SnapshotError(`refusing to follow a link at ${entry}`)
-    let real: string
-    try {
-      real = realpathSync(cursor)
-    } catch (error) {
-      throw new SnapshotError(`path cannot be resolved: ${messageOf(error)}`)
-    }
-    if (!pathIsInside(canonicalPath(rootReal), canonicalPath(real), process.platform)) throw new SnapshotError(`path escapes snapshot root: ${entry}`)
-  }
-  return lexical
-}
-
 function isLink(target: string): boolean {
   const stat = lstatSync(target)
   if (stat.isSymbolicLink()) return true
@@ -474,14 +360,6 @@ function scopeMentions(scope: string, root: string, entry: string, platform: Nod
   const api = platform === 'win32' ? path.win32 : path.posix
   const absolute = api.isAbsolute(root) ? api.resolve(root, entry) : resolve(root, entry)
   return pathIsInside(canonicalPath(scope, platform), canonicalPath(absolute, platform), platform)
-}
-
-function sepOf(value: string): string {
-  return value.includes('\\') ? '\\' : '/'
-}
-
-function messageOf(error: unknown): string {
-  return error instanceof Error ? error.message : 'unknown'
 }
 
 function parseManifest(value: unknown): SnapshotManifest {

@@ -5,6 +5,7 @@
 import type { ChatItem } from './contracts.ts'
 import { AGREEMENT_NOTES_HEAD } from './contracts.ts'
 import { cardText } from './cards.ts'
+import { toolDisplay, type ParsedNotice, type ToolDisplay } from './chat-format.ts'
 
 export interface RawEvent {
   readonly type: string
@@ -17,21 +18,24 @@ const SHOW_VIEW = 'show_view'
 const DETAIL_MAX = 1600
 const ARG_MAX = 200
 const ERROR_PREFIX = /^Error \[([^\]]+)\]:/
-const JSON_FAILURE_PREFIX = /^\{\s*"(?:status"\s*:\s*"(?:failed|error)"|ok"\s*:\s*false)\b/
 
 type Rec = Record<string, unknown>
 const rec = (value: unknown): Rec | undefined => value !== null && typeof value === 'object' && !Array.isArray(value) ? value as Rec : undefined
 
-function isJsonToolFailure(detail: string): boolean {
-  if (!detail.startsWith('{')) return false
-  if (JSON_FAILURE_PREFIX.test(detail)) return true
+/** Native failure state wins; the text fallback reads logs made before it was recorded. */
+export function toolResultFailed(data: Rec): boolean {
+  const message = rec(data.message)
+  if (message?.isError === true) return true
+  const detail = textOf(message?.content).trim()
+  // Older Dorothy tools returned an Error string as a successful result. New
+  // Dorothy successes carry display metadata, so only unmarked old rows use it.
+  if (rec(rec(data.meta)?.dshDot)?.display) return false
+  const oldError = ERROR_PREFIX.exec(detail)
+  if (oldError) return oldError[1] !== 'dot/unknown-request'
   try {
-    const parsed = rec(JSON.parse(detail))
-    if (!parsed) return false
-    return parsed.status === 'failed' || parsed.status === 'error' || parsed.ok === false
-  } catch {
-    return false
-  }
+    const value = rec(JSON.parse(detail))
+    return value?.status === 'failed' || value?.status === 'error' || value?.ok === false
+  } catch { return false }
 }
 
 export function textOf(content: unknown): string {
@@ -146,7 +150,8 @@ export class ChatFold {
         const parts = splitCarriedNotice(source, data.content)
         const text = parts.text.trim()
         const images = source?.kind === 'user' ? imageNotes(data.content) : []
-        if (parts.notice) this.push({ kind: 'notice', key: `${key}:notice`, text: parts.notice, at })
+        const notice = rec(rec(source?.dshDot)?.notices) as unknown as ParsedNotice | undefined
+        if (parts.notice) this.push({ kind: 'notice', key: `${key}:notice`, text: parts.notice, ...notice ? { notice } : {}, at })
         if (!text && images.length === 0) return parts.notice !== undefined
         if (source?.kind === 'user') {
           const answer = viewAnswerOf(source)
@@ -156,7 +161,7 @@ export class ChatFold {
           } else this.push({ kind: 'user', key, text, at, ...(images.length > 0 ? { images } : {}) })
           return true
         }
-        if (source?.kind === 'agent-message') { this.push({ kind: 'notice', key, text, at }); return true }
+        if (source?.kind === 'agent-message') { this.push({ kind: 'notice', key, text, ...notice ? { notice } : {}, at }); return true }
         return false
       }
       case 'assistant/message': {
@@ -197,12 +202,15 @@ export class ChatFold {
           this.list[index] = meta && message?.isError !== true && cardText(meta) !== undefined ? { ...item, presentation: meta } : { ...item, failed: true }
         } else if (item.kind === 'tool') {
           const detail = textOf(message?.content).trim()
-          const errMatch = ERROR_PREFIX.exec(detail)
-          // dot/unknown-request means the original session settled the request first, not a broken tool call.
-          const failed = message?.isError === true
-            || (errMatch !== null && errMatch[1] !== 'dot/unknown-request')
-            || isJsonToolFailure(detail)
-          this.list[index] = { ...item, status: failed ? 'error' : 'done', ...detail ? { detail: detail.length > DETAIL_MAX ? detail.slice(0, DETAIL_MAX) + '…' : detail } : {} }
+          const failed = toolResultFailed(data)
+          const saved = rec(rec(data.meta)?.dshDot)?.display as ToolDisplay | undefined
+          const error = rec(data.error)
+          const legacy = !saved && (typeof message?.isError !== 'boolean' || message.isError === false && ERROR_PREFIX.test(detail))
+          const display = legacy ? undefined : failed ? toolDisplay(item.name, detail, {
+            ...typeof error?.code === 'string' ? { code: error.code } : {},
+            message: typeof error?.reason === 'string' ? error.reason : detail.replace(/^Error: /, ''),
+          }) : saved ?? toolDisplay(item.name, detail)
+          this.list[index] = { ...item, status: failed ? 'error' : 'done', ...display ? { display } : {}, ...detail ? { detail: detail.length > DETAIL_MAX ? detail.slice(0, DETAIL_MAX) + '…' : detail } : {} }
         }
         return true
       }

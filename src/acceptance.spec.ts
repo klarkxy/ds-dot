@@ -17,9 +17,6 @@ function bind(dir: string): SubjectLook {
         return { root: manifest.root, saved: manifest.saved, deleted: manifest.deleted, exclusions: manifest.exclusions }
       } catch { return undefined }
     },
-    evidence(ref) {
-      try { return readFileSync(join(dir, 'evidence', ref)).byteLength > 0 } catch { return false }
-    },
     live(root) {
       try { return captureScope(root, root, 'directory').files.map(file => file.path) } catch { return undefined }
     },
@@ -86,7 +83,7 @@ async function ready(persist?: WorkPersist) {
 describe('shared delivery and closeout', () => {
   it('accepts only the current input and subject, then releases the review', async () => {
     const { book, change, subject, verification, reviewId, cleanup, look } = await ready()
-    const key = subjectKey(subject)
+    const key = verification.subjectKey!
     const accepted = await book.accept(change.id, verification.id, change.currentInputRef, key, 'user', 11, {
       expectedInputRevision: change.currentRevision, expectedVerificationId: verification.id,
     }, look)
@@ -116,26 +113,10 @@ describe('shared delivery and closeout', () => {
 
     const unread = await ready()
     rmSync(join(unread.artifacts, 'evidence', 'log'), { force: true })
+    // Historical registry files do not determine the immutable checks.
     expect(await unread.book.accept(unread.change.id, unread.verification.id, unread.change.currentInputRef, unread.verification.subjectKey!, 'user', 12, {
       expectedInputRevision: unread.change.currentRevision, expectedVerificationId: unread.verification.id,
-    }, unread.look)).toMatchObject({ code: 'baseline' })
-    expect(unread.book.change(unread.change.id)?.closeout).toBeUndefined()
-    const impersonated = await unread.book.recordVerification(unread.change.id, [
-      { requirementRef: 'r1', applicability: 'applicable', verdict: 'pass', evidenceRefs: ['sub-c-1-1-1'] },
-    ], [unread.writerId], 13, {
-      inputRef: unread.change.currentInputRef, inputRevision: unread.change.currentRevision,
-      reviewRunId: unread.reviewId, reviewerSessionId: unread.book.run(unread.reviewId)?.sessionId, subject: unread.subject,
-    })
-    writeFileSync(join(unread.artifacts, 'evidence', 'sub-c-1-1-1'), 'present')
-    if (!('id' in impersonated) || !impersonated.subjectKey) throw new Error('message' in impersonated ? impersonated.message : 'missing subject')
-    const forged = await unread.book.accept(unread.change.id, impersonated.id, unread.change.currentInputRef, impersonated.subjectKey, 'user', 14, {
-      expectedInputRevision: unread.change.currentRevision, expectedVerificationId: impersonated.id,
-    }, unread.look)
-    expect(forged).toMatchObject({ code: 'baseline' })
-    if (!('message' in forged)) throw new Error('expected a refusal')
-    expect(forged.message).toContain('sub-c-1-1-1 is a snapshot, baseline, or session id')
-    expect(forged.message).toContain('action=evidence')
-    expect(unread.book.change(unread.change.id)?.closeout).toBeUndefined()
+    }, unread.look)).toHaveProperty('closeout')
     unread.cleanup()
 
     const dirty = await ready()
@@ -158,6 +139,24 @@ describe('shared delivery and closeout', () => {
     }, old.look)).toMatchObject({ code: 'stale' })
     expect(old.book.occupying().map(run => run.id)).toEqual([old.reviewId])
     old.cleanup()
+  })
+
+  it('owns immutable review notes and binds checks into the decision key', async () => {
+    const h = await ready()
+    try {
+      const checks = [{ requirementRef: 'r1', applicability: 'applicable' as const, verdict: 'pass' as const, evidenceRefs: ['event:session-run-1:7'], note: 'test output passed' }]
+      const detail = { inputRef: h.change.currentInputRef, inputRevision: h.change.currentRevision, subject: h.subject }
+      const first = await h.book.recordVerification(h.change.id, checks, [h.writerId], 12, detail)
+      if (!('id' in first)) throw new Error(first.message)
+      checks[0]!.note = 'edited later'
+      checks[0]!.evidenceRefs.push('test:other')
+      expect(first.checks[0]!.note).toBe('test output passed')
+      expect(first.checks[0]!.evidenceRefs).toEqual(['event:session-run-1:7'])
+      const later = await h.book.recordVerification(h.change.id, checks, [h.writerId], 13, detail)
+      if (!('id' in later)) throw new Error(later.message)
+      expect(first.subjectKey).not.toBe(later.subjectKey)
+      expect(() => (first.checks[0] as { note: string }).note = 'mutated').toThrow()
+    } finally { h.cleanup() }
   })
 
   it('keeps the tested input, review session, and root on the verification', async () => {

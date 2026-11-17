@@ -62,6 +62,8 @@ function strId(value: unknown): string | undefined {
 
 export function unknownRequestIdOf(item: ToolItem): string | undefined {
   if (item.name !== TOOL.answerPending) return undefined
+  if (item.display?.error?.code === 'dot/unknown-request') return strId(item.args?.id)
+  if (item.display) return undefined
   const detail = item.detail?.trim() ?? ''
   const match = UNKNOWN_REQ_RE.exec(detail)
   if (!match) return undefined
@@ -154,7 +156,7 @@ export function filterVisibleChat(
     const hasHumanInput = block.inputs.some(input => input.kind === 'user' || input.kind === 'answer') || block.replies.some(reply => reply.trigger === 'human')
     if (isLast && !hasHumanInput && !hasVisibleView && bots.length === 0) silentTail = true
     const notices = block.inputs.filter((input): input is Extract<ChatItem, { kind: 'notice' }> => input.kind === 'notice')
-    const parsedNotices = notices.map(notice => parseNotice(notice.text))
+    const parsedNotices = notices.map(notice => notice.notice ?? parseNotice(notice.text))
     const isRoutineOnly = !hasHumanInput && notices.length > 0 && parsedNotices.every(parsed => !parsed.isReminder && parsed.entries.length > 0 && parsed.entries.every(entry => entry.kind === 'idle-check'))
 
     // Leading window tail from a race-lost request turn whose notice scrolled past the window.
@@ -231,7 +233,7 @@ export function filterVisibleChat(
 
     for (const input of block.inputs) {
       if (input.kind === 'notice' && hiddenRequestIds.size > 0) {
-        const parsed = parseNotice(input.text)
+        const parsed = input.notice ?? parseNotice(input.text)
         if (!parsed.isReminder && parsed.entries.length > 0) {
           const visibleEntries = parsed.entries.filter(
             entry => entry.kind === 'reminder' || !entry.requestId || !hiddenRequestIds.has(entry.requestId),

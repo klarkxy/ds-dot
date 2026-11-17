@@ -21,6 +21,8 @@ function harness() {
   const sessions = new Map<string, { cwd?: string }>()
   const host = {
     isRunning: () => false,
+    listModels: async () => ({ fallback: { provider: 'p', model: 'ok' }, models: [{ provider: 'p', model: 'ok', name: 'Ok' }] }),
+    listPresets: async () => ({ fallback: 'standard', presets: [{ id: 'standard' }] }),
     listSessions: async () => [],
     readEvents: async () => [],
     findSession: async (id: string) => sessions.get(id),
@@ -57,148 +59,26 @@ function harness() {
   return { home, project, store, service, task, cleanup: () => { rmSync(project, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }) } }
 }
 
-describe('verify tool contract', () => {
-  it('resolves subject_ref and refuses a snapshot id, a stale input, another run, a trimmed subject, and a shrunk check list', async () => {
+describe('closeout tool contract', () => {
+  it('requires the current input and every requirement check, with notes recorded in the verification', async () => {
     const h = harness()
     try {
-      expect(h.task.description).toContain('subject_ref')
-      expect(h.task.description).toContain('evidence_ref')
-      expect(h.task.parameters.properties.subject_ref?.description).toContain('action=subject')
-      expect(h.task.parameters.properties.subject?.description).toContain('not a snapshot id')
-      expect(h.task.parameters.properties.checks?.description).toContain('action=evidence')
-      expect(h.task.parameters.properties.evidence_ref?.description).toContain('Not a subjectRef')
-      const change = await h.service.createWorkChange({
-        title: 'Ship', cwd: h.project, goal: 'land',
-        requirements: [
-          { requirementRef: 'R1', text: 'edit', required: true },
-          { requirementRef: 'R2', text: 'check', required: true },
-        ],
-        at: 1,
-      })
-      const writer = await h.service.reserveWorkRun({
-        changeId: change.id, cwd: h.project, root: { workspaceRoot: h.project },
-        writeScope: { kind: 'paths', paths: [{ path: join(h.project, 'a.ts'), type: 'file' }] }, at: 2,
-      })
-      if (!writer.ok) throw new Error(writer.message)
-      await h.service.captureWorkBaseline(writer.run.id)
-      const started = await h.service.launchWorkRun(writer.run.id, 'edit')
-      if (!started.ok) throw new Error(started.message)
+      const change = await h.service.createWorkChange({ title: 'Ship', cwd: h.project, goal: 'land', requirements: [{ requirementRef: 'R1', text: 'edit', required: true }, { requirementRef: 'R2', text: 'check', required: true }] })
+      const started = await h.task.execute({ action: 'dispatch', task_id: change.id, instruction: 'edit', access: 'write', paths: JSON.stringify([{ path: 'a.ts', type: 'file' }]) })
+      const runId = /started (run-\d+)/.exec(started)![1]!
       writeFileSync(join(h.project, 'a.ts'), 'after')
-      const prepared = await h.store.work.prepareFinish(writer.run.id, 'completed', 3)
-      if (!prepared.ok) throw new Error(prepared.message)
-      const finished = await h.store.work.finishSettled(writer.run.id, prepared.updatedAt, 'completed', { queueCleared: true, agentIdle: true, jobsSettled: true }, 4)
-      if (!finished.ok) throw new Error(finished.message)
-      const review = await h.service.reserveWorkRun({
-        changeId: change.id, kind: 'review', cwd: h.project, root: { workspaceRoot: h.project },
-        writeScope: { kind: 'workspace-exclusive' }, at: 5,
-      })
-      if (!review.ok) throw new Error(review.message)
-      await h.service.captureWorkBaseline(review.run.id)
-      const startedReview = await h.service.launchWorkRun(review.run.id, 'check')
-      if (!startedReview.ok) throw new Error(startedReview.message)
-      const held = await h.service.holdWorkReview(review.run.id)
-      if (!('id' in held)) throw new Error(held.message)
-      await h.service.saveWorkEvidence('log', 'seen')
-      const captured = JSON.parse(await h.task.execute({ action: 'subject', task_id: change.id })) as { subjectRef: string; artifactRef: string; changes: unknown[] }
-      expect(captured.subjectRef).toBe(captured.artifactRef)
-      expect(captured.subjectRef.startsWith('sub-')).toBe(true)
+      await h.task.execute({ action: 'finish', task_id: change.id, run_id: runId })
       const current = h.store.work.change(change.id)!
-      const base = {
-        action: 'verify', task_id: change.id, run_ids: JSON.stringify([writer.run.id]),
-        review_run_id: review.run.id, session_id: h.store.work.run(review.run.id)!.sessionId,
-        expected_input_ref: current.currentInputRef, expected_input_revision: current.currentRevision,
-      }
-      const checks = JSON.stringify([
-        { requirementRef: 'R1', applicability: 'applicable', verdict: 'pass', evidenceRefs: ['log'] },
-        { requirementRef: 'R2', applicability: 'applicable', verdict: 'pass', evidenceRefs: ['log'] },
-      ])
-      const idError = await h.task.execute({ ...base, checks, subject: captured.subjectRef })
-      expect(idError).toContain(`subject ${captured.subjectRef} is a snapshot id`)
-      expect(idError).toContain('subject_ref')
-      expect(idError).not.toContain('must be JSON')
+      const base = { action: 'closeout', task_id: change.id, expected_input_ref: current.currentInputRef, expected_input_revision: current.currentRevision }
+      await expect(h.task.execute(base)).rejects.toThrow(/requires checks/)
+      await expect(h.task.execute({ ...base, checks: JSON.stringify([{ requirementRef: 'R1', applicability: 'required', verdict: 'pass', evidenceRefs: ['event:session-run-1:7'] }]) })).rejects.toThrow(/applicability must be/)
+      const checks = [{ requirementRef: 'R1', applicability: 'applicable', verdict: 'pass', evidenceRefs: ['event:session-run-1:7'], note: 'edit verified' }, { requirementRef: 'R2', applicability: 'applicable', verdict: 'pass', evidenceRefs: ['test:vitest:run-1'], note: 'tests passed' }]
+      await expect(h.task.execute({ ...base, checks: JSON.stringify(checks.slice(0, 1)) })).rejects.toThrow(/required R2 has no check/)
+      await expect(h.task.execute({ ...base, checks: JSON.stringify(checks), expected_input_revision: current.currentRevision + 1 })).rejects.toThrow(/is not current/)
       expect(h.store.work.latestVerification(change.id)).toBeUndefined()
-      const required = await h.task.execute({
-        ...base, subject_ref: captured.subjectRef,
-        checks: JSON.stringify([{ requirementRef: 'R1', applicability: 'required', verdict: 'pass', evidenceRefs: ['log'] }]),
-      })
-      expect(required).toContain('applicability must be applicable or not-applicable, not required')
-      expect(required).toContain('Do not drop it')
-      const trimmed = await h.task.execute({
-        ...base, checks, subject: JSON.stringify({ ...captured, baselineRefs: [{ workspaceRoot: current.cwd, artifactRef: 'base' }], changes: [] }),
-      })
-      expect(trimmed).toContain(`does not match captured delivery ${captured.subjectRef}`)
-      expect(trimmed).toContain('Do not drop scopeKey')
-      const shrunk = await h.task.execute({
-        ...base, subject_ref: captured.subjectRef,
-        checks: JSON.stringify([{ requirementRef: 'R1', applicability: 'applicable', verdict: 'pass', evidenceRefs: ['log'] }]),
-      })
-      expect(shrunk).toContain('checks are incomplete: required R2 has no check')
-      expect(shrunk).toContain('Do not remove requirements')
-      const elsewhere = mkdtempSync(join(tmpdir(), 'dot-verify-other-'))
-      try {
-        const other = await h.service.createWorkChange({ title: 'Other', cwd: elsewhere, goal: 'else', at: 6 })
-        const otherReview = await h.service.reserveWorkRun({
-          changeId: other.id, kind: 'review', cwd: elsewhere, root: { workspaceRoot: elsewhere },
-          writeScope: { kind: 'workspace-exclusive' }, at: 7,
-        })
-        if (!otherReview.ok) throw new Error(otherReview.message)
-        const foreign = await h.task.execute({ ...base, checks, subject_ref: captured.subjectRef, review_run_id: otherReview.run.id })
-        expect(foreign).toContain('verification has no review run')
-        expect(foreign).toContain('Do not edit checks')
-      } finally {
-        rmSync(elsewhere, { recursive: true, force: true })
-      }
-      expect(h.store.work.latestVerification(change.id)).toBeUndefined()
-      const snapshotEvidence = await h.task.execute({
-        ...base, subject_ref: captured.subjectRef,
-        checks: JSON.stringify([
-          { requirementRef: 'R1', applicability: 'applicable', verdict: 'pass', evidenceRefs: [captured.subjectRef] },
-          { requirementRef: 'R2', applicability: 'applicable', verdict: 'pass', evidenceRefs: ['log'] },
-        ]),
-      })
-      expect(snapshotEvidence).toContain(`${captured.subjectRef} is a snapshot, baseline, or session id`)
-      expect(snapshotEvidence).toContain('action=evidence')
-      expect(snapshotEvidence).toContain('Do not edit checks')
-      const otherIds = await h.task.execute({
-        ...base, subject_ref: captured.subjectRef,
-        checks: JSON.stringify([
-          { requirementRef: 'R1', applicability: 'applicable', verdict: 'pass', evidenceRefs: ['base-run-1-3'] },
-          { requirementRef: 'R2', applicability: 'applicable', verdict: 'pass', evidenceRefs: ['session-run-2'] },
-        ]),
-      })
-      expect(otherIds).toContain('base-run-1-3 is a snapshot, baseline, or session id')
-      expect(otherIds).not.toContain('must be JSON')
-      const unregistered = await h.task.execute({
-        ...base, subject_ref: captured.subjectRef,
-        checks: JSON.stringify([
-          { requirementRef: 'R1', applicability: 'applicable', verdict: 'pass', evidenceRefs: ['not-registered'] },
-          { requirementRef: 'R2', applicability: 'applicable', verdict: 'pass', evidenceRefs: ['log'] },
-        ]),
-      })
-      expect(unregistered).toContain('not-registered is not a registered evidence_ref')
-      expect(unregistered).toContain('action=evidence')
-      const refusedName = await h.task.execute({ action: 'evidence', task_id: change.id, evidence_ref: captured.subjectRef, summary: 'no' })
-      expect(refusedName).toContain('snapshot, baseline, or session id')
-      const registered = await h.task.execute({ action: 'evidence', task_id: change.id, evidence_ref: 'build-log', summary: 'ok' })
-      expect(registered).toContain('evidence_ref build-log')
-      expect(registered).toContain('Do not substitute')
-      expect(h.store.work.latestVerification(change.id)).toBeUndefined()
-      const byRef = JSON.parse(await h.task.execute({ ...base, checks, subject_ref: captured.subjectRef })) as { id: string; verdict: string }
-      expect(byRef).toMatchObject({ id: 'v-1', verdict: 'accept' })
-      const byObject = JSON.parse(await h.task.execute({ ...base, checks, subject: JSON.stringify(captured) })) as { id: string }
-      expect(byObject.id).toBe('v-2')
-      const revised = await h.service.reviseWorkChange(change.id, { goal: 'land it again', at: 8 })
-      if (!('id' in revised)) throw new Error(revised.message)
-      const stale = await h.task.execute({
-        ...base, checks, subject_ref: captured.subjectRef,
-        expected_input_ref: revised.currentInputRef, expected_input_revision: revised.currentRevision,
-      })
-      expect(stale).toContain(`subject_ref ${captured.subjectRef} is for ${current.currentInputRef}@${current.currentRevision}`)
-      expect(stale).toContain('Call action=subject again')
-      expect(h.store.work.verification('v-1')?.inputRef).toBe(current.currentInputRef)
-      expect(h.store.work.latestVerification(change.id)?.id).toBe('v-2')
-    } finally {
-      h.cleanup()
-    }
+      expect(await h.task.execute({ ...base, checks: JSON.stringify(checks) })).toContain('accepted')
+      expect(h.store.work.latestVerification(change.id)?.checks).toMatchObject(checks)
+      expect(h.service.workBoard(change.id)?.status).toBe('done')
+    } finally { h.cleanup() }
   })
 })

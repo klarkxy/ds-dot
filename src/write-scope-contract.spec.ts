@@ -58,9 +58,9 @@ function harness() {
     effect(fn: () => unknown) { fn() },
   } as never)
   const task = registered.find(row => row.name === TOOL.task) as { description: string; parameters: { properties: Record<string, { description?: string }> }; execute(args: Record<string, unknown>): Promise<string> }
-  const start = registered.find(row => row.name === TOOL.startTask) as { description: string; parameters: { properties: Record<string, { description?: string }> }; execute(args: Record<string, unknown>, exec: { signal?: AbortSignal }): Promise<string> }
+  const start = { ...task, execute: (args: Record<string, unknown>, _exec?: unknown) => task.execute({ ...args, action: 'dispatch', ...((args.cwd ?? args.dir) ? { dir: args.cwd ?? args.dir } : {}) }) }
   return {
-    project, store, task, start, exec: { signal: new AbortController().signal },
+    project, store, service, task, start, exec: { signal: new AbortController().signal },
     cleanup: () => { rmSync(project, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }) },
   }
 }
@@ -68,15 +68,10 @@ function harness() {
 describe('write scope contract', () => {
   it('shows a copyable write example and refuses a read run that names paths', async () => {
     const h = harness()
-    expect(h.start.description).toContain('[{"path":"site/note.txt","type":"file"}]')
-    expect(h.start.parameters.properties.paths?.description).toContain('site/note.txt')
     expect(h.task.parameters.properties.access?.description).toContain('write')
     const created = JSON.parse(await h.task.execute({ action: 'create', title: 'Ship', goal: 'write note', dir: h.project })) as { id: string }
     const paths = JSON.stringify([{ path: 'site/note.txt', type: 'file' }])
-    const refused = await h.start.execute({ task_id: created.id, instruction: 'write it', access: 'read', paths }, h.exec)
-    expect(refused).toMatch(/Error \[dot\/invalid\]:[\s\S]*access must be "write"[\s\S]*site\/note\.txt/)
-    const reserved = await h.task.execute({ action: 'reserve', task_id: created.id, role: 'work', access: 'read', paths })
-    expect(reserved).toMatch(/access must be "write"/)
+    await expect(h.start.execute({ task_id: created.id, instruction: 'write it', access: 'read', paths }, h.exec)).rejects.toThrow(/access must be "write"[\s\S]*site\/note\.txt/)
     expect(h.store.work.listRuns()).toEqual([])
     h.cleanup()
   })
@@ -87,10 +82,9 @@ describe('write scope contract', () => {
     const created = JSON.parse(await h.task.execute({
       action: 'create', title: 'Ship', goal: 'write note', dir: h.project, max_concurrent: 2,
     })) as { id: string }
-    const reserved = JSON.parse(await h.task.execute({
-      action: 'reserve', task_id: created.id, role: 'work', access: 'write',
-      paths: JSON.stringify([{ path: file, type: 'file' }]),
-    })) as { runId: string }
+    const result = await h.service.reserveWorkRun({ changeId: created.id, root: { workspaceRoot: h.project }, writeScope: { kind: 'paths', paths: [{ path: file, type: 'file' }] } })
+    if (!result.ok) throw new Error(result.message)
+    const reserved = { runId: result.run.id }
     expect(h.store.work.run(reserved.runId)).toMatchObject({ access: 'write', writeScope: { kind: 'paths', paths: [{ path: file, type: 'file' }] } })
     const continued = await h.start.execute({
       task_id: created.id, run_id: reserved.runId, instruction: '', access: 'write',
@@ -98,11 +92,7 @@ describe('write scope contract', () => {
     }, h.exec)
     expect(continued).toContain(reserved.runId)
     expect(h.store.work.run(reserved.runId)?.phase).toBe('reserved')
-    const bare = await h.start.execute({
-      task_id: created.id, instruction: '', access: 'write',
-      paths: JSON.stringify(['site/note.txt']),
-    }, h.exec)
-    expect(bare).toMatch(/site\/note\.txt/)
+    await expect(h.start.execute({ task_id: created.id, instruction: '', access: 'write', paths: JSON.stringify(['site/note.txt']) }, h.exec)).rejects.toThrow(/site\/note\.txt/)
     expect(h.store.work.listRuns()).toHaveLength(1)
     h.cleanup()
   })
@@ -112,9 +102,10 @@ describe('write scope contract', () => {
     const created = JSON.parse(await h.task.execute({
       action: 'create', title: 'Ship', goal: 'write note', dir: h.project, max_concurrent: 2,
     })) as { id: string }
-    const reading = JSON.parse(await h.task.execute({ action: 'reserve', task_id: created.id, role: 'work', access: 'read' })) as { runId: string }
-    const blocked = await h.start.execute({ task_id: created.id, run_id: reading.runId, instruction: 'write it', access: 'write' }, h.exec)
-    expect(blocked).toMatch(/read-only[\s\S]*site\/note\.txt/)
+    const result = await h.service.reserveWorkRun({ changeId: created.id, writeScope: { kind: 'paths', paths: [] } })
+    if (!result.ok) throw new Error(result.message)
+    const reading = { runId: result.run.id }
+    await expect(h.start.execute({ task_id: created.id, run_id: reading.runId, instruction: 'write it', access: 'write' }, h.exec)).rejects.toThrow(/read-only[\s\S]*site\/note\.txt/)
     expect(h.store.work.run(reading.runId)?.phase).toBe('reserved')
     const writing = await h.start.execute({
       task_id: created.id, instruction: '', access: 'write',

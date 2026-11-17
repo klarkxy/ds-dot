@@ -3,7 +3,7 @@ import { createRequire } from 'node:module'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
-import { apply } from './tools.ts'
+import { apply, TASK_ACTIONS } from './tools.ts'
 import { apply as applyReflection, REFLECTION_SUBMIT_TOOL } from './reflection.ts'
 import { DEFAULT_SETTINGS, TOOL, type DotSettings } from './contracts.ts'
 import { DEFAULT_PERSONA } from './persona.ts'
@@ -166,16 +166,16 @@ describe('dot tools', () => {
     const tool = load().find(row => row.name === TOOL.settings) as { execute(args: unknown): Promise<string> }
     expect(await tool.execute({ action: 'propose', field: 'approvals', value: '"human"', reason: 'Ask me every time' })).toContain('waits for the human')
     expect(await tool.execute({ action: 'propose', field: 'reflection', value: 'false', reason: 'pause it' })).toContain('waits for the human')
-    expect(await tool.execute({ action: 'propose', field: 'scope', value: 'broken JSON', reason: 'invalid' })).toContain('Error [dot/invalid]')
+    await expect(tool.execute({ action: 'propose', field: 'scope', value: 'broken JSON', reason: 'invalid' })).rejects.toMatchObject({ code: 'dot/invalid' })
   })
 
   it('decodes question answers from JSON text and rejects malformed payloads', async () => {
     const tool = load().find(row => row.name === TOOL.answerPending) as { execute(args: unknown): Promise<string> }
     const answer = await tool.execute({ id: 'q-1', answers: '[{"id":"choice","selected":["Yes"],"custom":"why"}]' })
     expect(JSON.parse(answer)).toEqual({ id: 'q-1', answer: { kind: 'question', answers: [{ id: 'choice', selected: ['Yes'], custom: 'why' }] } })
-    expect(await tool.execute({ id: 'q-1', answers: 'broken' })).toContain('Error [dot/invalid]')
-    expect(await tool.execute({ id: 'q-1', answers: '[null]' })).toContain('Error [dot/invalid]')
-    expect(await tool.execute({ id: 'q-1', allow: true, answers: '[]' })).toContain('Error [dot/invalid]')
+    await expect(tool.execute({ id: 'q-1', answers: 'broken' })).rejects.toMatchObject({ code: 'dot/invalid' })
+    await expect(tool.execute({ id: 'q-1', answers: '[null]' })).rejects.toMatchObject({ code: 'dot/invalid' })
+    await expect(tool.execute({ id: 'q-1', allow: true, answers: '[]' })).rejects.toMatchObject({ code: 'dot/invalid' })
   })
 
   it('registers one same-name show_view with a flat schema and single-step conclusion', async () => {
@@ -243,12 +243,12 @@ describe('dot tools', () => {
     expect(cognition.text).toMatchObject({ type: 'string' })
   })
 
-  it('keeps the task tool inside the dot preset entry', () => {
-    const root = join(dirname(fileURLToPath(import.meta.url)), '..')
-    const index = readFileSync(join(root, 'src', 'index.ts'), 'utf8')
-    const source = readFileSync(join(root, 'src', 'tools.ts'), 'utf8')
-    expect(index.match(/ds-dot\/tools/g)).toHaveLength(1)
-    expect(source).toContain('name: TOOL.task')
+  it('exposes exactly the high-level task operations and rejects removed actions', async () => {
+    const tool = load().find(row => row.name === TOOL.task) as { parameters: { properties: Record<string, { enum?: string[] }> }; execute(args: unknown): Promise<string> }
+    expect(tool.parameters.properties.action.enum).toEqual(['create', 'revise', 'dispatch', 'read', 'list', 'supplement', 'finish', 'step', 'closeout', 'pause', 'resume', 'cancel', 'decide', 'reject'])
+    expect(tool.parameters.properties.action.enum).toEqual([...TASK_ACTIONS])
+    for (const action of ['reserve', 'baseline', 'subject', 'evidence', 'verify', 'hold', 'accept', 'move', 'note', 'delete', 'board', 'update']) await expect(tool.execute({ action })).rejects.toThrow()
+    for (const field of ['subject', 'subject_ref', 'evidence_ref', 'to', 'status', 'summary', 'session_id']) expect(tool.parameters.properties).not.toHaveProperty(field)
     expect(loadReflection().map(row => row.name)).not.toContain(TOOL.task)
   })
 
@@ -329,7 +329,7 @@ describe('dot tools', () => {
   it('does not expose locks or the workspace directory as a self-service setting', async () => {
     const tool = load().find(row => row.name === TOOL.settings) as { execute(args: unknown): Promise<string> }
     // propose with locked field should fail (SelfSettings.propose throws)
-    await expect(tool.execute({ action: 'propose', field: 'locks', value: '{}', reason: 'unlock' })).resolves.toContain('Error [dot/failed]')
+    await expect(tool.execute({ action: 'propose', field: 'locks', value: '{}', reason: 'unlock' })).rejects.toThrow()
   })
 })
 

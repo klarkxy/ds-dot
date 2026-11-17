@@ -8,7 +8,7 @@ import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { subjectMaterial, type DeliverySubject, type SubjectLook } from './acceptance.ts'
 import {
-  captureScope, defaultIgnoreCover, ignoredDirName, readSnapshot, restoreSnapshot,
+  captureScope, defaultIgnoreCover, ignoredDirName, readSnapshot,
   saveSnapshot, scanScope, sha256,
 } from './artifacts.ts'
 import { DEFAULT_SETTINGS } from './contracts.ts'
@@ -28,7 +28,6 @@ function lookAt(artifacts: string, liveExtra: readonly string[] = []): SubjectLo
         return { root: manifest.root, saved: manifest.saved, deleted: manifest.deleted, exclusions: manifest.exclusions }
       } catch { return undefined }
     },
-    evidence: () => true,
     live(root) {
       try {
         return [...scanScope(root, root, 'directory').files, ...liveExtra]
@@ -148,7 +147,7 @@ describe('snapshot default exclusions', () => {
     }
   })
 
-  it('records a source symlink as a boundary without following it, and restore still refuses links', () => {
+  it('records a source symlink as a boundary without following it, without reading its target', () => {
     const root = tmp('dot-excl-link-')
     const outside = tmp('dot-excl-out-')
     const home = tmp('dot-excl-art-')
@@ -164,7 +163,7 @@ describe('snapshot default exclusions', () => {
       expect(captured.files.some(file => file.path.includes('secret'))).toBe(false)
       const snap = join(home, 'artifacts', 'escape')
       saveSnapshot(snap, [{ path: 'src/vendor/pwn.txt', body: new TextEncoder().encode('no') }], undefined, { root, exclusions: captured.exclusions })
-      expect(() => restoreSnapshot(snap, root)).toThrow(/link/)
+      expect(readSnapshot(snap).manifest.exclusions).toEqual(captured.exclusions)
       expect(existsSync(join(outside, 'pwn.txt'))).toBe(false)
     } finally {
       rmSync(root, { recursive: true, force: true })
@@ -296,8 +295,7 @@ describe('acceptance exclusion trees and source links', () => {
         read: ref => ref === 'delivery-1' || ref === 'base-1'
           ? { root: '/proj', saved: [{ path: 'Foo.ts', sha256: 'aa' }], deleted: [], exclusions: [] }
           : undefined,
-        evidence: () => true,
-        live: () => ['foo.ts'],
+            live: () => ['foo.ts'],
         boundaries: () => [],
         body: () => new Uint8Array([1]),
       },
@@ -390,7 +388,8 @@ describe('explicit ignored write scopes at baseline', () => {
       writeFileSync(join(h.project, 'a.ts'), 'after')
       const subject = await h.service.captureWorkSubject(change.id)
       expect(subject.changes).toEqual([expect.objectContaining({ path: 'a.ts', kind: 'modified', sha256: sha256(new TextEncoder().encode('after')) })])
-      expect(subject.exclusions.some(item => item.path === 'src/vendor' && item.reason.startsWith('symlink:'))).toBe(true)
+      expect(subject.exclusions.some(item => item.path === 'src/vendor')).toBe(false)
+      expect(subject.outOfScopePaths).toContain('src/vendor')
       expect(subject.exclusions.some(item => item.path === 'a.ts')).toBe(false)
       const look = lookAt(join(h.home, 'artifacts'))
       const current = h.store.work.change(change.id)!

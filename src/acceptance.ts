@@ -3,7 +3,7 @@
  * Snapshots stay in the artifact store. This module only names and compares them.
  */
 import { createHash } from 'node:crypto'
-import { absoluteScopePath, canonicalPath, pathsOverlap, type BaselineRef, type RunRecord, type WriteScope } from './work.ts'
+import { absoluteScopePath, canonicalPath, pathsOverlap, scopeKey, scopeWithinRoot, type BaselineRef, type CheckRecord, type RunRecord, type WriteScope } from './work.ts'
 
 export interface DeliveryChange {
   readonly path: string
@@ -25,9 +25,16 @@ export interface DeliverySubject {
   readonly changes: readonly DeliveryChange[]
   readonly protectedDirty: readonly string[]
   readonly exclusions: readonly SubjectExclusion[]
+  /** Omitted on older subjects, which captured the full workspace. */
+  readonly writeScope?: WriteScope
+  /** Visible observations outside the delivery, without attribution to this change. */
+  readonly outOfScopePaths?: readonly string[]
 }
 
-export function subjectKey(subject: DeliverySubject): string {
+export function subjectKey(subject: DeliverySubject, binding?: {
+  readonly inputRef: string; readonly inputRevision: number; readonly runIds: readonly string[];
+  readonly checks: readonly CheckRecord[]; readonly reviewRunId?: string; readonly reviewerSessionId?: string;
+}): string {
   const body = JSON.stringify({
     workspaceRoot: subject.workspaceRoot,
     cwd: subject.cwd,
@@ -36,6 +43,16 @@ export function subjectKey(subject: DeliverySubject): string {
     changes: subject.changes.map(change => `${change.kind}|${change.path}|${change.sha256 ?? ''}`).sort(),
     protectedDirty: [...subject.protectedDirty].sort(),
     exclusions: subject.exclusions.map(item => `${item.path}|${item.reason}`).sort(),
+    ...(subject.writeScope ? { writeScope: scopeKey(subject.writeScope, subject.workspaceRoot) } : {}),
+    ...(subject.outOfScopePaths ? { outOfScopePaths: [...subject.outOfScopePaths].sort() } : {}),
+    ...(binding ? {
+      inputRef: binding.inputRef, inputRevision: binding.inputRevision, runIds: [...binding.runIds].sort(),
+      reviewRunId: binding.reviewRunId, reviewerSessionId: binding.reviewerSessionId,
+      checks: binding.checks.map(check => ({
+        requirementRef: check.requirementRef, applicability: check.applicability, verdict: check.verdict,
+        evidenceRefs: [...check.evidenceRefs].sort(), note: check.note,
+      })).sort((a, b) => a.requirementRef.localeCompare(b.requirementRef)),
+    } : {}),
   })
   return createHash('sha256').update(body).digest('hex')
 }
@@ -73,24 +90,40 @@ export interface SubjectSnapshot {
 /** Reads the artifact store and the live workspace. A missing read is a refusal, not a skip. */
 export interface SubjectLook {
   read(ref: string): SubjectSnapshot | undefined
-  evidence(ref: string): boolean
   /** Relative paths in the workspace now. Undefined means the tree could not be read. */
-  live(workspaceRoot: string): readonly string[] | undefined
+  live(workspaceRoot: string, scope?: WriteScope): readonly string[] | undefined
   body(workspaceRoot: string, path: string): Uint8Array | undefined
   /** Scan-time exclusions currently in the workspace. Undefined means the tree could not be read. */
-  boundaries?(workspaceRoot: string): readonly SubjectExclusion[] | undefined
+  boundaries?(workspaceRoot: string, scope?: WriteScope): readonly SubjectExclusion[] | undefined
 }
 
-/** A snapshot, baseline, or session id is not an evidence_ref, even if a file was saved under that name. */
-export function isForeignEvidenceId(ref: string): boolean {
+/** References identify an event or test output rather than only a snapshot or session. */
+function isForeignEvidenceId(ref: string): boolean {
   return /^(?:sub|base|session)-/.test(ref)
 }
 
-/** Why this id cannot be used in evidenceRefs. Undefined means it is a registered evidence_ref. */
-export function evidenceRefGap(ref: string, registered: boolean): string | undefined {
-  if (isForeignEvidenceId(ref)) return `evidence ${ref} is a snapshot, baseline, or session id, not a registered evidence_ref. Call action=evidence and use the evidence_ref it returns.`
-  if (!registered) return `evidence ${ref} is not a registered evidence_ref. Call action=evidence and use the evidence_ref it returns. Do not substitute a snapshot, baseline, or session id.`
+/** Evidence names a session event or test output; review notes live on the check itself. */
+export function evidenceRefGap(ref: string): string | undefined {
+  if (!ref.trim()) return 'evidence reference is empty'
+  if (isForeignEvidenceId(ref)) return `evidence ${ref} is a snapshot, baseline, or session id; name a session event or test output instead`
   return undefined
+}
+
+/** The delivery is the union of writer scopes. A review's reservation does not expand it. */
+export function deliveryScope(runs: readonly RunRecord[]): WriteScope {
+  const writers = runs.filter(run => run.kind !== 'review')
+  if (writers.some(run => run.writeScope.kind === 'workspace-exclusive')) return { kind: 'workspace-exclusive' }
+  return { kind: 'paths', paths: writers.flatMap(run => run.writeScope.kind === 'paths'
+    ? run.writeScope.paths.map(item => ({ ...item, path: absoluteScopePath(run.workspaceRoot, item.path) })) : []) }
+}
+
+export function scopeContainsPath(scope: WriteScope, root: string, rel: string, platform: NodeJS.Platform = process.platform): boolean {
+  if (scope.kind === 'workspace-exclusive') return true
+  const absolute = absoluteScopePath(root, rel, platform)
+  return scope.paths.some(item => {
+    const target = absoluteScopePath(root, item.path, platform)
+    return item.type === 'file' ? samePlace(target, absolute, platform) : scopeWithinRoot(target, absolute, platform)
+  })
 }
 
 function foldRel(value: string, platform: NodeJS.Platform): string {
@@ -277,6 +310,9 @@ export function subjectMaterial(
   const manifest = look.read(subject.artifactRef)
   if (!manifest) return `delivery snapshot ${subject.artifactRef} is missing or incomplete`
   if (!manifest.root || !samePlace(manifest.root, subject.workspaceRoot, platform)) return `delivery snapshot root is not ${subject.workspaceRoot}`
+  const scoped = (rel: string) => !subject.writeScope || scopeContainsPath(subject.writeScope, subject.workspaceRoot, rel, platform)
+  if (subject.writeScope && scopeKey(subject.writeScope, subject.workspaceRoot, platform) !== scopeKey(deliveryScope(runs), subject.workspaceRoot, platform)) return 'delivery scope does not match the writer runs'
+  if (manifest.saved.some(entry => !scoped(entry.path)) || manifest.deleted.some(name => !scoped(name))) return 'snapshot contains a path outside the delivery scope'
   const snapshotExclusions = effectiveExclusions(manifest)
   if (!sameExclusionSet(subject.exclusions, snapshotExclusions, platform)) return 'delivery exclusions do not match the snapshot'
   for (const change of subject.changes) {
@@ -298,16 +334,16 @@ export function subjectMaterial(
     if (!baseline.root || !samePlace(baseline.root, ref.workspaceRoot, platform)) return `baseline ${ref.artifactRef} is not ${ref.workspaceRoot}`
   }
   for (const ref of evidenceRefs) {
-    const gap = evidenceRefGap(ref, look.evidence(ref))
+    const gap = evidenceRefGap(ref)
     if (gap) return gap
   }
-  const live = look.live(subject.workspaceRoot)
+  const live = look.live(subject.workspaceRoot, subject.writeScope)
   if (!live) return 'workspace could not be read'
   const deliveryLinks = snapshotExclusions.filter(item => isLinkReason(item.reason))
   if (look.boundaries) {
-    const liveBounds = look.boundaries(subject.workspaceRoot)
+    const liveBounds = look.boundaries(subject.workspaceRoot, subject.writeScope)
     if (!liveBounds) return 'workspace could not be read'
-    const liveLinks = liveBounds.filter(item => isLinkReason(item.reason))
+    const liveLinks = liveBounds.filter(item => isLinkReason(item.reason) && scoped(item.path))
     if (!sameExclusionSet(deliveryLinks, liveLinks, platform)) return 'source link appeared or changed'
   }
   for (const run of runs) {
@@ -325,6 +361,7 @@ export function subjectMaterial(
     const baseline = look.read(ref.artifactRef)
     if (!baseline) continue
     for (const entry of baseline.saved) {
+      if (!scoped(entry.path)) continue
       if (ignoreCovered(snapshotExclusions, entry.path, platform)) continue
       if (deliveryLinks.some(item => sameRel(item.path, entry.path, platform))) return `${entry.path} became a link`
       const kept = manifest.saved.some(item => sameRel(item.path, entry.path, platform))
@@ -333,6 +370,7 @@ export function subjectMaterial(
     }
   }
   for (const rel of live) {
+    if (!scoped(rel)) continue
     if (ignoreCovered(snapshotExclusions, rel, platform)) continue
     if (snapshotExclusions.some(item => isIgnoredFileReason(item.reason) && sameRel(item.path, rel, platform))) continue
     if (manifest.deleted.some(item => sameRel(item, rel, platform))) return `deleted ${rel} is still in the workspace`
@@ -351,5 +389,5 @@ export function subjectMaterial(
   }
   const prior = writerPrior(baselines, runs, ref => look.read(ref), platform)
   if (prior.missing) return `baseline ${prior.missing} is missing or incomplete`
-  return contributionGap(subject, prior.files, manifest, platform)
+  return contributionGap(subject, prior.files.filter(file => scoped(file.path)), manifest, platform)
 }

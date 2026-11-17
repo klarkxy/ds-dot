@@ -611,13 +611,18 @@ export class WorkBook {
     const closeoutCurrent = !!change.closeout && verification?.id === change.closeout.verificationId && !verdictBlocks
     const done = closeoutCurrent && open.length === 0
     const status = change.control === 'cancelled' ? 'cancelled' as const
-      : verdictBlocks ? verification!.verdict
+      : verdictBlocks ? verification!.verdict === 'unverified' ? 'unverified' as const : 'rework' as const
       : done ? 'done' as const
       : review ? 'review' as const
       : runs.some(run => run.phase === 'settling') ? 'settling' as const
       : open.length ? 'running' as const
       : 'waiting' as const
     const material = this.inputs.get(change.currentInputRef)
+    const oversight = change.oversight
+    const awaitsHumanDecision = oversight?.requested && oversight.inputRef === change.currentInputRef
+      && !(oversight.inputRevision === change.currentRevision && oversight.decision?.result === 'accept'
+        && oversight.decision.source === 'user' && oversight.decision.verificationId === verification?.id
+        && oversight.decision.subjectKey === verification?.subjectKey)
     return {
       id: change.id, title: change.title, priority: change.priority, revision: change.currentRevision,
       inputRef: change.currentInputRef, control: change.control, status,
@@ -641,10 +646,14 @@ export class WorkBook {
         ...(verification.subject && verification.subject.changes.length > 0 ? {
           changes: verification.subject.changes.map(change => ({ path: change.path, kind: change.kind })),
         } : {}),
+        ...(verification.subject && verification.subject.exclusions.length > 0 ? {
+          exclusions: verification.subject.exclusions.map(item => ({ path: item.path, reason: item.reason })),
+        } : {}),
       } : undefined,
       closeout: closeoutCurrent ? change.closeout : undefined,
       oversight: change.oversight,
-      humanAction: !change.closeout && !verdictBlocks && verification?.verdict === 'accept' && verification.subjectKey ? {
+      humanAction: !change.closeout && !verdictBlocks && !awaitsHumanDecision && verification?.verdict === 'accept' && verification.subjectKey
+        && verification.inputRef === change.currentInputRef && verification.inputRevision === change.currentRevision ? {
         action: 'accept' as const,
         expectedInputRef: change.currentInputRef,
         expectedInputRevision: change.currentRevision,
@@ -1034,6 +1043,7 @@ export class WorkBook {
     readonly reviewRunId?: string
     readonly reviewerSessionId?: string
     readonly subject?: DeliverySubject
+    readonly direct?: boolean
   }): Promise<VerificationRecord | WorkRefusal> {
     return this.exclusive(async () => {
       const refused = this.recoveryRefusal()
@@ -1063,7 +1073,12 @@ export class WorkBook {
         return { ok: false, code: 'stale', message: 'verification names an input this change does not have' }
       }
       const subject = detail.subject
-      if (detail.reviewRunId || detail.reviewerSessionId || subject) {
+      if (detail.direct === true && !detail.reviewRunId && !detail.reviewerSessionId) {
+        if (!subject) return { ok: false, code: 'stale', message: 'verification has no delivery subject' }
+        if (canonicalPath(change.cwd, this.platform) !== canonicalPath(subject.workspaceRoot, this.platform)) {
+          return { ok: false, code: 'ownership', message: 'delivery workspace does not match the change' }
+        }
+      } else if (detail.reviewRunId || detail.reviewerSessionId || subject) {
         const writers = [...this.runs.values()].filter(run => run.changeId === changeId && run.kind !== 'review')
         const review = detail.reviewRunId ? this.runs.get(detail.reviewRunId) : undefined
         const bound = this.reviewGap(review, changeId, subject, detail.reviewerSessionId, detail.inputRef, detail.inputRevision, writers)
@@ -1167,6 +1182,96 @@ export class WorkBook {
       const released: RunRecord = { ...review, phase: 'stopped', closeReason: 'closeout', updatedAt: at }
       await this.commit('runs', released.id, released)
       this.runs.set(released.id, released)
+      this.currentRevision += 1
+      return next
+    })
+  }
+
+  /**
+   * Deterministic lightweight closeout when all writer runs are confirmed settled
+   * with closure evidence and no separate review session is open. Enforces the
+   * exact same input-version, snapshot SHA-256, evidence, and human-oversight gates
+   * as {@link accept} without blocking the whole workspace on a second LLM session.
+   */
+  acceptDirect(
+    changeId: string,
+    verificationId: string,
+    expectedInputRef: string,
+    expectedSubjectKey: string,
+    source: string,
+    at = Date.now(),
+    human?: { readonly expectedInputRevision: number; readonly expectedVerificationId: string },
+    look?: SubjectLook,
+  ): Promise<ChangeRecord | WorkRefusal> {
+    return this.exclusive(async () => {
+      const refused = this.recoveryRefusal()
+      if (refused) return refused
+      const current = this.changes.get(changeId)
+      if (!current) return { ok: false, code: 'missing', message: `unknown change ${changeId}` }
+      if (current.control !== 'open') return { ok: false, code: current.control, message: `${changeId} is ${current.control}` }
+      if (current.closeout) return { ok: false, code: 'closed', message: `${changeId} is already closed out` }
+      const verification = this.verifications.get(verificationId)
+      if (!verification || verification.changeId !== changeId) return { ok: false, code: 'missing', message: `unknown verification ${verificationId}` }
+      if (verification.verdict !== 'accept') return { ok: false, code: 'stale', message: `${verificationId} is ${verification.verdict}` }
+      if (verification.inputRef !== current.currentInputRef || expectedInputRef !== current.currentInputRef || verification.inputRevision !== current.currentRevision) {
+        return { ok: false, code: 'stale', message: `${verificationId} does not match the current input` }
+      }
+      if (!verification.subject || !verification.subjectKey || verification.subjectKey !== expectedSubjectKey) {
+        return { ok: false, code: 'stale', message: `${verificationId} does not match the current delivery` }
+      }
+      const changeRuns = [...this.runs.values()].filter(run => run.changeId === changeId)
+      const openReviews = changeRuns.filter(run => run.kind === 'review' && !TERMINAL.has(run.phase))
+      if (openReviews.length > 0) {
+        return { ok: false, code: 'conflict', message: `${openReviews[0]!.id} is an open review; hold and accept through it or reject it first`, blockers: openReviews.map(run => run.id) }
+      }
+      const writers = changeRuns.filter(run => run.kind !== 'review')
+      const openWriters = writers.filter(run => !TERMINAL.has(run.phase))
+      if (openWriters.length > 0) {
+        return { ok: false, code: 'conflict', message: `${openWriters[0]!.id} is still open`, blockers: openWriters.map(run => run.id) }
+      }
+      for (const writer of writers) {
+        const sent = writer.creation === 'confirmed' || writer.deliveries.some(item => item.status === 'accepted' || item.status === 'unknown')
+        if (!sent) continue
+        const ev = writer.closureEvidence
+        if (!ev?.queueCleared || !ev.agentIdle || !ev.jobsSettled) {
+          return { ok: false, code: 'unknown', message: `${writer.id} is not confirmed stopped` }
+        }
+      }
+      const omitted = writers.filter(run => scopeWrites(run.writeScope) && !verification.runIds.includes(run.id))
+      if (omitted.length > 0) return { ok: false, code: 'stale', message: `${omitted[0]!.id} is missing from the delivery` }
+      if (this.inFlight(changeRuns)) return { ok: false, code: 'unknown', message: `${changeId} still has an in-flight delivery` }
+      const gap = subjectMaterial(verification.subject, current.baselineRefs, changeRuns, verification.checks.flatMap(check => check.evidenceRefs), look)
+      if (gap) return { ok: false, code: 'baseline', message: gap }
+      const material = this.inputs.get(current.currentInputRef)
+      if (!material) return { ok: false, code: 'missing', message: 'missing input' }
+      if (judgeVerification(material.requirements, verification.checks) !== 'accept') {
+        return { ok: false, code: 'stale', message: `${verificationId} does not cover the current requirements` }
+      }
+      if (!human || human.expectedInputRevision !== current.currentRevision || human.expectedVerificationId !== verificationId) {
+        return { ok: false, code: 'stale', message: 'the decision is for an older version' }
+      }
+      if (current.oversight?.requested && current.oversight.inputRef === current.currentInputRef) {
+        const decision = current.oversight.decision
+        if (!decision || decision.result !== 'accept' || decision.source !== 'user' || decision.verificationId !== verificationId || decision.subjectKey !== verification.subjectKey || current.oversight.inputRevision !== current.currentRevision) {
+          return { ok: false, code: 'stale', message: 'the user asked to see this version' }
+        }
+      }
+      const later = [...this.verifications.values()].some(row => row.changeId === changeId && row.id !== verification.id && row.inputRef === verification.inputRef && (row.verdict === 'rework' || row.verdict === 'unverified') && newerVerification(row, verification))
+      if (later) return { ok: false, code: 'stale', message: `${verificationId} was superseded` }
+      // A review released as rework is an explicit rejection of this delivery. Direct
+      // closeout must not overrule it: only a verification recorded after that rework
+      // (that is, work done in answer to it) may close the change.
+      const rejectedAfter = changeRuns.filter(run => run.kind === 'review' && run.phase === 'stopped' && run.closeReason === 'rework' && run.updatedAt > verification.createdAt)
+      if (rejectedAfter.length > 0) {
+        return { ok: false, code: 'conflict', message: `${rejectedAfter[0]!.id} rejected this delivery; record a new verification after the rework`, blockers: rejectedAfter.map(run => run.id) }
+      }
+      const next: ChangeRecord = {
+        ...current,
+        closeout: { verificationId, source, inputRef: current.currentInputRef, subjectKey: verification.subjectKey, at },
+        updatedAt: at,
+      }
+      await this.commit('changes', next.id, next)
+      this.changes.set(next.id, next)
       this.currentRevision += 1
       return next
     })

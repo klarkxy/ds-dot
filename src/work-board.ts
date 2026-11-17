@@ -48,6 +48,7 @@ export interface WorkVerificationView {
   readonly inputRevision: number
   readonly checks?: readonly WorkCheckView[]
   readonly changes?: readonly WorkChangeView[]
+  readonly exclusions?: readonly { readonly path: string; readonly reason: string }[]
 }
 
 export interface WorkCloseoutView {
@@ -104,6 +105,7 @@ export interface WorkReadRequest {
   readonly verificationId: string
   readonly inputRef: string
   readonly inputRevision: number
+  readonly forceFull?: boolean
 }
 
 export interface PendingGlance {
@@ -142,6 +144,9 @@ export function acceptPayload(item: WorkBoardItem): WorkAcceptPayload | undefine
   if (!action || action.action !== 'accept') return undefined
   if (!action.expectedInputRef || !action.expectedVerificationId || !action.expectedSubjectKey) return undefined
   if (!Number.isInteger(action.expectedInputRevision)) return undefined
+  if (action.expectedInputRef !== item.inputRef || action.expectedInputRevision !== item.revision) return undefined
+  if (action.expectedVerificationId !== item.verification?.id || action.expectedSubjectKey !== item.verification?.subjectKey
+    || item.verification?.inputRef !== item.inputRef || item.verification.inputRevision !== item.revision) return undefined
   return {
     id: item.id,
     verificationId: action.expectedVerificationId,
@@ -172,10 +177,14 @@ export function resumePayload(item: WorkBoardItem): { readonly id: string } | un
 export function lookRequest(item: WorkBoardItem, pending: readonly PendingGlance[]): WorkLookRequest | 'stale' | 'withdrawn' | undefined {
   const asked = item.oversight
   if (!asked?.requested) return undefined
+  if (item.verification && (item.verification.inputRef !== item.inputRef || item.verification.inputRevision !== item.revision)) return 'stale'
   const decision = asked.decision
   if (decision && decision.verificationId === item.verification?.id && decision.subjectKey === item.verification?.subjectKey && asked.inputRevision === item.revision) return undefined
   if (asked.inputRef !== item.inputRef || asked.inputRevision !== item.revision) return 'stale'
-  const bound = pending.flatMap(row => parseLook(row))
+  const bound = pending.flatMap(row => {
+    const look = parseWorkLook(row)
+    return look ? [look] : []
+  })
   const current = bound.find(row => row.changeId === item.id && row.inputRevision === item.revision && row.verificationId === item.verification?.id && row.subjectKey === item.verification?.subjectKey)
   if (current) return current
   if (bound.some(row => row.changeId === item.id)) return 'stale'
@@ -193,13 +202,14 @@ export function workFailure(error: { readonly code?: string; readonly message?: 
   return 'unknown'
 }
 
-export function groupWork(items: readonly WorkBoardItem[]): { readonly needsHuman: readonly WorkBoardItem[]; readonly active: readonly WorkBoardItem[]; readonly done: readonly WorkBoardItem[] } {
+export function groupWork(items: readonly WorkBoardItem[], pending: readonly PendingGlance[] = []): { readonly needsHuman: readonly WorkBoardItem[]; readonly active: readonly WorkBoardItem[]; readonly done: readonly WorkBoardItem[] } {
   const needsHuman: WorkBoardItem[] = []
   const active: WorkBoardItem[] = []
   const done: WorkBoardItem[] = []
   for (const item of items) {
+    const look = lookRequest(item, pending)
     if (item.status === 'done' || item.status === 'cancelled') done.push(item)
-    else if (item.humanAction || item.oversight?.requested) needsHuman.push(item)
+    else if (acceptPayload(item) || (typeof look === 'object' && look !== null)) needsHuman.push(item)
     else active.push(item)
   }
   return { needsHuman, active, done }
@@ -240,13 +250,13 @@ export function shortId(value: string | undefined): string {
   return value.length <= 12 ? value : `${value.slice(0, 8)}…`
 }
 
-function parseLook(row: PendingGlance): WorkLookRequest[] {
-  if (row.kind !== 'approval' || !row.detail) return []
+export function parseWorkLook(row: PendingGlance): WorkLookRequest | undefined {
+  if (row.kind !== 'approval' || !row.detail) return undefined
   try {
     const body = JSON.parse(row.detail) as { changeId?: unknown; inputRevision?: unknown; verificationId?: unknown; subjectKey?: unknown }
-    if (typeof body.changeId !== 'string' || typeof body.inputRevision !== 'number' || typeof body.verificationId !== 'string' || typeof body.subjectKey !== 'string') return []
-    return [{ id: row.id, changeId: body.changeId, inputRevision: body.inputRevision, verificationId: body.verificationId, subjectKey: body.subjectKey }]
+    if (typeof body.changeId !== 'string' || typeof body.inputRevision !== 'number' || typeof body.verificationId !== 'string' || typeof body.subjectKey !== 'string') return undefined
+    return { id: row.id, changeId: body.changeId, inputRevision: body.inputRevision, verificationId: body.verificationId, subjectKey: body.subjectKey }
   } catch {
-    return []
+    return undefined
   }
 }

@@ -24,6 +24,21 @@ export interface NewTask {
   readonly at: number
 }
 
+export interface WorkLedgerItem {
+  readonly id: string
+  readonly title: string
+  readonly cwd: string
+  readonly priority: 1 | 2 | 3
+  readonly revision: number
+  readonly control: string
+  readonly status: string
+  readonly activeRuns: number
+  readonly sessionIds: readonly string[]
+  readonly blockers: readonly string[]
+  readonly needsHumanLook?: boolean
+  readonly readyToAccept?: boolean
+}
+
 const NOTE_LIMIT = 240
 
 export function clip(text: string, limit = NOTE_LIMIT): string {
@@ -101,31 +116,56 @@ export function sortTasks(tasks: readonly TaskRecord[]): TaskRecord[] {
 }
 
 /**
- * Compact ledger block for dot's context: one line per live task plus the
- * waiting requests. Archived tasks are counted, not listed.
+ * Compact ledger block for dot's context: one line per live Change / Ticket plus
+ * watched sessions and waiting requests. Archived or finished entries are counted.
  */
-export function ledgerSummary(tasks: readonly TaskRecord[], pending: readonly PendingView[], now: number, tickets?: readonly Ticket[]): string {
-  if (tickets) {
-    const lines = ['[dot ledger]', 'Tasks:']
-    const active = tickets.filter(ticket => ticket.status !== 'done' && ticket.status !== 'cancelled')
-    const requests = (ticket: Ticket) => pending.filter(item => ticket.sessions.some(row => row.sessionId === item.sessionId))
-    const needs = (ticket: Ticket) => {
-      const latest = ticket.sessions.at(-1)
-      const error = latest !== undefined && tasks.some(task => task.sessionId === latest.sessionId && task.status === 'error')
-      const orphaned = (ticket.status === 'active' || ticket.status === 'review') && !ticket.sessions.some(row => tasks.some(task => task.sessionId === row.sessionId && task.status !== 'archived'))
-      return requests(ticket).length > 0 || error || orphaned
+export function ledgerSummary(
+  tasks: readonly TaskRecord[],
+  pending: readonly PendingView[],
+  now: number,
+  tickets?: readonly Ticket[],
+  changes?: readonly WorkLedgerItem[],
+): string {
+  if (tickets || (changes && changes.length > 0)) {
+    const lines = ['[dot ledger]']
+    if (changes && changes.length > 0) {
+      lines.push('Changes:')
+      const activeChanges = changes.filter(item => item.status !== 'done' && item.status !== 'cancelled')
+      const changeRequests = (item: WorkLedgerItem) => pending.filter(req => item.sessionIds.includes(req.sessionId))
+      const changeUrgent = (item: WorkLedgerItem) => changeRequests(item).length > 0 || item.status === 'rework' || item.status === 'unverified' || item.readyToAccept === true
+      activeChanges.sort((a, b) => Number(changeUrgent(b)) - Number(changeUrgent(a)) || b.priority - a.priority || a.id.localeCompare(b.id))
+      for (const item of activeChanges) {
+        const paused = item.control === 'paused' ? ' [PAUSED]' : ''
+        const blockers = item.blockers.length > 0 ? ` · open runs: ${item.blockers.join(', ')}` : ''
+        const reqMark = changeRequests(item).map(req => ` · WAITING ${req.id}`).join('')
+        const human = item.needsHumanLook ? ' · needs the human\'s look' : item.readyToAccept ? ' · ready to close out' : ''
+        lines.push(`- ${item.id} ${item.status.toUpperCase()}${paused} P${item.priority} rev=${item.revision} ${item.cwd} "${item.title}" · ${item.activeRuns} active run(s)${blockers}${reqMark}${human}`)
+      }
+      const hiddenChanges = changes.length - activeChanges.length
+      if (hiddenChanges > 0) lines.push(`(${hiddenChanges} done or cancelled change(s) hidden)`)
     }
-    active.sort((a, b) => Number(needs(b)) - Number(needs(a)) || b.priority - a.priority || a.createdAt - b.createdAt)
-    for (const ticket of active) {
-      const running = ticket.sessions.filter(row => tasks.some(task => task.sessionId === row.sessionId && task.status === 'running')).length
-      const holders = ticket.status === 'todo' && ticket.access === 'write' ? lockHolders(tickets, ticket.dir, ticket.id) : []
-      const waiting = holders.length ? ` · waiting for ${holders.map(row => row.id).join(', ')} to release the directory` : ''
-      const human = ticket.humanReview && ticket.status === 'review' ? ' · needs the human\'s look' : ''
-      const requestMark = requests(ticket).map(item => ` · WAITING ${item.id}`).join('')
-      lines.push(`- ${ticket.id} ${ticket.status.toUpperCase()} P${ticket.priority} ${ticket.access} ${ticket.dir} "${ticket.title}" · ${running} session(s) running · round ${ticket.rounds.length}${waiting}${requestMark}${human}`)
+    if (tickets && (tickets.length > 0 || !changes || changes.length === 0)) {
+      lines.push('Tasks:')
+      const active = tickets.filter(ticket => ticket.status !== 'done' && ticket.status !== 'cancelled')
+      const requests = (ticket: Ticket) => pending.filter(item => ticket.sessions.some(row => row.sessionId === item.sessionId))
+      const needs = (ticket: Ticket) => {
+        const latest = ticket.sessions.at(-1)
+        const error = latest !== undefined && tasks.some(task => task.sessionId === latest.sessionId && task.status === 'error')
+        const orphaned = (ticket.status === 'active' || ticket.status === 'review') && !ticket.sessions.some(row => tasks.some(task => task.sessionId === row.sessionId && task.status !== 'archived'))
+        return requests(ticket).length > 0 || error || orphaned
+      }
+      active.sort((a, b) => Number(needs(b)) - Number(needs(a)) || b.priority - a.priority || a.createdAt - b.createdAt)
+      for (const ticket of active) {
+        const running = ticket.sessions.filter(row => tasks.some(task => task.sessionId === row.sessionId && task.status === 'running')).length
+        const holders = ticket.status === 'todo' && ticket.access === 'write' ? lockHolders(tickets, ticket.dir, ticket.id) : []
+        const waiting = holders.length ? ` · waiting for ${holders.map(row => row.id).join(', ')} to release the directory` : ''
+        const human = ticket.humanReview && ticket.status === 'review' ? ' · needs the human\'s look' : ''
+        const requestMark = requests(ticket).map(item => ` · WAITING ${item.id}`).join('')
+        lines.push(`- ${ticket.id} ${ticket.status.toUpperCase()} P${ticket.priority} ${ticket.access} ${ticket.dir} "${ticket.title}" · ${running} session(s) running · round ${ticket.rounds.length}${waiting}${requestMark}${human}`)
+      }
+      const hidden = tickets.length - active.length
+      if (hidden) lines.push(`(${hidden} done or cancelled task(s) hidden)`)
     }
-    const hidden = tickets.length - active.length
-    if (hidden) lines.push(`(${hidden} done or cancelled task(s) hidden)`)
     lines.push('Watched sessions:')
     for (const task of sortTasks(tasks).filter(row => row.origin === 'watched' && row.status !== 'archived')) lines.push(`- ${task.status.toUpperCase()} ${task.sessionId} "${task.title}" (${formatAge(now - task.updatedAt)} ago)${task.unseenTurns ? ` · ${task.unseenTurns} unread turn(s)` : ''}`)
     if (pending.length) { lines.push('Waiting requests:'); for (const item of pending) lines.push(`- ${item.id} ${item.kind} from ${item.sessionId}: ${clip(item.subject, 160)}`) }

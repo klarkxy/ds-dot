@@ -52,7 +52,7 @@ async function setup() {
   return { home, project, store, service, calls, sessions }
 }
 
-async function readyChange(h: Awaited<ReturnType<typeof setup>>, title = 'Ship') {
+async function readyChange(h: Awaited<ReturnType<typeof setup>>, title = 'Ship', body = 'after') {
   writeFileSync(join(h.project, 'a.ts'), 'before')
   writeFileSync(join(h.project, 'gone.ts'), 'gone')
   const change = await h.service.createWorkChange({ title, cwd: h.project, goal: 'land it', requirements: [{ requirementRef: 'r1', text: 'edits', required: true }], at: 1 })
@@ -63,7 +63,7 @@ async function readyChange(h: Awaited<ReturnType<typeof setup>>, title = 'Ship')
   const launched = await h.service.launchWorkRun(run.id, 'edit it')
   if (!launched.ok) throw new Error(launched.message)
   rmSync(join(h.project, 'gone.ts'))
-  writeFileSync(join(h.project, 'a.ts'), 'after')
+  writeFileSync(join(h.project, 'a.ts'), body)
   const prepared = await h.store.work.prepareFinish(run.id, 'completed', 3)
   if (!prepared.ok) throw new Error(prepared.message)
   const finished = await h.store.work.finishSettled(run.id, prepared.updatedAt, 'completed', { queueCleared: true, agentIdle: true, jobsSettled: true }, 4)
@@ -125,7 +125,9 @@ describe('work.* RPC contract', () => {
       expected_input_revision: current.currentRevision, expected_subject_key: verified.subjectKey,
     })
     const pending = h.service.pending.list().at(-1)!
+    expect(h.service.workBoard(change.id)?.humanAction).toBeUndefined()
     await h.service.answerWorkReview(pending.id, true)
+    expect(h.service.workBoard(change.id)?.humanAction).toMatchObject({ expectedVerificationId: verified.id })
     expect(h.store.work.change(change.id)?.oversight?.decision).toMatchObject({ result: 'accept', verificationId: verified.id, subjectKey: verified.subjectKey })
     expect(h.store.work.change(change.id)?.closeout).toBeUndefined()
     const rejected = await h.service.answerWorkReview(pending.id, false).catch(error => error)
@@ -187,6 +189,30 @@ describe('work.* RPC contract', () => {
     rmSync(h.home, { recursive: true, force: true })
   })
 
+  it('previews long sources and reads the complete bound content on demand without bypassing version checks', async () => {
+    const h = await setup()
+    const body = `${'验收内容'.repeat(30_000)}\nEND_OF_COMPLETE_SOURCE`
+    try {
+      const { change, verified, current } = await readyChange(h, 'Long delivery', body)
+      h.service.saveWorkEvidence('log-1', body)
+      const bound = { verificationId: verified.id, inputRef: current.currentInputRef, inputRevision: current.currentRevision }
+      for (const [kind, ref] of [['evidence', 'log-1'], ['change', 'a.ts']] as const) {
+        const preview = h.service.readWorkSource(change.id, kind, ref, bound)
+        expect(preview).toMatchObject({ ok: true, truncated: true, totalBytes: Buffer.byteLength(body) })
+        if (preview.ok) expect(preview.body).not.toContain('END_OF_COMPLETE_SOURCE')
+        const full = h.service.readWorkSource(change.id, kind, ref, bound, { forceFull: true })
+        expect(full).toMatchObject({ ok: true, truncated: false, body, totalBytes: Buffer.byteLength(body) })
+      }
+      expect(h.service.readWorkSource(change.id, 'evidence', 'unbound-log', bound, { forceFull: true })).toMatchObject({ ok: false, code: 'stale' })
+      await h.service.reviseWorkChange(change.id, { goal: 'changed goal', at: 30 })
+      expect(h.service.readWorkSource(change.id, 'change', 'a.ts', bound, { forceFull: true })).toMatchObject({ ok: false, code: 'stale' })
+    } finally {
+      await h.service.dispose()
+      rmSync(h.project, { recursive: true, force: true })
+      rmSync(h.home, { recursive: true, force: true })
+    }
+  })
+
   it('refuses a verification body after the input moves on, and does not switch to another verification with the same name', async () => {
     const h = await setup()
     const { change, verified, current } = await readyChange(h)
@@ -197,6 +223,7 @@ describe('work.* RPC contract', () => {
     const revised = await h.service.reviseWorkChange(change.id, { goal: 'second', at: 30 })
     if (!('id' in revised)) throw new Error(revised.message)
     expect(revised.currentRevision).toBe(current.currentRevision + 1)
+    expect(h.service.workBoard(change.id)?.humanAction).toBeUndefined()
     const stale = h.service.readWorkSource(change.id, 'evidence', 'log-1', bound)
     expect(stale).toMatchObject({ ok: false, code: 'stale' })
     expect(stale).not.toHaveProperty('body')

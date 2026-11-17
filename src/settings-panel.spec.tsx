@@ -163,6 +163,12 @@ describe('factory reset', () => {
     await act(async () => { await Promise.resolve() })
     expect(document.body.textContent).toContain('owned jobs UNKNOWN')
     expect(document.body.textContent).not.toContain('Factory settings restored.')
+    const retry = [...document.querySelectorAll('button')].find(button => button.textContent === 'Preview and retry')!
+    expect(retry).toBeDefined()
+    await act(async () => retry.click())
+    expect(document.body.textContent).toContain('1 run(s)')
+    expect(document.querySelector('[role="alert"]')).toBeNull()
+    expect([...document.querySelectorAll('button')].some(button => button.textContent === 'Restore factory settings')).toBe(true)
     await act(async () => root.unmount())
   })
 })

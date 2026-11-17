@@ -12,7 +12,7 @@ import {
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ChangeEvent, type ClipboardEvent, type ComponentType, type KeyboardEvent, type ReactNode } from 'react'
 import { Board, type BoardActions } from './board.tsx'
-import { groupBoard, sessionLookup } from './board-groups.ts'
+import { headerBoardCounts, sessionLookup } from './board-groups.ts'
 import { filterVisibleChat } from './chat-filter.ts'
 import { formatToolDetail, parseNotice, permissionLabel, resolveSessionBadge, summarizeNotice, summarizeToolCall, summarizeToolGroup, type NoticeEntry, type SessionBadge, type TaskLookup } from './chat-format.ts'
 import { ContextPanel, type ContextApi } from './context-panel.tsx'
@@ -54,7 +54,7 @@ export interface ChatApi extends SettingsApi, ContextApi, TrajectoryApi, Knowled
   workReject?(payload: WorkRejectPayload): Promise<void>
   workAnswer?(payload: { readonly id: string; readonly allow: boolean }): Promise<void>
   workResume?(payload: { readonly id: string }): Promise<void>
-  workRead?(request: WorkReadRequest): Promise<{ readonly source: string; readonly body: string }>
+  workRead?(request: WorkReadRequest): Promise<{ readonly source: string; readonly body: string; readonly truncated?: boolean; readonly totalBytes?: number }>
   settings(signal: AbortSignal): Promise<DotSettings>
 }
 
@@ -319,10 +319,10 @@ export function ChatPanel({ locale, api, Card, onOpenSession, renderFactorySlot 
     if (el && stuck.current) el.scrollTop = el.scrollHeight
   }, [rows, streaming, pendingEchoes, running])
 
-  const groups = useMemo(() => board ? groupBoard(board) : undefined, [board])
-  const live = groups?.liveCount ?? 0
-  // The badge counts the board's first group: requests, tasks the human must look at, drafts.
-  const waiting = groups?.waitingCount ?? 0
+  const counts = useMemo(() => headerBoardCounts(board), [board])
+  const live = counts.liveCount
+  // The badge counts requests, human-review items, drafts, and closeout-ready Changes.
+  const waiting = counts.waitingCount
   const tasksBySession = useMemo<TaskLookup>(() => sessionLookup(board), [board])
   const lastTool = rows.at(-1)?.kind === 'tools'
   const showThinking = running && !preparingCard && !lastTool && !filtered.silentTail
@@ -344,7 +344,7 @@ export function ChatPanel({ locale, api, Card, onOpenSession, renderFactorySlot 
         </Button>
       </header>
       <div className="dsh-dot-main">
-      {boardOpen ? <div className="dsh-dot-boardwrap">{workApi ? <WorkBoardPanel locale={locale} api={workApi} pending={board?.pending ?? NO_PENDING} /> : null}<Board locale={locale} view={board} {...boardError === undefined ? {} : { error: boardError }} {...boardNotice === undefined ? {} : { notice: boardNotice }} onOpen={onOpenSession} onRetry={refreshBoard} onRemoveSchedule={removeSchedule} {...boardActions} /></div> : null}
+      {boardOpen ? <div className="dsh-dot-boardwrap">{workApi ? <WorkBoardPanel locale={locale} api={workApi} pending={board?.pending ?? NO_PENDING} {...board?.work ? { initialItems: board.work } : {}} /> : null}<Board locale={locale} view={board} suppressEmpty={(board?.work?.length ?? 0) > 0} {...boardError === undefined ? {} : { error: boardError }} {...boardNotice === undefined ? {} : { notice: boardNotice }} onOpen={onOpenSession} onRetry={refreshBoard} onRemoveSchedule={removeSchedule} {...boardActions} /></div> : null}
       <div className="dsh-dot-scroll" ref={scroller} onScroll={onScroll}>
         <div className="dsh-dot-log">
           {snapshot === undefined && error === undefined ? <div className="dsh-dot-center"><DotAvatar size={56} /><span className="dsh-dot-muted">{t(locale, 'loading')}</span></div> : null}

@@ -14,7 +14,7 @@ function bind(dir: string): SubjectLook {
     read(ref) {
       try {
         const manifest = readSnapshot(join(dir, ref)).manifest
-        return { root: manifest.root, saved: manifest.saved, deleted: manifest.deleted }
+        return { root: manifest.root, saved: manifest.saved, deleted: manifest.deleted, exclusions: manifest.exclusions }
       } catch { return undefined }
     },
     evidence(ref) {
@@ -22,6 +22,9 @@ function bind(dir: string): SubjectLook {
     },
     live(root) {
       try { return captureScope(root, root, 'directory').files.map(file => file.path) } catch { return undefined }
+    },
+    boundaries(root) {
+      try { return [...captureScope(root, root, 'directory').exclusions] } catch { return undefined }
     },
     body(root, path) {
       try { return new Uint8Array(readFileSync(join(root, ...path.split('/')))) } catch { return undefined }

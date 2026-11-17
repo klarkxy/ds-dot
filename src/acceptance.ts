@@ -3,7 +3,7 @@
  * Snapshots stay in the artifact store. This module only names and compares them.
  */
 import { createHash } from 'node:crypto'
-import type { BaselineRef, RunRecord, WriteScope } from './work.ts'
+import { absoluteScopePath, canonicalPath, pathsOverlap, type BaselineRef, type RunRecord, type WriteScope } from './work.ts'
 
 export interface DeliveryChange {
   readonly path: string
@@ -66,6 +66,8 @@ export interface SubjectSnapshot {
   readonly root: string
   readonly saved: readonly { readonly path: string; readonly sha256: string }[]
   readonly deleted: readonly string[]
+  /** Present when the on-disk manifest declared exclusions, including an empty list. */
+  readonly exclusions?: readonly SubjectExclusion[]
 }
 
 /** Reads the artifact store and the live workspace. A missing read is a refusal, not a skip. */
@@ -75,6 +77,8 @@ export interface SubjectLook {
   /** Relative paths in the workspace now. Undefined means the tree could not be read. */
   live(workspaceRoot: string): readonly string[] | undefined
   body(workspaceRoot: string, path: string): Uint8Array | undefined
+  /** Scan-time exclusions currently in the workspace. Undefined means the tree could not be read. */
+  boundaries?(workspaceRoot: string): readonly SubjectExclusion[] | undefined
 }
 
 /** A snapshot, baseline, or session id is not an evidence_ref, even if a file was saved under that name. */
@@ -89,13 +93,17 @@ export function evidenceRefGap(ref: string, registered: boolean): string | undef
   return undefined
 }
 
-function samePlace(left: string, right: string): boolean {
-  const fold = (value: string) => value.replaceAll('\\', '/').replace(/\/+$/, '').toLowerCase()
-  return fold(left) === fold(right)
+function foldRel(value: string, platform: NodeJS.Platform): string {
+  const normalized = value.replaceAll('\\', '/')
+  return platform === 'win32' ? normalized.toLowerCase() : normalized
 }
 
-function sameRel(left: string, right: string): boolean {
-  return left.replaceAll('\\', '/').toLowerCase() === right.replaceAll('\\', '/').toLowerCase()
+function samePlace(left: string, right: string, platform: NodeJS.Platform): boolean {
+  return canonicalPath(left, platform) === canonicalPath(right, platform)
+}
+
+function sameRel(left: string, right: string, platform: NodeJS.Platform): boolean {
+  return foldRel(left, platform) === foldRel(right, platform)
 }
 
 function digest(body: Uint8Array): string {
@@ -106,8 +114,71 @@ function artifactId(ref: string): boolean {
   return /^[A-Za-z0-9._-]{1,80}$/.test(ref) && ref !== '.' && ref !== '..'
 }
 
-function pathKey(value: string): string {
-  return value.replaceAll('\\', '/').toLowerCase()
+function pathKey(value: string, platform: NodeJS.Platform): string {
+  return foldRel(value, platform)
+}
+
+function relUnder(parent: string, child: string, platform: NodeJS.Platform): boolean {
+  const folder = foldRel(parent, platform).replace(/\/+$/, '')
+  const rel = foldRel(child, platform)
+  return rel === folder || rel.startsWith(`${folder}/`)
+}
+
+function isIgnoredDirectoryReason(reason: string): boolean {
+  return reason === 'ignored directory'
+}
+
+function isIgnoredFileReason(reason: string): boolean {
+  return reason === 'ignored file'
+}
+
+function isLinkReason(reason: string): boolean {
+  return reason === 'symlink' || reason.startsWith('symlink:')
+}
+
+function ignoreCovered(exclusions: readonly SubjectExclusion[], rel: string, platform: NodeJS.Platform): boolean {
+  return exclusions.some(item => isIgnoredDirectoryReason(item.reason) && relUnder(item.path, rel, platform))
+}
+
+function exclusionKey(item: SubjectExclusion, platform: NodeJS.Platform): string {
+  return `${foldRel(item.path, platform)}|${item.reason}`
+}
+
+function sameExclusionSet(left: readonly SubjectExclusion[], right: readonly SubjectExclusion[], platform: NodeJS.Platform): boolean {
+  const a = left.map(item => exclusionKey(item, platform)).sort()
+  const b = right.map(item => exclusionKey(item, platform)).sort()
+  return a.length === b.length && a.every((item, index) => item === b[index])
+}
+
+function declaredExclusions(snapshot: SubjectSnapshot | undefined): readonly SubjectExclusion[] | undefined {
+  return snapshot?.exclusions
+}
+
+function effectiveExclusions(snapshot: SubjectSnapshot): readonly SubjectExclusion[] {
+  return snapshot.exclusions ?? []
+}
+
+/** A path-scoped file baseline covers that file; a directory or workspace lock covers its tree. */
+function linkCoveredByRun(run: RunRecord, linkRel: string, platform: NodeJS.Platform): boolean {
+  if (run.writeScope.kind === 'workspace-exclusive') return true
+  let linkAbs: string
+  try {
+    linkAbs = absoluteScopePath(run.workspaceRoot, linkRel, platform)
+  } catch {
+    return false
+  }
+  const linkKey = canonicalPath(linkAbs, platform)
+  return run.writeScope.paths.some(scope => {
+    let scopeAbs: string
+    try {
+      scopeAbs = absoluteScopePath(run.workspaceRoot, scope.path, platform)
+    } catch {
+      return false
+    }
+    const scopeKey = canonicalPath(scopeAbs, platform)
+    if (scope.type === 'file') return scopeKey === linkKey
+    return pathsOverlap(scopeKey, linkKey, platform)
+  })
 }
 
 /**
@@ -119,6 +190,7 @@ export function writerPrior(
   baselines: readonly BaselineRef[],
   runs: readonly RunRecord[],
   read: (ref: string) => SubjectSnapshot | undefined,
+  platform: NodeJS.Platform = process.platform,
 ): { readonly files: readonly { readonly path: string; readonly sha256: string }[]; readonly missing?: string } {
   const writers = new Set(runs.filter(run => run.kind !== 'review').flatMap(run => run.baselineRefs.map(ref => ref.artifactRef)))
   const reviewOnly = new Set(runs.filter(run => run.kind === 'review').flatMap(run => run.baselineRefs.map(ref => ref.artifactRef)).filter(id => !writers.has(id)))
@@ -129,7 +201,7 @@ export function writerPrior(
     if (!snapshot) return { files, missing: ref.artifactRef }
     if (reviewOnly.has(ref.artifactRef)) continue
     for (const entry of snapshot.saved) {
-      const key = pathKey(entry.path)
+      const key = pathKey(entry.path, platform)
       if (seen.has(key)) continue
       seen.add(key)
       files.push({ path: entry.path, sha256: entry.sha256 })
@@ -143,15 +215,17 @@ export function contributionGap(
   subject: DeliverySubject,
   prior: readonly { readonly path: string; readonly sha256: string }[],
   manifest: SubjectSnapshot,
+  platform: NodeJS.Platform = process.platform,
 ): string | undefined {
-  const earlier = new Map(prior.map(file => [pathKey(file.path), file]))
-  const saved = new Map(manifest.saved.map(file => [pathKey(file.path), file]))
-  const excluded = (rel: string) => subject.exclusions.some(item => sameRel(item.path, rel))
-  const changeOf = (rel: string) => subject.changes.find(item => sameRel(item.path, rel))
-  const dirty = (rel: string) => subject.protectedDirty.some(item => sameRel(item, rel))
+  const exclusions = effectiveExclusions(manifest)
+  const earlier = new Map(prior.map(file => [pathKey(file.path, platform), file]))
+  const saved = new Map(manifest.saved.map(file => [pathKey(file.path, platform), file]))
+  const excluded = (rel: string) => ignoreCovered(exclusions, rel, platform)
+  const changeOf = (rel: string) => subject.changes.find(item => sameRel(item.path, rel, platform))
+  const dirty = (rel: string) => subject.protectedDirty.some(item => sameRel(item, rel, platform))
   for (const entry of manifest.saved) {
     if (excluded(entry.path)) continue
-    const before = earlier.get(pathKey(entry.path))
+    const before = earlier.get(pathKey(entry.path, platform))
     const change = changeOf(entry.path)
     if (!before) {
       if (!change || change.kind !== 'added') return `${entry.path} is not in the original baseline and is not added`
@@ -165,20 +239,20 @@ export function contributionGap(
     if (!change || change.kind !== 'modified') return `${entry.path} changed from its original baseline`
   }
   for (const file of prior) {
-    if (excluded(file.path) || saved.has(pathKey(file.path))) continue
-    if (!manifest.deleted.some(item => sameRel(item, file.path))) return `baseline file ${file.path} is missing from the delivery`
+    if (excluded(file.path) || saved.has(pathKey(file.path, platform))) continue
+    if (!manifest.deleted.some(item => sameRel(item, file.path, platform))) return `baseline file ${file.path} is missing from the delivery`
     const change = changeOf(file.path)
     if (!change || change.kind !== 'deleted') return `${file.path} was removed from its original baseline`
   }
   for (const name of subject.protectedDirty) {
-    const before = earlier.get(pathKey(name))
-    const entry = saved.get(pathKey(name))
+    const before = earlier.get(pathKey(name, platform))
+    const entry = saved.get(pathKey(name, platform))
     if (!before || !entry || before.sha256 !== entry.sha256) return `protectedDirty ${name} does not match its original baseline`
   }
   for (const change of subject.changes) {
-    const before = earlier.get(pathKey(change.path))
+    const before = earlier.get(pathKey(change.path, platform))
     if (change.kind === 'added' && before) return `added ${change.path} is already in the original baseline`
-    if (change.kind === 'modified' && (!before || before.sha256 === saved.get(pathKey(change.path))?.sha256)) return `modified ${change.path} does not differ from its original baseline`
+    if (change.kind === 'modified' && (!before || before.sha256 === saved.get(pathKey(change.path, platform))?.sha256)) return `modified ${change.path} does not differ from its original baseline`
     if (change.kind === 'deleted' && !before) return `deleted ${change.path} is not in the original baseline`
   }
   return undefined
@@ -194,6 +268,7 @@ export function subjectMaterial(
   runs: readonly RunRecord[],
   evidenceRefs: readonly string[],
   look: SubjectLook | undefined,
+  platform: NodeJS.Platform = process.platform,
 ): string | undefined {
   const named = subjectGap(subject, baselines, runs)
   if (named) return named
@@ -201,25 +276,26 @@ export function subjectMaterial(
   if (!artifactId(subject.artifactRef)) return `delivery snapshot ${subject.artifactRef} is not a single relative id`
   const manifest = look.read(subject.artifactRef)
   if (!manifest) return `delivery snapshot ${subject.artifactRef} is missing or incomplete`
-  if (!manifest.root || !samePlace(manifest.root, subject.workspaceRoot)) return `delivery snapshot root is not ${subject.workspaceRoot}`
+  if (!manifest.root || !samePlace(manifest.root, subject.workspaceRoot, platform)) return `delivery snapshot root is not ${subject.workspaceRoot}`
+  const snapshotExclusions = effectiveExclusions(manifest)
+  if (!sameExclusionSet(subject.exclusions, snapshotExclusions, platform)) return 'delivery exclusions do not match the snapshot'
   for (const change of subject.changes) {
     if (change.kind === 'deleted') {
-      if (!manifest.deleted.some(item => sameRel(item, change.path))) return `deleted ${change.path} is not in the snapshot`
+      if (!manifest.deleted.some(item => sameRel(item, change.path, platform))) return `deleted ${change.path} is not in the snapshot`
       continue
     }
-    const saved = manifest.saved.find(item => sameRel(item.path, change.path))
+    const saved = manifest.saved.find(item => sameRel(item.path, change.path, platform))
     if (!saved || !change.sha256 || change.sha256 !== saved.sha256) return `changed ${change.path} has no matching content`
   }
-  const accounted = (rel: string) => subject.changes.some(item => sameRel(item.path, rel))
-    || subject.protectedDirty.some(item => sameRel(item, rel))
-    || subject.exclusions.some(item => sameRel(item.path, rel))
+  const accounted = (rel: string) => subject.changes.some(item => sameRel(item.path, rel, platform))
+    || subject.protectedDirty.some(item => sameRel(item, rel, platform))
   for (const entry of manifest.saved) if (!accounted(entry.path)) return `snapshot file ${entry.path} is not in the delivery`
   for (const name of manifest.deleted) if (!accounted(name)) return `snapshot deletion ${name} is not in the delivery`
   for (const ref of subject.baselineRefs) {
     if (!artifactId(ref.artifactRef)) return `baseline ${ref.artifactRef} is not a single relative id`
     const baseline = look.read(ref.artifactRef)
     if (!baseline) return `baseline ${ref.artifactRef} is missing or incomplete`
-    if (!baseline.root || !samePlace(baseline.root, ref.workspaceRoot)) return `baseline ${ref.artifactRef} is not ${ref.workspaceRoot}`
+    if (!baseline.root || !samePlace(baseline.root, ref.workspaceRoot, platform)) return `baseline ${ref.artifactRef} is not ${ref.workspaceRoot}`
   }
   for (const ref of evidenceRefs) {
     const gap = evidenceRefGap(ref, look.evidence(ref))
@@ -227,32 +303,53 @@ export function subjectMaterial(
   }
   const live = look.live(subject.workspaceRoot)
   if (!live) return 'workspace could not be read'
+  const deliveryLinks = snapshotExclusions.filter(item => isLinkReason(item.reason))
+  if (look.boundaries) {
+    const liveBounds = look.boundaries(subject.workspaceRoot)
+    if (!liveBounds) return 'workspace could not be read'
+    const liveLinks = liveBounds.filter(item => isLinkReason(item.reason))
+    if (!sameExclusionSet(deliveryLinks, liveLinks, platform)) return 'source link appeared or changed'
+  }
+  for (const run of runs) {
+    if (run.kind === 'review' || !scopeWrites(run.writeScope)) continue
+    for (const ref of run.baselineRefs) {
+      const baseline = look.read(ref.artifactRef)
+      const recorded = declaredExclusions(baseline)
+      if (!baseline || recorded === undefined) continue
+      const scopedDelivery = deliveryLinks.filter(item => linkCoveredByRun(run, item.path, platform))
+      const scopedBaseline = recorded.filter(item => isLinkReason(item.reason) && linkCoveredByRun(run, item.path, platform))
+      if (!sameExclusionSet(scopedBaseline, scopedDelivery, platform)) return 'source link appeared or changed'
+    }
+  }
   for (const ref of subject.baselineRefs) {
     const baseline = look.read(ref.artifactRef)
     if (!baseline) continue
     for (const entry of baseline.saved) {
-      const kept = manifest.saved.some(item => sameRel(item.path, entry.path))
-        || manifest.deleted.some(item => sameRel(item, entry.path))
-        || subject.exclusions.some(item => sameRel(item.path, entry.path))
+      if (ignoreCovered(snapshotExclusions, entry.path, platform)) continue
+      if (deliveryLinks.some(item => sameRel(item.path, entry.path, platform))) return `${entry.path} became a link`
+      const kept = manifest.saved.some(item => sameRel(item.path, entry.path, platform))
+        || manifest.deleted.some(item => sameRel(item, entry.path, platform))
       if (!kept) return `baseline file ${entry.path} is missing from the delivery`
     }
   }
   for (const rel of live) {
-    if (subject.exclusions.some(item => sameRel(item.path, rel))) continue
-    if (manifest.deleted.some(item => sameRel(item, rel))) return `deleted ${rel} is still in the workspace`
-    const saved = manifest.saved.find(item => sameRel(item.path, rel))
+    if (ignoreCovered(snapshotExclusions, rel, platform)) continue
+    if (snapshotExclusions.some(item => isIgnoredFileReason(item.reason) && sameRel(item.path, rel, platform))) continue
+    if (manifest.deleted.some(item => sameRel(item, rel, platform))) return `deleted ${rel} is still in the workspace`
+    const saved = manifest.saved.find(item => sameRel(item.path, rel, platform))
     if (!saved) return `live file ${rel} is not in the delivery`
     const body = look.body(subject.workspaceRoot, rel)
     if (!body || digest(body) !== saved.sha256) return `workspace changed since the delivery snapshot: ${rel}`
   }
   for (const name of manifest.deleted) {
-    if (live.some(rel => sameRel(rel, name))) return `deleted ${name} is still in the workspace`
+    if (live.some(rel => sameRel(rel, name, platform))) return `deleted ${name} is still in the workspace`
   }
   for (const entry of manifest.saved) {
-    if (live.some(rel => sameRel(rel, entry.path))) continue
+    if (ignoreCovered(snapshotExclusions, entry.path, platform)) continue
+    if (live.some(rel => sameRel(rel, entry.path, platform))) continue
     return `snapshot file ${entry.path} is gone from the workspace`
   }
-  const prior = writerPrior(baselines, runs, ref => look.read(ref))
+  const prior = writerPrior(baselines, runs, ref => look.read(ref), platform)
   if (prior.missing) return `baseline ${prior.missing} is missing or incomplete`
-  return contributionGap(subject, prior.files, manifest)
+  return contributionGap(subject, prior.files, manifest, platform)
 }

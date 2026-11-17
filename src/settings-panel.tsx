@@ -283,6 +283,7 @@ function FactoryResetField({ locale, api, onSaved }: { locale: CopyLocale; api: 
     }, failure => {
       setPreview(undefined)
       setError(failure instanceof Error ? failure.message : String(failure)); setBusy(false)
+      api.settings(new AbortController().signal).then(onSaved, () => {})
     })
   }
   return (
@@ -305,7 +306,7 @@ function FactoryResetField({ locale, api, onSaved }: { locale: CopyLocale; api: 
             <Button variant="ghost" size="sm" disabled={busy} onClick={() => { setPreview(undefined); setError(''); setDone('') }}>{t(locale, 'sFactoryCancel')}</Button>
           </>
         ) : (
-          <Button variant="outline" size="sm" disabled={busy} onClick={load}>{busy ? t(locale, 'sFactoryBusy') : t(locale, 'sFactoryPreview')}</Button>
+          <Button variant="outline" size="sm" disabled={busy} onClick={load}>{busy ? t(locale, 'sFactoryBusy') : t(locale, error ? 'sFactoryRetry' : 'sFactoryPreview')}</Button>
         )}
       </div>
     </div>

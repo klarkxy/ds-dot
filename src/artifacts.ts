@@ -2,12 +2,35 @@
  * Immutable content snapshots for a baseline or a delivery subject.
  * A saved manifest is never overwritten. Bodies are written first; a failure
  * leaves no manifest and does not delete one that already exists.
- * Restore refuses to follow a symlink or junction out of the target root.
+ * Directory walks skip dependency/VCS trees and record those paths plus source
+ * link boundaries in `exclusions` without following them. Restore still refuses
+ * to follow a symlink or junction out of the target root.
  */
 import { createHash } from 'node:crypto'
-import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
-import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
+import { constants, copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import path, { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { absoluteScopePath, canonicalPath, scopeWrites, type WriteScope } from './work.ts'
+
+/**
+ * Dependency, VCS, and transient build caches skipped during directory walks.
+ * Explicit `type: 'file'` scopes still read the named file directly.
+ */
+export const SNAPSHOT_IGNORED_DIRS: ReadonlySet<string> = new Set([
+  '.git',
+  'node_modules',
+  '.pnpm-store',
+  '.venv',
+  '__pycache__',
+  '.turbo',
+  '.next',
+  '.nuxt',
+  '.cache',
+  '.pytest_cache',
+])
+
+const SNAPSHOT_IGNORED_FILES: ReadonlySet<string> = new Set([
+  '.DS_Store',
+])
 
 export interface SnapshotEntry {
   readonly path: string
@@ -16,12 +39,22 @@ export interface SnapshotEntry {
   readonly deleted?: boolean
 }
 
+export interface SnapshotExclusion {
+  readonly path: string
+  readonly reason: string
+}
+
 export interface SnapshotManifest {
   readonly root: string
   /** True only when the collector scanned the scope and found no files. */
   readonly empty: boolean
   readonly saved: readonly SnapshotEntry[]
   readonly deleted: readonly string[]
+  /**
+   * Top-level skipped trees and link boundaries. Omitted on pre-exclusion
+   * manifests; an empty array means the scan declared none.
+   */
+  readonly exclusions?: readonly SnapshotExclusion[]
 }
 
 export interface SnapshotSource {
@@ -33,6 +66,13 @@ export interface SnapshotSource {
 export interface SnapshotCapture {
   readonly root: string
   readonly empty?: boolean
+  readonly exclusions?: readonly SnapshotExclusion[]
+}
+
+export interface ScopeCapture {
+  readonly files: SnapshotSource[]
+  readonly empty: boolean
+  readonly exclusions: readonly SnapshotExclusion[]
 }
 
 export class SnapshotError extends Error {
@@ -43,12 +83,57 @@ export function sha256(body: Uint8Array): string {
   return createHash('sha256').update(body).digest('hex')
 }
 
+/**
+ * Sibling CAS directory (`<home>/cas-blobs`) used when `dir` lives under `<home>/artifacts/<id>`.
+ * Kept outside `artifacts/` so directory listings of `artifacts/` only see snapshot ids.
+ */
+function sharedCasDir(dir: string): string | undefined {
+  const parent = dirname(resolve(dir))
+  if (basename(parent) !== 'artifacts') return undefined
+  return join(dirname(parent), 'cas-blobs')
+}
+
+/**
+ * Store one content-addressed body for a snapshot, reusing the shared CAS copy.
+ * Copies are block clones when the filesystem supports them and plain copies
+ * otherwise — never hard links. A snapshot's blobs must stay independent files:
+ * a hard link would share its inode with the CAS and with every other snapshot,
+ * so one in-place write could corrupt snapshots that still claim to be immutable.
+ */
+function writeBlobWithCas(blobsDir: string, casDir: string | undefined, hash: string, body: Uint8Array): void {
+  const target = join(blobsDir, hash)
+  if (existsSync(target)) return
+  if (!casDir) {
+    writeFileSync(target, body)
+    return
+  }
+  mkdirSync(casDir, { recursive: true })
+  const casBlob = join(casDir, hash)
+  if (!existsSync(casBlob)) {
+    const temp = `${casBlob}.tmp-${process.pid}-${Date.now()}`
+    writeFileSync(temp, body)
+    try {
+      renameSync(temp, casBlob)
+    } catch {
+      // Another writer landed the same content-addressed body first; its bytes are identical.
+    } finally {
+      rmSync(temp, { force: true })
+    }
+  }
+  try {
+    copyFileSync(casBlob, target, constants.COPYFILE_FICLONE)
+  } catch {
+    try { copyFileSync(casBlob, target) } catch { writeFileSync(target, body) }
+  }
+}
+
 /** Save bodies first and the manifest only after every body is on disk. */
 export function saveSnapshot(dir: string, files: readonly SnapshotSource[], failOn?: string, capture?: SnapshotCapture): SnapshotManifest {
   const manifestPath = join(dir, 'manifest.json')
   if (existsSync(manifestPath)) throw new SnapshotError(`snapshot ${dir} is immutable`)
   const blobs = join(dir, 'blobs')
   mkdirSync(blobs, { recursive: true })
+  const casDir = sharedCasDir(dir)
   const saved: SnapshotEntry[] = []
   const deleted: string[] = []
   for (const file of files) {
@@ -59,22 +144,34 @@ export function saveSnapshot(dir: string, files: readonly SnapshotSource[], fail
     }
     if (!file.body) throw new SnapshotError(`missing body for ${file.path}`)
     const hash = sha256(file.body)
-    writeFileSync(join(blobs, hash), file.body)
+    writeBlobWithCas(blobs, casDir, hash, file.body)
     saved.push({ path: file.path, sha256: hash, bytes: file.body.byteLength })
   }
-  const manifest: SnapshotManifest = { root: capture?.root ?? '', empty: capture?.empty === true, saved, deleted }
+  const manifest: SnapshotManifest = {
+    root: capture?.root ?? '',
+    empty: capture?.empty === true,
+    saved,
+    deleted,
+    exclusions: capture?.exclusions ?? [],
+  }
   writeFileSync(manifestPath, JSON.stringify(manifest))
   return manifest
 }
 
+/** Remove all snapshots, evidence, subject records, and shared CAS blobs under `homeDir`. */
+export function wipeArtifacts(homeDir: string): void {
+  rmSync(join(homeDir, 'artifacts'), { recursive: true, force: true })
+  rmSync(join(homeDir, 'cas-blobs'), { recursive: true, force: true })
+}
+
 /** Read the live scope into snapshot sources. The caller saves them with {@link saveSnapshot}. */
-export function captureScope(root: string, scope: string, type: 'file' | 'directory'): { readonly files: SnapshotSource[]; readonly empty: boolean } {
-  const names = liveFiles(root, scope, type)
-  const files: SnapshotSource[] = names.map(rel => ({
+export function captureScope(root: string, scope: string, type: 'file' | 'directory', platform: NodeJS.Platform = process.platform): ScopeCapture {
+  const scanned = scanScope(root, scope, type, platform)
+  const files: SnapshotSource[] = scanned.files.map(rel => ({
     path: rel,
     body: new Uint8Array(readFileSync(join(root, ...rel.split('/')))),
   }))
-  return { files, empty: names.length === 0 }
+  return { files, empty: scanned.files.length === 0, exclusions: scanned.exclusions }
 }
 
 export function readSnapshot(dir: string): { readonly manifest: SnapshotManifest; readonly bodies: ReadonlyMap<string, Uint8Array> } {
@@ -143,7 +240,7 @@ export function baselineCaptures(run: { readonly cwd: string; readonly workspace
     if (!pathIsInside(expected, canonicalPath(absolute, platform), platform)) return { ok: false, reason: `scope ${scope.path} is outside ${run.workspaceRoot}` }
     let live: readonly string[]
     try {
-      live = liveFiles(manifest.root, absolute, scope.type)
+      live = scanScope(manifest.root, absolute, scope.type, platform).files
     } catch (error) {
       return { ok: false, reason: error instanceof Error ? error.message : 'scope could not be read' }
     }
@@ -155,7 +252,11 @@ export function baselineCaptures(run: { readonly cwd: string; readonly workspace
       if (sha256(body) !== saved.sha256 || body.byteLength !== saved.bytes) return { ok: false, reason: `content mismatch ${rel}` }
     }
     if (live.length === 0) {
-      const noted = [...manifest.saved.map(item => item.path), ...manifest.deleted].some(item => scopeMentions(absolute, manifest.root, item, platform))
+      const noted = [
+        ...manifest.saved.map(item => item.path),
+        ...manifest.deleted,
+        ...(manifest.exclusions ?? []).map(item => item.path),
+      ].some(item => scopeMentions(absolute, manifest.root, item, platform))
       if (!noted && !manifest.empty) return { ok: false, reason: `empty scope ${scope.path} has no capture evidence` }
     }
   }
@@ -164,6 +265,69 @@ export function baselineCaptures(run: { readonly cwd: string; readonly workspace
 
 export function relativePath(root: string, file: string): string {
   return relative(root, file).replaceAll('\\', '/')
+}
+
+/** Slash-normalized relative path; case-folded only on Windows. */
+export function foldRel(value: string, platform: NodeJS.Platform = process.platform): string {
+  const normalized = value.replaceAll('\\', '/')
+  return platform === 'win32' ? normalized.toLowerCase() : normalized
+}
+
+export function ignoredDirName(name: string, platform: NodeJS.Platform = process.platform): boolean {
+  if (SNAPSHOT_IGNORED_DIRS.has(name)) return true
+  if (platform !== 'win32') return false
+  const lower = name.toLowerCase()
+  for (const item of SNAPSHOT_IGNORED_DIRS) if (item.toLowerCase() === lower) return true
+  return false
+}
+
+export function ignoredFileName(name: string, platform: NodeJS.Platform = process.platform): boolean {
+  if (SNAPSHOT_IGNORED_FILES.has(name)) return true
+  if (platform !== 'win32') return false
+  const lower = name.toLowerCase()
+  for (const item of SNAPSHOT_IGNORED_FILES) if (item.toLowerCase() === lower) return true
+  return false
+}
+
+/**
+ * First default-ignored directory prefix of `rel`, using the path's own
+ * component spelling. A `type: 'file'` leaf named like a dependency dir is
+ * allowed (scan captures that ordinary file); a `.git` gitfile is still
+ * refused. Directory targets and any ancestor ignored directory refuse.
+ */
+export function defaultIgnoreCover(rel: string, platform: NodeJS.Platform = process.platform, type: 'file' | 'directory' = 'directory'): string | undefined {
+  const parts = rel.replaceAll('\\', '/').split('/').filter(Boolean)
+  const built: string[] = []
+  for (let i = 0; i < parts.length; i += 1) {
+    const part = parts[i]!
+    built.push(part)
+    const last = i === parts.length - 1
+    if (last && type === 'file') {
+      if (foldRel(part, platform) === '.git' || ignoredFileName(part, platform)) return built.join('/')
+      continue
+    }
+    if (ignoredDirName(part, platform)) return built.join('/')
+  }
+  return undefined
+}
+
+export function relUnder(parent: string, child: string, platform: NodeJS.Platform = process.platform): boolean {
+  const folder = foldRel(parent, platform).replace(/\/+$/, '')
+  const rel = foldRel(child, platform)
+  return rel === folder || rel.startsWith(`${folder}/`)
+}
+
+export function isIgnoredDirectoryReason(reason: string): boolean {
+  return reason === 'ignored directory'
+}
+
+export function isLinkReason(reason: string): boolean {
+  return reason === 'symlink' || reason.startsWith('symlink:')
+}
+
+/** True when `rel` sits at or under a recorded ignored-directory tree. */
+export function ignoreCovered(exclusions: readonly SnapshotExclusion[], rel: string, platform: NodeJS.Platform = process.platform): boolean {
+  return exclusions.some(item => isIgnoredDirectoryReason(item.reason) && relUnder(item.path, rel, platform))
 }
 
 /** Lexical path of `entry` when it stays strictly inside `root`. */
@@ -223,25 +387,71 @@ function unwrap(value: string): string {
   return value.replace(/^\\\\\?\\/, '')
 }
 
-function liveFiles(root: string, scope: string, type: 'file' | 'directory'): string[] {
-  if (!existsSync(scope)) return []
+function linkReason(target: string): string {
+  try {
+    return `symlink:${readlinkSync(target, 'utf8').replaceAll('\\', '/')}`
+  } catch {
+    return 'symlink'
+  }
+}
+
+function linkAt(target: string): boolean {
+  try { return isLink(target) } catch { return true }
+}
+
+export interface ScopeScan {
+  readonly files: readonly string[]
+  readonly exclusions: readonly SnapshotExclusion[]
+}
+
+/**
+ * Walk one explicit scope and name live files plus top-level exclusions.
+ * Does not read file bodies. Child dependency/VCS trees and links are recorded
+ * and not traversed. A link at the target is refused; an explicit directory is
+ * walked even when its basename is ignored.
+ */
+export function scanScope(root: string, scope: string, type: 'file' | 'directory', platform: NodeJS.Platform = process.platform): ScopeScan {
+  if (!existsSync(scope)) return { files: [], exclusions: [] }
   if (isLink(scope)) throw new SnapshotError(`refusing to follow a link at ${scope}`)
   if (type === 'file') {
     if (!lstatSync(scope).isFile()) throw new SnapshotError(`${scope} is not a file`)
-    return [relativePath(root, scope)]
+    return { files: [relativePath(root, scope)], exclusions: [] }
   }
-  const found: string[] = []
+  const files: string[] = []
+  const exclusions: SnapshotExclusion[] = []
   const walk = (dir: string) => {
     for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      if (entry.name === '.' || entry.name === '..') continue
       const full = join(dir, entry.name)
-      if (entry.isSymbolicLink() || isLink(full)) throw new SnapshotError(`refusing to follow a link at ${full}`)
-      if (entry.isDirectory()) walk(full)
-      else if (entry.isFile()) found.push(relativePath(root, full))
-      else throw new SnapshotError(`unsupported file in scope: ${full}`)
+      const rel = relativePath(root, full)
+      if (entry.isSymbolicLink() || linkAt(full)) {
+        exclusions.push({
+          path: rel,
+          reason: ignoredDirName(entry.name, platform) ? 'ignored directory' : linkReason(full),
+        })
+        continue
+      }
+      if (entry.isDirectory()) {
+        if (ignoredDirName(entry.name, platform)) {
+          exclusions.push({ path: rel, reason: 'ignored directory' })
+          continue
+        }
+        walk(full)
+      } else if (entry.isFile()) {
+        if (ignoredFileName(entry.name, platform)) {
+          exclusions.push({ path: rel, reason: 'ignored file' })
+          continue
+        }
+        if (foldRel(entry.name, platform) === '.git') {
+          exclusions.push({ path: rel, reason: 'ignored directory' })
+          continue
+        }
+        files.push(rel)
+      }
     }
   }
   walk(scope)
-  return found
+  return { files, exclusions }
 }
 
 function absoluteScope(root: string, scope: string, platform: NodeJS.Platform): string {
@@ -249,9 +459,10 @@ function absoluteScope(root: string, scope: string, platform: NodeJS.Platform): 
 }
 
 function pathIsInside(parent: string, child: string, platform: NodeJS.Platform): boolean {
-  const rel = relative(parent, child)
+  const api = platform === 'win32' ? path.win32 : path.posix
+  const rel = api.relative(parent, child)
   const folded = platform === 'win32' ? rel.toLowerCase() : rel
-  return folded === '' || (folded !== '..' && !folded.startsWith(`..${sepOf(folded)}`) && !folded.startsWith('../') && !isAbsolute(rel))
+  return folded === '' || (folded !== '..' && !folded.startsWith(`..${api.sep}`) && !folded.startsWith('../') && !api.isAbsolute(rel))
 }
 
 function sameRel(left: string, right: string, platform: NodeJS.Platform): boolean {
@@ -260,7 +471,8 @@ function sameRel(left: string, right: string, platform: NodeJS.Platform): boolea
 }
 
 function scopeMentions(scope: string, root: string, entry: string, platform: NodeJS.Platform): boolean {
-  const absolute = resolve(root, entry)
+  const api = platform === 'win32' ? path.win32 : path.posix
+  const absolute = api.isAbsolute(root) ? api.resolve(root, entry) : resolve(root, entry)
   return pathIsInside(canonicalPath(scope, platform), canonicalPath(absolute, platform), platform)
 }
 
@@ -274,7 +486,7 @@ function messageOf(error: unknown): string {
 
 function parseManifest(value: unknown): SnapshotManifest {
   if (!value || typeof value !== 'object') throw new SnapshotError('invalid manifest')
-  const record = value as { root?: unknown; empty?: unknown; saved?: unknown; deleted?: unknown }
+  const record = value as { root?: unknown; empty?: unknown; saved?: unknown; deleted?: unknown; exclusions?: unknown }
   if (!Array.isArray(record.saved) || !Array.isArray(record.deleted)) throw new SnapshotError('invalid manifest')
   const saved = record.saved.map(entry => {
     if (!entry || typeof entry !== 'object') throw new SnapshotError('invalid manifest')
@@ -285,5 +497,25 @@ function parseManifest(value: unknown): SnapshotManifest {
   if (!record.deleted.every(item => typeof item === 'string')) throw new SnapshotError('invalid manifest')
   if (record.root !== undefined && typeof record.root !== 'string') throw new SnapshotError('invalid manifest')
   if (record.empty !== undefined && typeof record.empty !== 'boolean') throw new SnapshotError('invalid manifest')
-  return { root: typeof record.root === 'string' ? record.root : '', empty: record.empty === true, saved, deleted: record.deleted }
+  const exclusions = parseExclusions(record.exclusions)
+  return {
+    root: typeof record.root === 'string' ? record.root : '',
+    empty: record.empty === true,
+    saved,
+    deleted: record.deleted,
+    ...(exclusions ? { exclusions } : {}),
+  }
+}
+
+function parseExclusions(value: unknown): SnapshotExclusion[] | undefined {
+  if (value === undefined) return undefined
+  if (!Array.isArray(value)) throw new SnapshotError('invalid manifest')
+  return value.map(item => {
+    if (!item || typeof item !== 'object') throw new SnapshotError('invalid manifest')
+    const row = item as { path?: unknown; reason?: unknown }
+    if (typeof row.path !== 'string' || row.path.length === 0 || typeof row.reason !== 'string' || row.reason.length === 0) {
+      throw new SnapshotError('invalid manifest')
+    }
+    return { path: row.path, reason: row.reason }
+  })
 }

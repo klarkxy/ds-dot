@@ -248,9 +248,13 @@ export interface TicketView extends Ticket {
 /** Board snapshot the client renders. */
 export interface BoardView {
   readonly dotSessionId?: string
-  /** Sessions the human asked dot to watch; sessions of tasks are shown through `tickets`. */
+  /** Sessions the human asked dot to watch; sessions of tasks are shown through `tickets` or `work`. */
   readonly tasks: readonly TaskRecord[]
+  /** Started task sessions so chat notices and activity badges resolve Change titles. */
+  readonly startedTasks?: readonly TaskRecord[]
   readonly tickets: readonly TicketView[]
+  /** Active and completed WorkBook Changes projected for the header counter and WorkBoard. */
+  readonly work?: readonly import('./work-board.ts').WorkBoardItem[]
   readonly pending: readonly PendingView[]
   /** dot's reminders, the one due first on top. */
   readonly schedules: readonly ScheduleRecord[]

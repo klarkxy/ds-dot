@@ -8,6 +8,7 @@ import { DEFAULT_SETTINGS, PRESET_ID, REMINDER_HEAD, type DotContextView, type D
 import { bindHost, FULL_ACCESS, type DotHost, type SessionRow, type WorkspaceRow } from './host.ts'
 import { DotService, HOME_TITLE } from './service.ts'
 import { readSnapshot, saveSnapshot } from './artifacts.ts'
+import * as artifacts from './artifacts.ts'
 import { launchReservedRun } from './execution.ts'
 import { agreementsSection } from './memory.ts'
 import { DotStore, type DotDomainHandle } from './store.ts'
@@ -2769,6 +2770,91 @@ describe('factory reset', () => {
     expect(h.store.knowledgeMigrated).toBe(true)
     expect(h.store.dotSessionId).toBeTruthy()
     expect(h.store.dotSessionId).not.toBe(dot)
+  })
+
+  it('resets an unsent reservation without trying to stop its placeholder session', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'dsh-dot-reset-unsent-'))
+    const h = setup(undefined, undefined, true, home)
+    await h.service.ensureDot()
+    const change = await h.store.work.createChange({ title: 'Reserved', cwd: home, goal: 'edit later', at: 1 })
+    const reserved = await h.store.work.reserveRun({ changeId: change.id, cwd: home, root: { workspaceRoot: home }, writeScope: { kind: 'workspace-exclusive' }, at: 2 })
+    if (!reserved.ok) throw new Error(reserved.message)
+    const placeholder = reserved.run.requestedSessionId
+    const stop = vi.spyOn(h.host, 'stopActivity').mockImplementation(async id => {
+      if (id === placeholder) throw new Error('this placeholder has no host session')
+      return { cancelAccepted: true, queueCleared: true, idle: true, jobsSettled: true }
+    })
+    try {
+      await expect(h.service.confirmFactoryReset(h.service.previewFactoryReset().token)).resolves.toMatchObject({ archiveFailed: [] })
+      expect(stop).not.toHaveBeenCalledWith(placeholder)
+      expect(h.calls).not.toContain(`archive ${placeholder}`)
+      expect(h.store.work.listRuns()).toEqual([])
+    } finally {
+      stop.mockRestore()
+      await h.service.dispose()
+      rmSync(home, { recursive: true, force: true })
+    }
+  })
+
+  it('retains ownership and settings when archive fails, then retries the reset', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'dsh-dot-reset-retry-'))
+    const h = setup(undefined, undefined, true, home)
+    await h.service.ensureDot()
+    await h.store.track({ sessionId: 'owned-retry', origin: 'started', title: 'job', goal: 'g', cwd: home, at: 1 })
+    await h.store.setAgreements('retained until cleanup succeeds')
+    const archive = vi.spyOn(h.host, 'archive').mockRejectedValueOnce(new Error('archive offline'))
+    try {
+      await expect(h.service.confirmFactoryReset(h.service.previewFactoryReset().token)).rejects.toMatchObject({ code: 'dot/reset-incomplete', message: expect.stringContaining('records and settings are retained') })
+      expect(h.store.ownsSession('owned-retry')).toBe(true)
+      expect(h.store.agreements).toBe('retained until cleanup succeeds')
+      archive.mockRestore()
+      await expect(h.service.confirmFactoryReset(h.service.previewFactoryReset().token)).resolves.toMatchObject({ archiveFailed: [] })
+      expect(h.store.agreements).toBe('')
+      expect(h.store.list()).toEqual([])
+    } finally {
+      archive.mockRestore()
+      await h.service.dispose()
+      rmSync(home, { recursive: true, force: true })
+    }
+  })
+
+  it('reports partial artifact cleanup and retains records so the remaining cleanup can be retried', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'dsh-dot-reset-artifact-retry-'))
+    const h = setup(undefined, undefined, true, home)
+    await h.service.ensureDot()
+    await h.store.setAgreements('still recorded')
+    const wipe = vi.spyOn(artifacts, 'wipeArtifacts').mockImplementationOnce(() => { throw new Error('artifact folder is busy') })
+    try {
+      await expect(h.service.confirmFactoryReset(h.service.previewFactoryReset().token)).rejects.toMatchObject({ code: 'dot/reset-incomplete', message: expect.stringContaining('Some files may already have been removed') })
+      expect(h.store.agreements).toBe('still recorded')
+      expect(h.store.lastFactoryResetAt).toBeUndefined()
+      wipe.mockRestore()
+      await expect(h.service.confirmFactoryReset(h.service.previewFactoryReset().token)).resolves.toMatchObject({ archiveFailed: [] })
+      expect(h.store.agreements).toBe('')
+      expect(h.store.lastFactoryResetAt).toBeDefined()
+    } finally {
+      wipe.mockRestore()
+      await h.service.dispose()
+      rmSync(home, { recursive: true, force: true })
+    }
+  })
+
+  it('reports that data was cleared if restarting Dorothy fails, and allows a fresh retry', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'dsh-dot-reset-start-retry-'))
+    const h = setup(undefined, undefined, true, home)
+    await h.service.ensureDot()
+    await h.store.setAgreements('clear me')
+    h.failCreate(true)
+    try {
+      await expect(h.service.confirmFactoryReset(h.service.previewFactoryReset().token)).rejects.toMatchObject({ code: 'dot/reset-incomplete', message: expect.stringContaining('data and settings were reset') })
+      expect(h.store.agreements).toBe('')
+      expect(h.store.lastFactoryResetAt).toBeDefined()
+      h.failCreate(false)
+      await expect(h.service.confirmFactoryReset(h.service.previewFactoryReset().token)).resolves.toMatchObject({ sessionId: expect.any(String) })
+    } finally {
+      await h.service.dispose()
+      rmSync(home, { recursive: true, force: true })
+    }
   })
 
   it('does not forget a still-running writer when factory reset cannot archive it', async () => {

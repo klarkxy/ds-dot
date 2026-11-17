@@ -77,7 +77,7 @@ export function apply(ctx: Context): void {
     workReject: async payload => { await call('work.reject', payload) },
     workAnswer: async payload => { await call('work.answer', payload) },
     workResume: async payload => { await call('work.resume', payload) },
-    workRead: request => call<{ source: string; body: string }>('work.read', request),
+    workRead: request => call<{ source: string; body: string; truncated?: boolean; totalBytes?: number }>('work.read', request),
     settings: signal => call<DotSettings>('settings', {}, signal),
     setSettings: patch => call<DotSettings>('settings.set', { patch }),
     settingProposals: signal => call<SettingProposal[]>('settings.proposals', {}, signal),

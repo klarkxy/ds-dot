@@ -40,6 +40,8 @@ export interface BoardProps extends BoardActions {
   readonly onOpen: (sessionId: string) => void
   readonly onRetry: () => void
   readonly onRemoveSchedule: (id: string) => void
+  /** Suppress the empty hint when WorkBoardPanel above already renders Changes. */
+  readonly suppressEmpty?: boolean
 }
 
 function dotOf(ticket: TicketView): StateDotState {
@@ -204,7 +206,7 @@ function GroupTitle({ title, count }: { title: string; count?: number }) {
  * recently finished tasks, watched sessions and Dorothy's reminders. Pure
  * render over a board snapshot; every action goes out through a callback.
  */
-export function Board({ locale, view, error, notice, onOpen, onRetry, onRemoveSchedule, ...actions }: BoardProps) {
+export function Board({ locale, view, error, notice, onOpen, onRetry, onRemoveSchedule, suppressEmpty, ...actions }: BoardProps) {
   const [expanded, setExpanded] = useState<string>()
   const [showFinished, setShowFinished] = useState(false)
   if (view === undefined) {
@@ -231,7 +233,7 @@ export function Board({ locale, view, error, notice, onOpen, onRetry, onRemoveSc
       onOpen={onOpen}
     />
   )
-  const empty = groups.liveCount === 0 && groups.finished.length === 0 && view.pending.length === 0 && view.schedules.length === 0
+  const empty = !suppressEmpty && groups.liveCount === 0 && groups.finished.length === 0 && view.pending.length === 0 && view.schedules.length === 0
   return (
     <div className={BOARD_ROOT}>
       <div className="dsh-ui-stack">

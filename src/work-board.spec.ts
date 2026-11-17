@@ -39,6 +39,7 @@ describe('work board actions', () => {
     expect(lookRequest(item(), [older])).toBe('stale')
     expect(lookRequest(item(), [])).toBe('withdrawn')
     expect(lookRequest(item({ oversight: { requested: true, inputRef: 'in-3', inputRevision: 3 } }), [current])).toBe('stale')
+    expect(lookRequest(item({ verification: { id: 'v-3', verdict: 'accept', subjectKey: 'subject-key', inputRef: 'in-3', inputRevision: 3 } }), [current])).toBe('stale')
   })
 
   it('keeps a refusal from looking like success', () => {
@@ -57,6 +58,15 @@ describe('work board actions', () => {
     expect(groups.needsHuman.map(row => row.id)).toEqual(['c-look'])
     expect(groups.active.map(row => row.id)).toEqual(['c-run'])
     expect(groups.done.map(row => row.id)).toEqual(['c-done'])
+  })
+
+  it('keeps withdrawn or stale requests out of the needs-human group until there is a current action', () => {
+    const waiting = item({ humanAction: undefined })
+    const current = pending({ changeId: waiting.id, inputRevision: 4, verificationId: 'v-3', subjectKey: 'subject-key' })
+    const stale = pending({ changeId: waiting.id, inputRevision: 3, verificationId: 'v-2', subjectKey: 'old' })
+    expect(groupWork([waiting], []).needsHuman).toEqual([])
+    expect(groupWork([waiting], [stale]).active.map(row => row.id)).toEqual([waiting.id])
+    expect(groupWork([waiting], [current]).needsHuman.map(row => row.id)).toEqual([waiting.id])
   })
 
   it('does not treat unknown, rejected or unverified facts as success', () => {

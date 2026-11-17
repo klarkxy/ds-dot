@@ -190,8 +190,10 @@ function WorkDrawer({ locale, api, tab, wide, settings, trajectoryRev, running, 
     const timer = setTimeout(() => setSaveNotice(undefined), 2200)
     return () => clearTimeout(timer)
   }, [saveNotice])
-  const items: readonly { value: DrawerTab; label: string; title: string; badge: number }[] = [
+  const isTasks = tab === 'tasks'
+  const items: readonly { value: DrawerTab; label: string; title: string; badge: number }[] = isTasks ? [
     { value: 'tasks', label: t(locale, 'tasks'), title: t(locale, 'tasks'), badge: waiting },
+  ] : [
     { value: 'settings', label: t(locale, 'settings'), title: t(locale, 'settings'), badge: proposalCount },
     { value: 'persona', label: t(locale, 'tabPersona'), title: t(locale, 'personaTitle'), badge: 0 },
     { value: 'context', label: t(locale, 'tabContext'), title: t(locale, 'ctxTitle'), badge: 0 },
@@ -199,8 +201,16 @@ function WorkDrawer({ locale, api, tab, wide, settings, trajectoryRev, running, 
   ]
   const activeItem = items.find(item => item.value === tab) ?? items[0]!
   return (
-    <aside className="dsh-dot-drawer" data-wide={wide ? '' : undefined} aria-label={t(locale, 'drawerLabel')}>
+    <div className="dsh-dot-drawer-layer">
+    <button type="button" tabIndex={-1} className="dsh-dot-drawer-backdrop" aria-label={t(locale, 'closeDrawer')} onClick={onClose} />
+    <aside className="dsh-dot-drawer" data-kind={isTasks ? 'tasks' : 'settings'} data-wide={wide ? '' : undefined} role="dialog" aria-label={isTasks ? t(locale, 'tasks') : t(locale, 'settings')}>
       <header className="dsh-dot-drawer-head">
+        {isTasks ? (
+          <h2 className="dsh-dot-drawer-title">
+            {t(locale, 'tasks')}
+            {waiting > 0 ? <span className="dsh-dot-nav-badge">{waiting}</span> : null}
+          </h2>
+        ) : (
         <nav className="dsh-dot-drawer-tabs" aria-label={t(locale, 'drawerTabs')}>
           {items.map(item => (
             <button
@@ -215,6 +225,7 @@ function WorkDrawer({ locale, api, tab, wide, settings, trajectoryRev, running, 
             </button>
           ))}
         </nav>
+        )}
         <span className="dsh-dot-spacer" />
         {saveNotice?.kind === 'saved' ? (
           <span className="dsh-dot-settings-status" role="status">
@@ -244,6 +255,7 @@ function WorkDrawer({ locale, api, tab, wide, settings, trajectoryRev, running, 
         </div>
       </div>
     </aside>
+    </div>
   )
 }
 
@@ -1064,13 +1076,25 @@ export const chatCss = settingsCss + `
 .dsh-dot-chat .dsh-dot-stage { position: relative; flex: 1; min-height: 0; display: flex; flex-direction: row; container-type: inline-size; }
 .dsh-dot-chat .dsh-dot-chatcol { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; }
 .dsh-dot-chat .dsh-dot-scroll { flex: 1; min-height: 0; overflow-y: auto; }
-.dsh-dot-chat .dsh-dot-drawer {
-  flex: 0 0 auto; width: 460px; max-width: 100%; min-height: 0; display: flex; flex-direction: column;
-  border-left: 0.5px solid var(--dsw-alias-border-l1); background: var(--dsw-alias-bg-layer-1);
-  transition: width var(--ds-transition-duration, 0.2s) var(--ds-ease-in-out, ease-out);
+.dsh-dot-chat .dsh-dot-drawer-layer { position: absolute; inset: 0; z-index: 10; display: flex; justify-content: flex-end; overflow: hidden; }
+.dsh-dot-chat .dsh-dot-drawer-backdrop {
+  position: absolute; inset: 0; padding: 0; border: 0; border-radius: 0; cursor: default;
+  background: var(--dsw-alias-bg-mask-1); animation: dsh-dot-fade var(--ds-transition-duration, 0.2s) ease-out;
 }
-.dsh-dot-chat .dsh-dot-drawer[data-wide] { width: 580px; }
-.dsh-dot-chat .dsh-dot-drawer-head {
+.dsh-dot-chat .dsh-dot-drawer {
+  position: relative; width: min(460px, 100%); height: 100%; min-height: 0; display: flex; flex-direction: column;
+  border-left: 0.5px solid var(--dsw-alias-border-l1); background: var(--dsw-alias-bg-layer-1);
+  box-shadow: var(--dsw-elevation-prominent);
+  transition: width var(--ds-transition-duration, 0.2s) var(--ds-ease-in-out, ease-out);
+  animation: dsh-dot-drawer-in var(--ds-transition-duration, 0.2s) var(--ds-ease-in-out, ease-out);
+}
+.dsh-dot-chat .dsh-dot-drawer[data-wide] { width: min(640px, 100%); }
+.dsh-dot-chat .dsh-dot-drawer-title {
+  display: inline-flex; align-items: center; gap: 8px; margin: 0; padding: 0 6px;
+  font-size: 14px; line-height: 20px; font-weight: 600; color: var(--dsw-alias-label-primary);
+}
+@keyframes dsh-dot-drawer-in { from { transform: translateX(24px); opacity: 0; } to { transform: none; opacity: 1; } }
+@keyframes dsh-dot-fade { from { opacity: 0; } to { opacity: 1; } }.dsh-dot-chat .dsh-dot-drawer-head {
   display: flex; align-items: center; gap: 4px; min-height: 46px; padding: 6px 8px 6px 10px; box-sizing: border-box;
   border-bottom: 0.5px solid var(--dsw-alias-border-l2);
 }
@@ -1110,15 +1134,9 @@ export const chatCss = settingsCss + `
 .dsh-dot-chat .dsh-dot-tasks .dsh-dot-board { padding: 0; height: auto; overflow: visible; }
 .dsh-dot-chat .dsh-dot-filters { display: flex; gap: 2px; overflow-x: auto; scrollbar-width: none; }
 .dsh-dot-chat .dsh-dot-filters button { padding: 3px 9px; font-size: 12px; line-height: 18px; }
-/* A narrow panel cannot hold the chat and the drawer side by side: the drawer covers the chat instead. */
-@container (max-width: 760px) {
-  .dsh-dot-chat .dsh-dot-drawer, .dsh-dot-chat .dsh-dot-drawer[data-wide] {
-    position: absolute; inset: 0 0 0 auto; z-index: 10; width: min(460px, 100%);
-    box-shadow: var(--dsw-elevation-prominent);
-  }
-  .dsh-dot-chat .dsh-dot-drawer-widen { display: none; }
-}
-@media (prefers-reduced-motion: reduce) { .dsh-dot-chat .dsh-dot-drawer { transition: none; } }.dsh-dot-chat .dsh-dot-settings-pane { gap: 0; }
+@container (max-width: 560px) { .dsh-dot-chat .dsh-dot-drawer-widen { display: none; } }
+@media (prefers-reduced-motion: reduce) { .dsh-dot-chat .dsh-dot-drawer, .dsh-dot-chat .dsh-dot-drawer-backdrop { transition: none; animation: none; } }
+.dsh-dot-chat .dsh-dot-settings-pane { gap: 0; }
 .dsh-dot-chat .dsh-dot-settings-pane > .dsh-ui-notice,
 .dsh-dot-chat .dsh-dot-settings-pane > .dsh-ui-error { margin-bottom: 16px; }
 .dsh-dot-chat .dsh-dot-pane-section { padding: 18px 0; border-bottom: 0.5px solid var(--dsw-alias-border-l2); }

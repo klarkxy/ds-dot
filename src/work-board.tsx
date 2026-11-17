@@ -389,12 +389,14 @@ export function WorkBoardPanel({ locale, api, pending, initialItems, filter = 'a
   const [notice, setNotice] = useState<string>()
   const [tick, setTick] = useState(0)
   const refresh = useCallback(() => setTick(value => value + 1), [])
+  const loadPrefix = t(locale, 'workLoadFailed')
   useEffect(() => {
     const lifetime = new AbortController()
     void api.workList(lifetime.signal).then(rows => {
-      if (!lifetime.signal.aborted) setItems(rows)
+      // A good read clears a load failure; a refused action keeps its own notice until the next action.
+      if (!lifetime.signal.aborted) { setItems(rows); setNotice(current => current?.startsWith(loadPrefix) ? undefined : current) }
     }, failure => {
-      if (!lifetime.signal.aborted) setNotice(`${t(locale, 'workUnknown')}${failure instanceof Error ? failure.message : String(failure)}`)
+      if (!lifetime.signal.aborted) setNotice(`${loadPrefix}${failure instanceof Error ? failure.message : String(failure)}`)
     })
     return () => lifetime.abort()
   }, [api, locale, tick, pending])

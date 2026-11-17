@@ -31,8 +31,8 @@ describe('knowledge storage compatibility', () => {
   }
 
   it('declares the previous domain version as readable', () => {
-    expect(dotDomain.version).toBe(4)
-    expect(dotDomain.compatibleVersions).toEqual([1, 2, 3])
+    expect(dotDomain.version).toBe(6)
+    expect(dotDomain.compatibleVersions).toEqual([1, 2, 3, 4, 5])
   })
 
   it('admits untouched v1 records at the real domain validation boundary', () => {

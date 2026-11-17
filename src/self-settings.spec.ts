@@ -23,13 +23,13 @@ function setup() {
 describe('Dorothy self settings', () => {
   it('defaults to unlocked and changes nothing until the human approves', async () => {
     const h = setup()
-    expect(await h.self.read()).toContain('scope: all')
-    const result = await h.self.propose({ field: 'scope', value: 'tracked', reason: 'only watch my tasks' })
+    expect(await h.self.read()).toContain('scope: tracked')
+    const result = await h.self.propose({ field: 'scope', value: 'all', reason: 'watch every session' })
     expect(result).toMatch(/setting-.*Nothing changed yet/)
-    expect(h.store.settings.scope).toBe('all')
-    const id = h.store.settingProposals[0]!.id
-    expect(await h.self.decide(id, true)).toContain('scope is now tracked')
     expect(h.store.settings.scope).toBe('tracked')
+    const id = h.store.settingProposals[0]!.id
+    expect(await h.self.decide(id, true)).toContain('scope is now all')
+    expect(h.store.settings.scope).toBe('all')
     expect(h.store.settingProposals).toEqual([])
   })
 

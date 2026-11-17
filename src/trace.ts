@@ -20,6 +20,12 @@ export const DOT_TRACE = {
   noticeDelivered: 'notice.delivered',
   noticeHeld: 'notice.held',
   noticeSuppressed: 'notice.suppressed',
+  childSealed: 'child-session.sealed',
+  peerSent: 'peer.sent',
+  peerDuplicate: 'peer.duplicate',
+  peerUnknown: 'peer.unknown',
+  peerRefused: 'peer.refused',
+  factoryReset: 'factory.reset',
 } as const
 
 export type DotTraceEventName = (typeof DOT_TRACE)[keyof typeof DOT_TRACE]

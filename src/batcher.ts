@@ -6,6 +6,8 @@ export interface Notice {
   readonly at: number
   readonly requestId?: string
   readonly ticketId?: string
+  /** Set on a persisted work-decision wake so delivery can be marked once. */
+  readonly wakeKey?: string
 }
 
 export interface Timer { set(callback: () => void, ms: number): unknown; clear(handle: unknown): void; now(): number }

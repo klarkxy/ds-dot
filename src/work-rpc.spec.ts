@@ -1,0 +1,216 @@
+/**
+ * Model-free contract for the board's `work.*` RPC surface: a projection
+ * forwards the same versioned arguments every consumer sends. A service-level
+ * double-check keeps an older input, decision or delivery from being applied.
+ */
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { describe, expect, it } from 'vitest'
+import { DotService } from './service.ts'
+import { DotStore } from './store.ts'
+import { DEFAULT_SETTINGS } from './contracts.ts'
+
+const str = (payload: unknown, key: string): string => typeof (payload as Record<string, unknown> | null)?.[key] === 'string' ? (payload as Record<string, string>)[key] : ''
+const num = (payload: unknown, key: string): number | undefined => typeof (payload as Record<string, unknown> | null)?.[key] === 'number' ? (payload as Record<string, number>)[key] : undefined
+const field = (payload: unknown, key: string): unknown => payload !== null && typeof payload === 'object' ? (payload as Record<string, unknown>)[key] : undefined
+
+async function setup() {
+  const home = mkdtempSync(join(tmpdir(), 'dot-rpc-home-'))
+  const project = mkdtempSync(join(tmpdir(), 'dot-rpc-proj-'))
+  const store = new DotStore(undefined)
+  void store.setSettings({ ...DEFAULT_SETTINGS, reflection: false, idleCheckMinutes: 0 })
+  const calls: string[] = []
+  const sessions = new Map<string, { cwd?: string; preset?: string }>()
+  const notes = { path: '/dot/memory.md', text: '', cognition: '', read: async () => notes.text, readCognition: async () => notes.cognition }
+  const host = {
+    isRunning: () => false,
+    listSessions: async () => [...sessions.keys()].map(id => ({ sessionId: id, running: false, archived: false })),
+    latestReply: async () => 'ok',
+    readEvents: async () => [],
+    cancel: async () => {},
+    archive: async () => {},
+    modelKey: () => 'fake/model',
+    syncModel: () => {},
+    createWorkspace: async () => ({ id: 'ws-1', title: 'p', path: project }),
+    listWorkspaces: () => [{ id: 'ws-1', title: 'p', path: project }],
+    cwdOf: async () => project,
+    setReadOnly: async () => true,
+    setWritable: async () => true,
+    verifyTaskPermission: async () => true,
+    findSession: async id => sessions.get(id),
+    createSession: async input => {
+      const id = input.sessionId ?? `session-${sessions.size}`
+      sessions.set(id, { cwd: input.cwd })
+      calls.push(`create ${id}`)
+      return id
+    },
+    prompt: async () => { calls.push('prompt') },
+    stopActivity: async () => { calls.push('stop'); return { cancelAccepted: true, queueCleared: true, idle: true, jobsSettled: true } },
+  }
+  const service = new DotService({ host: host as never, store, homeDir: home, notes, approvalGraceMs: 0, timer: { set: (cb, ms) => setTimeout(cb, ms), clear: handle => clearTimeout(handle as ReturnType<typeof setTimeout>), now: () => Date.now() }, now: () => 1000 })
+  return { home, project, store, service, calls, sessions }
+}
+
+async function readyChange(h: Awaited<ReturnType<typeof setup>>, title = 'Ship') {
+  writeFileSync(join(h.project, 'a.ts'), 'before')
+  writeFileSync(join(h.project, 'gone.ts'), 'gone')
+  const change = await h.service.createWorkChange({ title, cwd: h.project, goal: 'land it', requirements: [{ requirementRef: 'r1', text: 'edits', required: true }], at: 1 })
+  const reserved = await h.service.reserveWorkRun({ changeId: change.id, kind: 'work', cwd: h.project, root: { workspaceRoot: h.project }, writeScope: { kind: 'paths', paths: [{ path: join(h.project, 'a.ts'), type: 'file' }] }, at: 2 })
+  if (!reserved.ok) throw new Error(reserved.message)
+  const run = reserved.run
+  await h.service.captureWorkBaseline(run.id)
+  const launched = await h.service.launchWorkRun(run.id, 'edit it')
+  if (!launched.ok) throw new Error(launched.message)
+  rmSync(join(h.project, 'gone.ts'))
+  writeFileSync(join(h.project, 'a.ts'), 'after')
+  const prepared = await h.store.work.prepareFinish(run.id, 'completed', 3)
+  if (!prepared.ok) throw new Error(prepared.message)
+  const finished = await h.store.work.finishSettled(run.id, prepared.updatedAt, 'completed', { queueCleared: true, agentIdle: true, jobsSettled: true }, 4)
+  if (!finished.ok) throw new Error(`finishSettled: ${finished.message}`)
+  const review = await h.service.reserveWorkRun({ changeId: change.id, kind: 'review', cwd: h.project, root: { workspaceRoot: h.project }, writeScope: { kind: 'workspace-exclusive' }, at: 5 })
+  if (!review.ok) throw new Error(review.message)
+  await h.service.captureWorkBaseline(review.run.id)
+  const launchedReview = await h.service.launchWorkRun(review.run.id, 'check it')
+  if (!launchedReview.ok) throw new Error(launchedReview.message)
+  const held = await h.service.holdWorkReview(review.run.id)
+  if (!('id' in held)) throw new Error(held.message)
+  await h.service.saveWorkEvidence('log-1', 'built')
+  const subject = await h.service.captureWorkSubject(change.id)
+  const current = h.store.work.change(change.id)!
+  const verified = JSON.parse(await h.service.manageTask({
+    action: 'verify', task_id: change.id, run_ids: JSON.stringify([run.id]), review_run_id: review.run.id,
+    session_id: h.store.work.run(review.run.id)!.sessionId,
+    expected_input_ref: current.currentInputRef, expected_input_revision: current.currentRevision,
+    checks: JSON.stringify([{ requirementRef: 'r1', applicability: 'applicable', verdict: 'pass', evidenceRefs: ['log-1'] }]),
+    subject: JSON.stringify(subject),
+  })) as { id: string; subjectKey: string }
+  return { change, run, review: review.run, subject, verified, current }
+}
+
+describe('work.* RPC contract', () => {
+  it('work.list returns the derived projection, never ticket internals', async () => {
+    const h = await setup()
+    const { change } = await readyChange(h)
+    const rows = h.service.store.work.listChanges().map(row => h.service.workBoard(row.id)).filter(row => row !== undefined)
+    expect(rows).toHaveLength(1)
+    expect(rows[0]).toMatchObject({ id: change.id, status: 'review' })
+    expect(rows[0]).not.toHaveProperty('sessions')
+    expect(rows[0]).not.toHaveProperty('rounds')
+    rmSync(h.project, { recursive: true, force: true })
+    rmSync(h.home, { recursive: true, force: true })
+  })
+
+  it('work.accept applies the same versioned check as the model accept', async () => {
+    const h = await setup()
+    const { change, verified, current } = await readyChange(h)
+    const stale = await h.service.acceptWork(change.id, verified.id, current.currentInputRef, verified.subjectKey, 'user', {
+      expectedInputRevision: current.currentRevision - 1, expectedVerificationId: verified.id,
+    })
+    expect(stale).toMatchObject({ code: 'stale' })
+    const accepted = await h.service.acceptWork(change.id, verified.id, current.currentInputRef, verified.subjectKey, 'user', {
+      expectedInputRevision: current.currentRevision, expectedVerificationId: verified.id,
+    })
+    expect(accepted).toHaveProperty('closeout')
+    expect(h.store.work.workView(change.id)?.status).toBe('done')
+    rmSync(h.project, { recursive: true, force: true })
+    rmSync(h.home, { recursive: true, force: true })
+  })
+
+  it('work.answer only writes the pending versioned decision, not the closeout', async () => {
+    const h = await setup()
+    const { change, verified, current } = await readyChange(h)
+    await h.service.manageTask({
+      action: 'decide', task_id: change.id, verification_id: verified.id,
+      expected_input_revision: current.currentRevision, expected_subject_key: verified.subjectKey,
+    })
+    const pending = h.service.pending.list().at(-1)!
+    await h.service.answerWorkReview(pending.id, true)
+    expect(h.store.work.change(change.id)?.oversight?.decision).toMatchObject({ result: 'accept', verificationId: verified.id, subjectKey: verified.subjectKey })
+    expect(h.store.work.change(change.id)?.closeout).toBeUndefined()
+    const rejected = await h.service.answerWorkReview(pending.id, false).catch(error => error)
+    expect(rejected).toBeInstanceOf(Error)
+    rmSync(h.project, { recursive: true, force: true })
+    rmSync(h.home, { recursive: true, force: true })
+  })
+
+  it('work.reject releases the settled review without a closeout', async () => {
+    const h = await setup()
+    const { change, review, verified, current } = await readyChange(h)
+    const released = await h.service.rejectWork(change.id, review.id, current.currentRevision)
+    expect(released).toMatchObject({ ok: true })
+    expect(h.store.work.run(review.id)?.phase).toBe('stopped')
+    expect(h.store.work.change(change.id)?.closeout).toBeUndefined()
+    expect(h.store.work.workView(change.id)?.status).not.toBe('done')
+    rmSync(h.project, { recursive: true, force: true })
+    rmSync(h.home, { recursive: true, force: true })
+  })
+
+  it('work.resume finishes a held review only when its closeout already landed', async () => {
+    const h = await setup()
+    const { change, verified, current } = await readyChange(h)
+    const pending = await h.service.resumeWorkCloseout(change.id)
+    expect(pending).toMatchObject({ ok: true, released: false })
+    const accepted = await h.service.acceptWork(change.id, verified.id, current.currentInputRef, verified.subjectKey, 'user', {
+      expectedInputRevision: current.currentRevision, expectedVerificationId: verified.id,
+    })
+    expect(accepted).toHaveProperty('closeout')
+    const released = await h.service.resumeWorkCloseout(change.id)
+    expect(released).toMatchObject({ ok: true, released: false })
+    rmSync(h.project, { recursive: true, force: true })
+    rmSync(h.home, { recursive: true, force: true })
+  })
+
+  it('reads the bound evidence body and delivery bytes, and refuses an unbound or deleted source', async () => {
+    const h = await setup()
+    const { change } = await readyChange(h)
+    const marker = 'FINAL_C_EVIDENCE_BODY_7C: npm check exit=0, both A and B verified'
+    h.service.saveWorkEvidence('log-1', marker)
+    h.service.saveWorkEvidence('old-log', 'OLD_BODY_NOT_BOUND')
+    const view = h.service.workBoard(change.id)
+    const source = {
+      verificationId: view?.verification?.id ?? '',
+      inputRef: view?.verification?.inputRef ?? '',
+      inputRevision: view?.verification?.inputRevision ?? 0,
+    }
+    const bound = h.service.readWorkSource(change.id, 'evidence', 'log-1', source)
+    expect(bound).toMatchObject({ ok: true, source: 'evidence:log-1', body: marker })
+    expect(h.service.readWorkSource(change.id, 'evidence', 'old-log', source)).toMatchObject({ ok: false, code: 'stale' })
+    expect(h.service.readWorkSource(change.id, 'evidence', '../secret', source)).toMatchObject({ ok: false, code: 'invalid' })
+    const delivered = view?.verification?.changes?.find(item => item.kind === 'modified')
+    expect(delivered?.path).toBeTruthy()
+    const file = h.service.readWorkSource(change.id, 'change', delivered!.path, source)
+    expect(file.ok).toBe(true)
+    if (file.ok) expect(file.body).toContain('after')
+    expect(h.service.readWorkSource(change.id, 'change', 'not-in-this-delivery.txt', source)).toMatchObject({ ok: false, code: 'stale' })
+    rmSync(h.project, { recursive: true, force: true })
+    rmSync(h.home, { recursive: true, force: true })
+  })
+
+  it('refuses a verification body after the input moves on, and does not switch to another verification with the same name', async () => {
+    const h = await setup()
+    const { change, verified, current } = await readyChange(h)
+    const marker = 'FINAL_C_EVIDENCE_BODY_7C: npm check exit=0, both A and B verified'
+    h.service.saveWorkEvidence('log-1', marker)
+    const bound = { verificationId: verified.id, inputRef: current.currentInputRef, inputRevision: current.currentRevision }
+    expect(h.service.readWorkSource(change.id, 'evidence', 'log-1', bound)).toMatchObject({ ok: true, body: marker })
+    const revised = await h.service.reviseWorkChange(change.id, { goal: 'second', at: 30 })
+    if (!('id' in revised)) throw new Error(revised.message)
+    expect(revised.currentRevision).toBe(current.currentRevision + 1)
+    const stale = h.service.readWorkSource(change.id, 'evidence', 'log-1', bound)
+    expect(stale).toMatchObject({ ok: false, code: 'stale' })
+    expect(stale).not.toHaveProperty('body')
+    const next = h.store.work.change(change.id)!
+    h.service.saveWorkEvidence('other-log', 'REV2_ONLY')
+    const recorded = await h.service.recordWorkVerification(change.id, [
+      { requirementRef: 'r1', applicability: 'applicable', verdict: 'pass', evidenceRefs: ['other-log'] },
+    ], [], { inputRef: next.currentInputRef, inputRevision: next.currentRevision })
+    if (!('id' in recorded)) throw new Error(recorded.message)
+    const moved = { verificationId: recorded.id, inputRef: next.currentInputRef, inputRevision: next.currentRevision }
+    expect(h.service.readWorkSource(change.id, 'evidence', 'log-1', moved)).toMatchObject({ ok: false, code: 'stale' })
+    expect(h.service.readWorkSource(change.id, 'evidence', 'other-log', bound)).toMatchObject({ ok: false, code: 'stale' })
+    expect(h.service.readWorkSource(change.id, 'evidence', 'other-log', moved)).toMatchObject({ ok: true, body: 'REV2_ONLY' })
+    rmSync(h.project, { recursive: true, force: true })
+    rmSync(h.home, { recursive: true, force: true })
+  })
+})

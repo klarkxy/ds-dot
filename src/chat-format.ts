@@ -726,6 +726,12 @@ export function summarizeToolCall(item: ToolItem, locale: CopyLocale, tasks: Tas
         const label = strOf(args.title) ?? folderName(strOf(args.path))
         return label ? { summary: clipInline(label, 40) } : {}
       }
+      if (action === 'inspect' || action === 'files') {
+        const id = strOf(args.workspace_id)
+        const path = strOf(args.path)
+        const label = [id, path].filter(Boolean).join(' · ')
+        return label ? { summary: clipInline(label, 40) } : {}
+      }
       // list
       if (!detail) return {}
       const matches = [...detail.matchAll(WORKSPACE_ROW_RE)]

@@ -3,7 +3,7 @@
  * needs from DSH goes through {@link DotHost}, so the orchestration logic is
  * tested against a fake and the host surface stays in one file.
  *
- * Host contracts (DSH 0.2.2-rc.1 type declarations):
+ * Host contracts (DSH 0.2.2-rc.3 public session controller):
  * - sessionController: create / prompt / cancel / list / resolveAgent for task
  *   sessions, modelCatalog / selectModel for the model a task runs on
  *   (@deepseek-ai/dsh-api-session-controller)
@@ -23,6 +23,7 @@ import { assembleContextFor, installModelSelection } from '@deepseek-ai/dsh-agen
 import { BlockAssembler, createUserMessage, type MessageSource } from '@deepseek-ai/dsh-llm'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import { extractSessionEventText } from '@deepseek-ai/dsh-session-query'
+import { checkChatImages, type ChatImage } from './chat-images.ts'
 import type { RawEvent } from './chat.ts'
 import { contextView, EMPTY_SCAN, foldScan, type ContextScan, type PreTurnContext, type ProjectionValues } from './context.ts'
 import { assembledSurface, type AssembledPromptInput } from './context-surface.ts'
@@ -34,7 +35,7 @@ import { foldTrajectory } from './trajectory.ts'
 
 declare module '@deepseek-ai/dsh-llm' {
   interface MessageSourceMap {
-    'agent-message': { kind: 'agent-message'; form: 'relay'; senderSessionId: SessionId }
+    'agent-message': { kind: 'agent-message'; form: 'relay'; senderSessionId: SessionId; deliveryId?: string }
   }
 }
 
@@ -56,8 +57,12 @@ export interface DotHost {
   createWorkspace(path: string, title?: string): Promise<WorkspaceRow>
   listSessions(signal: AbortSignal): Promise<SessionRow[]>
   titles(sessionIds: readonly string[], signal: AbortSignal): Promise<Map<string, string>>
-  /** Open a top-level session; without a preset it runs on the host's default one. */
-  createSession(place: { workspaceId?: string; cwd?: string; preset?: string }): Promise<string>
+  /** Open a top-level session. `sessionId` is the id reserved before the call. */
+  createSession(place: { workspaceId?: string; cwd?: string; preset?: string; sessionId?: string }): Promise<string>
+  /** Seal one already-open session dot owns, once its agent is live. */
+  prepareOwnedSession?(sessionId: string): Promise<void>
+  /** Read one ordinary session back. Undefined means it is not there. */
+  findSession?(sessionId: string): Promise<{ cwd?: string; preset?: string } | undefined>
   /** Agent presets a session can run on, with the one a new session gets by default. */
   listPresets(): Promise<TaskPresetCatalog>
   /** Models a session can run on, with the one a new session gets by default. */
@@ -72,14 +77,21 @@ export interface DotHost {
   verifyTaskPermission?(sessionId: string, access: 'read' | 'write', preset: string): Promise<boolean>
   /** Set a read-only sandbox with deterministic rejection of escalation requests. */
   setReadOnly?(sessionId: string): Promise<boolean>
-  /** Deliver as the human's own prompt; used for a task's first instruction. */
-  prompt(sessionId: string, text: string, mode: 'queue' | 'steer', signal: AbortSignal): Promise<void>
-  /** Deliver as an agent-attributed message and wake the target. */
-  relay(targetId: string, senderId: string, text: string): Promise<void>
+  /** Deliver as the human's own prompt. `requestId` is reused when a receipt was lost. */
+  prompt(sessionId: string, text: string, mode: 'queue' | 'steer', signal: AbortSignal, requestId?: string): Promise<void>
+  /** Deliver as an agent-attributed message and wake the target. `deliveryId` is the business record, not a host request id. `confirm` runs after the agent is resolved and before followup. */
+  relay(targetId: string, senderId: string, text: string, deliveryId?: string, confirm?: () => boolean): Promise<void>
   cancel(sessionId: string): Promise<void>
   /** Stop and wait for the live agent, clearing queued work; false is fail-closed. */
   cancelAndWait?(sessionId: string, timeoutMs: number): Promise<boolean>
   archive(sessionId: string): Promise<void>
+  /**
+   * Ask the host to stop, then report the separate facts that release a run.
+   * A missing job registry stays `unknown` and must not be treated as settled.
+   */
+  stopActivity?(sessionId: string): Promise<{ cancelAccepted: boolean; queueCleared: boolean; idle: boolean; jobsSettled: boolean | 'unknown' }>
+  /** One passive state read. A null queue stays `unknown`; it is not an empty queue. */
+  watchSession?(sessionId: string): Promise<{ seq?: number; running?: boolean; queue?: 'empty' | 'pending' | 'unknown'; idle?: boolean }>
   /** Text of the latest assistant output, or undefined when none is readable. */
   latestReply(sessionId: string, maxChars: number): Promise<string | undefined>
   cwdOf(sessionId: string): Promise<string | undefined>
@@ -119,7 +131,7 @@ export interface DotHost {
   /** The model dot's next segment would run on, as `provider/model@effort`; undefined when none is known. */
   modelKey(): string | undefined
   /** The human's message to dot, optionally carrying notices into the same turn; steers a running turn, starts one when idle. */
-  say(sessionId: string, text: string, carriedNotices?: string, answer?: import('@klarkxy/dsh-deep-view/contracts').ViewAnswer): Promise<void>
+  say(sessionId: string, text: string, carriedNotices?: string, answer?: import('@klarkxy/dsh-deep-view/contracts').ViewAnswer, images?: readonly ChatImage[]): Promise<void>
   /** Stop dot's current turn; queued messages stay. */
   stop(sessionId: string): Promise<void>
   /**
@@ -179,9 +191,27 @@ interface LiveAgent {
 interface AgentHandle { readonly agent: LiveAgent; dispose(): Promise<void> }
 
 interface Agents {
-  get(id: string): LiveAgent | undefined
+  /** rc.3 `get` is a bare agent. A handle `{ agent, dispose }` is unwrapped, not treated as the agent. */
+  get(id: string): unknown
   create(options: Record<string, unknown>): Promise<AgentHandle>
   resume(options: Record<string, unknown>): Promise<AgentHandle>
+}
+
+/**
+ * The registry may return an {@link AgentHandle} or the agent itself.
+ * A truthy object with no session, status, or methods is not a live agent:
+ * the caller must keep looking. Missing methods on a real agent are not absence.
+ */
+export function unwrapLiveAgent(value: unknown): LiveAgent | undefined {
+  if (!value || typeof value !== 'object') return undefined
+  const row = value as { agent?: unknown; followup?: unknown; whenIdle?: unknown; cancel?: unknown; status?: unknown; session?: unknown }
+  if (row.agent && typeof row.agent === 'object') return unwrapLiveAgent(row.agent)
+  const live = typeof row.followup === 'function'
+    || typeof row.whenIdle === 'function'
+    || typeof row.cancel === 'function'
+    || typeof row.status === 'string'
+    || (row.session !== null && typeof row.session === 'object')
+  return live ? row as LiveAgent : undefined
 }
 
 interface PresetRegistry {
@@ -233,8 +263,56 @@ export class HostUnavailable extends Error {
   constructor(what: string) { super(`${what} is unavailable on this host`); this.name = 'HostUnavailable' }
 }
 
+interface OwnedJob { id?: string; status?: string; owner?: string }
+interface JobsApi {
+  list?: (caller?: string) => readonly OwnedJob[]
+  kill?: (id: string, caller?: string, reason?: string) => 'requested' | 'already-finished'
+  wait?: (id: string, timeoutMs: number, caller?: string) => Promise<OwnedJob>
+}
+interface JobFact { owner?: string; settled: boolean; producerReported?: boolean }
+
+/** rc.3 jobs live on `ctx.jobs`. Unowned jobs are public. A removed record still counts when its log says it did not settle. */
+async function settleOwnedJobs(get: Get, sessionId: string, factsOf: () => Promise<ReadonlyMap<string, JobFact> | undefined>): Promise<boolean | 'unknown'> {
+  const jobs = get('jobs') as JobsApi | undefined
+  if (typeof jobs?.list !== 'function') return 'unknown'
+  const terminal = (status?: string) => status === 'completed' || status === 'killed' || status === 'failed'
+  const owned = (row: OwnedJob) => row.owner === sessionId
+  try {
+    let rows = jobs.list(sessionId).filter(owned)
+    for (const row of rows) {
+      if (!row.id || terminal(row.status)) continue
+      try { jobs.kill?.(row.id, sessionId, 'run-stop') } catch { return 'unknown' }
+      if (typeof jobs.wait === 'function') {
+        try { await jobs.wait(row.id, 1_500, sessionId) } catch { return 'unknown' }
+      }
+    }
+    rows = jobs.list(sessionId).filter(owned)
+    if (rows.some(row => !row.id || !terminal(row.status))) return false
+    const facts = await factsOf()
+    if (!facts) return 'unknown'
+    const ids = new Set<string>([...rows.map(row => row.id ?? ''), ...facts.keys()].filter(id => id.length > 0))
+    for (const id of ids) {
+      const fact = facts.get(id)
+      if (!fact?.settled || fact.producerReported !== true) return false
+    }
+    return true
+  } catch { return 'unknown' }
+}
+
+/** A missing live agent has no readable queue. An unread state is not an empty one. */
+function queueEmpty(queue: unknown): boolean {
+  return queue === null || (Array.isArray(queue) && queue.length === 0)
+}
+
+function archivedSession(registry: () => Registry, sessionId: string): boolean {
+  try {
+    const ids = registry().archivedSessionIds
+    return Array.isArray(ids) && ids.includes(sessionId)
+  } catch { return false }
+}
+
 /** @param modelOf - dot's chosen model, read on every model call; undefined follows the host default. */
-export function bindHost(get: Get, log?: (message: string) => void, modelOf?: () => ModelChoice | undefined): DotHost {
+export function bindHost(get: Get, log?: (message: string) => void, modelOf?: () => ModelChoice | undefined, seal?: (agent: LiveAgent) => void): DotHost {
   const need = <T,>(name: string): T => {
     const value = get(name) as T | undefined
     if (!value) throw new HostUnavailable(name)
@@ -249,13 +327,16 @@ export function bindHost(get: Get, log?: (message: string) => void, modelOf?: ()
   const scans = new Map<string, ContextScan>()
   const windows = new Map<string, number>()
 
+  /** A registry hit that is only an id, or a handle, is not used in place of the resolved agent. */
+  const registryAgent = (sessionId: string): LiveAgent | undefined => unwrapLiveAgent(agents().get(sessionId))
   /** Live agent of any session: dot's is read straight from the registry, since the controller refuses subagent-origin sessions. */
   const liveAgent = async (sessionId: string): Promise<LiveAgent> => {
-    const live = agents().get(sessionId)
-    if (live) return live
+    const listed = registryAgent(sessionId)
+    if (listed) return listed
     const resolved = await controller().resolveAgent(sessionId)
-    if (!resolved.agent) throw new Error(typeof resolved.error?.message === 'string' ? resolved.error.message : `session ${sessionId} has no live agent`)
-    return resolved.agent
+    const agent = unwrapLiveAgent(resolved.agent)
+    if (!agent) throw new Error(typeof resolved.error?.message === 'string' ? resolved.error.message : `session ${sessionId} has no live agent`)
+    return agent
   }
   const agentOptions = () => {
     const defaults = need<DefaultModel>('agentDefaultModel')
@@ -323,8 +404,18 @@ export function bindHost(get: Get, log?: (message: string) => void, modelOf?: ()
       return out
     },
     async createSession(place) {
-      const created = await controller().create({ ...place.workspaceId ? { workspaceId: place.workspaceId } : { cwd: place.cwd }, ...place.preset ? { agentPreset: place.preset } : {} })
+      const created = await controller().create({
+        ...(place.sessionId ? { sessionId: place.sessionId } : {}),
+        ...(place.workspaceId ? { workspaceId: place.workspaceId } : { cwd: place.cwd }),
+        ...(place.preset ? { agentPreset: place.preset } : {}),
+      })
+      // Seal before the caller prompts. A session with no live agent is not returned as ready.
+      if (seal) seal(await liveAgent(created.sessionId))
       return created.sessionId
+    },
+    async prepareOwnedSession(sessionId) {
+      if (!seal) return
+      seal(await liveAgent(sessionId))
     },
     async listPresets() {
       const registry = need<PresetRegistry>('agentPresets')
@@ -416,13 +507,33 @@ export function bindHost(get: Get, log?: (message: string) => void, modelOf?: ()
         return false
       }
     },
-    async prompt(sessionId, text, mode, signal) {
-      await controller().prompt({ requestId: randomUUID(), sessionId, mode, content: [{ type: 'text', text }] }, signal)
+    async findSession(sessionId) {
+      const { items } = await controller().list({}, AbortSignal.timeout(10_000))
+      const found = items.find(item => String(item.sessionId) === sessionId)
+      if (!found) return undefined
+      let cwd = typeof found.cwd === 'string' ? found.cwd : undefined
+      let preset = typeof found.agentPreset === 'string' ? found.agentPreset : undefined
+      if (cwd === undefined || preset === undefined) {
+        try {
+          const stored = await query().readSession(sessionId) as { session?: { cwd?: string; agentPreset?: string }; header?: { agentPreset?: string } }
+          if (cwd === undefined && typeof stored.session?.cwd === 'string') cwd = stored.session.cwd
+          const storedPreset = stored.session?.agentPreset ?? stored.header?.agentPreset
+          if (preset === undefined && typeof storedPreset === 'string') preset = storedPreset
+        } catch { /* the list row is still enough to know the session exists */ }
+      }
+      return {
+        ...(cwd !== undefined ? { cwd } : {}),
+        ...(preset !== undefined ? { preset } : {}),
+      }
     },
-    async relay(targetId, senderId, text) {
+    async prompt(sessionId, text, mode, signal, requestId) {
+      await controller().prompt({ requestId: requestId ?? randomUUID(), sessionId, mode, content: [{ type: 'text', text }] }, signal)
+    },
+    async relay(targetId, senderId, text, deliveryId, confirm) {
       const agent = await liveAgent(targetId)
-      if (typeof agent.followup !== 'function') throw new Error('target session has no live agent')
-      const source = { kind: 'agent-message', form: 'relay', senderSessionId: senderId as SessionId } as MessageSource
+      if (confirm && !confirm()) throw new Error(`session ${targetId} closed before followup`)
+      if (typeof agent.followup !== 'function') throw new Error(`session ${targetId} is live but has no followup`)
+      const source = { kind: 'agent-message', form: 'relay', senderSessionId: senderId as SessionId, ...(deliveryId ? { deliveryId } : {}) } as MessageSource
       agent.followup(createUserMessage({ content: [{ type: 'text' as const, text }], source }))
     },
     async cancel(sessionId) { await controller().cancel({ sessionId }) },
@@ -439,6 +550,106 @@ export function bindHost(get: Get, log?: (message: string) => void, modelOf?: ()
       } catch { return false }
     },
     async archive(sessionId) { await registry().archiveSession(sessionId, { stopActivity: true }) },
+    async stopActivity(sessionId) {
+      let cancelAccepted = false
+      try { await controller().cancel({ sessionId }); cancelAccepted = true } catch { /* the cancel request itself was not accepted */ }
+      const raw = controller() as Controller & {
+        updateQueue?: (request: { sessionId: string; itemId: string; action: { kind: 'remove' } }) => Promise<unknown>
+        state?: (request: { sessionId: string }, signal: AbortSignal) => Promise<{ queue?: unknown; running?: unknown; cursor?: unknown }>
+      }
+      const readState = async () => typeof raw.state === 'function' ? await raw.state({ sessionId }, AbortSignal.timeout(10_000)) : undefined
+      let queueCleared = false
+      let running: boolean | undefined
+      let queue: unknown
+      const noteState = (state: { queue?: unknown; running?: unknown } | undefined) => {
+        if (!state) return
+        queue = state.queue
+        if (typeof state.running === 'boolean') running = state.running
+      }
+      try {
+        const state = await readState()
+        noteState(state)
+        if (state && Array.isArray(state.queue)) {
+          if (typeof raw.updateQueue === 'function') {
+            for (const item of state.queue) {
+              const id = item !== null && typeof item === 'object' && 'id' in item && typeof item.id === 'string' ? item.id : undefined
+              if (!id) throw new Error('queued item has no id')
+              await raw.updateQueue({ sessionId, itemId: id, action: { kind: 'remove' } })
+            }
+          } else if (state.queue.length > 0) throw new Error('queue cannot be cleared')
+          const again = await readState()
+          noteState(again)
+          queueCleared = !!again && Array.isArray(again.queue) && again.queue.length === 0
+        }
+      } catch { queueCleared = false }
+      const jobsSettled = await settleOwnedJobs(get, sessionId, async () => {
+        const facts = new Map<string, JobFact>()
+        try {
+          const stored = await query().readSession(sessionId) as { events?: readonly { type?: string; data?: { jobId?: string; owner?: string; producerReported?: boolean } }[] }
+          for (const event of stored.events ?? []) {
+            const jobId = event.data?.jobId
+            const owner = event.data?.owner
+            if (typeof jobId !== 'string' || owner !== sessionId) continue
+            if (event.type === 'job/registered') {
+              const previous = facts.get(jobId)
+              facts.set(jobId, { owner, settled: previous?.settled ?? false, ...(previous?.producerReported !== undefined ? { producerReported: previous.producerReported } : {}) })
+            } else if (event.type === 'job/settled' && typeof event.data?.producerReported === 'boolean') {
+              facts.set(jobId, { owner, settled: true, producerReported: event.data.producerReported })
+            }
+          }
+        } catch { return undefined }
+        return facts
+      })
+      let idle = false
+      let agentMissing = false
+      let agent: LiveAgent | undefined
+      try {
+        agent = await liveAgent(sessionId)
+      } catch { agentMissing = true }
+      // Only a failed lookup is absence. A wait or a later state read can fail
+      // while the agent is still running; that must not reuse the earlier snapshot.
+      if (agent) {
+        let observationFailed = false
+        try {
+          if (typeof agent.whenIdle === 'function' && agent.status !== 'idle') {
+            const watched = await Promise.race([
+              Promise.resolve().then(() => agent!.whenIdle!()).then(() => 'done' as const, () => 'failed' as const),
+              new Promise<'timeout'>(resolve => setTimeout(() => resolve('timeout'), 1_500)),
+            ])
+            if (watched === 'failed') observationFailed = true
+          }
+          if (!observationFailed) idle = agent.status === 'idle'
+        } catch { observationFailed = true }
+        try {
+          // The queue read can still see the turn that cancel just aborted.
+          // Idle is decided only after whenIdle, from a fresh state read.
+          noteState(await readState())
+        } catch { observationFailed = true }
+        if (observationFailed) idle = false
+      }
+      // An archived session has no live agent and no readable queue. That is
+      // not idleness by itself: the registry must say it is archived, the
+      // persisted state must be stopped, and every owned job must have settled.
+      if (agentMissing && jobsSettled === true && running === false && queueEmpty(queue) && archivedSession(registry, sessionId)) {
+        idle = true
+        queueCleared = true
+      }
+      if (running === true) idle = false
+      return { cancelAccepted, queueCleared, idle, jobsSettled }
+    },
+    async watchSession(sessionId) {
+      const raw = controller() as Controller & { state?: (request: { sessionId: string }, signal: AbortSignal) => Promise<{ queue?: unknown; running?: unknown; cursor?: unknown }> }
+      if (typeof raw.state !== 'function') return { queue: 'unknown' as const }
+      try {
+        const state = await raw.state({ sessionId }, AbortSignal.timeout(10_000))
+        const queue = Array.isArray(state.queue) ? (state.queue.length === 0 ? 'empty' as const : 'pending' as const) : 'unknown' as const
+        return {
+          queue,
+          ...(typeof state.cursor === 'number' ? { seq: state.cursor } : {}),
+          ...(typeof state.running === 'boolean' ? { running: state.running, idle: state.running === false } : {}),
+        }
+      } catch { return { queue: 'unknown' as const } }
+    },
     async latestReply(sessionId, maxChars) {
       const log = await query().readSession(sessionId)
       for (let index = log.events.length - 1; index >= 0; index--) {
@@ -517,7 +728,7 @@ export function bindHost(get: Get, log?: (message: string) => void, modelOf?: ()
       await handle.dispose()
     },
     async resumeDot(sessionId, preset) {
-      const live = agents().get(sessionId)
+      const live = registryAgent(sessionId)
       if (live) return live.session?.header?.origin === 'subagent'
       try {
         const { setup } = await setupFor(preset)
@@ -533,13 +744,27 @@ export function bindHost(get: Get, log?: (message: string) => void, modelOf?: ()
         return false
       }
     },
-    async say(sessionId, text, carriedNotices, answer) {
+    async say(sessionId, text, carriedNotices, answer, images) {
       const agent = await liveAgent(sessionId)
       const content = carriedNotices ? `${carriedNotices}\n\n${text}` : text
       // The character count lets the panel and history split the carried notices
       // back out without storing a second copy of their text in the source.
       const source = { kind: 'user', ...answer ? { deepView: { owner: 'dsh-deep-view', version: 1, answer } } : {}, ...carriedNotices ? { dshDot: { carriedChars: carriedNotices.length } } : {} } as MessageSource
-      const message = createUserMessage({ content: [{ type: 'text' as const, text: content }], source })
+      const pictures = checkChatImages(images)
+      let blocks: Array<{ type: 'text'; text: string } | { type: 'image'; attachment: unknown }> = []
+      if (content.length > 0 || pictures.length === 0) blocks.push({ type: 'text', text: content })
+      if (pictures.length > 0) {
+        const attachments = get('attachments') as { admitPromptContent?(content: readonly unknown[]): Promise<Array<{ type: string; text?: string; attachment?: unknown }>> } | undefined
+        if (typeof attachments?.admitPromptContent !== 'function') throw new Error('image input is unavailable on this host')
+        const admitted = await attachments.admitPromptContent([
+          ...blocks,
+          ...pictures.map(image => ({ type: 'image' as const, mediaType: image.mediaType, data: image.data, ...(image.name ? { name: image.name } : {}) })),
+        ])
+        blocks = admitted.filter(part => part.type === 'text' || part.type === 'image').map(part => part.type === 'text'
+          ? { type: 'text' as const, text: part.text ?? '' }
+          : { type: 'image' as const, attachment: part.attachment })
+      }
+      const message = createUserMessage({ content: blocks as [{ type: 'text'; text: string }], source })
       if (agent.status === 'idle' || typeof agent.steer !== 'function') agent.followup?.(message)
       else agent.steer(message)
       if (answer && agent.session) {
@@ -567,7 +792,7 @@ export function bindHost(get: Get, log?: (message: string) => void, modelOf?: ()
       await handle.dispose()
     },
     async readEvents(sessionId) {
-      const session = agents().get(sessionId)?.session
+      const session = registryAgent(sessionId)?.session
       if (session && typeof session.seq === 'number' && typeof session.eventAt === 'function') {
         const out: RawEvent[] = []
         for (let seq = 0; seq < session.seq; seq++) {
@@ -580,7 +805,7 @@ export function bindHost(get: Get, log?: (message: string) => void, modelOf?: ()
       return stored.events.filter((event): event is RawEvent => typeof event.type === 'string')
     },
     async summarize(sessionId, instruction, maxTokens, onUsage) {
-      const session = agents().get(sessionId)?.session
+      const session = registryAgent(sessionId)?.session
       const llm = get('llm') as Llm | undefined
       if (!session || typeof session.requestHeader !== 'function' || typeof session.deriveMessages !== 'function') throw new Error('the session is not live')
       if (typeof llm?.stream !== 'function') throw new HostUnavailable('llm')
@@ -621,7 +846,7 @@ export function bindHost(get: Get, log?: (message: string) => void, modelOf?: ()
       return wanted ? `${wanted.provider}/${wanted.model}@${wanted.reasoningEffort ?? ''}` : undefined
     },
     syncModel(sessionId) {
-      const model = agents().get(sessionId)?.model
+      const model = registryAgent(sessionId)?.model
       const wanted = wantedModel()
       if (!model || !wanted) return
       const current = model.current()
@@ -631,7 +856,7 @@ export function bindHost(get: Get, log?: (message: string) => void, modelOf?: ()
       }
     },
     dotEvents(sessionId, limit) {
-      const session = agents().get(sessionId)?.session
+      const session = registryAgent(sessionId)?.session
       if (!session || typeof session.seq !== 'number' || typeof session.eventAt !== 'function') return []
       const out: RawEvent[] = []
       for (let seq = Math.max(0, session.seq - limit); seq < session.seq; seq++) {
@@ -641,7 +866,7 @@ export function bindHost(get: Get, log?: (message: string) => void, modelOf?: ()
       return out
     },
     async dotContext(sessionId) {
-      const agent = agents().get(sessionId)
+      const agent = registryAgent(sessionId)
       const session = agent?.session
       if (!session || typeof session.seq !== 'number' || typeof session.eventAt !== 'function') return { live: false, compactions: 0 }
       let scan = scans.get(sessionId) ?? EMPTY_SCAN
@@ -711,13 +936,13 @@ export function bindHost(get: Get, log?: (message: string) => void, modelOf?: ()
       return contextView(scan, values, fallback, preTurn)
     },
     dotTrajectory(sessionId) {
-      const session = agents().get(sessionId)?.session
+      const session = registryAgent(sessionId)?.session
       if (!session || typeof session.seq !== 'number' || typeof session.eventAt !== 'function') return { sessionId, turns: [], earlier: 0 }
       const events = function* () { for (let seq = 0; seq < session.seq!; seq++) { const event = session.eventAt!(seq); if (event) yield event } }
       return { sessionId, ...foldTrajectory(events()) }
     },
     isRunning(sessionId) {
-      const status = agents().get(sessionId)?.status
+      const status = registryAgent(sessionId)?.status
       return status !== undefined && status !== 'idle'
     },
     async dispose() {

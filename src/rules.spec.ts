@@ -6,7 +6,7 @@ describe('routeRequest', () => {
   it('lets dot judge every approval and question by default', () => {
     expect(routeRequest(DEFAULT_RULES, 'approval')).toEqual({ action: 'dot', kind: 'approval' })
     expect(routeRequest(DEFAULT_RULES, 'question')).toEqual({ action: 'dot', kind: 'question' })
-    expect(DEFAULT_RULES.scope).toBe('all')
+    expect(DEFAULT_RULES.scope).toBe('tracked')
   })
 
   it('leaves questions to the host when off', () => {

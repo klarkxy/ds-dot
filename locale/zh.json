@@ -6,7 +6,7 @@
   "panel": {
     "cardPreparing": "正在准备卡片…",
     "cardExpired": "已过期",
-    "cardsHint": "过期卡片仍可补答，答复会送达当前对话。",
+    "cardsHint": "此卡片已失效，请重新发起请求。",
     "personaTitle": "人设与约定",
     "agreements": "约定",
     "agreementsHint": "你说过的规矩，原话记下。与认知冲突时，一律以约定为准。",

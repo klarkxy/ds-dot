@@ -3,10 +3,11 @@
  * change saves at once; free-text fields save when they lose focus.
  */
 import { groupModelMenuChoices, modelMenuShortName, parseModelMenuChoices, type ModelMenuChoice } from '@klarkxy/dsh-plugin-kit/model-menu'
+import { renderModelPicker, type RenderFactorySlot } from '@klarkxy/dsh-plugin-kit/model-picker'
 import { Button, Checkbox, IconSearchOutlineRegular, Input, SegmentedTabs, type SegmentedTab } from '@deepseek-ai/dsh-client-ui-primitives'
 import { createContext, useCallback, useContext, useEffect, useId, useMemo, useState, type ReactNode } from 'react'
-import { type ApprovalMode, type DotSettings, type ModelChoice, type SettingField, type SettingProposal, type TakeoverMode, type TaskModelRule, type TaskPermission } from './contracts.ts'
-import { t, type CopyLocale, type TextKey } from './ui-copy.ts'
+import { type ApprovalMode, type DotSettings, type FactoryResetPreview, type FactoryResetResult, type ModelChoice, type SettingField, type SettingProposal, type TakeoverMode, type TaskModelRule, type TaskPermission } from './contracts.ts'
+import { factoryResetScope, t, type CopyLocale, type TextKey } from './ui-copy.ts'
 
 /** null on model, persona or address goes back to the default. `policy` is legacy and cannot be patched. */
 export type SettingsPatch = { readonly [K in Exclude<keyof DotSettings, 'policy'>]?: K extends 'model' ? ModelChoice | null : K extends 'persona' | 'address' ? string | null : DotSettings[K] }
@@ -19,6 +20,8 @@ export interface SettingsApi {
   settingProposals(signal: AbortSignal): Promise<SettingProposal[]>
   decideSetting(id: string, allow: boolean): Promise<string>
   settings(signal: AbortSignal): Promise<DotSettings>
+  previewFactoryReset?(): Promise<FactoryResetPreview>
+  confirmFactoryReset?(token: string): Promise<FactoryResetResult>
 }
 
 const LocaleContext = createContext<CopyLocale>('zh')
@@ -253,13 +256,70 @@ function SegmentedChoice<T extends string>({ locale, label, value, options, labe
   )
 }
 
-export function SettingsPanel({ locale, api, settings, onSaved, onStatusChange, onProposalCount }: {
+function FactoryResetField({ locale, api, onSaved }: { locale: CopyLocale; api: SettingsApi; onSaved: (next: DotSettings) => void }) {
+  const [preview, setPreview] = useState<FactoryResetPreview>()
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+  const [done, setDone] = useState('')
+  const load = () => {
+    setBusy(true); setError(''); setDone('')
+    api.previewFactoryReset!().then(next => { setPreview(next); setBusy(false) }, failure => {
+      setError(failure instanceof Error ? failure.message : String(failure)); setBusy(false)
+    })
+  }
+  const confirm = () => {
+    if (!preview) return
+    setBusy(true); setError('')
+    api.confirmFactoryReset!(preview.token).then(result => {
+      setPreview(undefined)
+      if (result.archiveFailed.length > 0) {
+        setDone('')
+        setError(result.archiveFailed.map(row => `${row.sessionId}: ${row.message}`).join('\n'))
+      } else {
+        setDone(t(locale, 'sFactoryDone'))
+      }
+      setBusy(false)
+      api.settings(new AbortController().signal).then(onSaved, () => {})
+    }, failure => {
+      setPreview(undefined)
+      setError(failure instanceof Error ? failure.message : String(failure)); setBusy(false)
+    })
+  }
+  return (
+    <div className="dsh-dot-pane-section dsh-dot-factory">
+      <h3 className="dsh-dot-pane-section-title">{t(locale, 'sFactory')}</h3>
+      <p className="dsh-ui-help">{t(locale, 'sFactoryDesc')}</p>
+      {preview ? (
+        <div className="dsh-dot-factory-preview">
+          <div className="dsh-ui-label">{t(locale, 'sFactoryScope')}</div>
+          <ul>{factoryResetScope(locale, preview).map(line => <li key={line}>{line}</li>)}</ul>
+          <p className="dsh-ui-help">{t(locale, 'sFactoryKeep')}</p>
+        </div>
+      ) : null}
+      {error ? <div className="dsh-ui-error" role="alert">{t(locale, 'sFactoryFailed')}{error}</div> : null}
+      {done ? <div className="dsh-ui-notice" role="status">{done}</div> : null}
+      <div className="dsh-ui-actions">
+        {preview ? (
+          <>
+            <Button variant="primary" size="sm" disabled={busy} onClick={confirm}>{busy ? t(locale, 'sFactoryBusy') : t(locale, 'sFactoryConfirm')}</Button>
+            <Button variant="ghost" size="sm" disabled={busy} onClick={() => { setPreview(undefined); setError(''); setDone('') }}>{t(locale, 'sFactoryCancel')}</Button>
+          </>
+        ) : (
+          <Button variant="outline" size="sm" disabled={busy} onClick={load}>{busy ? t(locale, 'sFactoryBusy') : t(locale, 'sFactoryPreview')}</Button>
+        )}
+      </div>
+    </div>
+  )
+}
+
+export function SettingsPanel({ locale, api, settings, onSaved, onStatusChange, onProposalCount, renderFactorySlot }: {
   locale: CopyLocale
   api: SettingsApi
   settings?: DotSettings
   onSaved: (next: DotSettings) => void
   onStatusChange?: (status: SaveNotice | undefined) => void
   onProposalCount?: (count: number) => void
+  renderFactorySlot?: RenderFactorySlot
 }) {
   const models = useModels(api)
   const [status, setStatus] = useState<SaveNotice>()
@@ -329,14 +389,28 @@ export function SettingsPanel({ locale, api, settings, onSaved, onStatusChange, 
       <div className="dsh-dot-pane-section">
         <div className="dsh-ui-form">
         <Field label={t(locale, 'sModel')} help={modelHelp} helpTone={models.failed ? 'warn' : undefined} {...lock('model')}>
-          <select className="dsh-ui-select" aria-label={t(locale, 'sModel')} value={chosen ? keyOf(chosen) : FOLLOW} onChange={event => pickModel(event.target.value)}>
-            <option value={FOLLOW}>{t(locale, 'sModelFollow')}</option>
-            {modelGroups.map(group => (
-              <optgroup key={group.provider} label={group.name}>
-                {group.items.map(choice => <option key={keyOf(choice)} value={keyOf(choice)}>{choice.label}</option>)}
-              </optgroup>
-            ))}
-          </select>
+          {renderModelPicker(renderFactorySlot, {
+            locale,
+            choices,
+            selected: chosen ? { provider: chosen.provider, model: chosen.model } : undefined,
+            onPick: picked => save({ model: { provider: picked.provider, model: picked.model } }),
+            leading: [{ id: 'follow', label: t(locale, 'sModelFollow'), selected: !chosen }],
+            onPickLeading: () => save({ model: null }),
+            triggerLabel: chosen ? (choices.find(item => item.provider === chosen.provider && item.model === chosen.model)?.label ?? `${chosen.provider} / ${chosen.model}`) : t(locale, 'sModelFollow'),
+            modelLabel: t(locale, 'sModel'),
+            listClassName: 'dsh-dot-chat',
+          }, {
+            fallback: (
+              <select className="dsh-ui-select" aria-label={t(locale, 'sModel')} value={chosen ? keyOf(chosen) : FOLLOW} onChange={event => pickModel(event.target.value)}>
+                <option value={FOLLOW}>{t(locale, 'sModelFollow')}</option>
+                {modelGroups.map(group => (
+                  <optgroup key={group.provider} label={group.name}>
+                    {group.items.map(choice => <option key={keyOf(choice)} value={keyOf(choice)}>{choice.label}</option>)}
+                  </optgroup>
+                ))}
+              </select>
+            ),
+          })}
         </Field>
         <Field label={t(locale, 'sReflection')} help={t(locale, 'sReflectionDesc')} {...lock('reflection')}>
           <SegmentedChoice locale={locale} label={t(locale, 'sReflection')} value={settings.reflection ? 'on' : 'off'} options={['on', 'off']} labelKeyOf={opt => `sReflection_${opt}`} onChange={next => save({ reflection: next === 'on' })} />
@@ -427,6 +501,7 @@ export function SettingsPanel({ locale, api, settings, onSaved, onStatusChange, 
         </Field>
         </div>
       </div>
+      {api.previewFactoryReset && api.confirmFactoryReset ? <FactoryResetField locale={locale} api={api} onSaved={onSaved} /> : null}
     </div></LocaleContext.Provider>
   )
 }
@@ -478,4 +553,7 @@ export const settingsCss = `
 .dsh-dot-chat .dsh-dot-model-item:hover { background: var(--dsw-alias-interactive-bg-hover); }
 .dsh-dot-chat .dsh-dot-idle-check { display: flex; align-items: center; gap: 8px; }
 .dsh-dot-chat .dsh-dot-idle-input { width: 96px; flex: 0 0 auto; }
+.dsh-dot-chat .dsh-dot-factory { margin-top: 8px; padding-top: 16px; border-top: 0.5px solid var(--dsw-alias-border-l2); }
+.dsh-dot-chat .dsh-dot-factory-preview { display: flex; flex-direction: column; gap: 8px; margin: 8px 0; padding: 10px 12px; border-radius: var(--dsw-radius-md); background: var(--dsw-alias-bg-layer-1); box-shadow: var(--dsw-elevation-stroke); }
+.dsh-dot-chat .dsh-dot-factory-preview ul { margin: 0; padding-left: 18px; font-size: 12px; line-height: 18px; color: var(--dsw-alias-label-secondary); }
 `

@@ -1,6 +1,9 @@
 /** Preset scopes support deny-only restrictions; refresh them as global tools arrive. */
 import type { Context } from '@deepseek-ai/cordis'
 
+interface ToolCall {
+  readonly name: string
+}
 interface ToolScope {
   tools: {
     /** No scope argument deliberately reads the deployment-global registry. */
@@ -8,6 +11,7 @@ interface ToolScope {
     restrict(filter: { deny: readonly string[] }): () => void
   }
   on(event: 'tools/change', listener: () => void): () => void
+  on(event: 'tools/pre-execute', listener: (exec: ToolCall, next: () => Promise<{ kind: string }>) => Promise<{ kind: string }>): () => void
   effect(start: () => (() => void)): unknown
 }
 
@@ -36,8 +40,16 @@ export function restrictInheritedTools(ctx: Context, allowedNames: readonly stri
     }
     refresh()
     const stop = host.on('tools/change', refresh)
+    let stopGate = () => {}
+    try {
+      stopGate = host.on('tools/pre-execute', (exec, next) => {
+        if (allowed.has(exec.name)) return next()
+        return Promise.resolve({ kind: 'deny', reason: 'This preset cannot run that tool.' })
+      })
+    } catch { /* without the call gate, restrict is the only denial */ }
     return () => {
       stop()
+      stopGate()
       for (const release of releases.reverse()) release()
     }
   })

@@ -98,6 +98,17 @@ describe('PendingHub', () => {
     expect(hub.settlement('ap-999')).toBeUndefined()
   })
 
+  it('reset drops open requests and forgets settlements', async () => {
+    const hub = new PendingHub()
+    const one = hub.open({ kind: 'approval', sessionId: 's', subject: 'x' })
+    expect(hub.answer(one.id, { kind: 'approval', allow: true })).toBe(true)
+    const two = hub.open({ kind: 'approval', sessionId: 's', subject: 'y' })
+    hub.reset()
+    expect(hub.list()).toEqual([])
+    expect(hub.settlement(one.id)).toBeUndefined()
+    await expect(two.settled).resolves.toBeUndefined()
+  })
+
   it('keeps only the most recent settlements, bounded', async () => {
     const hub = new PendingHub(() => 0, 2)
     const first = hub.open({ kind: 'approval', sessionId: 's1', subject: 'a' })

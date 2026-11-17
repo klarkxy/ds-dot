@@ -17,12 +17,14 @@ import { SERVICE_NAME, TOOL } from './contracts.ts'
 import { personaSection } from './persona.ts'
 import { settingsSnapshotBlock, type SelfSettings } from './self-settings.ts'
 import { DotError, messageOf, type DotService } from './service.ts'
+import { DEV_INDEX_TOOLS, installDotDevIndex } from './dev-index-scope.ts'
 import { restrictInheritedTools } from './tool-scope.ts'
 import { installDotWeb } from './web-scope.ts'
 
 /** Host tool names from `@deepseek-ai/dsh-tool-web` (0.2.2-rc.1). Absent names are not an error. */
 export const HOST_WEB_TOOLS = ['web_search', 'web_fetch'] as const
-export const DOT_INHERITED_ALLOW = [...Object.values(TOOL), 'show_view', ...HOST_WEB_TOOLS]
+export { DEV_INDEX_TOOLS }
+export const DOT_INHERITED_ALLOW = [...Object.values(TOOL), 'show_view', ...HOST_WEB_TOOLS, ...DEV_INDEX_TOOLS]
 
 export const name = 'dsh-dot-tools'
 export const inject = ['tools', 'systemPrompt', SERVICE_NAME] as const
@@ -68,6 +70,14 @@ const str = (args: unknown, key: string): string | undefined => {
   return typeof value === 'string' ? value : undefined
 }
 
+/** paths is a JSON string in the schema. A model that passes the array itself is still that same list. */
+const pathsText = (args: unknown): string | undefined => {
+  const value = (args as Record<string, unknown> | null)?.paths
+  if (typeof value === 'string') return value
+  if (Array.isArray(value)) return JSON.stringify(value)
+  return undefined
+}
+
 const num = (args: unknown, key: string): number | undefined => {
   const value = (args as Record<string, unknown> | null)?.[key]
   return typeof value === 'number' ? value : undefined
@@ -88,6 +98,7 @@ async function run(work: () => Promise<string> | string): Promise<string> {
 export function apply(ctx: Context): void {
   installDotWeb(ctx)
   restrictInheritedTools(ctx, DOT_INHERITED_ALLOW)
+  void installDotDevIndex(ctx)
   const host = ctx as ToolHost
   const dot = () => host[SERVICE_NAME]
   // Both sections read what the segment froze when it started, so every request of a segment
@@ -125,7 +136,7 @@ export function apply(ctx: Context): void {
       'Show the human one card and end this turn. This is how every reply to the human goes out: put your reply text inside the card (a text node is enough), then call show_view once as the very last step.',
       'Calling it ends the turn at once — finish every other tool call first and have its result in hand. If it reports an invalid view, fix the view and call show_view again in the same turn.',
       'Write the view as JSON text in view. Every ViewNode must carry a "type" field; nodes nest under stack|row (children, optional let).',
-      'Display nodes: text, metric{label,value}, table{columns,rows}, chart{kind,categories,series}, progress{percent|value+max}, callout{text}, sources{items}. Inputs: slider, number, choice, toggle.',
+      'Display nodes: text, metric{label,value}, table{columns,rows}, chart{kind,categories,series}, progress{percent|value+max}, callout{text}, sources{items}, steps{items}. Rich nodes: math (plots), flow (node graphs), explore (scatter), map (locations). Inputs: slider, number, choice, toggle.',
       'To ask the human to choose, confirm or fill something in, use an options, confirm or form node and set await_reply true; a display-only card must not set it. For a human approval pass approval_id with the exact request id: the host renders a bound approval confirmation and applies its answer directly. A background wake-up with nothing for the human must not call this tool: end silently with no message.',
     ].join(' '),
     parameters: {
@@ -207,15 +218,18 @@ export function apply(ctx: Context): void {
   // ── dot_workspace (merged from dot_list_workspaces + dot_create_workspace) ─
   tool(defineToolInput({
     name: TOOL.workspace,
-    description: 'Manage workspaces. action=list: list workspaces (id, title, directory, session count), your own workspace is marked. action=create: create or reuse a workspace for an absolute directory; the directory is created when missing.',
+    description: 'Manage workspaces. action=list: list workspaces (id, title, directory, session count), your own workspace is marked. action=inspect: details of one workspace (id, or your own when omitted). action=files: list files and folders inside that workspace (read-only; optional relative path). action=create: create or reuse a workspace for an absolute directory; the directory is created when missing. File writes stay on task sessions.',
     parameters: {
-      action: { type: 'string', enum: ['list', 'create'], required: true, description: 'list or create.' },
-      path: { type: 'string', description: 'create only: absolute directory.' },
+      action: { type: 'string', enum: ['list', 'inspect', 'files', 'create'], required: true, description: 'list, inspect, files, or create.' },
+      path: { type: 'string', description: 'create: absolute directory. files: optional relative path inside the workspace.' },
       title: { type: 'string', description: 'create only: display title for a new workspace.' },
+      workspace_id: { type: 'string', description: 'inspect or files: workspace id from action=list. Omit to use your own workspace.' },
     },
     execute: args => run(() => {
       const action = str(args, 'action')
       if (action === 'create') return dot().createWorkspace(str(args, 'path') ?? '', str(args, 'title'))
+      if (action === 'inspect') return dot().inspectWorkspace(str(args, 'workspace_id'))
+      if (action === 'files') return dot().listWorkspaceFiles(str(args, 'workspace_id'), str(args, 'path'))
       return dot().listWorkspaces()
     }),
     title: 'Workspace',
@@ -224,12 +238,31 @@ export function apply(ctx: Context): void {
   // ── dot_task ──────────────────────────────────────────────────────────────
   tool(defineToolInput({
     name: TOOL.task,
-    description: 'Manage tasks. action=update changes fields only (title, goal, deliverable, acceptance, directory, access, priority, human_review) and never changes status. action=move migrates status and requires to and reason. action=note records one work, rework, or review round. Other actions: create, read, list, or delete a draft. States: draft, todo, active, review, done, cancelled.',
+    description: 'Manage work. action=create starts a Change. action=revise or update changes the current input. action=supplement delivers one context message to an active Run through a recorded delivery. It does not revise the input, open a Run, or widen scope. Name run_id, message, expected_input_ref and expected_input_revision; an older or different input is refused and nothing is sent. Do not resend a delivery that was not confirmed. action=reserve opens a work, rework, or review Run. action=baseline captures a run baseline. action=subject captures the current delivery and returns subjectRef. action=verify records checks for that current input: pass subject_ref, or the full JSON object from action=subject. A snapshot id is not the subject. evidenceRefs must be evidence_ref values returned by action=evidence, not a subjectRef, baseline id, or session id. A stale input, another change, a trimmed subject, an unregistered evidence ref, or a missing required check is refused. Do not shrink checks to get past a refusal. action=hold keeps a stopped review until closeout. action=finish completes a writer or rework run only; a review stays reserved until closeout, so finish refuses it and hold is the next step. action=accept and action=reject are the only closeout decisions and require the expected input revision. action=decide asks the user to look at this version; it does not record their answer. action=pause stops new runs. action=resume opens them again. action=cancel closes new work and settles current runs. action=step records one current step done only when that run has a readable result for this input. An accepted first prompt is not that result. A file written after this run released its scope is not that result either. A reserved run cannot be marked done. action=board shows the derived status. action=read shows the current input, its steps, and earlier inputs. action=move does not close out work.',
     parameters: {
-      action: { type: 'string', enum: ['create', 'update', 'move', 'note', 'read', 'list', 'delete'], required: true, description: 'update changes fields only and never status. move migrates status and needs to and reason. note records one round.' },
+      action: { type: 'string', enum: ['create', 'update', 'revise', 'move', 'note', 'read', 'list', 'delete', 'board', 'accept', 'reject', 'reserve', 'baseline', 'subject', 'verify', 'hold', 'decide', 'finish', 'evidence', 'supplement', 'pause', 'resume', 'cancel', 'step'], required: true, description: 'create, revise, supplement, reserve, baseline, subject, verify, hold, finish, evidence, accept, reject, decide, pause, resume, cancel, step, board, list, or read use the work model. supplement records context on the named active run and its input version; it does not revise. decide only asks the user to look. pause, resume, and cancel are the work controls. move, note, and delete stay closed.' },
       task_id: { type: 'string' }, title: { type: 'string' }, goal: { type: 'string' }, dir: { type: 'string' }, workspace_id: { type: 'string' },
-      access: { type: 'string', enum: ['read', 'write'] }, deliverable: { type: 'string' }, acceptance: { type: 'string' }, priority: { type: 'integer' }, draft: { type: 'boolean' }, human_review: { type: 'boolean' },
-      to: { type: 'string', enum: ['draft', 'todo', 'active', 'review', 'done', 'cancelled'], description: 'move only. update rejects to and leaves the stored status unchanged.' }, status: { type: 'string' }, reason: { type: 'string' }, role: { type: 'string', enum: ['work', 'rework', 'review'], description: 'note only: the round being recorded.' }, summary: { type: 'string' }, verdict: { type: 'string', enum: ['pass', 'fail'], description: 'note only: review outcome. A fail verdict is what a consecutive-round count can use.' }, session_id: { type: 'string' },
+      access: { type: 'string', enum: ['read', 'write'], description: 'reserve: "write" when the run will change files. "read" cannot write. A writing run also needs paths, for example [{"path":"site/note.txt","type":"file"}].' }, deliverable: { type: 'string' }, acceptance: { type: 'string' }, priority: { type: 'integer' }, draft: { type: 'boolean' }, human_review: { type: 'boolean', description: 'create or revise: the user asked to see this version before closeout.' },
+      requirements: { type: 'string', description: 'JSON array of {requirementRef, text, required}.' },
+      steps: { type: 'string', description: 'create or revise: JSON array of {stepRef, text}. Stable step ids, not positions.' },
+      behavior_notes: { type: 'string', description: 'create or revise: behavior constraints. Changing them makes a new input.' },
+      max_concurrent: { type: 'integer', description: 'create or revise: how many runs of this change may be open at once, from 1 to 8.' },
+      step_refs: { type: 'string', description: 'reserve: JSON array of stepRef values this run covers. Omit to cover the current steps.' },
+      step_ref: { type: 'string', description: 'step: the current step this run finished. Recorded only when a readable result belongs to this run and input. The accepted first prompt is not that result, and neither is a file written after this run released its scope.' },
+      input_ref: { type: 'string', description: 'read: one earlier input. Omit to read the current input and its history.' },
+      checks: { type: 'string', description: 'verify: JSON array of {requirementRef, applicability, verdict, evidenceRefs, note?}. applicability is only "applicable" or "not-applicable". Each evidenceRefs entry must be an evidence_ref returned by action=evidence. A subjectRef, baseline id, or session id is not evidence. Include every required requirement. Do not drop one to make verify pass.' },
+      subject: { type: 'string', description: 'verify: the full JSON object from action=subject, not a snapshot id. Prefer subject_ref. A trimmed object is rejected.' },
+      subject_ref: { type: 'string', description: 'verify: subjectRef returned by action=subject. The service loads that captured delivery for the current change and input. An older input or another change is rejected.' },
+      run_id: { type: 'string', description: 'baseline, finish, hold, supplement, or one writer run named by verify. supplement delivers to this run only.' },
+      message: { type: 'string', description: 'supplement: context to record and deliver once. It does not change the input.' },
+      run_ids: { type: 'string', description: 'verify: JSON array of every related run id.' },
+      paths: { type: 'string', description: 'reserve: JSON array of {path, type}. type is "file" or "directory". Example: [{"path":"site/note.txt","type":"file"}]. A write run must also set access to "write". Review ignores this and reserves the whole workspace.' },
+      evidence_ref: { type: 'string', description: 'evidence: relative id to register. The call returns this evidence_ref. Put that id in verify evidenceRefs. Not a subjectRef, baseline id, or session id.' },
+      to: { type: 'string', enum: ['draft', 'todo', 'active', 'review', 'done', 'cancelled'], description: 'move only. update rejects to and leaves the stored status unchanged.' }, status: { type: 'string' }, reason: { type: 'string' }, role: { type: 'string', enum: ['work', 'rework', 'review'], description: 'reserve: the run kind. note: the round being recorded.' }, summary: { type: 'string' }, verdict: { type: 'string', enum: ['pass', 'fail'], description: 'finish: fail marks a writer or rework run failed. finish does not complete a review; use hold. decide does not take a verdict.' }, session_id: { type: 'string', description: 'verify: the review session, which must not be a writer session.' },
+      verification_id: { type: 'string', description: 'accept or decide.' }, review_run_id: { type: 'string', description: 'reject, hold, or verify.' },
+      expected_input_ref: { type: 'string', description: 'accept, verify, or supplement: the input this action was made for.' },
+      expected_input_revision: { type: 'integer', description: 'accept, reject, verify, decide, or supplement. supplement refuses any other revision.' },
+      expected_subject_key: { type: 'string', description: 'accept: the delivery the button was rendered for.' },
     },
     execute: args => run(async () => dot().manageTask(args as Record<string, unknown>)),
     title: 'Manage task',
@@ -238,11 +271,12 @@ export function apply(ctx: Context): void {
   // ── dot_start_task ────────────────────────────────────────────────────────
   tool(defineToolInput({
     name: TOOL.startTask,
-    description: `Open a new top-level session in a workspace (or directory), send it the first instruction as the human's request, and track it. Without workspace_id and cwd it runs in your own workspace. Write a self-contained instruction: goal, context, constraints, definition of done, what to report.`,
+    description: 'Open a Run for a Change. Without task_id, create the Change in an absolute cwd first. The instruction is that run\'s first prompt. A run that writes files must set access to "write" and paths to a JSON array of {path, type} covering exactly those files or directories. Copy this: access "write", paths [{"path":"site/note.txt","type":"file"}]. type is only "file" or "directory". access "read" cannot write; do not use it for a writing step, and do not wait for a write tool to fail before switching. Omitting paths with access "write" reserves the whole change directory. role=review reserves the whole workspace. To continue a reserved run, pass run_id, or the same {path, type} list; a relative path and its absolute path under the change directory are the same entry. An unknown run_id, or one that is not reserved for the requested role, is refused and does not create a Change. Several reserved write runs are not chosen by taking the first. The write gate uses the selected run\'s saved scope, so omitting access or passing read does not lower it, and access "write" does not start a read-only run. check_only lists conflicting reservations and the user\'s own sessions; it does not start anything. A model must be one the human allows. A named preset must exist. Write runs use the configured permission.',
     parameters: {
       task_id: { type: 'string', description: 'Existing task id.' },
+      run_id: { type: 'string', description: 'Continue this reserved run. With paths, its full scope must match.' },
       role: { type: 'string', enum: ['work', 'rework', 'review'] },
-      access: { type: 'string', enum: ['read', 'write'] },
+      access: { type: 'string', enum: ['read', 'write'], description: 'write when the run will change files. read cannot write. Example for a writing run: access "write" with paths [{"path":"site/note.txt","type":"file"}].' },
       acceptance: { type: 'string' }, deliverable: { type: 'string' }, priority: { type: 'integer' }, check_only: { type: 'boolean' },
       title: { type: 'string', description: 'Short task name for the board.' },
       instruction: { type: 'string', description: 'First message the session receives; omit for check_only.' },
@@ -251,6 +285,7 @@ export function apply(ctx: Context): void {
       goal: { type: 'string', description: 'What done means, kept in the ledger; defaults to the instruction.' },
       model: { type: 'string', description: `Model to run on, as provider/model from ${TOOL.listModels}. Leave it out for the default.` },
       preset: { type: 'string', description: 'Agent preset: the tools and instructions the session works with. Leave it out for the default, which fits most work. "ptc" for mechanical work that is mostly running steps by script: bulk edits, batch processing, repetitive checks. "cordis" for work on DSH itself: writing or changing DSH plugins, presets and settings.' },
+      paths: { type: 'string', description: 'JSON array of {path, type} for a write run. type is "file" or "directory". Example: [{"path":"site/note.txt","type":"file"}]. A continuation must match the reserved run\'s full list; a relative path is resolved against the change directory. Review reserves the whole workspace. Omit with access "write" only to reserve the whole change directory.' },
     },
     execute: (args, exec) => run(() => dot().startTask({
       title: str(args, 'title') ?? 'task',
@@ -267,6 +302,8 @@ export function apply(ctx: Context): void {
       ...str(args, 'goal') ? { goal: str(args, 'goal')! } : {},
       ...str(args, 'model') ? { model: str(args, 'model')! } : {},
       ...str(args, 'preset') ? { preset: str(args, 'preset')! } : {},
+      ...pathsText(args) ? { paths: pathsText(args)! } : {},
+      ...str(args, 'run_id') ? { runId: str(args, 'run_id')! } : {},
     }, exec.signal ?? new AbortController().signal)),
     title: 'Start task',
   }))
@@ -283,7 +320,7 @@ export function apply(ctx: Context): void {
   // ── dot_send ──────────────────────────────────────────────────────────────
   tool(defineToolInput({
     name: TOOL.sendToSession,
-    description: 'Send a message to any session as yourself (agent-attributed). Wakes an idle session; a running one gets it at its next turn.',
+    description: 'Send a message to a watched or ordinary session as yourself (agent-attributed). Wakes an idle session; a running one gets it at its next turn. A run\'s own session refuses this. Context for an active run goes through dot_task action=supplement, which records a delivery for that run and input version.',
     parameters: {
       session_id: { type: 'string', required: true, description: 'Target session.' },
       message: { type: 'string', required: true, description: 'Text to deliver.' },
@@ -364,7 +401,7 @@ export function apply(ctx: Context): void {
   // ── dot_schedule (merged from dot_schedule_add + dot_schedule_list + dot_schedule_remove) ──
   tool(defineToolInput({
     name: TOOL.schedule,
-    description: `Manage your reminders. action=add: set a reminder — when it is due you are woken by a [dot reminder] message carrying its prompt, in whatever session your conversation has moved to by then. Give exactly one timing: after_minutes, at, every_minutes, or daily_time (optionally with weekdays). Times are the host's local time. Every firing costs you a turn, so repeat no more often than the work needs. action=list: list all your reminders (id, title, timing, next due, prompt). action=remove: remove one reminder by its id (sch-...); remove a repeating reminder once its purpose is served.`,
+    description: `Manage your reminders. action=add: set a reminder — when it is due you are woken by a [dot reminder] message carrying its prompt, in whatever session your conversation has moved to by then. Give exactly one timing: after_minutes, at, every_minutes, or daily_time (optionally with weekdays). after_minutes and at fire once: a late wake, a lost ack, or a restart does not fire that same reminder again, so do not add a second copy of it. Times are the host's local time. Every firing costs you a turn, so repeat no more often than the work needs. action=list: list your reminders (id, title, timing, next due or delivered once, prompt). action=remove: remove one reminder by its id (sch-...); remove a repeating reminder once its purpose is served.`,
     parameters: {
       action: { type: 'string', enum: ['add', 'list', 'remove'], required: true, description: 'add, list, or remove.' },
       title: { type: 'string', description: 'add: short name shown in the board.' },

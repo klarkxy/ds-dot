@@ -23,16 +23,19 @@ import { installPluginLogger } from '@klarkxy/dsh-plugin-kit/logger'
 import { approvalAuditId, raceApproval } from './approval-relay.ts'
 import type { RawEvent } from './chat.ts'
 import { COMPACTION_POLICY, PLUGIN_NAME, PRESET_ID, RPC_CHANNEL, SERVICE_NAME, type PendingQuestionItem, type TaskRecord } from './contracts.ts'
+import { CHAT_SAY_BODY_BYTES, checkChatImages } from './chat-images.ts'
 import { ChatFeed } from './feed.ts'
 import { bindHost } from './host.ts'
+import { hostFaultFromEnv } from './host-fault-harness.ts'
 import { clip } from './ledger.ts'
 import { detachNative } from './native.ts'
+import { PeerLedger } from './peer.ts'
 import { DOT_INSTRUCTIONS } from './prompt.ts'
 import { installPresetVisibility } from './preset-visibility.ts'
 import { REFLECTION_INSTRUCTIONS, REFLECTION_PRESET_ID } from './reflection.ts'
 import { APPROVAL_GRACE_MS, DotError, DotService, messageOf } from './service.ts'
 import { patchSettings } from './settings.ts'
-import { dotDomain, parseTask, restoreTaskTimestamps } from './storage.ts'
+import { dotDomain, parsePeerDelivery, parseTask, restoreTaskTimestamps } from './storage.ts'
 import { DotStore, type DotDomainHandle } from './store.ts'
 import { reviewPayload } from './task-rpc.ts'
 
@@ -48,6 +51,8 @@ declare module '@deepseek-ai/cordis' {
 const WAIT_MS = 15_000
 /** A finished turn is read this long after it stops, once its boundary has committed. */
 const TURN_SETTLE_MS = 300
+/** The previous plugin instance's disposal, so a reload cannot open the domain twice. */
+let retiring: Promise<void> | undefined
 /** Events scanned back for the tool call an approval is about. */
 const CALL_SCAN = 400
 
@@ -81,6 +86,7 @@ function sessionIdOf(agent: AgentLike | undefined): string | undefined {
 }
 
 export async function apply(ctx: Context, config: Config = {}): Promise<void> {
+  if (retiring) await retiring.catch(() => undefined)
   const logger = installPluginLogger(ctx, PLUGIN_NAME, { forwardHostWarnError: false })
   const log = (message: string) => {
     ctx.logger?.info?.(message)
@@ -94,16 +100,20 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
   const query = ctx.get('sessionQuery' as never) as unknown as { readSession(sessionId: string): Promise<{ events: readonly { time?: unknown }[] }> }
   await restoreTaskTimestamps(domain, async sessionId => (await query.readSession(sessionId)).events.map(event => event.time).filter((time): time is number => typeof time === 'number'), log)
   const store = new DotStore(domain, [...domain.table('tasks').entries()].map(([, value]) => parseTask(value)).filter((task): task is TaskRecord => task !== undefined))
-  await store.migrateTickets()
-  const host = bindHost(serviceName => ctx.get(serviceName as never), log, () => store.settings.model)
+  const fault = hostFaultFromEnv()
+  let sealOwned: ((agent: unknown) => void) | undefined
+  const host = fault.wrapHost(bindHost(name => fault.wrapService(name, ctx.get(name as never)), log, () => store.settings.model, agent => { sealOwned?.(agent) }))
   const service = new DotService({
     host,
     store,
+    peers: new PeerLedger(domain.table('peers'), parsePeerDelivery),
     homeDir: config.homeDir?.trim() || join(process.env.DSH_HOME?.trim() || join(homedir(), '.dsh'), 'dot'),
     log,
     trace: logger,
     approvalGraceMs: Number.isFinite(config.approvalGraceMs) ? Math.max(0, Math.min(60_000, config.approvalGraceMs!)) : APPROVAL_GRACE_MS,
   })
+  sealOwned = agent => service.sealAgent(agent)
+  void service.sealExisting()
   const feed = new ChatFeed(host, store)
   // The chat follows dot into every new segment and keeps the earlier ones above it.
   const follow = () => { if (store.dotSessionId) feed.attach(store.dotSessionId, store.pastSegments); feed.cardsChanged() }
@@ -117,15 +127,16 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
   ctx.provide(SERVICE_NAME, service)
   ctx.effect(() => () => {
     unfollow()
-    // Stop reflection (and wait for it to release its session) before the host
-    // disposes every handle: otherwise an in-flight pass would outlive the plugin.
-    void (async () => {
+    const done = (async () => {
+      service.releaseChildSeals()
       await service.dispose().catch(err => { logger.fault('service.dispose-failed', 'DotService disposal failed.', err) })
       feed.dispose()
       await host.dispose().catch(err => { logger.fault('host.dispose-failed', 'DotHost disposal failed.', err) })
       await store.flush()
       await domain.close()
     })()
+    retiring = done
+    return done.finally(() => { if (retiring === done) retiring = undefined })
   }, 'dot.lifecycle')
 
   ctx.effect(() => installPresetVisibility(ctx.agentPresets), 'dot.preset-visibility')
@@ -200,9 +211,15 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
 
   // Ledger and chat feed. Handlers never throw back into the agent loop.
   const guard = (work: () => unknown) => { try { void Promise.resolve(work()).catch(() => {}) } catch { /* observer only */ } }
+  ctx.effect(() => ctx.on('tools/change', () => service.refreshChildSeals()), 'dot.child-tools')
+  ctx.effect(() => ctx.on('agent/disposed', ({ agent }: { agent: AgentLike }) => {
+    const id = agent.session?.id
+    if (id) service.releaseChildSeal(id)
+  }), 'dot.seal-release')
   ctx.effect(() => ctx.on('agent/status', ({ agent, status }: { agent: AgentLike; status: string }) => guard(() => {
     const own = agent.session?.id
     if (own) feed.onStatus(own)
+    if (own) service.sealIfOwned(agent)
     if (own && service.isDot(own) && (status === 'running' || status === 'idle')) service.onStatus(own, status)
     // dot's own session is left out of the ledger; its finished turn is where a segment change is checked.
     // The check waits for the turn boundary to commit, like the reply read below.
@@ -271,12 +288,17 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
     const origin = topLevelOf(req.agent as AgentLike)
     if (!origin) return next()
     const args = callArguments(req.agent as AgentLike, req.callId)
-    const detail = [
-      origin.via ? `asked by subagent ${origin.via}` : '',
-      req.reason ? `reason: ${req.reason}` : '',
-      args ? `arguments: ${args}` : '',
-    ].filter(Boolean).join('\n  ')
-    const routed = service.relayRequest({ kind: 'approval', sessionId: origin.id, subject: req.toolName, ...detail ? { detail } : {}, ...origin.cwd ? { cwd: origin.cwd } : {}, ...req.signal ? { signal: req.signal } : {} })
+    const routed = service.relayRequest({
+      kind: 'approval',
+      sessionId: origin.id,
+      subject: req.toolName,
+      toolName: req.toolName,
+      ...(req.reason ? { reason: req.reason } : {}),
+      ...(args !== undefined ? { arguments: args } : {}),
+      ...(origin.via ? { viaSubagent: true } : {}),
+      ...(origin.cwd ? { cwd: origin.cwd } : {}),
+      ...(req.signal ? { signal: req.signal } : {}),
+    })
     if (routed.decided === 'skip') return next()
     if (routed.decided === 'deny') {
       logger.info('approval.rule-denied', 'Approval denied automatically by Dot rule.', { sessionId: origin.id, tool: req.toolName })
@@ -341,6 +363,8 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
   const field = (payload: unknown, key: string): unknown => payload !== null && typeof payload === 'object' ? (payload as Record<string, unknown>)[key] : undefined
   const num = (payload: unknown, key: string): number => { const value = field(payload, key); return typeof value === 'number' && Number.isFinite(value) ? value : 0 }
   const str = (payload: unknown, key: string): string => { const value = field(payload, key); return typeof value === 'string' ? value : '' }
+  // The kit's 64 KiB default answers 413 before `say` runs. A PNG of about
+  // 51 KB does not fit after base64; the cap below fits the advertised images.
   ctx.effect(() => registerHostRpc(ctx as unknown as HostRpcContext, RPC_CHANNEL, async (endpoint, payload, signal) => {
     try {
       switch (endpoint) {
@@ -357,7 +381,8 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
         }
         case 'say': {
           const text = field(payload, 'text')
-          await service.say(typeof text === 'string' ? text.slice(0, 20_000) : '')
+          const images = checkChatImages(field(payload, 'images'))
+          await service.say(typeof text === 'string' ? text.slice(0, 20_000) : '', undefined, images)
           return { ok: true, value: true }
         }
         case 'card.pending': {
@@ -427,6 +452,44 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
           await service.setTaskPriority(str(payload, 'id'), priority)
           return { ok: true, value: true }
         }
+        case 'work.list': {
+          const rows = service.store.work.listChanges().map(change => service.workBoard(change.id)).filter(row => row !== undefined)
+          return { ok: true, value: rows }
+        }
+        case 'work.read': {
+          const kind = field(payload, 'kind')
+          if (kind !== 'evidence' && kind !== 'change') return { ok: false, error: { code: 'dot/invalid', message: 'kind must be evidence or change' } }
+          const read = service.readWorkSource(str(payload, 'id'), kind, str(payload, 'ref'), {
+            verificationId: str(payload, 'verificationId'), inputRef: str(payload, 'inputRef'), inputRevision: num(payload, 'inputRevision'),
+          })
+          if (!read.ok) return { ok: false, error: { code: `dot/${read.code}`, message: read.message } }
+          return { ok: true, value: { source: read.source, body: read.body } }
+        }
+        case 'work.accept': {
+          const result = await service.acceptWork(str(payload, 'id'), str(payload, 'verificationId'), str(payload, 'expectedInputRef'), str(payload, 'expectedSubjectKey'), 'user', {
+            expectedInputRevision: num(payload, 'expectedInputRevision'), expectedVerificationId: str(payload, 'verificationId'),
+          })
+          if (result && 'ok' in result && result.ok === false) return { ok: false, error: { code: result.code, message: result.message } }
+          return { ok: true, value: true }
+        }
+        case 'work.reject': {
+          const result = await service.rejectWork(str(payload, 'id'), str(payload, 'reviewRunId'), num(payload, 'expectedInputRevision'))
+          if (result && 'ok' in result && result.ok === false) return { ok: false, error: { code: result.code, message: result.message } }
+          return { ok: true, value: true }
+        }
+        case 'work.answer': {
+          try {
+            await service.answerWorkReview(str(payload, 'id'), field(payload, 'allow') === true)
+            return { ok: true, value: true }
+          } catch (error) {
+            return { ok: false, error: { code: error instanceof DotError ? error.code : 'dot/failed', message: messageOf(error) } }
+          }
+        }
+        case 'work.resume': {
+          const result = await service.resumeWorkCloseout(str(payload, 'id'))
+          if (result && 'ok' in result && result.ok === false) return { ok: false, error: { code: result.code, message: result.message } }
+          return { ok: true, value: true }
+        }
         case 'knowledge': return { ok: true, value: await service.knowledgeView() }
         // Panel edits of the agreements/cognition do not switch segments at once: the change is
         // picked up before the next message (prompt-changed), or folded in while the segment is untouched.
@@ -450,11 +513,16 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
           logger.info('settings.updated', 'Updated Dot settings via RPC.')
           return { ok: true, value: next }
         }
+        case 'factory.preview': return { ok: true, value: service.previewFactoryReset() }
+        case 'factory.reset': {
+          const token = field(payload, 'token')
+          return { ok: true, value: await service.confirmFactoryReset(typeof token === 'string' ? token : '') }
+        }
         default: return { ok: false, error: { code: 'not-found', message: `unknown endpoint: ${endpoint}` } }
       }
     } catch (error) {
       logger.error('rpc.handler-failed', 'Dot RPC request failed.', error, { endpoint })
       return { ok: false, error: { code: 'dot/failed', message: messageOf(error) } }
     }
-  }, { logger }), 'dot.rpc')
+  }, { logger, maxBodyBytes: CHAT_SAY_BODY_BYTES }), 'dot.rpc')
 }

@@ -50,6 +50,8 @@ describe('filterVisibleChat', () => {
     const unknown: ChatItem = { kind: 'tool', key: 'u', name: 'dot_schedule', args: { action: 'rename' }, status: 'done', at: 2, turn: 1 }
     const listed: ChatItem = { kind: 'tool', key: 'l', name: 'dot_schedule', args: { action: 'list' }, status: 'done', at: 2, turn: 1 }
     const created: ChatItem = { kind: 'tool', key: 'c', name: 'dot_workspace', args: { action: 'create' }, status: 'done', at: 2, turn: 1 }
+    const inspected: ChatItem = { kind: 'tool', key: 'i', name: 'dot_workspace', args: { action: 'inspect' }, status: 'done', at: 2, turn: 1 }
+    const files: ChatItem = { kind: 'tool', key: 'f', name: 'dot_workspace', args: { action: 'files' }, status: 'done', at: 2, turn: 1 }
     const moved: ChatItem = { kind: 'tool', key: 'm', name: 'dot_task', args: { action: 'move' }, status: 'done', at: 2, turn: 1 }
     const noted: ChatItem = { kind: 'tool', key: 't', name: 'dot_task', args: { action: 'note' }, status: 'done', at: 2, turn: 1 }
     expect(filterVisibleChat([notice, added, note]).items.map(item => item.key)).toEqual(['n', 'a', 'b'])
@@ -57,6 +59,8 @@ describe('filterVisibleChat', () => {
     expect(filterVisibleChat([notice, unknown, note]).items.map(item => item.key)).toEqual(['n', 'u', 'b'])
     expect(filterVisibleChat([notice, listed, note]).items).toEqual([])
     expect(filterVisibleChat([notice, created, note]).items.map(item => item.key)).toEqual(['n', 'c', 'b'])
+    expect(filterVisibleChat([notice, inspected, note]).items).toEqual([])
+    expect(filterVisibleChat([notice, files, note]).items).toEqual([])
     expect(filterVisibleChat([notice, moved, note]).items.map(item => item.key)).toEqual(['n', 'm', 'b'])
     expect(filterVisibleChat([notice, noted, note]).items.map(item => item.key)).toEqual(['n', 't', 'b'])
   })

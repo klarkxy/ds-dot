@@ -21,6 +21,7 @@ export interface PendingInput {
   readonly detail?: string
   readonly questions?: readonly PendingQuestionItem[]
   readonly signal?: AbortSignal
+  readonly humanRequired?: boolean
 }
 
 /** How a recent request ended. */
@@ -63,6 +64,7 @@ export class PendingHub {
       subject: input.subject,
       ...input.detail === undefined ? {} : { detail: input.detail },
       ...input.questions === undefined ? {} : { questions: input.questions },
+      ...input.humanRequired ? { humanRequired: true } : {},
     }
     const withdraw = () => { this.settle(id, undefined) }
     const entry: Entry = { view, resolve: finish }
@@ -105,6 +107,12 @@ export class PendingHub {
   dispose(): void {
     for (const id of [...this.entries.keys()]) this.settle(id, undefined)
     this.listeners.clear()
+  }
+
+  /** Drop every open request and forget recent settlements. Used by factory reset. */
+  reset(): void {
+    for (const id of [...this.entries.keys()]) this.settle(id, undefined)
+    this.settled.clear()
   }
 
   private settle(id: string, answer: PendingAnswer | undefined): boolean {

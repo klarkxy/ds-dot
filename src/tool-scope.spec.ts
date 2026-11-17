@@ -8,12 +8,12 @@ function scope(initial: string[]) {
   const global = new Set(initial)
   const filters = new Set<{ deny: readonly string[] }>()
   const calls: Array<{ deny: readonly string[] }> = []
-  const listeners = new Set<() => void>()
+  const listeners = new Map<string, Set<(...args: never[]) => unknown>>()
   const cleanups: Array<() => void> = []
   let depth = 0
   const notify = () => {
     if (++depth > 5) throw new Error('recursive restriction update')
-    try { for (const listener of listeners) listener() } finally { depth-- }
+    try { for (const listener of listeners.get('tools/change') ?? []) listener() } finally { depth-- }
   }
   const ctx = {
     tools: {
@@ -28,7 +28,12 @@ function scope(initial: string[]) {
         return () => { filters.delete(filter); notify() }
       },
     },
-    on(_event: string, listener: () => void) { listeners.add(listener); return () => { listeners.delete(listener) } },
+    on(event: string, listener: (...args: never[]) => unknown) {
+      const set = listeners.get(event) ?? new Set()
+      set.add(listener)
+      listeners.set(event, set)
+      return () => { set.delete(listener) }
+    },
     effect(start: () => (() => void)) { cleanups.push(start()) },
   }
   return {
@@ -37,7 +42,8 @@ function scope(initial: string[]) {
     remove(name: string) { global.delete(name); notify() },
     visible: () => [...global].filter(name => ![...filters].some(filter => filter.deny.includes(name))),
     dispose: () => cleanups.forEach(cleanup => cleanup()),
-    listenerCount: () => listeners.size,
+    listenerCount: () => [...listeners.values()].reduce((count, set) => count + set.size, 0),
+    gate: () => [...(listeners.get('tools/pre-execute') ?? [])][0] as ((exec: { name: string }, next: () => Promise<{ kind: string }>) => Promise<{ kind: string }>) | undefined,
   }
 }
 
@@ -96,6 +102,18 @@ describe('dot preset tool restrictions', () => {
     expect(HOST_WEB_TOOLS).toEqual(['web_search', 'web_fetch'])
   })
 
+  it('keeps dsh_docs and dsh_plugins when they exist, and does not require them', () => {
+    const allowed = [...DOT_INHERITED_ALLOW]
+    const s = scope([...Object.values(TOOL), 'show_view', 'pwsh'])
+    restrictInheritedTools(s.ctx as never, allowed)
+    expect(s.visible()).not.toContain('dsh_docs')
+    s.add('dsh_docs')
+    s.add('dsh_plugins')
+    expect(s.visible()).toContain('dsh_docs')
+    expect(s.visible()).toContain('dsh_plugins')
+    expect(s.visible()).not.toContain('pwsh')
+  })
+
   it('does not require web tools and denies a renamed global tool without dropping dot tools', () => {
     const allowed = [...DOT_INHERITED_ALLOW]
     const s = scope([...Object.values(TOOL), 'show_view', 'pwsh'])
@@ -109,5 +127,16 @@ describe('dot preset tool restrictions', () => {
     expect(s.visible()).toContain('web_search')
     expect(s.visible()).toContain('web_fetch')
     expect(s.visible()).not.toContain('pwsh')
+  })
+
+  it('denies a scoped tool the restrict list never sees', async () => {
+    const s = scope(['show_view'])
+    restrictInheritedTools(s.ctx as never, ['show_view'])
+    const gate = s.gate()
+    expect(gate).toBeTypeOf('function')
+    await expect(gate!({ name: 'scoped_secret' }, async () => ({ kind: 'allow' }))).resolves.toMatchObject({ kind: 'deny' })
+    await expect(gate!({ name: 'show_view' }, async () => ({ kind: 'allow' }))).resolves.toEqual({ kind: 'allow' })
+    s.dispose()
+    expect(s.listenerCount()).toBe(0)
   })
 })

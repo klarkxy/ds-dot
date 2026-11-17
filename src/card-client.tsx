@@ -85,6 +85,8 @@ export function createDotCards(call: (endpoint: string, payload: unknown) => Pro
     const [rpcExpired, setRpcExpired] = useState(false)
     const [busy, setBusy] = useState(false)
     const [failed, setFailed] = useState(false)
+    const [detailFailed, setDetailFailed] = useState(false)
+    const [answerStatus, setAnswerStatus] = useState<'answered' | 'busy'>()
     // Approval detail state: null = not loaded, undefined = not an approval card
     const [approvalDetail, setApprovalDetail] = useState<ApprovalDetail | null | undefined>(undefined)
     const [detailMissing, setDetailMissing] = useState(false)
@@ -99,7 +101,7 @@ export function createDotCards(call: (endpoint: string, payload: unknown) => Pro
     const expired = rpcExpired || presentationExpired
     useEffect(() => {
       let cancelled = false
-      setPending(false); setRpcExpired(false)
+      setPending(false); setRpcExpired(false); setDetailFailed(false); setAnswerStatus(undefined); setFailed(false); setAnswer(null)
       setApprovalDetail(undefined); setDetailMissing(false)
       setNotifyPending(false); setRetryFailed(false)
       if (!valid?.interactive || !id) return
@@ -121,13 +123,13 @@ export function createDotCards(call: (endpoint: string, payload: unknown) => Pro
               setDetailMissing(true)
             }
           }
-          // Only set pending/expired for cards that have not been answered yet.
-          if (!rec.answer) {
-            setPending(true)
-            setRpcExpired(rec.expired === true)
-          }
-        }
-      }, () => { if (!cancelled) setFailed(true) })
+          setRpcExpired(rec.expired === true)
+          if (rec.answer) {
+            setAnswer(checkedAnswer(rec.answer as Answer, id, valid.view))
+            setAnswerStatus('answered')
+          } else setPending(true)
+        } else setDetailFailed(true)
+      }, () => { if (!cancelled) setDetailFailed(true) })
       return () => { cancelled = true }
     // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [call, id, valid?.interactive])
@@ -139,8 +141,25 @@ export function createDotCards(call: (endpoint: string, payload: unknown) => Pro
         const np = res?.notificationPending === true
         setAnswer({ id, action, values }); setPending(false)
         setNotifyPending(np)
-      }, () => setFailed(true)).finally(() => setBusy(false))
-    }, [call, id, pending, expired, busy])
+      }, async failure => {
+        setPending(false)
+        try {
+          const record = await call('card.detail', { viewId: id })
+          if (!record || typeof record !== 'object' || (record as { id?: unknown }).id !== id) {
+            setDetailFailed(true)
+            return
+          }
+          const rec = record as { expired?: unknown; answer?: unknown; notificationPending?: unknown }
+          setNotifyPending(rec.notificationPending === true)
+          if (rec.answer) {
+            setAnswer(valid ? checkedAnswer(rec.answer as Answer, id, valid.view) : null)
+            setAnswerStatus('answered')
+          } else if (rec.expired === true) setRpcExpired(true)
+          else if (String(failure).includes('already being answered')) setAnswerStatus('busy')
+        } catch { setDetailFailed(true) }
+        setFailed(true)
+      }).finally(() => setBusy(false))
+    }, [call, id, pending, expired, busy, valid])
     const retryNotification = useCallback(() => {
       if (!id || retryBusy) return
       setRetryBusy(true); setRetryFailed(false)
@@ -170,7 +189,10 @@ export function createDotCards(call: (endpoint: string, payload: unknown) => Pro
             {retryFailed ? <span role="alert">{uiT(loc, 'notifyRetryFailed')}</span> : null}
           </div>
         )}
-        {failed && !notifyPending ? <p role="alert">{zh ? uiZh.answerFailed : uiEn.answerFailed}</p> : null}
+        {detailFailed ? <p role="alert">{uiT(loc, 'cardDetailFailed')}</p> : null}
+        {expired && !answer ? <p role="status">{uiT(loc, 'cardsHint')}</p> : null}
+        {answerStatus ? <p role="status">{uiT(loc, answerStatus === 'answered' ? 'cardAnswered' : 'cardAnswerBusy')}</p> : null}
+        {failed && !notifyPending && !expired && !answerStatus ? <p role="alert">{zh ? uiZh.answerFailed : uiEn.answerFailed}</p> : null}
       </div>
     )
   }

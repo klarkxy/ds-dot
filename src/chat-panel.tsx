@@ -10,7 +10,7 @@ import {
   IconDataOutlineRegular, IconSettingsOutlineRegular, IconUserOutlineRegular,
   MarkdownText, StateDot, Tag, TextShimmer, UserMessageBubble, type MarkdownLabels, type StateDotState, type TagTone,
 } from '@deepseek-ai/dsh-client-ui-primitives'
-import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ComponentType, type KeyboardEvent, type ReactNode } from 'react'
+import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ChangeEvent, type ClipboardEvent, type ComponentType, type KeyboardEvent, type ReactNode } from 'react'
 import { Board, type BoardActions } from './board.tsx'
 import { groupBoard, sessionLookup } from './board-groups.ts'
 import { filterVisibleChat } from './chat-filter.ts'
@@ -19,8 +19,12 @@ import { ContextPanel, type ContextApi } from './context-panel.tsx'
 import { PersonaPanel, type KnowledgeApi } from './persona-panel.tsx'
 import { TrajectoryPanel, type TrajectoryApi } from './trajectory-panel.tsx'
 import type { BoardView, ChatItem, ChatSnapshot, DotSettings, TicketPriority } from './contracts.ts'
+import { CHAT_IMAGE_LIMIT, ChatImageRejected, imageName, inspectImageBytes, type ChatImage, type ChatImageError } from './chat-images.ts'
 import { SettingsPanel, settingsCss, type SaveNotice, type SettingsApi } from './settings-panel.tsx'
+import type { RenderFactorySlot } from '@klarkxy/dsh-plugin-kit/model-picker'
 import { t, toolLabel, type CopyLocale } from './ui-copy.ts'
+import { WorkBoardPanel, type WorkApi } from './work-board.tsx'
+import type { WorkAcceptPayload, PendingGlance, WorkBoardItem, WorkReadRequest, WorkRejectPayload } from './work-board.ts'
 import { DotAvatar } from './whale.tsx'
 
 export const CHAT_ROOT = 'dsh-dot-chat'
@@ -34,7 +38,7 @@ const STICK_PX = 96
 export interface ChatApi extends SettingsApi, ContextApi, TrajectoryApi, KnowledgeApi {
   chat(itemsRev: number, signal: AbortSignal): Promise<ChatSnapshot | undefined>
   wait(rev: number, itemsRev: number, signal: AbortSignal): Promise<ChatSnapshot | undefined>
-  say(text: string): Promise<void>
+  say(text: string, images?: readonly ChatImage[]): Promise<void>
   stop(): Promise<void>
   board(signal: AbortSignal): Promise<BoardView>
   /** Remove one of Dorothy's reminders from the board. */
@@ -45,6 +49,12 @@ export interface ChatApi extends SettingsApi, ContextApi, TrajectoryApi, Knowled
   cancelTask(id: string): Promise<void>
   reviewTask(id: string, pass: boolean, note?: string): Promise<void>
   setTaskPriority(id: string, priority: TicketPriority): Promise<void>
+  workList?(signal: AbortSignal): Promise<readonly WorkBoardItem[]>
+  workAccept?(payload: WorkAcceptPayload): Promise<void>
+  workReject?(payload: WorkRejectPayload): Promise<void>
+  workAnswer?(payload: { readonly id: string; readonly allow: boolean }): Promise<void>
+  workResume?(payload: { readonly id: string }): Promise<void>
+  workRead?(request: WorkReadRequest): Promise<{ readonly source: string; readonly body: string }>
   settings(signal: AbortSignal): Promise<DotSettings>
 }
 
@@ -88,21 +98,26 @@ function useChatFeed(api: ChatApi): { state: ChatState; error?: string; retry: (
   return { state, ...error === undefined ? {} : { error }, retry: useCallback(() => setAttempt(value => value + 1), []) }
 }
 
-function useBoard(api: ChatApi): [BoardView | undefined, () => void] {
+function useBoard(api: ChatApi): [BoardView | undefined, string | undefined, () => void] {
   const [view, setView] = useState<BoardView>()
+  const [error, setError] = useState<string>()
   const [round, setRound] = useState(0)
   useEffect(() => {
     const lifetime = new AbortController()
     let timer: ReturnType<typeof setTimeout> | undefined
     const run = () => {
-      api.board(lifetime.signal).then(setView, () => {}).finally(() => {
+      api.board(lifetime.signal).then(next => {
+        if (!lifetime.signal.aborted) { setView(next); setError(undefined) }
+      }, failure => {
+        if (!lifetime.signal.aborted) setError(failure instanceof Error ? failure.message : String(failure))
+      }).finally(() => {
         if (!lifetime.signal.aborted) timer = setTimeout(run, BOARD_POLL_MS)
       })
     }
     run()
     return () => { lifetime.abort(); if (timer !== undefined) clearTimeout(timer) }
   }, [api, round])
-  return [view, useCallback(() => setRound(value => value + 1), [])]
+  return [view, error, useCallback(() => setRound(value => value + 1), [])]
 }
 
 function useSettings(api: ChatApi): [DotSettings | undefined, (next: DotSettings) => void] {
@@ -114,6 +129,8 @@ function useSettings(api: ChatApi): [DotSettings | undefined, (next: DotSettings
   }, [api])
   return [settings, setSettings]
 }
+
+const NO_PENDING: readonly PendingGlance[] = []
 
 export type Row =
   | { kind: 'item'; item: ChatItem; lead: boolean }
@@ -137,7 +154,7 @@ export function rowsOf(items: readonly ChatItem[]): Row[] {
 
 type SettingsTab = 'settings' | 'persona' | 'context' | 'trajectory'
 
-function SettingsDrawer({ locale, api, settings, tab, trajectoryRev, running, onTab, onSaved, onClose }: { locale: CopyLocale; api: ChatApi; settings?: DotSettings; tab: SettingsTab; trajectoryRev?: number; running: boolean; onTab: (tab: SettingsTab) => void; onSaved: (next: DotSettings) => void; onClose: () => void }) {
+function SettingsDrawer({ locale, api, settings, tab, trajectoryRev, running, onTab, onSaved, onClose, renderFactorySlot }: { locale: CopyLocale; api: ChatApi; settings?: DotSettings; tab: SettingsTab; trajectoryRev?: number; running: boolean; onTab: (tab: SettingsTab) => void; onSaved: (next: DotSettings) => void; onClose: () => void; renderFactorySlot?: RenderFactorySlot }) {
   const [saveNotice, setSaveNotice] = useState<SaveNotice>()
   const [proposalCount, setProposalCount] = useState(0)
   useEffect(() => {
@@ -203,7 +220,7 @@ function SettingsDrawer({ locale, api, settings, tab, trajectoryRev, running, on
           <div className="dsh-dot-settings-scroll">
             <div className="dsh-dot-settings" data-tab={tab} id={`dsh-dot-settings-panel-${tab}`} role="region" aria-label={activeItem.title}>
               {tab === 'settings'
-                ? <SettingsPanel locale={locale} api={api} {...settings ? { settings } : {}} onSaved={onSaved} onStatusChange={setSaveNotice} onProposalCount={setProposalCount} />
+                ? <SettingsPanel locale={locale} api={api} {...settings ? { settings } : {}} onSaved={onSaved} onStatusChange={setSaveNotice} onProposalCount={setProposalCount} {...renderFactorySlot ? { renderFactorySlot } : {}} />
                 : tab === 'persona'
                   ? <PersonaPanel locale={locale} api={api} {...settings ? { settings } : {}} onSaved={onSaved} onStatusChange={setSaveNotice} />
                   : tab === 'context'
@@ -223,13 +240,21 @@ export interface ChatPanelProps {
   readonly api: ChatApi
   readonly Card?: CardComponent
   readonly onOpenSession: (sessionId: string) => void
+  readonly renderFactorySlot?: RenderFactorySlot
 }
 
-export function ChatPanel({ locale, api, Card, onOpenSession }: ChatPanelProps) {
+export function ChatPanel({ locale, api, Card, onOpenSession, renderFactorySlot }: ChatPanelProps) {
   const { state, error, retry } = useChatFeed(api)
-  const [board, refreshBoard] = useBoard(api)
+  const [board, boardError, refreshBoard] = useBoard(api)
   const [boardNotice, setBoardNotice] = useState<string>()
   const removeSchedule = useCallback((id: string) => { void api.removeSchedule(id).then(refreshBoard, refreshBoard) }, [api, refreshBoard])
+  const workApi = useMemo<WorkApi | undefined>(() => {
+    if (!api.workList || !api.workAccept || !api.workReject || !api.workAnswer || !api.workResume) return undefined
+    return {
+      workList: api.workList, workAccept: api.workAccept, workReject: api.workReject, workAnswer: api.workAnswer, workResume: api.workResume,
+      ...(api.workRead ? { workRead: api.workRead } : {}),
+    }
+  }, [api])
   const boardActions = useMemo<BoardActions>(() => {
     // A failed action keeps the board as it is and says why; either way the board is read again.
     const run = (work: Promise<unknown>) => {
@@ -247,7 +272,7 @@ export function ChatPanel({ locale, api, Card, onOpenSession }: ChatPanelProps) 
   const snapshot = state.snapshot
   const running = snapshot?.running === true
   const streaming = snapshot?.streaming ?? ''
-  const [echoes, setEchoes] = useState<{ text: string; at: number }[]>([])
+  const [echoes, setEchoes] = useState<{ text: string; at: number; images: readonly ChatImage[] }[]>([])
   const [sendError, setSendError] = useState<string>()
   const [boardOpen, setBoardOpen] = useState(false)
   const [settingsOpen, setSettingsOpen] = useState(false)
@@ -258,7 +283,7 @@ export function ChatPanel({ locale, api, Card, onOpenSession }: ChatPanelProps) 
   // A local echo leaves once the log holds a matching message sent after it.
   // Filtered during render as well, so the frame that brings the logged copy
   // never shows both.
-  const delivered = useCallback((echo: { text: string; at: number }) => state.items.some(item => item.kind === 'user' && item.text.trim() === echo.text && item.at >= echo.at - 5_000), [state.items])
+  const delivered = useCallback((echo: { text: string; at: number; images: readonly ChatImage[] }) => state.items.some(item => item.kind === 'user' && item.text.trim() === echo.text && (item.images?.length ?? 0) === echo.images.length && item.at >= echo.at - 5_000), [state.items])
   const pendingEchoes = useMemo(() => echoes.filter(echo => !delivered(echo)), [echoes, delivered])
   useEffect(() => {
     if (echoes.length === 0) return
@@ -267,13 +292,14 @@ export function ChatPanel({ locale, api, Card, onOpenSession }: ChatPanelProps) 
     if (left.length !== echoes.length) setEchoes(left)
   }, [echoes, delivered])
 
-  const send = useCallback(async (text: string) => {
+  const send = useCallback(async (text: string, images: readonly ChatImage[]) => {
     setSendError(undefined)
-    const echo = { text, at: Date.now() }
+    const echo = { text, at: Date.now(), images }
     setEchoes(list => [...list, echo])
-    try { await api.say(text) } catch (failure) {
+    try { await api.say(text, images) } catch (failure) {
       setEchoes(list => list.filter(item => item !== echo))
-      setSendError(failure instanceof Error ? failure.message : String(failure))
+      const message = failure instanceof Error ? failure.message : String(failure)
+      setSendError(/\bHTTP 413\b/.test(message) ? t(locale, 'sendTooLarge') : message)
       throw failure
     }
   }, [api])
@@ -318,7 +344,7 @@ export function ChatPanel({ locale, api, Card, onOpenSession }: ChatPanelProps) 
         </Button>
       </header>
       <div className="dsh-dot-main">
-      {boardOpen ? <div className="dsh-dot-boardwrap"><Board locale={locale} view={board} {...boardNotice === undefined ? {} : { notice: boardNotice }} onOpen={onOpenSession} onRetry={() => {}} onRemoveSchedule={removeSchedule} {...boardActions} /></div> : null}
+      {boardOpen ? <div className="dsh-dot-boardwrap">{workApi ? <WorkBoardPanel locale={locale} api={workApi} pending={board?.pending ?? NO_PENDING} /> : null}<Board locale={locale} view={board} {...boardError === undefined ? {} : { error: boardError }} {...boardNotice === undefined ? {} : { notice: boardNotice }} onOpen={onOpenSession} onRetry={refreshBoard} onRemoveSchedule={removeSchedule} {...boardActions} /></div> : null}
       <div className="dsh-dot-scroll" ref={scroller} onScroll={onScroll}>
         <div className="dsh-dot-log">
           {snapshot === undefined && error === undefined ? <div className="dsh-dot-center"><DotAvatar size={56} /><span className="dsh-dot-muted">{t(locale, 'loading')}</span></div> : null}
@@ -330,7 +356,7 @@ export function ChatPanel({ locale, api, Card, onOpenSession }: ChatPanelProps) 
             </div>
           ) : null}
           {rows.map(row => <Fragment key={row.kind === 'tools' ? 'tools:' + row.key : row.item.key}>{renderRow(row, { locale, labels, Card, sessionId: snapshot?.sessionId ?? '', answers: state.answers, hiddenRequestIds: filtered.hiddenRequestIds, tasks: tasksBySession, onOpenSession })}</Fragment>)}
-          {pendingEchoes.map(echo => <div key={'echo:' + echo.at} className="dsh-dot-user dsh-dot-echo"><UserMessageBubble>{echo.text}</UserMessageBubble></div>)}
+          {pendingEchoes.map(echo => <div key={'echo:' + echo.at} className="dsh-dot-user dsh-dot-echo"><UserMessageBubble>{echo.text}</UserMessageBubble>{echo.images.length > 0 ? <ImageNotes locale={locale} images={echo.images.map(image => ({ mediaType: image.mediaType, ...(image.name ? { name: image.name } : {}) }))} /> : null}</div>)}
           {preparingCard ? <BotLine lead={!lastTool}><span role="status"><TextShimmer active>{t(locale, 'cardPreparing')}</TextShimmer></span></BotLine> : null}
           {showThinking ? <BotLine lead={!lastTool}><TextShimmer active>{t(locale, 'thinking')}</TextShimmer></BotLine> : null}
         </div>
@@ -342,7 +368,7 @@ export function ChatPanel({ locale, api, Card, onOpenSession }: ChatPanelProps) 
         </div>
       ) : null}
       <Composer locale={locale} running={running} disabled={snapshot === undefined} onSend={send} onStop={() => { void api.stop() }} {...sendError === undefined ? {} : { error: sendError }} />
-      {settingsOpen ? <SettingsDrawer locale={locale} api={api} {...settings ? { settings } : {}} tab={settingsTab} {...snapshot ? { trajectoryRev: snapshot.itemsRev } : {}} running={running} onTab={setSettingsTab} onSaved={setSettings} onClose={() => setSettingsOpen(false)} /> : null}
+      {settingsOpen ? <SettingsDrawer locale={locale} api={api} {...settings ? { settings } : {}} tab={settingsTab} {...snapshot ? { trajectoryRev: snapshot.itemsRev } : {}} running={running} onTab={setSettingsTab} onSaved={setSettings} onClose={() => setSettingsOpen(false)} {...renderFactorySlot ? { renderFactorySlot } : {}} /> : null}
       </div>
     </div>
   )
@@ -373,8 +399,14 @@ function renderRow(row: Row, context: RenderContext): ReactNode {
   const item = row.item
   switch (item.kind) {
     case 'user':
+      return (
+        <div className="dsh-dot-user">
+          {item.text ? <UserMessageBubble>{item.text}</UserMessageBubble> : null}
+          {item.images && item.images.length > 0 ? <ImageNotes locale={context.locale} images={item.images} /> : null}
+        </div>
+      )
     case 'answer':
-      return <div className={'dsh-dot-user' + (item.kind === 'answer' ? ' dsh-dot-answer' : '')}><UserMessageBubble>{item.text}</UserMessageBubble></div>
+      return <div className="dsh-dot-user dsh-dot-answer"><UserMessageBubble>{item.text}</UserMessageBubble></div>
     case 'notice':
       return <Notice locale={context.locale} text={item.text} hiddenRequestIds={context.hiddenRequestIds} tasks={context.tasks} onOpenSession={context.onOpenSession} />
     case 'segment':
@@ -666,31 +698,106 @@ function Notice({ locale, text, hiddenRequestIds, tasks, onOpenSession }: { loca
   )
 }
 
-function Composer({ locale, running, disabled, error, onSend, onStop }: { locale: CopyLocale; running: boolean; disabled: boolean; error?: string; onSend: (text: string) => Promise<void>; onStop: () => void }) {
+function imageErrorText(locale: CopyLocale, code: ChatImageError): string {
+  switch (code) {
+    case 'unsupported': return t(locale, 'imageUnsupported')
+    case 'too-large': return t(locale, 'imageTooLarge')
+    case 'too-many': return t(locale, 'imageTooMany')
+    case 'mismatch': return t(locale, 'imageMismatch')
+    default: return t(locale, 'imageInvalid')
+  }
+}
+
+function bytesToBase64(bytes: Uint8Array): string {
+  let binary = ''
+  const step = 0x8000
+  for (let index = 0; index < bytes.length; index += step) {
+    binary += String.fromCharCode(...bytes.subarray(index, index + step))
+  }
+  return btoa(binary)
+}
+
+async function readImageFile(file: File): Promise<ChatImage> {
+  const bytes = new Uint8Array(await file.arrayBuffer())
+  const inspected = inspectImageBytes(bytes, file.type)
+  if (!inspected.ok) throw new ChatImageRejected(inspected.error)
+  const name = imageName(file.name)
+  return { mediaType: inspected.mediaType, data: bytesToBase64(bytes), ...(name ? { name } : {}) }
+}
+
+function ImageNotes({ locale, images }: { locale: CopyLocale; images: readonly { readonly mediaType: string; readonly name?: string }[] }) {
+  return (
+    <div className="dsh-dot-images">
+      {images.map((image, index) => <span key={`${image.name ?? image.mediaType}:${index}`} className="dsh-dot-image-chip">{t(locale, 'imageAttached')}{image.name ? ` · ${image.name}` : ''}</span>)}
+    </div>
+  )
+}
+
+function Composer({ locale, running, disabled, error, onSend, onStop }: { locale: CopyLocale; running: boolean; disabled: boolean; error?: string; onSend: (text: string, images: readonly ChatImage[]) => Promise<void>; onStop: () => void }) {
   const [text, setText] = useState('')
+  const [images, setImages] = useState<ChatImage[]>([])
   const [busy, setBusy] = useState(false)
+  const [localError, setLocalError] = useState<string>()
   const area = useRef<HTMLTextAreaElement>(null)
+  const picker = useRef<HTMLInputElement>(null)
   useLayoutEffect(() => {
     const el = area.current
     if (!el) return
     el.style.height = 'auto'
     el.style.height = Math.min(el.scrollHeight, 200) + 'px'
   }, [text])
+  const addFiles = useCallback(async (files: readonly File[]) => {
+    setLocalError(undefined)
+    const next = [...images]
+    for (const file of files) {
+      if (next.length >= CHAT_IMAGE_LIMIT) { setLocalError(imageErrorText(locale, 'too-many')); break }
+      try { next.push(await readImageFile(file)) } catch (failure) {
+        setLocalError(failure instanceof ChatImageRejected ? imageErrorText(locale, failure.code) : imageErrorText(locale, 'invalid'))
+        break
+      }
+    }
+    setImages(next)
+  }, [images, locale])
   const submit = useCallback(() => {
     const body = text.trim()
-    if (!body || busy || disabled) return
+    if ((!body && images.length === 0) || busy || disabled) return
     setBusy(true)
-    onSend(body).then(() => setText(''), () => {}).finally(() => { setBusy(false); area.current?.focus() })
-  }, [text, busy, disabled, onSend])
+    const sending = images
+    onSend(body, sending).then(() => { setText(''); setImages([]) }, () => {}).finally(() => { setBusy(false); area.current?.focus() })
+  }, [text, images, busy, disabled, onSend])
   const onKeyDown = useCallback((event: KeyboardEvent<HTMLTextAreaElement>) => {
     if (event.key !== 'Enter' || event.shiftKey || event.nativeEvent.isComposing || event.keyCode === 229) return
     event.preventDefault()
     submit()
   }, [submit])
+  const onPaste = useCallback((event: ClipboardEvent<HTMLTextAreaElement>) => {
+    const files = [...event.clipboardData.files]
+    if (files.length === 0) return
+    event.preventDefault()
+    void addFiles(files)
+  }, [addFiles])
+  const onPick = useCallback((event: ChangeEvent<HTMLInputElement>) => {
+    const files = [...event.target.files ?? []]
+    event.target.value = ''
+    if (files.length > 0) void addFiles(files)
+  }, [addFiles])
+  const shownError = localError ?? error
   return (
     <div className="dsh-dot-composer">
-      {error !== undefined ? <div className="dsh-dot-error">{t(locale, 'sendFailed')}{error}</div> : null}
+      {shownError !== undefined ? <div className="dsh-dot-error">{localError !== undefined ? shownError : `${t(locale, 'sendFailed')}${shownError}`}</div> : null}
+      {images.length > 0 ? (
+        <div className="dsh-dot-images">
+          {images.map((image, index) => (
+            <span key={`${image.name ?? image.mediaType}:${index}`} className="dsh-dot-image-chip">
+              {image.name ?? t(locale, 'imageAttached')}
+              <button type="button" aria-label={t(locale, 'removeImage')} onClick={() => setImages(list => list.filter((_, item) => item !== index))}>×</button>
+            </span>
+          ))}
+        </div>
+      ) : null}
       <div className="dsh-dot-inputrow">
+        <input ref={picker} className="dsh-dot-file" type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple onChange={onPick} />
+        <Button variant="outline" size="sm" disabled={disabled || busy} aria-label={t(locale, 'attachImage')} onClick={() => picker.current?.click()}>{t(locale, 'attachImage')}</Button>
         <textarea
           ref={area}
           className="dsh-dot-input"
@@ -699,10 +806,11 @@ function Composer({ locale, running, disabled, error, onSend, onStop }: { locale
           placeholder={running ? t(locale, 'placeholderRunning') : t(locale, 'placeholder')}
           onChange={event => setText(event.target.value)}
           onKeyDown={onKeyDown}
+          onPaste={onPaste}
           disabled={disabled}
         />
         {running ? <Button variant="outline" size="sm" onClick={onStop}>{t(locale, 'stop')}</Button> : null}
-        <Button variant="primary" size="sm" disabled={disabled || busy || !text.trim()} onClick={submit}>{busy ? t(locale, 'sending') : t(locale, 'send')}</Button>
+        <Button variant="primary" size="sm" disabled={disabled || busy || (!text.trim() && images.length === 0)} onClick={submit}>{busy ? t(locale, 'sending') : t(locale, 'send')}</Button>
       </div>
     </div>
   )
@@ -964,6 +1072,16 @@ export const chatCss = settingsCss + `
   flex: 1; min-width: 0; resize: none; border: 0; outline: none; background: transparent;
   color: var(--dsw-alias-label-primary); font: inherit; font-size: 14px; line-height: 22px;
   padding: 3px 0; max-height: 200px;
+}
+.dsh-dot-chat .dsh-dot-file { display: none; }
+.dsh-dot-chat .dsh-dot-images { display: flex; flex-wrap: wrap; gap: 6px; }
+.dsh-dot-chat .dsh-dot-image-chip {
+  display: inline-flex; align-items: center; gap: 6px; max-width: 100%;
+  padding: 2px 8px; border-radius: var(--dsw-radius-sm); background: var(--dsw-alias-bg-layer-2);
+  font-size: 12px; line-height: 18px; color: var(--dsw-alias-label-secondary);
+}
+.dsh-dot-chat .dsh-dot-image-chip button {
+  border: 0; background: transparent; color: inherit; cursor: pointer; padding: 0; font: inherit;
 }
 .dsh-dot-chat .dsh-dot-input::placeholder { color: var(--dsw-alias-label-dimmed); }
 `

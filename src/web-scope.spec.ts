@@ -24,6 +24,7 @@ function scopeFixture(parent?: object) {
           return () => { for (const cleanup of cleanups.reverse()) cleanup() }
         },
         reflect: { provide(_name: string, service: WebRuntime) { scoped.web = service; isolated = service } },
+        events: { dispatch() { return [] } },
         systemPrompt: {
           getSectionOrder() { return 50 },
           section() { return () => {} },

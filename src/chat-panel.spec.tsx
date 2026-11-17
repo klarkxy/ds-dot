@@ -64,6 +64,64 @@ function makeApi(snapshot: ChatSnapshot): ChatApi {
 }
 
 describe('ChatPanel activity and notice cards', () => {
+  it('shows a board failure and retries immediately', async () => {
+    const snapshot: ChatSnapshot = { sessionId: 'dot-1', running: false, streaming: '', rev: 1, itemsRev: 1, items: [] }
+    const api = makeApi(snapshot)
+    api.board = vi.fn().mockRejectedValueOnce(new Error('offline')).mockResolvedValue({ tasks: [], tickets: [], pending: [], schedules: [] })
+    const root = createRoot(document.getElementById('root')!)
+    await act(async () => { root.render(<ChatPanel locale="en" api={api} onOpenSession={() => {}} />) })
+    await act(async () => { [...document.querySelectorAll('button')].find(button => button.textContent?.startsWith('Tasks'))!.click() })
+    expect(document.body.textContent).toContain('offline')
+    await act(async () => { [...document.querySelectorAll('button')].find(button => button.textContent === 'Retry')!.click() })
+    expect(api.board).toHaveBeenCalledTimes(2)
+    expect(document.body.textContent).not.toContain('offline')
+    await act(async () => root.unmount())
+  })
+
+  it.each(['expired', 'answered', 'busy', 'detailFailed'] as const)('refreshes a rejected card answer: %s', async state => {
+    const view = { type: 'confirm', id: 'ok' }
+    let reads = 0
+    const call = vi.fn(async (endpoint: string) => {
+      if (endpoint === 'card.answer') throw new Error(state === 'busy' ? 'This card is already being answered' : 'rejected')
+      if (reads++ === 0) return { id: 'card', expired: false }
+      if (state === 'detailFailed') throw new Error('offline')
+      return { id: 'card', expired: state === 'expired', ...(state === 'answered' ? { answer: { id: 'card', action: 'ok', values: { confirmed: true } } } : {}) }
+    })
+    const { Card } = createDotCards(call)
+    const root = createRoot(document.getElementById('root')!)
+    await act(async () => { root.render(<Card sessionId="s" callId="c" presentation={{ title: 'Confirm', view, viewId: 'card' }} />) })
+    const confirm = [...document.querySelectorAll<HTMLButtonElement>('.dvui-root button')].find(button => button.textContent === 'Confirm')!
+    await act(async () => { confirm.click() })
+    expect(call.mock.calls.filter(([endpoint]) => endpoint === 'card.detail')).toHaveLength(2)
+    const expected = { expired: 'This card has expired', answered: 'already been answered', busy: 'being processed', detailFailed: 'Could not load card status' }[state]
+    expect(document.body.textContent).toContain(expected)
+    const button = [...document.querySelectorAll<HTMLButtonElement>('.dvui-root button')].find(item => item.textContent === 'Confirm')
+    expect(!button || button.disabled).toBe(true)
+    await act(async () => root.unmount())
+  })
+  it('restores notification retry after an answer response is lost', async () => {
+    const view = { type: 'confirm', id: 'ok' }
+    let reads = 0
+    const call = vi.fn(async (endpoint: string) => {
+      if (endpoint === 'card.answer') throw new Error('network response lost')
+      if (endpoint === 'card.detail') return reads++ === 0
+        ? { id: 'card', expired: false, approvalId: 'approval-1' }
+        : { id: 'card', expired: false, approvalId: 'approval-1', answer: { id: 'card', action: 'ok', values: { confirmed: true } }, notificationPending: true }
+      return true
+    })
+    const { Card } = createDotCards(call)
+    const root = createRoot(document.getElementById('root')!)
+    await act(async () => { root.render(<Card sessionId="s" callId="c" presentation={{ title: 'Confirm', view, viewId: 'card' }} />) })
+    const confirm = [...document.querySelectorAll<HTMLButtonElement>('button')].find(button => button.textContent === 'Confirm')!
+    await act(async () => { confirm.click() })
+    expect(reads).toBe(2)
+    const retry = document.querySelector<HTMLButtonElement>('.dsh-dot-notify-retry button')
+    expect(retry).not.toBeNull()
+    await act(async () => { retry!.click() })
+    expect(call).toHaveBeenCalledWith('card.retryNotification', { viewId: 'card' })
+    expect(document.querySelector('.dsh-dot-notify-retry')).toBeNull()
+    await act(async () => root.unmount())
+  })
   it('keeps an idle-check card failure through row layout and on screen', async () => {
     const idle: ChatItem = { kind: 'notice', key: 'n', text: '[dot notice] Updates:\nTasks:\n- idle-check · dot: Routine check', at: 1, turn: 1, trigger: 'background' }
     const failed: ChatItem = { kind: 'view', key: 'bad', failed: true, at: 2, turn: 1, trigger: 'background' }
@@ -520,7 +578,7 @@ describe('ChatPanel activity and notice cards', () => {
     expect(drawer.querySelector('.dsh-dot-settings-title')?.textContent).toBe('设置')
 
     // Trigger a save and confirm the non-jumping header status appears.
-    const trackedTab = [...drawer.querySelectorAll<HTMLButtonElement>('[role="tab"]')].find(node => node.textContent === '仅她跟进的任务')!
+    const trackedTab = [...drawer.querySelectorAll<HTMLButtonElement>('[role="tab"]')].find(node => node.textContent === '所有会话')!
     await act(async () => { trackedTab.click() })
     await act(async () => { await Promise.resolve() })
     expect(drawer.querySelector('.dsh-dot-settings-status')?.textContent).toContain('已保存')
@@ -542,5 +600,46 @@ describe('ChatPanel activity and notice cards', () => {
     expect(document.querySelector('[role="dialog"]')).toBeNull()
 
     await act(async () => { root.unmount() })
+  })
+})
+
+describe('Composer images', () => {
+  const proto = dom.window.HTMLElement.prototype as HTMLElement & { attachEvent?: () => void; detachEvent?: () => void }
+  proto.attachEvent = () => {}
+  proto.detachEvent = () => {}
+  const PNG_B64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=='
+
+  async function pick(file: File) {
+    const input = document.querySelector<HTMLInputElement>('input.dsh-dot-file')!
+    Object.defineProperty(input, 'files', { configurable: true, value: [file] })
+    await act(async () => { input.dispatchEvent(new dom.window.Event('change', { bubbles: true })) })
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 0)) })
+  }
+
+  it('keeps a picture and says the message is too large when the host answers 413', async () => {
+    const snapshot: ChatSnapshot = { sessionId: 'dot-1', running: false, streaming: '', rev: 1, itemsRev: 1, items: [] }
+    const api = makeApi(snapshot)
+    api.say = async () => { throw new Error('transport failure for /dsh-dot/say: HTTP 413') }
+    const root = createRoot(document.getElementById('root')!)
+    await act(async () => { root.render(<ChatPanel locale="en" api={api} onOpenSession={() => {}} />) })
+    await pick(new File([Uint8Array.from(Buffer.from(PNG_B64, 'base64'))], 'dot.png', { type: 'image/png' }))
+    expect(document.body.textContent).toContain('dot.png')
+    await act(async () => { [...document.querySelectorAll('button')].find(button => button.textContent === 'Send')!.click() })
+    await act(async () => { await Promise.resolve() })
+    expect(document.body.textContent).toContain('Not sent: That message is too large')
+    expect(document.body.textContent).toContain('8 MB')
+    expect(document.body.textContent).not.toContain('HTTP 413')
+    expect(document.body.textContent).toContain('dot.png')
+    await act(async () => root.unmount())
+  })
+
+  it('says what is wrong with a file that is not an image', async () => {
+    const snapshot: ChatSnapshot = { sessionId: 'dot-1', running: false, streaming: '', rev: 1, itemsRev: 1, items: [] }
+    const root = createRoot(document.getElementById('root')!)
+    await act(async () => { root.render(<ChatPanel locale="en" api={makeApi(snapshot)} onOpenSession={() => {}} />) })
+    await pick(new File([Uint8Array.from([1, 2, 3, 4])], 'note.txt', { type: 'text/plain' }))
+    expect(document.body.textContent).toContain('Only PNG, JPEG, WebP and GIF')
+    expect(document.body.textContent).not.toContain('note.txt')
+    await act(async () => root.unmount())
   })
 })

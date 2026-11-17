@@ -235,6 +235,7 @@ export function Board({ locale, view, error, notice, onOpen, onRetry, onRemoveSc
   return (
     <div className={BOARD_ROOT}>
       <div className="dsh-ui-stack">
+        {error !== undefined ? <div className="dsh-ui-row" role="alert"><span className="dsh-ui-error">{t(locale, 'loadFailed')}: {error}</span><Button variant="ghost" onClick={onRetry}>{t(locale, 'retry')}</Button></div> : null}
         {notice ? <div className="dsh-ui-error" role="alert">{t(locale, 'taskActionFailed')}{notice}</div> : null}
         {empty ? <p className="dsh-ui-hint">{t(locale, 'empty')}</p> : null}
         {groups.waitingCount > 0 ? (

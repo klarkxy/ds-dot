@@ -44,10 +44,12 @@ describe('dot approval instructions', () => {
     expect(DOT_INSTRUCTIONS).not.toContain('${TOOL.')
     const lines = DOT_INSTRUCTIONS.split('\n')
     const expectedTools: Array<[string, string[]]> = [
-      ['- A goal arrives:', [TOOL.startTask]],
-      ['- An ordinary supplement arrives:', [TOOL.task, TOOL.sendToSession, TOOL.interruptSession]],
-      ['- A work session ends:', [TOOL.read, TOOL.task]],
-      ['- Review fails:', [TOOL.task]],
+      ['- A goal arrives:', [TOOL.task]],
+      ['- Dispatch a run:', [TOOL.task, TOOL.startTask]],
+      ['- An ordinary supplement arrives:', [TOOL.task]],
+      ['- A run reports done or fails:', [TOOL.task]],
+      ['- Verify the delivery:', [TOOL.task]],
+      ['- Close out:', [TOOL.task]],
     ]
     for (const [prefix, tools] of expectedTools) {
       const line = lines.find((entry) => entry.startsWith(prefix))
@@ -56,24 +58,45 @@ describe('dot approval instructions', () => {
     }
   })
 
-  it('keeps task responsibility after a turn and infers routine acceptance criteria', () => {
-    expect(DOT_INSTRUCTIONS).toContain('Ending your current turn does not end your responsibility for a task')
-    expect(DOT_INSTRUCTIONS).toContain('reasonable, verifiable acceptance criteria yourself')
+  it('keeps change responsibility after a turn and infers routine acceptance criteria', () => {
+    expect(DOT_INSTRUCTIONS).toContain('Ending your current turn does not end your responsibility for a change')
+    expect(DOT_INSTRUCTIONS).toContain('verifiable acceptance criteria yourself')
     expect(DOT_INSTRUCTIONS).toContain('scope, authorization or an important trade-off')
   })
 
   it('waits for notifications instead of polling or repeating supplements', () => {
-    expect(DOT_INSTRUCTIONS).toContain('If nothing else can move, end your turn and wait for notifications')
-    expect(DOT_INSTRUCTIONS).toContain('relay the supplement once')
+    expect(DOT_INSTRUCTIONS).toContain('end your turn and wait for notifications')
+    expect(DOT_INSTRUCTIONS).toContain('action=supplement')
+    expect(DOT_INSTRUCTIONS).toContain('a refusal means the input moved on')
     expect(DOT_INSTRUCTIONS).toContain('do not resend or poll for it')
     expect(DOT_INSTRUCTIONS).toContain('do not repeatedly read, resend or nudge')
-    expect(DOT_INSTRUCTIONS).toContain('This does not cancel or interrupt current work')
+    expect(DOT_INSTRUCTIONS).toContain('no matter how casually the human phrases it')
+    expect(DOT_INSTRUCTIONS).toContain('never resend the same content through another path')
+    expect(DOT_INSTRUCTIONS).toContain('One investigation at a time')
+    expect(DOT_INSTRUCTIONS).toContain('retry action=finish only when something actually changed')
+    expect(DOT_INSTRUCTIONS).toContain('end that turn silently')
   })
 
-  it('organizes review failure, acceptance and the next queued task into one loop', () => {
+  it('covers change, reservation, supplement, settlement, verification and closeout', () => {
+    for (const action of ['action=create', 'action=revise', 'action=supplement', 'action=reserve', 'action=baseline', 'action=step', 'action=finish', 'action=subject', 'action=verify', 'action=reject', 'action=accept', 'action=pause', 'action=resume', 'action=cancel']) {
+      expect(DOT_INSTRUCTIONS).toContain(action)
+    }
+    expect(DOT_INSTRUCTIONS).toContain('a finished session turn is not a finished change')
+    expect(DOT_INSTRUCTIONS).toContain('a completed run is not an accepted verification')
     expect(DOT_INSTRUCTIONS).toContain('specific failed criteria and evidence')
     expect(DOT_INSTRUCTIONS).toContain('conflicting criteria or missing authorization')
-    expect(DOT_INSTRUCTIONS).toContain('advance any todo task released by the directory lock')
+    expect(DOT_INSTRUCTIONS).toContain('After three consecutive unsuccessful verification rounds, ask the human')
+  })
+
+  it('keeps UNKNOWN and refusal semantics instead of blind retries', () => {
+    for (const phrase of ['conflict, quota, baseline, stale, unknown, recovery, closed and cancelled', 'are durable facts, not retry hints', 'reconcile instead of repeating the call', 'never fabricate a fresh session or second prompt']) {
+      expect(DOT_INSTRUCTIONS).toContain(phrase)
+    }
+    expect(DOT_INSTRUCTIONS).toContain('An unknown stop keeps the run occupied')
+    expect(DOT_INSTRUCTIONS).toContain('do not free its paths or reuse them for a new run')
+    for (const phrase of ['even with small argument changes', 'is still that fact', 'take a safe alternate path', 'escalate to the human', 'never repeat the same action without new evidence']) {
+      expect(DOT_INSTRUCTIONS).toContain(phrase)
+    }
   })
 
   it('includes four generic patterns rather than embedding acceptance prompts', () => {
@@ -82,26 +105,30 @@ describe('dot approval instructions', () => {
     for (const phrase of ['picnic', 'dinner-plan', 'weekend-note', 'quiet-note', 'alpha.txt', 'beta.txt']) expect(DOT_INSTRUCTIONS).not.toContain(phrase)
   })
 
-  it('keeps directory preflight and treats build or test verification as write work', () => {
+  it('keeps workspace preflight and whole-workspace review', () => {
     expect(DOT_INSTRUCTIONS).toContain('with check_only')
     expect(DOT_INSTRUCTIONS).toContain("their own session is running there")
-    expect(DOT_INSTRUCTIONS).toContain('verification that runs builds or tests, or writes temporary data, is a write task')
-    expect(DOT_INSTRUCTIONS).toContain("shares the task's directory lock")
-    expect(DOT_INSTRUCTIONS).not.toContain('Use read-only access for research and review.')
+    expect(DOT_INSTRUCTIONS).toContain('a review run reserves the whole workspace')
+    expect(DOT_INSTRUCTIONS).toContain('reserve the review run first')
+    expect(DOT_INSTRUCTIONS).not.toContain('role=review')
   })
 
-  it('normally assigns independent review and knows when to stop or wait for the human', () => {
-    expect(DOT_INSTRUCTIONS).toContain('open a new session with role=review')
-    expect(DOT_INSTRUCTIONS).toContain('reports conclusions without changing the deliverable')
-    expect(DOT_INSTRUCTIONS).toContain('review small tasks yourself')
-    expect(DOT_INSTRUCTIONS).toContain('After three consecutive unsuccessful review rounds, ask the human')
-    expect(DOT_INSTRUCTIONS).toContain('set human_review and move the task to review')
-    expect(DOT_INSTRUCTIONS).toContain('move it to done only after their confirmation')
-  })
-
-  it('keeps cancellation separate from permission to clean up the directory', () => {
-    expect(DOT_INSTRUCTIONS).toContain('When cancelling a task, report what remains in its directory')
+  it('keeps cancellation separate from permission to clean up the workspace', () => {
+    expect(DOT_INSTRUCTIONS).toContain('each open run is settled in turn')
+    expect(DOT_INSTRUCTIONS).toContain('report what remains in its workspace')
     expect(DOT_INSTRUCTIONS).toContain('do not automatically clean up deliverables or intermediate files')
+  })
+
+  it('keeps step attribution tied to the run\'s own result on the current input', () => {
+    expect(DOT_INSTRUCTIONS).toContain('step_refs')
+    expect(DOT_INSTRUCTIONS).toContain('stable ids')
+    expect(DOT_INSTRUCTIONS).toContain('a readable result')
+    expect(DOT_INSTRUCTIONS).toContain('an accepted first prompt is not a result')
+    expect(DOT_INSTRUCTIONS).toContain('belongs to whoever wrote it next')
+    expect(DOT_INSTRUCTIONS).toContain('behavior_notes')
+    expect(DOT_INSTRUCTIONS).toContain('max_concurrent')
+    expect(DOT_INSTRUCTIONS).toContain('execution configuration')
+    expect(DOT_INSTRUCTIONS).toContain('changing it alone does not make a new input')
   })
 
   it('keeps identity in the persona section and facts independent of its tone', () => {
@@ -114,12 +141,12 @@ describe('dot approval instructions', () => {
   })
 
   it('drafts and proposes persona changes without erasing cognition', () => {
-    expect(DOT_INSTRUCTIONS).toContain('If they give only a name, start a read task to research the character before drafting')
+    expect(DOT_INSTRUCTIONS).toContain('If they give only a name, start a read run to research the character before drafting')
     expect(DOT_INSTRUCTIONS).toContain('action=propose, field=persona')
     expect(DOT_INSTRUCTIONS).toContain('Changing persona never clears or archives cognition')
   })
 
-  it('allows small talk from memory only with an unverified caveat and checks exact answers in a task', () => {
+  it('allows small talk from memory only with an unverified caveat and checks exact answers in a run', () => {
     expect(DOT_INSTRUCTIONS).toContain('from memory and unverified')
     expect(DOT_INSTRUCTIONS).toContain('look it up yourself with web_search')
     expect(DOT_INSTRUCTIONS).toContain('web_fetch')

@@ -62,7 +62,6 @@ export class DotCards {
   }
 }
 
-export function cardAnswerText(card: DotCardRecord, answer: ViewAnswer, expired: boolean): string {
-  const prefix = expired ? '补答已过期卡片' : '答复卡片'
-  return `[${prefix} #${card.number}「${card.title}」] ${answerText(card, answer.action, answer.values)}`
+export function cardAnswerText(card: DotCardRecord, answer: ViewAnswer): string {
+  return `[答复卡片 #${card.number}「${card.title}」] ${answerText(card, answer.action, answer.values)}`
 }

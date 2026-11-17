@@ -9,6 +9,7 @@ import { z } from 'zod'
 import type { ViewNode } from '@klarkxy/dsh-deep-view/contracts'
 import { SETTING_FIELDS, type CognitionVersion, type DotContextUsage, type DotUsageOffset, type ReflectionRun, type ScheduleRecord, type SettingProposal, type TaskRecord, type Ticket } from './contracts.ts'
 import type { PastSegment, Segment } from './segments.ts'
+import { changeSchema, inputSchema, runSchema, storedVerificationSchema } from './work.ts'
 
 export const STATE_KEY = 'current'
 
@@ -105,6 +106,7 @@ const scheduleSchema = z.object({
   createdAt: z.number(),
   nextAt: z.number(),
   lastFiredAt: z.number().optional(),
+  deliveredAt: z.number().optional(),
 }).strict()
 
 const usageSchema = z.object({
@@ -177,6 +179,8 @@ const stateSchema = z.object({
   reflections: z.array(reflectionRunSchema).optional(),
   usageCarry: usageSchema.optional(),
   usageOffset: usageOffsetSchema.optional(),
+  /** When the human last restored factory settings. Survives the wipe as the audit. */
+  lastFactoryResetAt: z.number().optional(),
 }).strict()
 
 const proposalValueSchema = z.union([z.string(), z.number(), z.boolean(), z.null(), z.record(z.string(), z.unknown()), z.array(z.unknown())])
@@ -242,6 +246,8 @@ export interface DotState {
   readonly usageCarry?: DotContextUsage
   /** Segment usage subtracted after the human clears cumulative totals mid-segment. */
   readonly usageOffset?: DotUsageOffset
+  /** When the human last restored factory settings. */
+  readonly lastFactoryResetAt?: number
 }
 
 export function parseSettingProposal(value: unknown): SettingProposal | undefined {
@@ -249,17 +255,38 @@ export function parseSettingProposal(value: unknown): SettingProposal | undefine
   return parsed.success ? parsed.data as SettingProposal : undefined
 }
 
+export const peerDeliverySchema = z.object({
+  id: z.string().min(1),
+  senderSessionId: z.string().min(1),
+  targetSessionId: z.string().min(1),
+  text: z.string(),
+  status: z.enum(['intent', 'accepted', 'unknown']),
+  updatedAt: z.number(),
+}).strict()
+
+export type PeerDelivery = z.infer<typeof peerDeliverySchema>
+
+export function parsePeerDelivery(value: unknown): PeerDelivery | undefined {
+  const parsed = peerDeliverySchema.safeParse(value)
+  return parsed.success ? parsed.data : undefined
+}
+
 export const dotDomain = defineDomain({
   name: 'klarkxy_dsh_dot',
-  // v4 adds tickets while retaining v1–v3 state and task rows.
-  version: 4,
-  compatibleVersions: [1, 2, 3],
+  // v6 adds peer-delivery rows and still reads v1–v5 rows.
+  version: 6,
+  compatibleVersions: [1, 2, 3, 4, 5],
   tables: {
     state: domainTable<string, DotState>(stateSchema),
     tasks: domainTable<string, StoredTaskRecord>(storedTaskSchema),
     tickets: domainTable<string, Ticket>(ticketSchema),
     schedules: domainTable<string, ScheduleRecord>(scheduleSchema),
     proposals: domainTable<string, SettingProposal>(proposalSchema),
+    changes: domainTable(changeSchema),
+    inputs: domainTable(inputSchema),
+    runs: domainTable(runSchema),
+    verifications: domainTable(storedVerificationSchema),
+    peers: domainTable<string, PeerDelivery>(peerDeliverySchema),
   },
 })
 

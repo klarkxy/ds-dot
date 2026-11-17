@@ -145,8 +145,18 @@ export function formatReminders(due: readonly ScheduleRecord[], now: number): st
   return lines.join('\n')
 }
 
+/** A once reminder already handed off. It stays as an audit row and must not wake again. */
+export function onceDelivered(record: ScheduleRecord): boolean {
+  return record.timing.kind === 'once' && record.deliveredAt !== undefined
+}
+
 /** The reminders as dot reads them in the list tool. */
 export function scheduleLines(records: readonly ScheduleRecord[]): string {
   if (records.length === 0) return `No reminders set. ${TOOL.schedule} (action=add) sets one.`
-  return records.map(record => `- ${record.id} "${record.title}" (${describeTiming(record.timing)}; next ${stamp(record.nextAt)}): ${entryText(record.prompt)}`).join('\n')
+  return records.map(record => {
+    if (onceDelivered(record)) {
+      return `- ${record.id} "${record.title}" (once; delivered ${stamp(record.deliveredAt!)}; will not fire again): ${entryText(record.prompt)}`
+    }
+    return `- ${record.id} "${record.title}" (${describeTiming(record.timing)}; next ${stamp(record.nextAt)}): ${entryText(record.prompt)}`
+  }).join('\n')
 }

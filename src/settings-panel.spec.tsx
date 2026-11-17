@@ -91,3 +91,78 @@ describe('routine check setting', () => {
     await act(async () => root.unmount())
   })
 })
+
+describe('factory reset', () => {
+  it('previews the wipe then confirms with the issued token', async () => {
+    const tokens: string[] = []
+    const api = {
+      models: async () => ({ groups: [] }),
+      settings: async () => current,
+      settingProposals: async () => [],
+      decideSetting: async () => 'ok',
+      setSettings: async (patch: Partial<DotSettings>) => { current = { ...current, ...patch } as DotSettings; return current },
+      previewFactoryReset: async () => ({
+        token: 'tok-1', expiresAt: Date.now() + 60_000,
+        tasks: 2, tickets: 1, changes: 3, runs: 1, schedules: 0, proposals: 0, cards: 0,
+        ownedSessions: 1, pastSegments: 0, reflections: 0, hasAgreements: true, hasCognition: false,
+        archiveSessionIds: ['s-owned'],
+      }),
+      confirmFactoryReset: async (token: string) => { tokens.push(token); current = { ...DEFAULT_SETTINGS }; return { archived: ['s-owned'], archiveFailed: [], sessionId: 'dot-new', at: 1 } },
+    }
+    let current: DotSettings = { ...DEFAULT_SETTINGS, scope: 'all' }
+    function Harness() {
+      const [settings, setSettings] = useState<DotSettings>(current)
+      return <SettingsPanel locale="en" api={api as never} settings={settings} onSaved={setSettings} />
+    }
+    const root = createRoot(document.getElementById('root')!)
+    await act(async () => root.render(<Harness />))
+    await act(async () => { await Promise.resolve() })
+    expect(document.body.textContent).toContain('Factory reset')
+    expect(document.body.textContent).toContain('Your own sessions, project files and the host persona')
+    const previewBtn = [...document.querySelectorAll('button')].find(button => button.textContent === 'Preview what will be cleared')!
+    await act(async () => previewBtn.click())
+    await act(async () => { await Promise.resolve() })
+    expect(document.body.textContent).toContain('2 task(s)')
+    expect(document.body.textContent).toContain('Agreements will be cleared')
+    const confirm = [...document.querySelectorAll('button')].find(button => button.textContent === 'Restore factory settings')!
+    await act(async () => confirm.click())
+    await act(async () => { await Promise.resolve() })
+    expect(tokens).toEqual(['tok-1'])
+    expect(document.body.textContent).toContain('Factory settings restored.')
+    await act(async () => root.unmount())
+  })
+
+  it('shows an aborted reset instead of pretending it succeeded', async () => {
+    const api = {
+      models: async () => ({ groups: [] }),
+      settings: async () => current,
+      settingProposals: async () => [],
+      decideSetting: async () => 'ok',
+      setSettings: async (patch: Partial<DotSettings>) => { current = { ...current, ...patch } as DotSettings; return current },
+      previewFactoryReset: async () => ({
+        token: 'tok-2', expiresAt: Date.now() + 60_000,
+        tasks: 1, tickets: 0, changes: 1, runs: 1, schedules: 0, proposals: 0, cards: 0,
+        ownedSessions: 1, pastSegments: 0, reflections: 0, hasAgreements: false, hasCognition: false,
+        archiveSessionIds: ['writer-1'],
+      }),
+      confirmFactoryReset: async () => { throw new Error('factory reset aborted: 1 session(s) not settled (writer-1: owned jobs UNKNOWN). Stop them first, then retry.') },
+    }
+    let current: DotSettings = { ...DEFAULT_SETTINGS }
+    function Harness() {
+      const [settings, setSettings] = useState<DotSettings>(current)
+      return <SettingsPanel locale="en" api={api as never} settings={settings} onSaved={setSettings} />
+    }
+    const root = createRoot(document.getElementById('root')!)
+    await act(async () => root.render(<Harness />))
+    await act(async () => { await Promise.resolve() })
+    const previewBtn = [...document.querySelectorAll('button')].find(button => button.textContent === 'Preview what will be cleared')!
+    await act(async () => previewBtn.click())
+    await act(async () => { await Promise.resolve() })
+    const confirm = [...document.querySelectorAll('button')].find(button => button.textContent === 'Restore factory settings')!
+    await act(async () => confirm.click())
+    await act(async () => { await Promise.resolve() })
+    expect(document.body.textContent).toContain('owned jobs UNKNOWN')
+    expect(document.body.textContent).not.toContain('Factory settings restored.')
+    await act(async () => root.unmount())
+  })
+})

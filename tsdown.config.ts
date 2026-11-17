@@ -1,9 +1,16 @@
 import { spawnSync } from 'node:child_process'
+import { existsSync } from 'node:fs'
+import { createRequire } from 'node:module'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { defineConfig, type UserConfig } from 'tsdown'
 
 const wrapClient: NonNullable<UserConfig['plugins']>[number] = {
   name: 'wrap-dsh-client',
-  closeBundle() {
+  // writeBundle runs after this config's files land. closeBundle also fires on
+  // the host config in some tsdown runs, when client.inner is not there yet.
+  writeBundle() {
+    if (!existsSync('lib/client.inner.cjs') && !existsSync('lib/client.inner.js')) return
     const result = spawnSync(process.execPath, ['scripts/wrap-client.mjs', 'ds-dot'], { stdio: 'inherit' })
     if (result.status !== 0) throw new Error(`client wrap exited ${result.status ?? 'unknown'}`)
   },
@@ -26,6 +33,28 @@ const hostExternal = [
   'zod',
   '@klarkxy/dsh-deep-view',
 ]
+
+function deepViewBrowserFile(pkg: string, from: string, to: string): string | undefined {
+  try {
+    const widgetRequire = createRequire(fileURLToPath(import.meta.resolve('@klarkxy/dsh-deep-view/widget')))
+    const resolved = widgetRequire.resolve(pkg)
+    const browser = resolved.endsWith(from) ? resolved.slice(0, -from.length) + to : join(dirname(resolved), to)
+    return existsSync(browser) ? browser : undefined
+  } catch {
+    return undefined
+  }
+}
+
+const vegaCanvasBrowser = deepViewBrowserFile('vega-canvas', 'vega-canvas.node.js', 'vega-canvas.browser.js')
+const vegaLoaderBrowser = deepViewBrowserFile('vega-loader', 'vega-loader.node.js', 'vega-loader.browser.js')
+
+const richViewAlias: NonNullable<UserConfig['plugins']>[number] = {
+  name: 'deep-view-browser-canvas',
+  resolveId(id) {
+    if (id === 'vega-canvas' && vegaCanvasBrowser) return vegaCanvasBrowser
+    if (id === 'vega-loader' && vegaLoaderBrowser) return vegaLoaderBrowser
+  },
+}
 
 export default defineConfig([
   {
@@ -62,12 +91,15 @@ export default defineConfig([
     target: 'es2022',
     sourcemap: true,
     hash: false,
-    plugins: [wrapClient],
+    define: { 'process.env.NODE_ENV': '"production"' },
+    outputOptions: options => ({ ...options, codeSplitting: false }),
+    plugins: [richViewAlias, wrapClient],
     deps: {
       neverBundle: ['react', 'react/jsx-runtime', 'react-dom', '@deepseek-ai/dsh-client-ui-primitives'],
       alwaysBundle: [
         '@klarkxy/dsh-plugin-kit/official-ui',
         '@klarkxy/dsh-plugin-kit/model-menu',
+        '@klarkxy/dsh-plugin-kit/model-picker',
         '@klarkxy/dsh-plugin-kit/client-logger',
         '@klarkxy/dsh-plugin-kit/log-shared',
         '@klarkxy/dsh-deep-view/widget',
@@ -75,6 +107,12 @@ export default defineConfig([
         '@klarkxy/dsh-deep-view/answers',
         '@klarkxy/dsh-deep-view/copy',
         '@klarkxy/dsh-deep-view/contracts',
+        '@xyflow/react',
+        'mafs',
+        'maplibre-gl',
+        'vega',
+        'vega-embed',
+        'vega-lite',
       ],
     },
     outExtensions: () => ({ dts: '.d.ts', js: '.cjs' }),

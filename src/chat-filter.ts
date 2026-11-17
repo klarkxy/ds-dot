@@ -44,7 +44,8 @@ const READ_ONLY_TOOLS: ReadonlySet<string> = new Set([
 /** list/read are queries. A missing or unknown action is a change, so the turn stays visible. */
 function isQueryTool(tool: ToolItem): boolean {
   const action = typeof tool.args?.action === 'string' ? tool.args.action : undefined
-  if (tool.name === TOOL.workspace || tool.name === TOOL.schedule) return action === 'list'
+  if (tool.name === TOOL.workspace) return action === 'list' || action === 'inspect' || action === 'files'
+  if (tool.name === TOOL.schedule) return action === 'list'
   if (tool.name === TOOL.task) return action === 'read' || action === 'list'
   return READ_ONLY_TOOLS.has(tool.name)
 }

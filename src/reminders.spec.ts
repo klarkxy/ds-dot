@@ -74,7 +74,7 @@ describe('ReminderClock', () => {
     expect(h.delivered[0]).toContain('check the build')
     expect(h.delivered[0]).toContain('look at the board')
     expect(h.delivered[0]).not.toContain('not yet')
-    expect(h.store.schedule(once.id)).toBeUndefined()
+    expect(h.store.schedule(once.id)).toMatchObject({ deliveredAt: START + 10 * MINUTE, lastFiredAt: START + 10 * MINUTE })
     expect(h.store.schedule(every.id)).toMatchObject({ nextAt: START + 20 * MINUTE, lastFiredAt: START + 10 * MINUTE })
     expect(h.wait()).toBe(10 * MINUTE)
     // Nothing is due: a tick only sets the timer again.
@@ -93,29 +93,39 @@ describe('ReminderClock', () => {
     await h.clock.tick()
     expect(h.delivered).toHaveLength(1)
     expect(h.delivered[0]).toContain('delivered late')
-    expect(h.store.schedule(once.id)).toBeUndefined()
+    expect(h.store.schedule(once.id)).toMatchObject({ deliveredAt: START + 5 * 60 * MINUTE })
     expect(h.store.schedule(every.id)!.nextAt).toBe(START + 330 * MINUTE)
     await h.clock.tick()
     expect(h.delivered).toHaveLength(1)
   })
 
-  it('keeps reminders due when the delivery fails and tries again a minute later', async () => {
+  it('does not wake the same once reminder again after a failed ack or a restart', async () => {
     const h = setup()
     h.clock.start()
     const once = await h.clock.add({ title: 'once', prompt: 'call back', afterMinutes: 1 })
+    const every = await h.clock.add({ title: 'pulse', prompt: 'look again', everyMinutes: 1 })
     h.advance(MINUTE)
     h.fail(true)
     await h.clock.tick()
     expect(h.delivered).toEqual([])
-    expect(h.store.schedule(once.id)).toBeDefined()
-    expect(h.wait()).toBe(MINUTE)
+    expect(h.store.schedule(once.id)).toMatchObject({ deliveredAt: START + MINUTE })
+    expect(h.store.schedule(every.id)?.lastFiredAt).toBeUndefined()
     expect(h.logs.join('\n')).toContain('dot is unreachable')
     h.fail(false)
     h.advance(MINUTE)
     await h.clock.tick()
     expect(h.delivered).toHaveLength(1)
-    expect(h.store.schedules).toEqual([])
-    expect(h.wait()).toBeUndefined()
+    expect(h.delivered[0]).toContain('look again')
+    expect(h.delivered[0]).not.toContain('call back')
+    const again = new ReminderClock({
+      store: h.store,
+      now: () => START + 2 * MINUTE + 1_000,
+      deliver: async text => { h.delivered.push(text) },
+    })
+    again.start()
+    await again.tick()
+    expect(h.delivered).toHaveLength(1)
+    expect(h.store.schedule(once.id)?.deliveredAt).toBe(START + MINUTE)
   })
 
   it('leaves a reminder removed while it was being delivered', async () => {

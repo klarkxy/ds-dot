@@ -34,6 +34,16 @@ describe('chatItems', () => {
     expect(items[1]).toMatchObject({ key: '1', text: 'please check it' })
   })
 
+  it('keeps an image-only human message and names the attachment', () => {
+    const items = chatItems([
+      ev(1, 'user/message', {
+        content: [{ type: 'image', attachment: { mediaType: 'image/png', name: 'dot.png' } }],
+        source: { kind: 'user' },
+      }),
+    ])
+    expect(items).toMatchObject([{ kind: 'user', text: '', images: [{ mediaType: 'image/png', name: 'dot.png' }] }])
+  })
+
   it('splits an agreement note carried by a human message into a separate chat row', () => {
     const note = '[dot agreement notes]\nYour background reflection pass noticed something.'
     const items = chatItems([

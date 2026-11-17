@@ -26,6 +26,7 @@ describe('parseSettings', () => {
   })
 
   it('defaults a fresh install to workspace write and keeps a saved permission', () => {
+    expect(DEFAULT_SETTINGS.scope).toBe('tracked')
     expect(DEFAULT_SETTINGS.taskPermission).toBe('workspace-write')
     expect(parseSettings({}).taskPermission).toBe('workspace-write')
     expect(parseSettings({ taskPermission: 'danger-full-access' }).taskPermission).toBe('danger-full-access')

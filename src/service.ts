@@ -5,14 +5,21 @@
  * entry wires host events into it; the preset child plugin exposes its
  * operations as model tools.
  */
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { mkdir } from 'node:fs/promises'
-import { isAbsolute, resolve } from 'node:path'
+import { isAbsolute, join, resolve } from 'node:path'
+import { APPROVAL_DETAIL_LIMIT, approvalNotice } from './approval-risk.ts'
+import { writerPrior, evidenceRefGap, isForeignEvidenceId, type DeliverySubject, type SubjectLook } from './acceptance.ts'
+import { captureScope, readSnapshot, saveSnapshot, baselineCaptures, sha256, type SnapshotSource } from './artifacts.ts'
+import { bindRunSession, cancelWork, countRelayInserts, finishWork, launchReservedRun, observeRun, reconcileRun, supplementRun } from './execution.ts'
+import { absoluteScopePath, canonicalPath, occupantsConflict, scopeWithinRoot, scopeWrites, workspaceIdentity, type ChangeRecord, type Occupant, type Requirement, type RunRecord, type StepSpec, type WorkRefusal, type WriteScope } from './work.ts'
 import type { ShownView, ViewAnswer } from '@klarkxy/dsh-deep-view/contracts'
 import { DotCards, cardAnswerText, type DotCardRecord } from './card-state.ts'
+import { checkChatImages, type ChatImage } from './chat-images.ts'
 import { cardText } from './cards.ts'
 import { NoticeBatcher, formatNotices, type Notice, type Timer } from './batcher.ts'
 import { ZERO_USAGE, addUsage, combineUsage, netSegmentUsage, usageFromEvents } from './context.ts'
-import { PRESET_ID, TOOL, type BoardView, type DotContextSections, type DotContextUsage, type DotContextView, type KnowledgeView, type ModelChoice, type PendingKind, type PendingQuestionItem, type ReflectionRun, type RolloverReason, type RuleConfig, type TrajectoryView } from './contracts.ts'
+import { PRESET_ID, TOOL, type BoardView, type DotContextSections, type DotContextUsage, type DotContextView, type FactoryResetPreview, type FactoryResetResult, type KnowledgeView, type ModelChoice, type PendingKind, type PendingQuestionItem, type ReflectionRun, type RolloverReason, type RuleConfig, type TrajectoryView } from './contracts.ts'
 import { SUMMARY_INSTRUCTION, SUMMARY_MAX_TOKENS, buildHandoff, type Handoff } from './handoff.ts'
 import { READ_ROWS_DEFAULT, READ_ROWS_MAX, SEARCH_LIMIT_DEFAULT, SEARCH_LIMIT_MAX, SEARCH_SESSIONS_MAX, formatRead, formatSearch, historyRows, queryTerms, searchRows, windowRows, type SessionHits } from './history.ts'
 import { type DotHost, type WorkspaceRow } from './host.ts'
@@ -24,6 +31,7 @@ import { ACCEPTED_DELIVERY_HINT, IDLE_SILENCE_HINT, QUEUED_INSTRUCTION_HINT, rev
 import { DOT_TRACE, emitDotTrace, type DotTraceInput } from './trace.ts'
 import type { Ticket, TicketAccess, TicketPriority, TicketStatus, SessionRole } from './contracts.ts'
 import { AGREEMENTS_MAX_CHARS, COGNITION_MAX_CHARS, KnowledgeError, MemoryNotes, addEntry, agreementNotesBlock, agreementsSection, cognitionSection, normalizeAgreements, normalizeCognition, policyAsAgreements, removeEntry } from './memory.ts'
+import { deliverPeer, PeerLedger, refreshChildSeals, sealChildSession, type PeerSendInput } from './peer.ts'
 import { PendingHub, type PendingAnswer } from './pending.ts'
 import { personaSection } from './persona.ts'
 import { ReflectionRunner } from './reflection.ts'
@@ -32,6 +40,8 @@ import { routeRequest } from './rules.ts'
 import { ScheduleInputError, describeTiming, scheduleLines, type ScheduleInput } from './schedule.ts'
 import { openingText, reasonAfterTurn, reasonBeforeDelivery, type Segment } from './segments.ts'
 import type { DotStore } from './store.ts'
+import { factoryResetArchiveIds, factoryResetCounts, factoryResetStopGap, factoryResetTokenError, issueFactoryResetToken, type FactoryResetStopEvidence } from './factory-reset.ts'
+import { formatWorkspaceFiles, listWorkspaceFiles as listWorkspaceTree, WORKSPACE_LIST_MAX } from './workspace-inspect.ts'
 import { eventTier } from './tiers.ts'
 import { TaskModelError, formatTaskModels, modelKey, pickTaskModel, type TaskModelCatalog } from './task-models.ts'
 import { TaskPresetError, pickTaskPreset, type TaskPresetCatalog, type TaskPresetChoice } from './task-presets.ts'
@@ -54,6 +64,14 @@ export interface DotServiceOptions {
   readonly log?: (message: string) => void
   /** Existing plugin logger. Absent in tests; a write failure never changes the decision. */
   readonly trace?: Parameters<typeof emitDotTrace>[0]
+  /** Durable peer-delivery rows. Absent only in tests that never send one. */
+  readonly peers?: PeerLedger
+  /**
+   * Tests of the old ticket lifecycle opt in. Production leaves this unset, so
+   * ticket create/update/move, dispatch, supplement, cancel and review refuse
+   * before they take a lock or start a session.
+   */
+  readonly legacyWorkEntries?: boolean
 }
 
 /** The legacy note files; only migration reads them, and a missing file reads as empty. */
@@ -102,6 +120,11 @@ export class DotService {
   private migration?: Promise<void>
   private requestedSegment?: { focus?: string }
   private readonly retryingCardNotifications = new Set<string>()
+  /** Decision wakes already queued in this process. The durable mark is notifiedAt. */
+  private readonly decisionWakes = new Set<string>()
+  private readonly childRefreshers = new Set<() => void>()
+  private readonly childReleases = new Map<string, () => void>()
+  private resetArmed?: { readonly token: string; readonly expiresAt: number }
   readonly cards: DotCards
   /** The single background reflection pass; the reminder clock ticks its gate. */
   readonly reflection: ReflectionRunner
@@ -111,6 +134,7 @@ export class DotService {
     this.now = options.now ?? Date.now
     this.notes = options.notes ?? new MemoryNotes(options.homeDir)
     this.pending = new PendingHub(this.now)
+    this.pending.onChange(() => { void this.pruneApprovalDetails() })
     this.selfSettings = new SelfSettings(this)
     this.reflection = new ReflectionRunner({
       host: options.host,
@@ -164,6 +188,85 @@ export class DotService {
     return sessionId !== undefined && sessionId === this.store.dotSessionId
   }
 
+  /** Deny child-session tools on one agent and register dot_peer. A repeat is a no-op. */
+  sealAgent(agent: unknown): void {
+    const sealed = sealChildSession(agent, input => this.peerSend(input), this.childRefreshers)
+    const id = (agent as { session?: { id?: unknown } } | null)?.session?.id
+    if (sealed.applied && typeof id === 'string') {
+      this.childReleases.set(id, sealed.release)
+      this.emit({ event: DOT_TRACE.childSealed, message: `Sealed child-session tools on ${id}.`, sessionId: id })
+    }
+  }
+
+  refreshChildSeals(): void { refreshChildSeals(this.childRefreshers) }
+
+  /** Drop one sealed agent so a closed session does not keep its context alive. */
+  releaseChildSeal(sessionId: string): void {
+    const release = this.childReleases.get(sessionId)
+    if (!release) return
+    this.childReleases.delete(sessionId)
+    release()
+  }
+
+  releaseChildSeals(): void {
+    const releases = [...this.childReleases.values()]
+    this.childReleases.clear()
+    this.childRefreshers.clear()
+    for (const release of releases) release()
+  }
+
+  /** Seal only a session this ledger already records as one dot opened. */
+  sealIfOwned(agent: unknown): void {
+    const id = (agent as { session?: { id?: unknown } } | null)?.session?.id
+    if (typeof id !== 'string' || this.isDot(id) || !this.store.ownsSession(id)) return
+    this.sealAgent(agent)
+  }
+
+  /** Best-effort seal for sessions that were already open when the plugin started. */
+  async sealExisting(): Promise<void> {
+    const prepare = this.host.prepareOwnedSession
+    if (!prepare) return
+    for (const sessionId of this.store.ownedSessionIds()) {
+      try { await prepare.call(this.host, sessionId) } catch { /* the next status event seals a live agent */ }
+    }
+  }
+
+  peerSend(input: PeerSendInput): Promise<string> {
+    const ledger = this.options.peers
+    if (!ledger) return Promise.resolve('Error [dot/peer-unavailable]: peer delivery is not available; nothing was sent.')
+    return ledger.run(() => deliverPeer(input, {
+      now: () => this.now(),
+      owns: id => this.store.ownsSession(id),
+      get: id => ledger.read(id),
+      put: row => ledger.write(row),
+      prove: async (target, sender, deliveryId, text) => {
+        try { return countRelayInserts(await this.host.readEvents(target), deliveryId, sender, text) } catch { return undefined }
+      },
+      relay: async (target, sender, text, deliveryId) => {
+        await this.host.relay(target, sender, text, deliveryId, () => this.peerTarget(target).ok)
+      },
+      hold: (target, sender, deliveryId, text) => this.store.work.holdPeer(target, sender, deliveryId, text, this.now()),
+      release: (target, deliveryId, status) => this.store.work.settlePeer(target, deliveryId, status, this.now()),
+      admit: target => this.peerTarget(target),
+      trace: (event, message, data) => this.emit({
+        event,
+        message,
+        ...(typeof data.senderSessionId === 'string' ? { sessionId: data.senderSessionId } : {}),
+        data,
+      }),
+    }))
+  }
+
+  /** Same delivery gate as a supplement: the target run is active and still holds its current input. */
+  private peerTarget(sessionId: string): { readonly ok: true } | { readonly ok: false; readonly message: string } {
+    const run = this.store.work.sessionRun(sessionId)
+    if (!run) return { ok: false, message: `${sessionId} has no run; nothing was sent. Read the board instead of messaging a finished session.` }
+    if (run.phase !== 'active') return { ok: false, message: `${run.id} is ${run.phase}; nothing was sent. Read the board instead of messaging a finished session.` }
+    const allowed = this.store.work.dispatchAllowed(run.id)
+    if (!allowed.ok) return { ok: false, message: `${allowed.message}; nothing was sent.` }
+    return { ok: true }
+  }
+
   /**
    * Return dot's live session, resuming it after a restart and creating it on
    * first use. A stored session that cannot be reopened is followed by a new
@@ -186,15 +289,15 @@ export class DotService {
           await mkdir(this.options.homeDir, { recursive: true })
           const sessionId = await this.host.createDot(this.options.homeDir, PRESET_ID)
           await this.store.beginSegment({ sessionId, startedAt: this.now(), ...await this.frozen() })
-          return sessionId
+          return this.openedDot(sessionId)
         }
         if (await this.host.resumeDot(existing, PRESET_ID)) {
           // A session from before segments existed gets its record on first use.
           if (!this.store.segment) await this.store.beginSegment({ sessionId: existing, startedAt: this.now(), ...await this.frozen() })
-          return existing
+          return this.openedDot(existing)
         }
         await mkdir(this.options.homeDir, { recursive: true })
-        return await this.rollover(existing, 'lost')
+        return this.openedDot(await this.rollover(existing, 'lost'))
       } finally {
         this.ensuring = undefined
       }
@@ -202,17 +305,18 @@ export class DotService {
     return this.ensuring
   }
 
-  /** The human's message from dot's chat panel. */
-  async say(text: string, cardReply?: { card: DotCardRecord; answer: ViewAnswer }): Promise<void> {
+  /** The human's message from dot's chat panel. Images are admitted with the text. */
+  async say(text: string, cardReply?: { card: DotCardRecord; answer: ViewAnswer }, images?: readonly ChatImage[]): Promise<void> {
     const body = text.trim()
-    if (!body) throw new DotError('dot/invalid', 'message must be non-empty')
+    const pictures = checkChatImages(images)
+    if (!body && pictures.length === 0) throw new DotError('dot/invalid', 'message must be non-empty')
     await this.serial(async () => {
       const dot = await this.ready()
       // The human already wakes dot, so carried updates join the same message
       // instead of becoming a separate model turn of their own.
       const notices = this.liveNotices(this.batcher.take())
       const card = cardReply && this.store.cards.find(row => row.id === cardReply.card.id)
-      const message = cardReply ? cardAnswerText(card ?? cardReply.card, cardReply.answer, card?.expired === true) : body
+      const message = cardReply ? cardAnswerText(card ?? cardReply.card, cardReply.answer) : body
       // A pending agreement note from the reflection pass rides the same carried
       // prefix as batched updates; it reaches dot once and is cleared after delivery.
       const agreementNotes = this.store.agreementNotes.trim()
@@ -221,7 +325,7 @@ export class DotService {
         notices.length > 0 ? this.formatQueuedNotices(notices) : '',
       ].filter(Boolean).join('\n\n')
       try {
-        await this.host.say(dot, message, carried || undefined, cardReply?.answer)
+        await this.host.say(dot, message, carried || undefined, cardReply?.answer, pictures.length > 0 ? pictures : undefined)
       } catch (error) {
         this.batcher.restore(this.liveNotices(notices))
         throw error
@@ -371,6 +475,122 @@ export class DotService {
     return 'A fresh segment will start when this turn ends. Finish your reply normally; it will be carried into the handoff.'
   }
 
+  previewFactoryReset(): FactoryResetPreview {
+    this.assertOpen()
+    const issued = issueFactoryResetToken(this.now())
+    this.resetArmed = issued
+    return {
+      ...factoryResetCounts(this.store),
+      token: issued.token,
+      expiresAt: issued.expiresAt,
+      archiveSessionIds: factoryResetArchiveIds(this.store),
+    }
+  }
+
+  /**
+   * Restore factory settings. Archives sessions Dorothy opened (not the
+   * human's own), wipes her ledger, and starts a clean session.
+   */
+  confirmFactoryReset(token: string): Promise<FactoryResetResult> {
+    return this.serial(async () => {
+      this.assertOpen()
+      const error = factoryResetTokenError(this.resetArmed, token, this.now())
+      this.resetArmed = undefined
+      if (error) throw new DotError('dot/invalid', error)
+      const archiveIds = factoryResetArchiveIds(this.store)
+      const stopIds = new Set(archiveIds)
+      for (const run of this.store.work.occupying()) {
+        if (run.sessionId) stopIds.add(run.sessionId)
+        if (run.requestedSessionId) stopIds.add(run.requestedSessionId)
+      }
+      const unsettled: string[] = []
+      for (const sessionId of stopIds) {
+        const gap = factoryResetStopGap(sessionId, await this.proveFactoryResetStopped(sessionId))
+        if (gap) unsettled.push(gap)
+      }
+      if (unsettled.length > 0) {
+        throw new DotError(
+          'dot/reset-busy',
+          `factory reset aborted: ${unsettled.length} session(s) not settled (${unsettled.join('; ')}). Stop them first, then retry.`,
+        )
+      }
+      this.pending.reset()
+      this.batcher.take()
+      this.idleChecker.cancel()
+      this.releaseChildSeals()
+      const archived: string[] = []
+      const archiveFailed: { sessionId: string; message: string }[] = []
+      for (const sessionId of archiveIds) {
+        try {
+          await this.host.archive(sessionId)
+          archived.push(sessionId)
+        } catch (failure) {
+          archiveFailed.push({ sessionId, message: messageOf(failure) })
+          this.options.log?.(`dsh-dot: factory reset did not archive ${sessionId}: ${messageOf(failure)}`)
+        }
+      }
+      await this.store.factoryReset(this.now())
+      await this.options.peers?.clear()
+      this.reminders.refresh()
+      this.homeRegistered = false
+      this.ensuring = undefined
+      this.migration = undefined
+      this.requestedSegment = undefined
+      const sessionId = await this.ensureDot()
+      this.applyModel(sessionId)
+      this.armIdleCheck()
+      this.emit({
+        event: DOT_TRACE.factoryReset,
+        message: 'Restored Dorothy to factory settings.',
+        sessionId,
+        data: { archived: archived.length, archiveFailed: archiveFailed.length },
+      })
+      return { archived, archiveFailed, sessionId, at: this.now() }
+    })
+  }
+
+  /** Queue, agent idle, and owned jobs — the same facts finishSettled needs. Missing proof is UNKNOWN. */
+  private async proveFactoryResetStopped(sessionId: string): Promise<FactoryResetStopEvidence> {
+    if (typeof this.host.stopActivity === 'function') {
+      try {
+        const report = await this.host.stopActivity(sessionId)
+        return { queueCleared: report.queueCleared, idle: report.idle, jobsSettled: report.jobsSettled }
+      } catch (failure) {
+        this.options.log?.(`dsh-dot: factory reset could not stop ${sessionId}: ${messageOf(failure)}`)
+        return { queueCleared: false, idle: false, jobsSettled: 'unknown' }
+      }
+    }
+    try { await this.host.stop(sessionId) } catch (failure) {
+      this.options.log?.(`dsh-dot: factory reset could not stop ${sessionId}: ${messageOf(failure)}`)
+    }
+    return { queueCleared: false, idle: !this.host.isRunning(sessionId), jobsSettled: 'unknown' }
+  }
+
+  async inspectWorkspace(id?: string): Promise<string> {
+    const home = await this.homeWorkspace().catch(error => { this.options.log?.(`dsh-dot: dot's own workspace is unavailable: ${messageOf(error)}`); return undefined })
+    const rows = this.host.listWorkspaces()
+    const key = id?.trim()
+    const row = key ? rows.find(item => item.id === key) : home
+    if (!row) throw new DotError('dot/unknown-workspace', key ? `no workspace ${key}` : 'no workspaces yet')
+    const own = row.id === home?.id ? ' · your own workspace' : ''
+    return [`Workspace ${row.id} "${row.title}"${own}`, `path: ${row.path}`, `sessions: ${row.sessionCount}`].join('\n')
+  }
+
+  async listWorkspaceFiles(id?: string, relPath?: string): Promise<string> {
+    const home = await this.homeWorkspace().catch(error => { this.options.log?.(`dsh-dot: dot's own workspace is unavailable: ${messageOf(error)}`); return undefined })
+    const rows = this.host.listWorkspaces()
+    const key = id?.trim()
+    const row = key ? rows.find(item => item.id === key) : home
+    if (!row) throw new DotError('dot/unknown-workspace', key ? `no workspace ${key}` : 'no workspaces yet')
+    try {
+      const listed = await listWorkspaceTree(row.path, relPath?.trim() || '.')
+      const truncated = listed.length >= WORKSPACE_LIST_MAX
+      return [`Workspace ${row.id} "${row.title}" ${row.path}`, formatWorkspaceFiles(listed, truncated)].join('\n')
+    } catch (error) {
+      throw new DotError('dot/invalid', error instanceof Error ? error.message : String(error))
+    }
+  }
+
   /** Mechanical panel action: no model message, approval, or queued switch. */
   newSegment(): Promise<string> {
     return this.serial(async () => {
@@ -422,7 +642,18 @@ export class DotService {
       if (this.closing) return
       await this.store.apply(!row || row.archived ? { type: 'archived', sessionId: task.sessionId, at: this.now() } : { type: 'status', sessionId: task.sessionId, status: row.running ? 'running' : 'idle', at: this.now() }, this.pending.list())
     }
+    for (const run of this.store.work.occupying()) {
+      if (this.closing) return
+      await reconcileRun(this.store.work, this.runHost(), run.id, this.now()).catch(error => {
+        this.options.log?.(`dsh-dot: run ${run.id} was not reconciled: ${messageOf(error)}`)
+      })
+      const current = this.store.work.run(run.id)
+      if (current?.creation === 'confirmed' && current.sessionId && current.sessionId === current.requestedSessionId && !this.store.tracks(current.sessionId)) {
+        await this.rememberRun(current.id)
+      }
+    }
     if (this.canIdleCheck()) this.idleChecker.run()
+    this.recoverDecisionWakes()
     this.armIdleCheck()
   }
   /** P4 human actions call this after their durable task change. */
@@ -445,7 +676,7 @@ export class DotService {
    * The human's board actions. Each one moves the task as `human` and queues a
    * task-human notice for dot; changing the priority is silent.
    */
-  confirmTask(id: string): Promise<Ticket> { return this.serial(() => this.confirmTaskNow(id)) }
+  confirmTask(id: string): Promise<Ticket> { return this.legacyClosed('task.confirm') ?? this.serial(() => this.confirmTaskNow(id)) }
 
   private async confirmTaskNow(id: string): Promise<Ticket> {
     const before = this.humanTarget(id)
@@ -455,7 +686,7 @@ export class DotService {
     return moved
   }
 
-  deleteDraft(id: string): Promise<boolean> { return this.serial(() => this.deleteDraftNow(id)) }
+  deleteDraft(id: string): Promise<boolean> { return this.legacyClosed('task.delete') ?? this.serial(() => this.deleteDraftNow(id)) }
 
   private async deleteDraftNow(id: string): Promise<boolean> {
     const before = this.humanTarget(id)
@@ -466,7 +697,7 @@ export class DotService {
   }
 
   cancelTask(id: string): Promise<Ticket> {
-    return this.serial(() => this.cancelTaskNow(id))
+    return this.legacyClosed('task.cancel') ?? this.serial(() => this.cancelTaskNow(id))
   }
 
   private async cancelTaskNow(id: string): Promise<Ticket> {
@@ -490,7 +721,7 @@ export class DotService {
   }
 
   reviewTask(id: string, pass: boolean, note?: string): Promise<Ticket> {
-    return this.serial(() => this.reviewTaskNow(id, pass, note))
+    return this.legacyClosed('task.review') ?? this.serial(() => this.reviewTaskNow(id, pass, note))
   }
 
   private async reviewTaskNow(id: string, pass: boolean, note?: string): Promise<Ticket> {
@@ -511,7 +742,7 @@ export class DotService {
     return moved
   }
 
-  setTaskPriority(id: string, priority: TicketPriority): Promise<Ticket> { return this.serial(() => this.setTaskPriorityNow(id, priority)) }
+  setTaskPriority(id: string, priority: TicketPriority): Promise<Ticket> { return this.legacyClosed('task.priority') ?? this.serial(() => this.setTaskPriorityNow(id, priority)) }
 
   private async setTaskPriorityNow(id: string, priority: TicketPriority): Promise<Ticket> {
     this.humanTarget(id)
@@ -614,7 +845,71 @@ export class DotService {
   }
 
   manageTask(args: Record<string, unknown>): Promise<string> {
+    const action = typeof args.action === 'string' ? args.action : ''
+    const workAction = action === 'board' || action === 'accept' || action === 'reject' || action === 'revise' || action === 'reserve' || action === 'baseline' || action === 'subject' || action === 'verify' || action === 'hold' || action === 'decide' || action === 'finish' || action === 'evidence' || action === 'supplement' || action === 'pause' || action === 'resume' || action === 'cancel' || action === 'step'
+    const awaitsHost = action === 'finish' || action === 'hold' || action === 'cancel' || action === 'supplement'
+    const newRecord = this.options.legacyWorkEntries !== true && (action === 'create' || action === 'list' || action === 'read' || action === 'update')
+    if (awaitsHost) return this.manageWorkAction(args)
+    if (workAction || newRecord) return this.serial(() => this.manageWorkAction(args))
+    if (action !== 'list' && action !== 'read') {
+      const closed = this.legacyClosed(`dot_task ${action || 'update'}`)
+      if (closed) return closed
+    }
     return this.serial(() => this.manageTaskNow(args))
+  }
+
+  private async manageWorkAction(args: Record<string, unknown>): Promise<string> {
+    const action = typeof args.action === 'string' ? args.action : ''
+    const changeId = typeof args.task_id === 'string' ? args.task_id : ''
+    if (action === 'list') {
+      const rows = this.store.work.listChanges()
+      return rows.length ? rows.map(change => {
+        const view = this.store.work.workView(change.id)
+        return `${change.id} ${(view?.status ?? 'waiting').toUpperCase()} P${change.priority} ${change.cwd} "${change.title}"`
+      }).join('\n') : 'No tasks.'
+    }
+    if (action === 'create' || action === 'revise' || action === 'update') return this.reviseOrCreate(args)
+    if (action === 'supplement') return this.supplementFromTool(args)
+    if (action === 'pause' || action === 'resume' || action === 'cancel') return this.controlFromTool(args)
+    if (!changeId && action !== 'step') throw new DotError('dot/invalid', 'task_id is required')
+    if (action === 'step') return this.stepFromTool(args)
+    if (!changeId) throw new DotError('dot/invalid', 'task_id is required')
+    if (action === 'read') return this.readWork(changeId, typeof args.input_ref === 'string' ? args.input_ref : undefined)
+    if (action === 'board') {
+      const view = this.workBoard(changeId)
+      if (!view) throw new DotError('dot/invalid', `unknown change ${changeId}`)
+      return JSON.stringify(view)
+    }
+    const verificationId = typeof args.verification_id === 'string' ? args.verification_id : ''
+    const expectedInputRef = typeof args.expected_input_ref === 'string' ? args.expected_input_ref : ''
+    const expectedSubjectKey = typeof args.expected_subject_key === 'string' ? args.expected_subject_key : ''
+    const expectedInputRevision = typeof args.expected_input_revision === 'number' ? args.expected_input_revision : undefined
+    if (action === 'reject') {
+      const reviewRunId = typeof args.review_run_id === 'string' ? args.review_run_id : ''
+      if (expectedInputRevision === undefined) throw new DotError('dot/invalid', 'reject requires expected_input_revision')
+      const released = await this.rejectWork(changeId, reviewRunId, expectedInputRevision)
+      if (!released.ok) throw new DotError('dot/invalid', released.message)
+      return `rejected ${changeId}; review ${released.run.id} released`
+    }
+    if (action === 'reserve') return this.reserveFromTool(args)
+    if (action === 'baseline') return this.baselineFromTool(args)
+    if (action === 'subject') {
+      const subject = await this.captureWorkSubject(changeId)
+      return JSON.stringify({ ...subject, subjectRef: subject.artifactRef })
+    }
+    if (action === 'verify') return this.verifyFromTool(args)
+    if (action === 'hold') return this.holdFromTool(args)
+    if (action === 'finish') return this.finishFromTool(args)
+    if (action === 'evidence') return this.evidenceFromTool(args)
+    if (action === 'decide') return this.decideFromTool(args)
+    if (expectedInputRevision === undefined || !verificationId || !expectedInputRef || !expectedSubjectKey) {
+      throw new DotError('dot/invalid', 'accept requires verification_id, expected_input_ref, expected_input_revision and expected_subject_key')
+    }
+    const accepted = await this.acceptWork(changeId, verificationId, expectedInputRef, expectedSubjectKey, 'tool', {
+      expectedInputRevision, expectedVerificationId: verificationId,
+    })
+    if (!('id' in accepted)) throw new DotError('dot/invalid', accepted.message)
+    return `accepted ${changeId} at ${accepted.closeout?.subjectKey ?? expectedSubjectKey}`
   }
 
   private async manageTaskNow(args: Record<string, unknown>): Promise<string> {
@@ -711,8 +1006,9 @@ export class DotService {
     return runningTarget
   }
 
-  startTask(input: { workspaceId?: string; cwd?: string; title: string; instruction: string; goal?: string; model?: string; preset?: string; taskId?: string; role?: SessionRole; access?: TicketAccess; acceptance?: string; deliverable?: string; priority?: TicketPriority; checkOnly?: boolean }, signal: AbortSignal): Promise<string> {
-    return this.serial(() => this.startTicketSession(input, signal))
+  startTask(input: { workspaceId?: string; cwd?: string; title: string; instruction: string; goal?: string; model?: string; preset?: string; taskId?: string; role?: SessionRole; access?: TicketAccess; acceptance?: string; deliverable?: string; priority?: TicketPriority; checkOnly?: boolean; paths?: string; runId?: string }, signal: AbortSignal): Promise<string> {
+    if (this.options.legacyWorkEntries === true) return this.serial(() => this.startTicketSession(input, signal))
+    return this.startWorkSession(input)
   }
 
   private async startTicketSession(input: { workspaceId?: string; cwd?: string; title: string; instruction: string; goal?: string; model?: string; preset?: string; taskId?: string; role?: SessionRole; access?: TicketAccess; acceptance?: string; deliverable?: string; priority?: TicketPriority; checkOnly?: boolean }, signal: AbortSignal): Promise<string> {
@@ -790,7 +1086,19 @@ export class DotService {
 
   /** Agent-attributed delivery: the target sees dot as the sender, not the human. */
   send(sessionId: string, text: string): Promise<string> {
-    return this.serial(() => this.sendNow(sessionId, text))
+    return this.serial(() => {
+      if (this.options.legacyWorkEntries !== true) {
+        const recovery = this.store.work.recoveryError
+        const task = this.store.task(sessionId)
+        const run = this.store.work.sessionRun(sessionId)
+        if (recovery || task?.origin === 'started' || run) {
+          throw new DotError('dot/legacy-closed', recovery
+            ? `dot_send is closed until work records recover: ${recovery}`
+            : 'dot_send cannot continue a legacy started session or a run. Record a delivery on the run; nothing was relayed.')
+        }
+      }
+      return this.sendNow(sessionId, text)
+    })
   }
 
   private async sendNow(sessionId: string, text: string): Promise<string> {
@@ -859,6 +1167,10 @@ export class DotService {
     if (this.store.task(sessionId)?.origin !== 'started') {
       throw new DotError('dot/not-yours', `you did not start ${sessionId}, so you cannot archive it. Only the human archives sessions they opened; tell them so when they asked for it`)
     }
+    const run = this.store.work.sessionRun(sessionId)
+    if (run && run.phase !== 'completed' && run.phase !== 'failed' && run.phase !== 'stopped') {
+      throw new DotError('dot/invalid', `${run.id} is ${run.phase}; archive it after it stops`)
+    }
     await this.host.archive(sessionId)
     for (const view of this.pending.forSession(sessionId)) this.pending.answer(view.id, view.kind === 'approval' ? { kind: 'approval', allow: false } : { kind: 'question', answers: (view.questions ?? []).map(q => ({ id: q.id, selected: [] })) })
     await this.store.apply({ type: 'archived', sessionId, at: this.now() }, this.pending.list())
@@ -893,7 +1205,7 @@ export class DotService {
       throw new DotError('dot/unknown-request', `no known request ${id}; check the request id`)
     }
     // A model-generated tool call is not evidence of a human decision.
-    if (view.kind === 'approval' && answer.kind === 'approval' && this.rules.approvals === 'human') throw new DotError('dot/human-required', `approval ${id} requires a direct human decision`)
+    if (view.kind === 'approval' && answer.kind === 'approval' && (view.humanRequired === true || this.rules.approvals === 'human')) throw new DotError('dot/human-required', `approval ${id} requires a direct human decision`)
     if (view.kind === 'question' && this.rules.questions === 'human') throw new DotError('dot/human-required', `question ${id} requires a direct human answer in the original session`)
     // The human may switch to deny while dot is still judging a delivered request.
     const denied = view.kind === 'approval' && answer.kind === 'approval' && this.rules.approvals === 'deny'
@@ -909,6 +1221,12 @@ export class DotService {
     if (allow && this.rules.approvals === 'deny') throw new DotError('dot/invalid', 'approvals=deny; no grant was applied')
     if (!this.pending.answer(id, { kind: 'approval', allow })) throw new DotError('dot/unknown-request', `approval ${id} is no longer pending`)
     return `Answered ${id} for ${view.sessionId}.`
+  }
+
+  private pruneApprovalDetails(): Promise<void> {
+    const open = new Set(this.pending.list().filter(row => row.kind === 'approval').map(row => row.id))
+    const kept = this.store.approvalDetails.filter(row => open.has(row.requestId)).slice(-APPROVAL_DETAIL_LIMIT)
+    return this.store.replaceApprovalDetails(kept)
   }
 
   scheduleAdd(input: ScheduleInput): Promise<string> { return this.track(() => this.scheduleAddNow(input)) }
@@ -1230,18 +1548,33 @@ export class DotService {
   }
 
   private async onTurnEndNow(sessionId: string): Promise<void> {
+    const owned = this.store.work.sessionRun(sessionId)
+    if (owned && owned.phase !== 'completed' && owned.phase !== 'failed' && owned.phase !== 'stopped') {
+      await observeRun(this.store.work, this.runHost(), owned.id, this.now()).catch(error => {
+        this.options.log?.(`dsh-dot: run ${owned.id} was not observed: ${messageOf(error)}`)
+      })
+    }
     if (this.isDot(sessionId) || !this.store.tracks(sessionId)) return
     const reply = await this.host.latestReply(sessionId, 600).catch(() => undefined)
     if (this.closing) return
     const task = await this.store.apply({ type: 'turn-end', sessionId, at: this.now(), ...reply ? { note: reply } : {} }, this.pending.list())
-    if (task) this.notify({ sessionId, kind: 'turn-end', text: `"${task.title}" finished a turn: ${clip(reply ?? '(no text)', 400)}`, at: this.now() })
+    if (!task) return
+    const ownedNow = this.store.work.sessionRun(sessionId)
+    const change = ownedNow ? this.store.work.change(ownedNow.changeId) : undefined
+    const older = ownedNow && change && (ownedNow.inputRef !== change.currentInputRef || ownedNow.inputRevision !== change.currentRevision)
+    const text = ownedNow
+      ? `${ownedNow.changeId} ${ownedNow.id} input ${ownedNow.inputRef}@${ownedNow.inputRevision}${older ? ' (older input; it does not advance the current one)' : ''}: ${clip(reply ?? '(no text)', 400)}`
+      : `"${task.title}" finished a turn: ${clip(reply ?? '(no text)', 400)}`
+    this.notify({ sessionId, kind: 'turn-end', text, at: this.now() })
   }
 
   onError(sessionId: string, error: unknown): void {
     if (this.closing || this.isDot(sessionId) || !this.store.tracks(sessionId)) return
     const message = messageOf(error)
     void this.store.apply({ type: 'error', sessionId, at: this.now(), message }, this.pending.list())
-    this.notify({ sessionId, kind: 'error', text: clip(message, 400), at: this.now() })
+    const owned = this.store.work.sessionRun(sessionId)
+    const text = owned ? `${owned.changeId} ${owned.id} input ${owned.inputRef}@${owned.inputRevision}: ${clip(message, 400)}` : clip(message, 400)
+    this.notify({ sessionId, kind: 'error', text, at: this.now() })
   }
 
   /**
@@ -1250,19 +1583,39 @@ export class DotService {
    * every request whose kind the settings leave to the host (`off`);
    * skipped requests reach their own answerer unchanged.
    */
-  relayRequest(input: { kind: PendingKind; sessionId: string; subject: string; detail?: string; cwd?: string; questions?: readonly PendingQuestionItem[]; signal?: AbortSignal }): RelayOutcome {
+  relayRequest(input: { kind: PendingKind; sessionId: string; subject: string; detail?: string; cwd?: string; questions?: readonly PendingQuestionItem[]; signal?: AbortSignal; toolName?: string; reason?: string; arguments?: string; viaSubagent?: boolean }): RelayOutcome {
     if (this.closing || this.isDot(input.sessionId) || !this.store.dotSessionId) return { decided: 'skip' }
     const tracked = this.store.tracks(input.sessionId)
     if (!tracked && this.rules.scope === 'tracked') return { decided: 'skip' }
     const task = this.store.task(input.sessionId)
     const route = routeRequest(this.rules, input.kind)
     if (route.action === 'skip' || route.action === 'deny') return { decided: route.action }
-    const { cwd, ...request } = input
-    const opened = this.pending.open(request)
     const ticket = this.store.ticketForSession(input.sessionId)
-    const where = task ? `task "${task.title}"` : `untracked session${cwd ? ` in ${cwd}` : ''}`
+    const notice = input.kind === 'approval'
+      ? approvalNotice({
+          toolName: input.toolName ?? input.subject,
+          ...(input.detail !== undefined ? { detail: input.detail } : {}),
+          ...(input.reason !== undefined ? { reason: input.reason } : {}),
+          ...(input.arguments !== undefined ? { arguments: input.arguments } : {}),
+          ...(input.viaSubagent ? { viaSubagent: true } : {}),
+          ...(ticket?.access === 'read' ? { readOnly: true } : {}),
+        })
+      : undefined
+    const detail = notice?.text ?? input.detail
+    const humanRequired = notice?.forced === true
+    const opened = this.pending.open({
+      kind: input.kind,
+      sessionId: input.sessionId,
+      subject: input.subject,
+      ...(detail !== undefined ? { detail } : {}),
+      ...(input.questions !== undefined ? { questions: input.questions } : {}),
+      ...(input.signal !== undefined ? { signal: input.signal } : {}),
+      ...(humanRequired ? { humanRequired: true } : {}),
+    })
+    const where = task ? `task "${task.title}"` : `untracked session${input.cwd ? ` in ${input.cwd}` : ''}`
     const lines = [ticket ? `${opened.id} for task ${ticket.id} "${ticket.title}": ${input.kind} · "${input.subject}"` : `${opened.id} · ${input.kind} from ${where} · "${input.subject}"`]
-    if (input.detail) lines.push(`  detail: ${clip(input.detail, 600)}`)
+    if (detail) lines.push(`  detail: ${notice ? detail : clip(detail, 600)}`)
+    if (humanRequired && notice) lines.push(`  human-required: ${notice.reasons.join(', ')}; do not use dot_answer.`)
     if (input.kind === 'question' && route.action === 'human') lines.push('  The human must answer the original question in its session; do not use dot_answer.')
     for (const q of input.questions ?? []) {
       lines.push(`  [${q.id}] ${q.question}${q.options?.length ? ' options: ' + q.options.map(o => o.label).join(' | ') : ''}${q.multiSelect ? ' (multi)' : ''}`)
@@ -1302,6 +1655,7 @@ export class DotService {
   flushNotices(): Promise<void> { return this.batcher.drain() }
 
   dispose(): Promise<void> {
+    this.releaseChildSeals()
     if (this.disposal) return this.disposal
     this.closing = true
     this.batcher.dispose()
@@ -1346,6 +1700,7 @@ export class DotService {
       if (live.length === 0) return
       if (this.host.isRunning(dot)) throw new Error('dot is running')
       await this.host.relay(dot, live[0]!.sessionId, this.formatQueuedNotices(live))
+      await this.ackDecisionWakes(live).catch(error => this.options.log?.(`dsh-dot: decision wake was not marked: ${messageOf(error)}`))
       this.emit({ event: DOT_TRACE.noticeDelivered, message: `Delivered ${live.length} notice(s).`, sessionId: dot, data: { count: live.length, kinds: live.map(item => item.kind).join(',') } })
     })
   }
@@ -1371,6 +1726,812 @@ export class DotService {
 
   private assertOpen(): void {
     if (this.closing) throw new DotError('dot/disposed', 'dot is shutting down')
+  }
+
+  createWorkChange(input: Parameters<DotStore['work']['createChange']>[0]) { return this.store.work.createChange(input) }
+  reviseWorkChange(changeId: string, patch: Parameters<DotStore['work']['reviseChange']>[1]) { return this.store.work.reviseChange(changeId, patch) }
+  reserveWorkRun(input: Parameters<DotStore['work']['reserveRun']>[0]) { return this.store.work.reserveRun(input) }
+  publishWorkBaseline(runId: string, expectedRevision: number, artifactRef: string, at?: number) {
+    return this.store.work.publishBaseline(runId, expectedRevision, artifactRef, at ?? this.now(), run => this.confirmBaseline(run, artifactRef))
+  }
+
+  /**
+   * Host calls stay off the service lane. The work book locks only the record
+   * commit; a lost receipt or a stop that is still settling does not block
+   * unrelated changes.
+   */
+  private runHost() { return bindRunSession(this.host, this.store.settings.taskPermission) }
+
+  launchWorkRun(runId: string, text: string, preset?: string, model?: { readonly provider: string; readonly model: string }) {
+    return this.launchAndRemember(runId, text, preset, model)
+  }
+
+  private async launchAndRemember(runId: string, text: string, preset?: string, model?: { readonly provider: string; readonly model: string }) {
+    const launched = await launchReservedRun(this.store.work, this.runHost(), runId, text, preset, model, async () => { await this.rememberRun(runId) })
+    if (launched.ok) await this.rememberRun(runId)
+    return launched
+  }
+
+  /** The existing ledger is how a run session is owned, notified and approved. It does not create a ticket. */
+  private async rememberRun(runId: string): Promise<void> {
+    const run = this.store.work.run(runId)
+    const sessionId = run?.sessionId
+    if (!run || !sessionId || run.creation !== 'confirmed' || sessionId !== run.requestedSessionId) return
+    const change = this.store.work.change(run.changeId)
+    await this.store.track({
+      sessionId, origin: 'started', title: change?.title ?? run.id,
+      goal: `${run.changeId} ${run.id} input ${run.inputRef}@${run.inputRevision}`,
+      cwd: run.cwd, at: this.now(),
+    })
+  }
+  supplementWorkRun(runId: string, text: string, senderId: string, expected: { readonly inputRef: string; readonly inputRevision: number }) {
+    return supplementRun(this.store.work, this.runHost(), runId, text, senderId, this.now(), expected)
+  }
+
+  /** One context delivery on the named run. The work book keeps the input, the sender and any unconfirmed delivery. */
+  private async supplementFromTool(args: Record<string, unknown>): Promise<string> {
+    const text = typeof args.message === 'string' ? args.message : ''
+    const runId = typeof args.run_id === 'string' ? args.run_id : ''
+    const inputRef = typeof args.expected_input_ref === 'string' ? args.expected_input_ref : ''
+    const inputRevision = typeof args.expected_input_revision === 'number' ? args.expected_input_revision : undefined
+    if (!runId || !text.trim() || !inputRef || inputRevision === undefined || !Number.isInteger(inputRevision)) {
+      throw new DotError('dot/invalid', 'supplement requires run_id, message, expected_input_ref and expected_input_revision')
+    }
+    const namedChange = typeof args.task_id === 'string' ? args.task_id : ''
+    const current = this.store.work.run(runId)
+    if (namedChange && current && namedChange !== current.changeId) throw new DotError('dot/invalid', `${runId} is not a run of ${namedChange}`)
+    const senderId = this.store.dotSessionId
+    if (!senderId) throw new DotError('dot/not-ready', 'your conversation is not ready yet')
+    const sent = await this.supplementWorkRun(runId, text, senderId, { inputRef, inputRevision })
+    if (!sent.ok) throw new DotError(sent.code === 'unknown' ? 'dot/unknown' : sent.code === 'stale' ? 'dot/stale' : 'dot/invalid', sent.message)
+    const delivery = [...(this.store.work.run(runId)?.deliveries ?? [])].reverse().find(item => item.kind !== 'initial' && item.contentRef === text && item.source === senderId)
+    return `supplemented ${runId} delivery ${delivery?.id ?? 'recorded'} ${delivery?.status ?? sent.phase} for ${inputRef}@${inputRevision}`
+  }
+  cancelWorkChange(changeId: string) {
+    return cancelWork(this.store.work, this.runHost(), changeId, this.now())
+  }
+  finishWorkRun(runId: string, phase: 'completed' | 'failed') {
+    return finishWork(this.store.work, this.runHost(), runId, phase, this.now())
+  }
+  observeWorkRun(runId: string) {
+    return observeRun(this.store.work, this.runHost(), runId, this.now())
+  }
+  reconcileWorkRun(runId: string) {
+    return reconcileRun(this.store.work, this.runHost(), runId, this.now())
+  }
+  workBoard(changeId: string) { return this.store.work.workView(changeId) }
+  recordWorkVerification(changeId: string, checks: Parameters<DotStore['work']['recordVerification']>[1], runIds: readonly string[], detail?: Parameters<DotStore['work']['recordVerification']>[4]) {
+    return this.store.work.recordVerification(changeId, checks, runIds, this.now(), detail)
+  }
+  acceptWork(changeId: string, verificationId: string, expectedInputRef: string, expectedSubjectKey: string, source = 'user', human?: { readonly expectedInputRevision: number; readonly expectedVerificationId: string }) {
+    return this.store.work.accept(changeId, verificationId, expectedInputRef, expectedSubjectKey, source, this.now(), human, this.subjectLook())
+  }
+  rejectWork(changeId: string, reviewRunId: string, expectedInputRevision: number) {
+    return this.store.work.reopenAfterReview(changeId, reviewRunId, this.now(), expectedInputRevision)
+  }
+  resumeWorkCloseout(changeId: string) { return this.store.work.resumeCloseout(changeId, this.now()) }
+
+  /**
+   * Capture the run's live scope and publish it as the baseline.
+   * Relative paths resolve against the run's workspace root, not the process
+   * working directory. A snapshot whose manifest already exists is left in place;
+   * the next attempt uses a new id. A save that stopped before the manifest is
+   * completed in that same directory.
+   * `failOn` is the snapshot body's failure injection. Production callers omit it.
+   */
+  async captureWorkBaseline(runId: string, attempt?: { readonly failOn?: string }) {
+    const run = this.store.work.run(runId)
+    if (!run) throw new DotError('dot/invalid', `unknown run ${runId}`)
+    if (!scopeWrites(run.writeScope)) throw new DotError('dot/invalid', `${runId} does not write, so it has no baseline`)
+    const root = run.workspaceRoot
+    const scopes = run.writeScope.kind === 'workspace-exclusive'
+      ? [{ path: root, type: 'directory' as const }]
+      : run.writeScope.paths
+    if (scopes.length === 0) throw new DotError('dot/invalid', `${runId} has no path to capture`)
+    const files: SnapshotSource[] = []
+    const seen = new Set<string>()
+    for (const scope of scopes) {
+      const absolute = this.scopeTarget(root, scope.path)
+      let captured: { files: Parameters<typeof saveSnapshot>[1]; empty: boolean }
+      try { captured = captureScope(root, absolute, scope.type) } catch (error) {
+        throw new DotError('dot/invalid', error instanceof Error ? error.message : 'scope could not be read')
+      }
+      for (const file of captured.files) {
+        const key = file.path.replaceAll('\\', '/').toLowerCase()
+        if (seen.has(key)) continue
+        seen.add(key)
+        files.push(file)
+      }
+    }
+    const id = this.nextBaselineArtifact(run.id, this.store.work.revision)
+    saveSnapshot(join(this.options.homeDir, 'artifacts', id), files, attempt?.failOn, { root, empty: files.length === 0 })
+    return this.publishWorkBaseline(runId, this.store.work.revision, id)
+  }
+
+  /** Save the current workspace as the delivery subject and name what changed against the published baselines. */
+  async captureWorkSubject(changeId: string): Promise<DeliverySubject> {
+    const change = this.store.work.change(changeId)
+    if (!change) throw new DotError('dot/invalid', `unknown change ${changeId}`)
+    const root = change.cwd
+    let captured: { files: Parameters<typeof saveSnapshot>[1]; empty: boolean }
+    try { captured = captureScope(root, root, 'directory') } catch (error) {
+      throw new DotError('dot/invalid', error instanceof Error ? error.message : 'workspace could not be read')
+    }
+    const id = artifactName(`sub-${change.id}-${change.currentRevision}-${this.store.work.revision}`)
+    const runs = this.store.work.listRuns().filter(run => run.changeId === change.id)
+    const prior = writerPrior(change.baselineRefs, runs, ref => this.subjectLook().read(ref))
+    if (prior.missing) throw new DotError('dot/invalid', `baseline ${prior.missing} is missing or incomplete`)
+    const before = new Map(prior.files.map(file => [file.path.toLowerCase(), file]))
+    const deleted = [...before.values()]
+      .filter(entry => !captured.files.some(file => file.path.toLowerCase() === entry.path.toLowerCase()))
+      .map(entry => ({ path: entry.path, deleted: true as const }))
+    const manifest = saveSnapshot(join(this.options.homeDir, 'artifacts', id), [...captured.files, ...deleted], undefined, { root, empty: captured.empty && deleted.length === 0 })
+    const changes: DeliverySubject['changes'][number][] = []
+    const protectedDirty: string[] = []
+    for (const entry of manifest.saved) {
+      const prior = before.get(entry.path.toLowerCase())
+      if (!prior) changes.push({ path: entry.path, kind: 'added', sha256: entry.sha256 })
+      else if (prior.sha256 !== entry.sha256) changes.push({ path: entry.path, kind: 'modified', sha256: entry.sha256 })
+      else protectedDirty.push(entry.path)
+    }
+    for (const entry of before.values()) {
+      const still = manifest.saved.some(item => item.path.toLowerCase() === entry.path.toLowerCase())
+      const noted = manifest.deleted.some(item => item.toLowerCase() === entry.path.toLowerCase())
+      if (!still && !noted) changes.push({ path: entry.path, kind: 'deleted' })
+    }
+    for (const name of manifest.deleted) {
+      if (!changes.some(item => item.kind === 'deleted' && item.path.toLowerCase() === name.toLowerCase())) changes.push({ path: name, kind: 'deleted' })
+    }
+    const subject: DeliverySubject = {
+      workspaceRoot: root, cwd: root, baselineRefs: change.baselineRefs, artifactRef: id,
+      changes, protectedDirty, exclusions: [],
+    }
+    this.rememberSubject(change.id, change.currentInputRef, change.currentRevision, subject)
+    return subject
+  }
+
+  saveWorkEvidence(ref: string, body: string): void {
+    if (!artifactName(ref) || artifactName(ref) !== ref) throw new DotError('dot/invalid', `evidence ${ref} is not a single relative id`)
+    const dir = join(this.options.homeDir, 'artifacts', 'evidence')
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(join(dir, ref), body)
+  }
+
+  /**
+   * Read one source named by this verification.
+   * The verification has to be the one requested and it has to match the current input.
+   * An older input, an unbound id, or a path outside that delivery is refused before any file is opened.
+   */
+  readWorkSource(changeId: string, kind: 'evidence' | 'change', ref: string, bound: { readonly verificationId: string; readonly inputRef: string; readonly inputRevision: number }): { readonly ok: true; readonly source: string; readonly body: string } | { readonly ok: false; readonly code: 'missing' | 'stale' | 'invalid'; readonly message: string } {
+    const change = this.store.work.change(changeId)
+    if (!change) return { ok: false, code: 'missing', message: `unknown change ${changeId}` }
+    if (!bound.verificationId || !bound.inputRef || !Number.isInteger(bound.inputRevision) || bound.inputRevision < 1) {
+      return { ok: false, code: 'stale', message: `${changeId} has no current verification` }
+    }
+    const verification = this.store.work.verification(bound.verificationId)
+    if (!verification || verification.changeId !== changeId) return { ok: false, code: 'stale', message: `${bound.verificationId} is not bound to the current verification` }
+    if (bound.inputRef !== verification.inputRef || bound.inputRevision !== verification.inputRevision || verification.inputRef !== change.currentInputRef || verification.inputRevision !== change.currentRevision) {
+      return { ok: false, code: 'stale', message: `${bound.verificationId} is not bound to the current input` }
+    }
+    if (kind === 'evidence') {
+      if (!artifactName(ref) || artifactName(ref) !== ref) return { ok: false, code: 'invalid', message: `evidence ${ref} is not a single relative id` }
+      if (!verification.checks.some(check => check.evidenceRefs.includes(ref))) return { ok: false, code: 'stale', message: `${ref} is not bound to ${verification.id}` }
+      try {
+        const body = readFileSync(join(this.options.homeDir, 'artifacts', 'evidence', ref), 'utf8')
+        if (!body) return { ok: false, code: 'missing', message: `evidence ${ref} is empty` }
+        return { ok: true, source: `evidence:${ref}`, body }
+      } catch {
+        return { ok: false, code: 'missing', message: `evidence ${ref} is missing` }
+      }
+    }
+    const subject = verification.subject
+    const named = subject?.changes.find(item => item.path === ref)
+    if (!subject || !named) return { ok: false, code: 'stale', message: `${ref} is not a delivered file of ${verification.id}` }
+    if (named.kind === 'deleted' || !named.sha256) return { ok: false, code: 'missing', message: `${ref} was deleted in ${verification.id}` }
+    if (!artifactName(subject.artifactRef) || artifactName(subject.artifactRef) !== subject.artifactRef) return { ok: false, code: 'invalid', message: 'delivery snapshot is not a single relative id' }
+    try {
+      const bodyBytes = readSnapshot(join(this.options.homeDir, 'artifacts', subject.artifactRef)).bodies.get(named.path)
+      if (!bodyBytes || bodyBytes.byteLength === 0) return { ok: false, code: 'missing', message: `${ref} is missing from the delivery snapshot` }
+      const body = new TextDecoder('utf-8', { fatal: true }).decode(bodyBytes)
+      return { ok: true, source: `change:${named.path}`, body }
+    } catch {
+      return { ok: false, code: 'missing', message: `${ref} could not be read` }
+    }
+  }
+
+  /** Check the review, close it to new deliveries, then stop. A late delivery cannot reuse this stop. */
+  async holdWorkReview(runId: string) {
+    const prepared = await this.store.work.prepareReviewHold(runId, this.now())
+    if (!prepared.ok) return prepared
+    const current = this.store.work.run(runId)
+    if (current?.phase === 'settling' && current.closureEvidence?.jobsSettled) return current
+    let report: { queueCleared: boolean; idle: boolean; jobsSettled: boolean | 'unknown' }
+    try { report = await this.runHost().stop(prepared.sessionId) } catch {
+      report = { queueCleared: false, idle: false, jobsSettled: 'unknown' }
+    }
+    if (!report.queueCleared || !report.idle || report.jobsSettled !== true) {
+      return { ok: false as const, code: 'unknown' as const, message: `${runId} is not confirmed stopped` }
+    }
+    return this.store.work.completeReviewHold(runId, prepared.updatedAt, { queueCleared: true, agentIdle: true, jobsSettled: true }, this.now())
+  }
+
+  private subjectLook(): SubjectLook {
+    const root = join(this.options.homeDir, 'artifacts')
+    return {
+      read: ref => {
+        if (!artifactName(ref) || artifactName(ref) !== ref) return undefined
+        try {
+          const manifest = readSnapshot(join(root, ref)).manifest
+          return { root: manifest.root, saved: manifest.saved, deleted: manifest.deleted }
+        } catch { return undefined }
+      },
+      evidence: ref => {
+        if (!artifactName(ref) || artifactName(ref) !== ref) return false
+        try { return readFileSync(join(root, 'evidence', ref)).byteLength > 0 } catch { return false }
+      },
+      live: workspaceRoot => {
+        try { return captureScope(workspaceRoot, workspaceRoot, 'directory').files.map(file => file.path) } catch { return undefined }
+      },
+      body: (workspaceRoot, path) => {
+        try { return new Uint8Array(readFileSync(join(workspaceRoot, ...path.split('/')))) } catch { return undefined }
+      },
+    }
+  }
+
+  private async reviseOrCreate(args: Record<string, unknown>): Promise<string> {
+    const text = (key: string) => typeof args[key] === 'string' ? args[key] as string : undefined
+    const action = text('action')
+    const title = text('title')
+    const goal = text('goal')
+    const dir = text('dir')
+    const requirements = requirementList(args.requirements)
+    const steps = args.steps === undefined ? undefined : stepList(args.steps)
+    const behaviorNotes = text('behavior_notes')
+    const maxConcurrentRuns = typeof args.max_concurrent === 'number' ? args.max_concurrent : undefined
+    if (action === 'create') {
+      if (!title?.trim() || !goal?.trim() || !dir || !isAbsolute(dir)) throw new DotError('dot/invalid', 'title, goal and an absolute dir are required')
+      const change = await this.store.work.createChange({
+        title, cwd: dir, goal,
+        requirements: requirements ?? [{ requirementRef: 'goal', text: goal, required: true }],
+        ...(steps ? { steps } : {}),
+        ...(behaviorNotes !== undefined ? { behaviorNotes } : {}),
+        ...(maxConcurrentRuns !== undefined ? { maxConcurrentRuns } : {}),
+        ...(typeof args.priority === 'number' ? { priority: args.priority as 1 | 2 | 3 } : {}),
+        at: this.now(),
+      })
+      if (args.human_review === true) await this.store.work.requestOversight(change.id, this.now())
+      return JSON.stringify(this.store.work.workView(change.id))
+    }
+    const changeId = text('task_id') ?? ''
+    if (!changeId) throw new DotError('dot/invalid', 'task_id is required')
+    const revised = await this.store.work.reviseChange(changeId, {
+      ...(title !== undefined ? { title } : {}),
+      ...(goal !== undefined ? { goal } : {}),
+      ...(dir !== undefined ? { cwd: dir } : {}),
+      ...(requirements ? { requirements } : {}),
+      ...(steps ? { steps } : {}),
+      ...(behaviorNotes !== undefined ? { behaviorNotes } : {}),
+      ...(maxConcurrentRuns !== undefined ? { maxConcurrentRuns } : {}),
+      ...(typeof args.priority === 'number' ? { priority: args.priority as 1 | 2 | 3 } : {}),
+      at: this.now(),
+    })
+    if (!('id' in revised)) throw new DotError('dot/invalid', revised.message)
+    if (args.human_review === true) await this.store.work.requestOversight(revised.id, this.now())
+    return JSON.stringify(this.store.work.workView(revised.id))
+  }
+
+  private async reserveFromTool(args: Record<string, unknown>): Promise<string> {
+    const changeId = typeof args.task_id === 'string' ? args.task_id : ''
+    const role = typeof args.role === 'string' ? args.role : 'work'
+    if (role !== 'work' && role !== 'rework' && role !== 'review') throw new DotError('dot/invalid', 'invalid role')
+    const change = this.store.work.change(changeId)
+    if (!change) throw new DotError('dot/invalid', `unknown change ${changeId}`)
+    const write = role === 'review' || args.access === 'write'
+    const paths = pathScope(args.paths)
+    if (role !== 'review' && paths && paths.length > 0 && args.access !== 'write') {
+      throw new DotError('dot/invalid', `these paths are a write scope, so access must be "write". Example: access "write", paths ${WRITE_PATHS_EXAMPLE}. access "read" cannot write them, and the run is not reserved.`)
+    }
+    const listed = jsonArray(args.step_refs)
+    const stepRefs = listed?.map(item => String(item))
+    const reserved = await this.store.work.reserveRun({
+      changeId, kind: role, cwd: change.cwd, root: { workspaceRoot: change.cwd },
+      ...(stepRefs ? { stepRefs } : {}),
+      writeScope: role === 'review'
+        ? { kind: 'workspace-exclusive' }
+        : { kind: 'paths', paths: paths ?? (write ? [{ path: change.cwd, type: 'directory' as const }] : []) },
+      at: this.now(),
+    })
+    if (!reserved.ok) throw new DotError('dot/invalid', reserved.message)
+    return JSON.stringify({ changeId, runId: reserved.run.id, phase: reserved.run.phase, requestedSessionId: reserved.run.requestedSessionId })
+  }
+
+  private readWork(changeId: string, inputRef?: string): string {
+    const change = this.store.work.change(changeId)
+    if (!change) throw new DotError('dot/invalid', `unknown change ${changeId}`)
+    if (inputRef) {
+      const row = this.store.work.input(inputRef)
+      if (!row || row.changeId !== changeId) throw new DotError('dot/invalid', `unknown input ${inputRef}`)
+      return JSON.stringify(row)
+    }
+    const view = this.workBoard(changeId)
+    const material = this.store.work.input(change.currentInputRef)
+    return JSON.stringify({
+      ...view,
+      goal: material?.goal,
+      requirements: material?.requirements ?? [],
+      steps: change.steps.map(step => ({
+        stepRef: step.stepRef,
+        text: material?.steps.find(item => item.stepRef === step.stepRef)?.text ?? '',
+        done: step.done,
+        inputRef: step.inputRef,
+        ...(step.runId ? { runId: step.runId } : {}),
+        ...(step.subjectRef ? { subjectRef: step.subjectRef } : {}),
+      })),
+      behaviorNotes: material?.behaviorNotes ?? null,
+      maxConcurrentRuns: change.maxConcurrentRuns,
+      history: this.store.work.inputsFor(changeId).map(row => ({ id: row.id, revision: row.revision, goal: row.goal })),
+    })
+  }
+
+  private async controlFromTool(args: Record<string, unknown>): Promise<string> {
+    const action = typeof args.action === 'string' ? args.action : ''
+    const changeId = typeof args.task_id === 'string' ? args.task_id : ''
+    if (!changeId) throw new DotError('dot/invalid', 'task_id is required')
+    if (action === 'cancel') {
+      const cancelled = await this.cancelWorkChange(changeId)
+      if (!cancelled.ok) throw new DotError('dot/invalid', cancelled.message)
+      return `cancelled ${changeId}`
+    }
+    const current = this.store.work.change(changeId)
+    if (!current) throw new DotError('dot/invalid', `unknown change ${changeId}`)
+    if (current.control === 'cancelled') throw new DotError('dot/invalid', `${changeId} is cancelled`)
+    const control = action === 'pause' ? 'paused' as const : 'open' as const
+    const changed = await this.store.work.setControl(changeId, control, this.now())
+    if (!('id' in changed)) throw new DotError('dot/invalid', changed.message)
+    return `${control} ${changeId}`
+  }
+
+  private async stepFromTool(args: Record<string, unknown>): Promise<string> {
+    const changeId = typeof args.task_id === 'string' ? args.task_id : ''
+    const stepRef = typeof args.step_ref === 'string' ? args.step_ref : ''
+    const runId = typeof args.run_id === 'string' ? args.run_id : ''
+    const expectedInputRevision = typeof args.expected_input_revision === 'number' ? args.expected_input_revision : undefined
+    if (!changeId || !stepRef || !runId || expectedInputRevision === undefined) {
+      throw new DotError('dot/invalid', 'step requires task_id, step_ref, run_id and expected_input_revision')
+    }
+    const run = this.store.work.run(runId)
+    const subject = run ? (this.scopeResult(run) ?? await this.eventResult(run) ?? '') : ''
+    const noted = await this.store.work.noteStep(changeId, stepRef, runId, expectedInputRevision, subject, this.now())
+    if (!('id' in noted)) throw new DotError('dot/invalid', noted.message)
+    return `step ${stepRef} done on ${changeId} by ${runId}`
+  }
+
+  /**
+   * A file this run changed after its baseline, while it still holds that scope.
+   * After release, the live tree may belong to the next writer. Do not read it back as this run's result.
+   */
+  private scopeResult(run: RunRecord): string | undefined {
+    if (!scopeWrites(run.writeScope) || run.phase === 'reserved') return undefined
+    if (!this.store.work.occupying().some(row => row.id === run.id)) return undefined
+    const ref = run.baselineRefs.at(-1)
+    if (!ref) return undefined
+    let prior = new Map<string, string>()
+    try {
+      const manifest = readSnapshot(join(this.options.homeDir, 'artifacts', ref.artifactRef)).manifest
+      prior = new Map(manifest.saved.map(item => [foldPath(item.path), item.sha256]))
+    } catch { return undefined }
+    const root = run.workspaceRoot
+    const scopes = run.writeScope.kind === 'workspace-exclusive'
+      ? [{ path: root, type: 'directory' as const }]
+      : run.writeScope.paths
+    const found: string[] = []
+    for (const scope of scopes) {
+      let target: string
+      try { target = this.scopeTarget(root, scope.path) } catch { continue }
+      let captured: { files: SnapshotSource[] }
+      try { captured = captureScope(root, target, scope.type) } catch { continue }
+      for (const file of captured.files) {
+        if (!file.body) continue
+        const hash = sha256(file.body)
+        if (prior.get(foldPath(file.path)) === hash) continue
+        found.push(`file:${file.path}:${hash}`)
+      }
+    }
+    found.sort()
+    return found[0]
+  }
+
+  /** An assistant result on this run's own session. Another run's events do not count. */
+  private async eventResult(run: RunRecord): Promise<string | undefined> {
+    const sessionId = run.sessionId
+    if (run.phase === 'reserved' || run.creation !== 'confirmed' || !sessionId || sessionId !== run.requestedSessionId) return undefined
+    let events: readonly { type?: string; seq?: number; data?: unknown }[] = []
+    try { events = await this.host.readEvents(sessionId) } catch { return undefined }
+    const instruction = run.deliveries.find(item => item.kind === 'initial')?.contentRef.trim()
+    for (let index = 0; index < events.length; index += 1) {
+      const event = events[index]
+      if (!event || event.type !== 'assistant/message') continue
+      const text = assistantText(event).trim()
+      if (!text || text === instruction) continue
+      const seq = typeof event.seq === 'number' ? event.seq : index
+      return `event:${sessionId}:${seq}:${sha256(new TextEncoder().encode(text)).slice(0, 16)}`
+    }
+    return undefined
+  }
+
+  private async baselineFromTool(args: Record<string, unknown>): Promise<string> {
+    const runId = typeof args.run_id === 'string' ? args.run_id : ''
+    if (!runId) throw new DotError('dot/invalid', 'run_id is required')
+    const published = await this.captureWorkBaseline(runId)
+    if (!('applied' in published) || !published.applied) throw new DotError('dot/invalid', 'message' in published ? published.message : 'baseline was not published')
+    return `baseline ${published.run.baselineRefs.at(-1)?.artifactRef ?? ''} on ${runId}`
+  }
+
+  private async verifyFromTool(args: Record<string, unknown>): Promise<string> {
+    const changeId = typeof args.task_id === 'string' ? args.task_id : ''
+    if (!changeId) throw new DotError('dot/invalid', 'verify requires task_id. Read the current change, then call action=subject.')
+    const change = this.store.work.change(changeId)
+    if (!change) throw new DotError('dot/invalid', `unknown change ${changeId}. Read the task list. Do not edit checks.`)
+    const checks = jsonArray(args.checks)
+    if (!checks) {
+      throw new DotError('dot/invalid', 'verify checks must be a JSON array of {requirementRef, applicability, verdict, evidenceRefs}. evidenceRefs must be evidence_ref values returned by action=evidence. Include every required requirement. Do not shrink the list.')
+    }
+    for (const check of checks) {
+      const applicability = check && typeof check === 'object' ? (check as { applicability?: unknown }).applicability : undefined
+      if (applicability !== 'applicable' && applicability !== 'not-applicable') {
+        throw new DotError('dot/invalid', `applicability must be applicable or not-applicable, not ${String(applicability)}. Fix this check. Do not drop it or shrink the requirement list.`)
+      }
+      const refs = check && typeof check === 'object' ? (check as { evidenceRefs?: unknown }).evidenceRefs : undefined
+      if (!Array.isArray(refs)) {
+        throw new DotError('dot/invalid', 'each check needs evidenceRefs, an array of evidence_ref values from action=evidence. Do not put a snapshot, baseline, or session id there, and do not shrink the list.')
+      }
+      for (const ref of refs) {
+        const gap = typeof ref === 'string' ? evidenceRefGap(ref, this.registeredEvidence(ref)) : evidenceRefGap('missing', false)
+        if (gap) throw new DotError('dot/invalid', `${gap} Do not edit checks to drop this item.`)
+      }
+    }
+    const subject = this.subjectForVerify(change, args)
+    const expectedRef = typeof args.expected_input_ref === 'string' ? args.expected_input_ref : ''
+    const expectedRevision = typeof args.expected_input_revision === 'number' ? args.expected_input_revision : undefined
+    if (!expectedRef || expectedRevision === undefined) {
+      throw new DotError('dot/invalid', `verify requires expected_input_ref and expected_input_revision for ${change.currentInputRef}@${change.currentRevision}. Read the current input. Do not edit checks.`)
+    }
+    if (expectedRef !== change.currentInputRef || expectedRevision !== change.currentRevision) {
+      throw new DotError('dot/invalid', `expected input ${expectedRef}@${expectedRevision} is not current ${change.currentInputRef}@${change.currentRevision}. Call action=subject again. Do not edit checks.`)
+    }
+    const material = this.store.work.input(change.currentInputRef)
+    const covered = new Set(checks.map(check => check && typeof check === 'object' ? (check as { requirementRef?: unknown }).requirementRef : undefined))
+    const missing = (material?.requirements ?? []).filter(item => item.required && !covered.has(item.requirementRef)).map(item => item.requirementRef)
+    if (missing.length) {
+      throw new DotError('dot/invalid', `checks are incomplete: required ${missing.join(', ')} has no check. Add those checks. Do not remove requirements to make verify pass.`)
+    }
+    const listed = jsonArray(args.run_ids)
+    const runIds = listed ? listed.map(item => String(item)) : typeof args.run_id === 'string' && args.run_id ? [args.run_id] : []
+    const recorded = await this.recordWorkVerification(changeId, checks as Parameters<DotStore['work']['recordVerification']>[1], runIds, {
+      inputRef: expectedRef,
+      inputRevision: expectedRevision,
+      reviewRunId: typeof args.review_run_id === 'string' ? args.review_run_id : undefined,
+      reviewerSessionId: typeof args.session_id === 'string' ? args.session_id : undefined,
+      subject,
+    })
+    if (!('id' in recorded)) throw new DotError('dot/invalid', verifyRefusal(recorded.message))
+    return JSON.stringify({ id: recorded.id, verdict: recorded.verdict, inputRef: recorded.inputRef, subjectKey: recorded.subjectKey })
+  }
+
+  /** The delivery captured for this change and input. A snapshot id or a trimmed object is not accepted. */
+  private subjectForVerify(change: { readonly id: string; readonly currentInputRef: string; readonly currentRevision: number }, args: Record<string, unknown>): DeliverySubject {
+    const requested = typeof args.subject_ref === 'string' ? args.subject_ref.trim() : ''
+    const raw = args.subject
+    const id = snapshotId(raw)
+    if (!requested && id) {
+      throw new DotError('dot/invalid', `subject ${id} is a snapshot id, not the delivery. Call action=subject and pass its subjectRef as subject_ref. Do not put the id in subject, and do not edit checks.`)
+    }
+    const ref = requested || (raw && typeof raw === 'object' && !Array.isArray(raw) ? stringField(raw, 'artifactRef') : '') || (jsonObject(raw) ? stringField(jsonObject(raw), 'artifactRef') : '')
+    if (!ref) {
+      throw new DotError('dot/invalid', 'verify needs subject_ref from action=subject, or the full JSON object that call returned. A snapshot id is not the subject. Do not edit checks.')
+    }
+    const stored = this.readStoredSubject(ref)
+    if (!stored) {
+      throw new DotError('dot/invalid', `subject_ref ${ref} is not a captured delivery. Call action=subject and pass the subjectRef it returns. Do not invent the object, and do not edit checks.`)
+    }
+    if (stored.changeId !== change.id) {
+      throw new DotError('dot/invalid', `subject_ref ${ref} belongs to ${stored.changeId}, not ${change.id}. Call action=subject on ${change.id}. Do not edit checks.`)
+    }
+    if (stored.inputRef !== change.currentInputRef || stored.inputRevision !== change.currentRevision) {
+      throw new DotError('dot/invalid', `subject_ref ${ref} is for ${stored.inputRef}@${stored.inputRevision}, current is ${change.currentInputRef}@${change.currentRevision}. Call action=subject again. Do not edit checks.`)
+    }
+    const parsed = jsonObject(raw)
+    if (parsed && !sameSubject(stored.subject, parsed)) {
+      throw new DotError('dot/invalid', `subject does not match captured delivery ${ref}. Pass subject_ref, or the unchanged object from action=subject. Do not drop scopeKey, changes, or baselines, and do not edit checks.`)
+    }
+    return stored.subject
+  }
+
+  private rememberSubject(changeId: string, inputRef: string, inputRevision: number, subject: DeliverySubject): void {
+    if (!artifactName(subject.artifactRef) || artifactName(subject.artifactRef) !== subject.artifactRef) {
+      throw new DotError('dot/invalid', `subject ${subject.artifactRef} is not a single relative id`)
+    }
+    const dir = join(this.options.homeDir, 'artifacts', 'subjects')
+    mkdirSync(dir, { recursive: true })
+    const path = join(dir, `${subject.artifactRef}.json`)
+    if (existsSync(path)) return
+    writeFileSync(path, JSON.stringify({ changeId, inputRef, inputRevision, subject }))
+  }
+
+  private readStoredSubject(ref: string): { readonly changeId: string; readonly inputRef: string; readonly inputRevision: number; readonly subject: DeliverySubject } | undefined {
+    if (!artifactName(ref) || artifactName(ref) !== ref) return undefined
+    try {
+      const parsed = JSON.parse(readFileSync(join(this.options.homeDir, 'artifacts', 'subjects', `${ref}.json`), 'utf8')) as { changeId?: unknown; inputRef?: unknown; inputRevision?: unknown; subject?: unknown }
+      if (typeof parsed.changeId !== 'string' || typeof parsed.inputRef !== 'string' || typeof parsed.inputRevision !== 'number' || !parsed.subject || typeof parsed.subject !== 'object') return undefined
+      return { changeId: parsed.changeId, inputRef: parsed.inputRef, inputRevision: parsed.inputRevision, subject: parsed.subject as DeliverySubject }
+    } catch { return undefined }
+  }
+
+  private async evidenceFromTool(args: Record<string, unknown>): Promise<string> {
+    const ref = typeof args.evidence_ref === 'string' ? args.evidence_ref : ''
+    const body = typeof args.summary === 'string' ? args.summary : ''
+    if (!ref || !body) throw new DotError('dot/invalid', 'evidence requires evidence_ref and summary. evidence_ref is the id you will put in evidenceRefs. It is not a snapshot id, baseline id, or session id.')
+    if (isForeignEvidenceId(ref)) throw new DotError('dot/invalid', `evidence_ref ${ref} is a snapshot, baseline, or session id. Choose a relative evidence id, call action=evidence again, and put that evidence_ref in evidenceRefs.`)
+    this.saveWorkEvidence(ref, body)
+    return `evidence_ref ${ref}. Put this id in evidenceRefs. Do not substitute a snapshot id, baseline id, or session id.`
+  }
+
+  private async finishFromTool(args: Record<string, unknown>): Promise<string> {
+    const runId = typeof args.run_id === 'string' ? args.run_id : ''
+    if (!runId) throw new DotError('dot/invalid', 'run_id is required')
+    const phase = args.verdict === 'fail' ? 'failed' as const : 'completed' as const
+    const finished = await this.finishWorkRun(runId, phase)
+    if (!finished.ok) throw new DotError('dot/invalid', finished.message)
+    return `${phase} ${runId}`
+  }
+
+  private async holdFromTool(args: Record<string, unknown>): Promise<string> {
+    const runId = typeof args.review_run_id === 'string' ? args.review_run_id : typeof args.run_id === 'string' ? args.run_id : ''
+    if (!runId) throw new DotError('dot/invalid', 'review_run_id is required')
+    const held = await this.holdWorkReview(runId)
+    if (!('id' in held)) throw new DotError('dot/invalid', held.message)
+    return `holding ${held.id} at ${held.phase}`
+  }
+
+  private async decideFromTool(args: Record<string, unknown>): Promise<string> {
+    const changeId = typeof args.task_id === 'string' ? args.task_id : ''
+    const change = this.store.work.change(changeId)
+    if (!change) throw new DotError('dot/invalid', `unknown change ${changeId}`)
+    const expectedInputRevision = typeof args.expected_input_revision === 'number' ? args.expected_input_revision : change.currentRevision
+    const verificationId = typeof args.verification_id === 'string' ? args.verification_id : ''
+    const subjectKey = typeof args.expected_subject_key === 'string' ? args.expected_subject_key : ''
+    if (!verificationId || !subjectKey) throw new DotError('dot/invalid', 'decide requires verification_id and expected_subject_key')
+    if (!change.oversight?.requested || change.oversight.inputRef !== change.currentInputRef) {
+      const asked = await this.store.work.requestOversight(changeId, this.now())
+      if (!('id' in asked)) throw new DotError('dot/invalid', asked.message)
+    }
+    const opened = this.pending.open({
+      kind: 'approval',
+      sessionId: this.store.dotSessionId || changeId,
+      subject: `Look at ${changeId}`,
+      detail: JSON.stringify({ changeId, inputRevision: expectedInputRevision, verificationId, subjectKey }),
+    })
+    return `pending ${opened.id} for ${changeId}`
+  }
+
+  /** The human card settles a work review. A model tool call cannot record this as the user. */
+  async answerWorkReview(id: string, allow: boolean): Promise<string> {
+    const view = this.pending.get(id)
+    if (!view?.detail) throw new DotError('dot/unknown-request', `work review ${id} is no longer pending`)
+    let binding: { changeId?: string; inputRevision?: number; verificationId?: string; subjectKey?: string }
+    try { binding = JSON.parse(view.detail) as typeof binding } catch { throw new DotError('dot/invalid', `work review ${id} is not bound`) }
+    if (!binding.changeId || binding.inputRevision === undefined || !binding.verificationId || !binding.subjectKey) {
+      throw new DotError('dot/invalid', `work review ${id} is not bound`)
+    }
+    // Claim the pending answer before any write. A withdrawal or another answer that already won leaves no decision.
+    if (!this.pending.answer(id, { kind: 'approval', allow })) throw new DotError('dot/unknown-request', `work review ${id} is no longer pending`)
+    const noted = await this.store.work.noteOversight(binding.changeId, {
+      result: allow ? 'accept' : 'reject',
+      verificationId: binding.verificationId,
+      subjectKey: binding.subjectKey,
+      source: 'user',
+      expectedInputRevision: binding.inputRevision,
+    }, this.now())
+    if (!('id' in noted)) throw new DotError('dot/invalid', noted.message)
+    this.queueDecisionWake(noted)
+    return `user ${allow ? 'accepted' : 'rejected'} ${binding.changeId}`
+  }
+
+  /** A version-matched user decision wakes dot once. It does not call decide, accept, or reject, and it does not open a session. */
+  private openedDot(sessionId: string): string {
+    this.recoverDecisionWakes()
+    return sessionId
+  }
+
+  private recoverDecisionWakes(): void {
+    if (!this.store.dotSessionId) return
+    for (const change of this.store.work.listChanges()) this.queueDecisionWake(change)
+  }
+
+  private queueDecisionWake(change: ChangeRecord): void {
+    const decision = change.oversight?.decision
+    const oversight = change.oversight
+    if (!decision?.verificationId || !decision.subjectKey || !oversight) return
+    if (decision.notifiedAt !== undefined || change.closeout) return
+    if (oversight.inputRef !== change.currentInputRef || oversight.inputRevision !== change.currentRevision) return
+    const dot = this.store.dotSessionId
+    if (!dot) return
+    const key = `${change.id}\0${decision.verificationId}\0${decision.subjectKey}\0${decision.at}`
+    if (this.decisionWakes.has(key)) return
+    this.decisionWakes.add(key)
+    const next = decision.result === 'accept' ? 'accept' : 'reject'
+    this.notify({
+      sessionId: dot,
+      kind: 'task-human',
+      wakeKey: key,
+      at: this.now(),
+      text: `${change.id} user ${decision.result} is already recorded for verification ${decision.verificationId}, subject ${decision.subjectKey}, input ${oversight.inputRef}@${oversight.inputRevision}. Do not call decide again and do not answer this pending request again. Next, call action=${next} for this verification, subject, and input. This wake does not accept, reject, or open a session.`,
+    })
+  }
+
+  private async ackDecisionWakes(items: readonly Notice[]): Promise<void> {
+    for (const item of items) {
+      if (!item.wakeKey) continue
+      const [changeId, verificationId, subjectKey, atText] = item.wakeKey.split('\0')
+      const at = Number(atText)
+      if (!changeId || !verificationId || !subjectKey || !Number.isFinite(at)) continue
+      await this.store.work.markDecisionNotified(changeId, { verificationId, subjectKey, at }, this.now())
+    }
+  }
+
+  private registeredEvidence(ref: string): boolean {
+    if (isForeignEvidenceId(ref) || !artifactName(ref) || artifactName(ref) !== ref) return false
+    try { return readFileSync(join(this.options.homeDir, 'artifacts', 'evidence', ref)).byteLength > 0 } catch { return false }
+  }
+
+  /** Continue one reserved run. Omitting access does not choose a different run, and it does not lower that run's scope. */
+  private pickReserved(changeId: string, role: 'work' | 'rework' | 'review', input: { readonly runId?: string; readonly paths?: string }): RunRecord | undefined {
+    const open = this.store.work.listRuns().filter(run => run.changeId === changeId && run.kind === role && !['completed', 'failed', 'stopped'].includes(run.phase))
+    const reservedRuns = open.filter(run => run.phase === 'reserved')
+    const wanted = input.paths ? pathScope(input.paths) : undefined
+    if (input.runId) {
+      const named = reservedRuns.find(run => run.id === input.runId)
+      if (!named) throw new DotError('dot/invalid', `${input.runId} is not a reserved run on ${changeId}`)
+      if (wanted && wanted.length > 0 && !samePathList(named, wanted)) {
+        throw new DotError('dot/invalid', `${input.runId} was reserved with a different path list. Pass that run's full {path, type} list. A relative path is the same file as its absolute path under the change directory. Example: ${WRITE_PATHS_EXAMPLE}.`)
+      }
+      return named
+    }
+    if (wanted && wanted.length > 0) {
+      const matches = reservedRuns.filter(run => samePathList(run, wanted))
+      if (matches.length > 1) throw new DotError('dot/invalid', `${changeId} has ${matches.length} reserved runs for that scope`)
+      if (matches.length === 1) return matches[0]
+      const writers = open.filter(run => scopeWrites(run.writeScope))
+      if (writers.length > 0) throw new DotError('dot/invalid', `${changeId} has no reserved run for that scope. Pass that run's full {path, type} list. Example: ${WRITE_PATHS_EXAMPLE}.`)
+      return undefined
+    }
+    if (reservedRuns.length === 1) return reservedRuns[0]
+    if (open.length > 0) {
+      throw new DotError('dot/invalid', reservedRuns.length > 1
+        ? `${changeId} has ${reservedRuns.length} reserved runs; name the run or its paths`
+        : `${changeId} already has ${open.length} open runs`)
+    }
+    return undefined
+  }
+
+  private async startWorkSession(input: { cwd?: string; title: string; instruction: string; goal?: string; model?: string; taskId?: string; role?: SessionRole; access?: TicketAccess; preset?: string; checkOnly?: boolean; paths?: string; runId?: string }): Promise<string> {
+    const role = input.role ?? 'work'
+    if (role !== 'work' && role !== 'rework' && role !== 'review') throw new DotError('dot/invalid', 'invalid role')
+    let changeId = input.taskId
+    if (!changeId && input.runId) {
+      const named = this.store.work.run(input.runId)
+      if (!named || named.phase !== 'reserved' || named.kind !== role) {
+        throw new DotError('dot/invalid', named ? `${input.runId} is not a reserved ${role} run` : `unknown run ${input.runId}`)
+      }
+      changeId = named.changeId
+    }
+    if (!changeId) {
+      const cwd = input.cwd
+      if (!cwd || !isAbsolute(cwd)) throw new DotError('dot/invalid', 'directory must be absolute')
+      const goal = input.goal?.trim() || input.instruction.trim()
+      if (!goal && !input.checkOnly) throw new DotError('dot/invalid', 'instruction must be non-empty')
+      const change = await this.store.work.createChange({ title: input.title, cwd, goal: goal || input.title, at: this.now() })
+      changeId = change.id
+    }
+    const change = this.store.work.change(changeId)
+    if (!change) throw new DotError('dot/invalid', `unknown change ${changeId}`)
+    if (input.checkOnly) {
+      const candidate = plannedOccupant(change.cwd, plannedScope(role, input.access, input.paths, change.cwd))
+      return (await this.scopeReport(change.cwd, change.id, candidate)).text
+    }
+    const preset = await this.taskPreset(input.preset)
+    const model = await this.taskModel(input.model)
+    const selected = this.pickReserved(change.id, role, input)
+    if (selected && input.access === 'write' && !scopeWrites(selected.writeScope)) {
+      throw new DotError('dot/invalid', `${selected.id} is read-only, so access "write" does not start it. Reserve a write run with access "write" and paths covering the files. Example: paths ${WRITE_PATHS_EXAMPLE}. This run was not started.`)
+    }
+    if (!selected && role !== 'review' && input.access !== 'write' && input.paths && pathScope(input.paths)?.length) {
+      throw new DotError('dot/invalid', `these paths are a write scope, so access must be "write", not "${input.access ?? 'read'}". Example: access "write", paths ${WRITE_PATHS_EXAMPLE}. The run was not started.`)
+    }
+    const scope = selected ? selected.writeScope : plannedScope(role, input.access, input.paths, change.cwd)
+    const report = await this.scopeReport(change.cwd, change.id, selected ? occupantOf(selected) : plannedOccupant(change.cwd, scope))
+    if (scopeWrites(scope) && report.blocked) throw new DotError('dot/locked', report.text)
+    const note = report.text === 'Directory lock is available.' ? '' : `\n${report.text}`
+    let runId = selected?.id
+    if (!runId) {
+      const reserved = await this.reserveFromTool({ task_id: changeId, role, access: input.access ?? (role === 'review' ? 'write' : 'read'), ...(input.paths ? { paths: input.paths } : {}) })
+      runId = JSON.parse(reserved).runId as string
+    }
+    const instruction = input.instruction.trim()
+    if (!instruction) return `reserved ${runId} on ${changeId}${note}`
+    const launched = await this.launchWorkRun(runId, instruction, preset.named ? preset.id : undefined, model)
+    if (!launched.ok) return `reserved ${runId} on ${changeId}; not started: ${launched.message}${note}`
+    return `started ${runId} on ${changeId}${note}`
+  }
+
+  /** Other changes block only where their write scope actually overlaps. This change's runs are not a lock on themselves. */
+  private async scopeReport(cwd: string, exceptChangeId: string, candidate?: Occupant): Promise<{ readonly text: string; readonly blocked: boolean }> {
+    let rows: Awaited<ReturnType<DotHost['listSessions']>> | undefined
+    try { rows = await this.host.listSessions(new AbortController().signal) } catch { rows = undefined }
+    const others = this.store.work.occupying().filter(run => run.changeId !== exceptChangeId)
+    const conflicting = candidate
+      ? others.filter(run => occupantsConflict(candidate, occupantOf(run)))
+      : others.filter(run => run.writeScope.kind === 'workspace-exclusive' && (directoriesConflict(run.cwd, cwd) || (run.workspaceRoot !== '' && directoriesConflict(run.workspaceRoot, cwd))))
+    const exclusive = conflicting.filter(run => run.writeScope.kind === 'workspace-exclusive')
+    const paths = conflicting.filter(run => run.writeScope.kind === 'paths')
+    const humans = (rows ?? []).filter(row => !row.archived && !row.subagent && !row.blank && !this.isDot(row.sessionId) && !this.store.work.sessionRun(row.sessionId) && !!row.cwd && directoriesConflict(row.cwd, cwd))
+    const lines: string[] = []
+    if (rows === undefined) lines.push('Host sessions could not be listed.')
+    if (exclusive.length) lines.push(`Directory locked by ${exclusive.map(run => run.id).join(', ')}`)
+    if (paths.length) lines.push(`Path reservations: ${paths.map(run => run.id).join(', ')}`)
+    if (humans.length) lines.push(`Other sessions in this directory:\n${humans.map(row => `- ${row.sessionId} ${row.running ? 'RUNNING' : 'idle'}`).join('\n')}`)
+    const blocked = rows === undefined || exclusive.length > 0 || paths.length > 0 || humans.some(row => row.running)
+    return { text: lines.length ? lines.join('\n') : 'Directory lock is available.', blocked }
+  }
+
+  /** Resolve one scope against the workspace root, and refuse anything that leaves it. */
+  private scopeTarget(root: string, scopePath: string): string {
+    let absolute: string
+    try { absolute = absoluteScopePath(root, scopePath) } catch (error) {
+      throw new DotError('dot/invalid', error instanceof Error ? error.message : 'scope could not be resolved')
+    }
+    if (!scopeWithinRoot(root, scopePath)) throw new DotError('dot/invalid', `scope ${scopePath} is outside ${root}`)
+    return absolute
+  }
+
+  /**
+   * The id of this attempt. An existing manifest is a failed or finished snapshot
+   * and stays where it is; the next attempt gets a new id. No manifest means the
+   * previous save stopped early, so this attempt finishes that same directory.
+   */
+  private nextBaselineArtifact(runId: string, revision: number): string {
+    const stem = artifactName(`base-${runId}-${revision}`)
+    if (!stem) throw new DotError('dot/invalid', `${runId} has no baseline id`)
+    let id = stem
+    let attempt = 2
+    while (existsSync(join(this.options.homeDir, 'artifacts', id, 'manifest.json'))) {
+      const next = artifactName(`${stem}-a${attempt}`)
+      if (!next || next === id) throw new DotError('dot/invalid', `${runId} has too many failed baseline attempts`)
+      id = next
+      attempt += 1
+      if (attempt > 40) throw new DotError('dot/invalid', `${runId} has too many failed baseline attempts`)
+    }
+    return id
+  }
+
+  /** A baseline is valid only when the snapshot's captured files match the live scope. */
+  private confirmBaseline(run: RunRecord, artifactRef: string): WorkRefusal | undefined {
+    if (!/^[A-Za-z0-9._-]{1,80}$/.test(artifactRef) || artifactRef === '.' || artifactRef === '..') {
+      return { ok: false, code: 'baseline', message: `artifact ${artifactRef} is not a single relative id` }
+    }
+    try {
+      const manifest = readSnapshot(join(this.options.homeDir, 'artifacts', artifactRef)).manifest
+      const captured = baselineCaptures(run, manifest)
+      if (!captured.ok) return { ok: false, code: 'baseline', message: captured.reason }
+      return undefined
+    } catch {
+      return { ok: false, code: 'baseline', message: `artifact ${artifactRef} is missing or incomplete` }
+    }
+  }
+
+  private legacyClosed(entry: string): Promise<never> | undefined {
+    if (this.options.legacyWorkEntries === true) return undefined
+    return Promise.reject(new DotError('dot/legacy-closed', `${entry} is closed. Use a Change and reserveRun; this entry does not start a session, take a directory lock, or change a ticket.`))
   }
 
   private serial<T>(work: () => Promise<T>): Promise<T> {
@@ -1543,4 +2704,176 @@ export class DotService {
 
 export function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : typeof error === 'string' ? error : 'unknown error'
+}
+
+function artifactName(ref: string): string {
+  const cleaned = ref.replace(/[^A-Za-z0-9._-]/g, '').slice(0, 80)
+  return cleaned === '.' || cleaned === '..' ? '' : cleaned
+}
+
+function stepList(value: unknown): StepSpec[] {
+  const rows = jsonArray(value)
+  if (!rows) throw new DotError('dot/invalid', 'steps must be a JSON array of {stepRef, text}')
+  return rows.map(row => {
+    if (!row || typeof row !== 'object') throw new DotError('dot/invalid', 'steps must be objects')
+    const item = row as { stepRef?: unknown; text?: unknown }
+    if (typeof item.stepRef !== 'string' || !item.stepRef || typeof item.text !== 'string' || !item.text) {
+      throw new DotError('dot/invalid', 'steps must include stepRef and text')
+    }
+    return { stepRef: item.stepRef, text: item.text }
+  })
+}
+
+function requirementList(value: unknown): Requirement[] | undefined {
+  const rows = jsonArray(value)
+  if (!rows) return undefined
+  return rows.map(row => {
+    if (!row || typeof row !== 'object') throw new DotError('dot/invalid', 'requirements must be objects')
+    const item = row as { requirementRef?: unknown; text?: unknown; required?: unknown }
+    if (typeof item.requirementRef !== 'string' || !item.requirementRef || typeof item.text !== 'string' || typeof item.required !== 'boolean') {
+      throw new DotError('dot/invalid', 'requirements must include requirementRef, text, and required')
+    }
+    return { requirementRef: item.requirementRef, text: item.text, required: item.required }
+  })
+}
+
+function jsonArray(value: unknown): unknown[] | undefined {
+  if (Array.isArray(value)) return value
+  if (typeof value !== 'string' || !value.trim()) return undefined
+  try {
+    const parsed = JSON.parse(value) as unknown
+    return Array.isArray(parsed) ? parsed : undefined
+  } catch { return undefined }
+}
+
+function foldPath(value: string): string {
+  return value.replaceAll('\\', '/').toLowerCase()
+}
+
+function assistantText(event: { data?: unknown }): string {
+  const data = event.data
+  if (!data || typeof data !== 'object') return ''
+  const content = (data as { message?: { content?: unknown } }).message?.content
+  if (typeof content === 'string') return content
+  if (!Array.isArray(content)) return ''
+  return content.map(block => {
+    if (!block || typeof block !== 'object') return ''
+    const row = block as { type?: string; text?: unknown }
+    return row.type === 'text' && typeof row.text === 'string' ? row.text : ''
+  }).join('')
+}
+
+function occupantOf(run: RunRecord): Occupant {
+  return {
+    id: run.id,
+    cwd: run.cwd,
+    workspaceRoot: run.workspaceRoot,
+    exclusiveRoot: run.exclusiveRoot,
+    uncertainBoundary: run.uncertainBoundary || (run.writeScope.kind === 'workspace-exclusive' && !run.workspaceRoot),
+    writeScope: run.writeScope,
+  }
+}
+
+function plannedScope(role: 'work' | 'rework' | 'review', access: string | undefined, paths: string | undefined, cwd: string): WriteScope {
+  if (role === 'review') return { kind: 'workspace-exclusive' }
+  const listed = paths ? pathScope(paths) : undefined
+  return { kind: 'paths', paths: listed ?? (access === 'write' ? [{ path: cwd, type: 'directory' as const }] : []) }
+}
+
+function plannedOccupant(cwd: string, scope: WriteScope): Occupant {
+  const canonical = canonicalPath(cwd)
+  const identity = workspaceIdentity(canonical, { workspaceRoot: canonical })
+  return {
+    id: 'next',
+    cwd: canonical,
+    workspaceRoot: identity.workspaceRoot,
+    exclusiveRoot: identity.exclusiveRoot,
+    uncertainBoundary: identity.uncertainBoundary,
+    writeScope: scope,
+  }
+}
+
+function samePathList(run: RunRecord, paths: readonly { path: string; type: 'file' | 'directory' }[]): boolean {
+  if (run.writeScope.kind !== 'paths') return false
+  const root = run.workspaceRoot || run.cwd
+  const fold = (item: { path: string; type: string }) => {
+    try { return `${item.type}:${canonicalPath(absoluteScopePath(root, item.path))}` } catch { return `${item.type}:${item.path}` }
+  }
+  const left = run.writeScope.paths.map(fold).sort()
+  const right = paths.map(fold).sort()
+  return left.length === right.length && left.every((item, index) => item === right[index])
+}
+
+const WRITE_PATHS_EXAMPLE = '[{"path":"site/note.txt","type":"file"}]'
+
+function pathScope(value: unknown): { path: string; type: 'file' | 'directory' }[] | undefined {
+  if (value === undefined) return undefined
+  if (typeof value === 'string' && !value.trim()) return undefined
+  const rows = jsonArray(value)
+  if (!rows) throw new DotError('dot/invalid', `paths must be a JSON array of {path, type}. Example: ${WRITE_PATHS_EXAMPLE}. type is "file" or "directory".`)
+  return rows.map(row => {
+    if (!row || typeof row !== 'object' || Array.isArray(row)) {
+      throw new DotError('dot/invalid', `paths must include path and type on every entry. A bare path string is not an entry. Example: ${WRITE_PATHS_EXAMPLE}.`)
+    }
+    const item = row as { path?: unknown; type?: unknown }
+    if (typeof item.path !== 'string' || !item.path || (item.type !== 'file' && item.type !== 'directory')) {
+      throw new DotError('dot/invalid', `paths must include path and type on every entry. type is "file" or "directory", not ${JSON.stringify(item.type)}. Example: ${WRITE_PATHS_EXAMPLE}.`)
+    }
+    return { path: item.path, type: item.type }
+  })
+}
+
+function jsonObject(value: unknown): Record<string, unknown> | undefined {
+  if (value && typeof value === 'object' && !Array.isArray(value)) return value as Record<string, unknown>
+  if (typeof value !== 'string' || !value.trim()) return undefined
+  try {
+    const parsed = JSON.parse(value) as unknown
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed as Record<string, unknown> : undefined
+  } catch { return undefined }
+}
+
+/** A bare snapshot id, including one wrapped as a JSON string. An object is not an id. */
+function snapshotId(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined
+  const text = value.trim()
+  if (!text || text.startsWith('{') || text.startsWith('[')) return undefined
+  if (text.startsWith('"')) {
+    try {
+      const parsed = JSON.parse(text) as unknown
+      return typeof parsed === 'string' && parsed.trim() ? parsed.trim() : undefined
+    } catch { return undefined }
+  }
+  return text
+}
+
+function stringField(value: unknown, key: string): string {
+  if (!value || typeof value !== 'object') return ''
+  const field = (value as Record<string, unknown>)[key]
+  return typeof field === 'string' ? field : ''
+}
+
+function sameSubject(stored: DeliverySubject, passed: Record<string, unknown>): boolean {
+  const rest = { ...passed }
+  delete rest.subjectRef
+  return stable(stored) === stable(rest)
+}
+
+function stable(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stable).join(',')}]`
+  if (value && typeof value === 'object') {
+    const record = value as Record<string, unknown>
+    return `{${Object.keys(record).sort().map(key => `${JSON.stringify(key)}:${stable(record[key])}`).join(',')}}`
+  }
+  return JSON.stringify(value) ?? 'null'
+}
+
+function verifyRefusal(message: string): string {
+  if (message.includes('scopeKey') || message.includes('delivery schema')) return `${message} Pass subject_ref from action=subject. Do not trim the subject or edit checks.`
+  if (message.includes('no review run') || message.includes('is not a run of') || message.includes('reviewer session') || message.includes('review workspace') || message.includes('review cwd')) {
+    return `${message} Use the review run and session for this change. Do not edit checks.`
+  }
+  if (message.includes('older input') || message.includes('current input') || message.includes('different input')) {
+    return `${message} Call action=subject again for the current input. Do not edit checks.`
+  }
+  return `${message} Do not edit checks to get past this.`
 }

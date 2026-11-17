@@ -9,6 +9,11 @@ function fakeDomain(seed: Record<string, Record<string, unknown>> = {}) {
     tickets: new Map(Object.entries(seed.tickets ?? {})),
     schedules: new Map(Object.entries(seed.schedules ?? {})),
     proposals: new Map(Object.entries(seed.proposals ?? {})),
+    changes: new Map(Object.entries(seed.changes ?? {})),
+    inputs: new Map(Object.entries(seed.inputs ?? {})),
+    runs: new Map(Object.entries(seed.runs ?? {})),
+    verifications: new Map(Object.entries(seed.verifications ?? {})),
+    peers: new Map(Object.entries(seed.peers ?? {})),
   }
   const puts: string[] = []
   const domain: DotDomainHandle = {
@@ -17,10 +22,28 @@ function fakeDomain(seed: Record<string, Record<string, unknown>> = {}) {
       get: key => tables[name]!.get(key),
       put: async (key, value) => { puts.push(`${name}:${key}`); tables[name]!.set(key, value) },
       delete: async key => { puts.push(`${name}:-${key}`); return tables[name]!.delete(key) },
+      update: async (key, recipe) => {
+        const rows = tables[name]!
+        if (!rows.has(key)) {
+          const error = new Error(`domain 'klarkxy_dsh_dot' table '${name}' has no record '${key}' to update`)
+          ;(error as { code?: string }).code = 'missing-key'
+          throw error
+        }
+        puts.push(`${name}:update:${key}`)
+        const next = recipe(rows.get(key))
+        rows.set(key, next)
+        return next
+      },
     }),
     close: async () => {},
   }
   return { domain, tables, puts }
+}
+
+function unknownState(): Error {
+  const error = new Error('durable outcome unknown')
+  ;(error as { code?: string }).code = 'unknown-state'
+  return error
 }
 
 describe('ticket migration', () => {
@@ -161,6 +184,153 @@ describe('DotStore', () => {
     void store.track({ sessionId: 'b', origin: 'started', title: 'B', goal: '', cwd: '/', at: 2 })
     await store.flush()
     expect(puts).toEqual(['tasks:a', 'state:current', 'tasks:b'])
+  })
+
+  it('strips a baseline that was saved on the run but not the change', async () => {
+    const { domain, tables } = fakeDomain()
+    const store = new DotStore(domain)
+    const change = await store.work.createChange({ title: 'A', cwd: 'H:\\proj', goal: 'a', at: 1 })
+    const reserved = await store.work.reserveRun({ changeId: change.id, cwd: 'H:\\proj\\docs', writeScope: { kind: 'paths', paths: [{ path: 'H:\\proj\\docs\\a.md', type: 'file' }] }, at: 2 })
+    if (!reserved.ok) throw new Error(reserved.message)
+    const diverged = { ...reserved.run, baselineRefs: [{ workspaceRoot: reserved.run.workspaceRoot, scopeKey: 'stale', artifactRef: 'ghost' }] }
+    tables.runs!.set(reserved.run.id, diverged)
+    const reloaded = new DotStore(domain)
+    expect(reloaded.work.run(reserved.run.id)?.baselineRefs).toEqual([])
+    expect(reloaded.work.dispatchAllowed(reserved.run.id)).toMatchObject({ code: 'baseline' })
+    await reloaded.flush()
+    expect(tables.runs!.get(reserved.run.id)).toMatchObject({ baselineRefs: [] })
+  })
+
+  it('refuses a new reservation when the runs table cannot be read or a core row is illegal', async () => {
+    const { domain } = fakeDomain()
+    const unreadable: DotDomainHandle = {
+      ...domain,
+      table: name => {
+        if (name === 'runs') throw new Error('runs unreadable')
+        return domain.table(name)
+      },
+    }
+    const blocked = new DotStore(unreadable)
+    expect(blocked.work.recoveryError).toMatch(/unreadable runs/)
+    expect(await blocked.work.reserveRun({ changeId: 'c-1', writeScope: { kind: 'paths', paths: [] } })).toMatchObject({ code: 'recovery' })
+    const { domain: illegalDomain, tables } = fakeDomain()
+    tables.runs!.set('bad', { id: 'bad' })
+    const illegal = new DotStore(illegalDomain)
+    expect(illegal.work.recoveryError).toMatch(/illegal runs/)
+    expect(await illegal.work.reserveRun({ changeId: 'c-1', writeScope: { kind: 'paths', paths: [] } })).toMatchObject({ code: 'recovery' })
+  })
+
+  it('seals scheduling when a schedule delete, proposal delete, or direct state write is unknown', async () => {
+    const { domain } = fakeDomain()
+    const original = domain.table.bind(domain)
+    let mode = 'off'
+    const wrapped: DotDomainHandle = {
+      ...domain,
+      table: name => {
+        const table = original(name)
+        return {
+          ...table,
+          put: async (key, value) => {
+            await table.put(key, value)
+            if (mode === 'state' && name === 'state') throw unknownState()
+          },
+          delete: async key => {
+            if (mode === 'schedule-disk' && name === 'schedules') throw new Error('disk failure')
+            const removed = await table.delete(key)
+            if (mode === 'schedule' && name === 'schedules') throw unknownState()
+            if (mode === 'proposal' && name === 'proposals') throw unknownState()
+            return removed
+          },
+        }
+      },
+    }
+    const store = new DotStore(wrapped)
+    const change = await store.work.createChange({ title: 'A', cwd: 'H:\\proj', goal: 'a', maxConcurrentRuns: 4, at: 1 })
+    const reserved = await store.work.reserveRun({ changeId: change.id, writeScope: { kind: 'paths', paths: [] }, at: 2 })
+    if (!reserved.ok) throw new Error(reserved.message)
+    const followUp = { kind: 'context' as const, targetSessionId: reserved.run.requestedSessionId, inputRevision: reserved.run.inputRevision, contentRef: 'c', source: 'dot', status: 'intent' as const }
+    await store.putSchedule({ id: 'sch-1', title: 't', prompt: 'p', timing: { kind: 'once', at: 5 }, createdAt: 1, nextAt: 5 })
+    mode = 'schedule'
+    await expect(store.deleteSchedule('sch-1')).rejects.toMatchObject({ code: 'unknown-state' })
+    expect(store.work.recoveryError).toMatch(/unknown-state/)
+    expect(store.work.dispatchAllowed(reserved.run.id)).toMatchObject({ code: 'recovery' })
+    expect(await store.work.addDelivery(reserved.run.id, followUp)).toMatchObject({ code: 'recovery' })
+    expect(await store.work.reserveRun({ changeId: change.id, cwd: 'D:\\else', writeScope: { kind: 'paths', paths: [] }, at: 3 })).toMatchObject({ code: 'recovery' })
+    const reopened = new DotStore(domain)
+    expect(reopened.work.recoveryError).toBeUndefined()
+    expect(reopened.schedule('sch-1')).toBeUndefined()
+    expect(reopened.work.dispatchAllowed(reserved.run.id)).toEqual({ ok: true })
+
+    mode = 'off'
+    const proposals = new DotStore(wrapped)
+    await proposals.putSettingProposal({ id: 'setting-1', field: 'scope', before: 'all', after: 'tracked', reason: 'test', createdAt: 1 })
+    mode = 'proposal'
+    await expect(proposals.deleteSettingProposal('setting-1')).rejects.toMatchObject({ code: 'unknown-state' })
+    expect(proposals.work.dispatchAllowed(reserved.run.id)).toMatchObject({ code: 'recovery' })
+    expect(await proposals.work.addDelivery(reserved.run.id, followUp)).toMatchObject({ code: 'recovery' })
+    expect(await proposals.work.reserveRun({ changeId: change.id, cwd: 'D:\\else', writeScope: { kind: 'paths', paths: [] }, at: 4 })).toMatchObject({ code: 'recovery' })
+
+    mode = 'off'
+    const state = new DotStore(wrapped)
+    mode = 'state'
+    await expect(state.commitKnowledgeMigration({ knowledgeMigrated: '1' })).rejects.toMatchObject({ code: 'unknown-state' })
+    expect(state.work.dispatchAllowed(reserved.run.id)).toMatchObject({ code: 'recovery' })
+    expect(await state.work.addDelivery(reserved.run.id, followUp)).toMatchObject({ code: 'recovery' })
+    expect(await state.work.reserveRun({ changeId: change.id, cwd: 'D:\\else', writeScope: { kind: 'paths', paths: [] }, at: 5 })).toMatchObject({ code: 'recovery' })
+
+    mode = 'schedule-disk'
+    const plain = new DotStore(wrapped)
+    await plain.putSchedule({ id: 'sch-2', title: 't', prompt: 'p', timing: { kind: 'once', at: 5 }, createdAt: 1, nextAt: 5 })
+    await expect(plain.deleteSchedule('sch-2')).rejects.toThrow('disk failure')
+    expect(plain.work.recoveryError).toBeUndefined()
+    expect(plain.work.dispatchAllowed(reserved.run.id)).toEqual({ ok: true })
+  })
+
+  it('puts the first input and change, then updates the saved change', async () => {
+    const { domain, puts, tables } = fakeDomain()
+    await expect(domain.table('inputs').update!('input-1', value => value)).rejects.toMatchObject({ code: 'missing-key' })
+    const store = new DotStore(domain)
+    const change = await store.work.createChange({ title: 'Recipe', cwd: 'H:\\shared', goal: 'land it', at: 1 })
+    expect(puts.slice(0, 2)).toEqual(['inputs:input-1', 'changes:c-1'])
+    expect(puts.some(op => op.startsWith('inputs:update:') || op.startsWith('changes:update:'))).toBe(false)
+    const reserved = await store.work.reserveRun({ changeId: change.id, cwd: 'H:\\shared', writeScope: { kind: 'paths', paths: [] }, at: 2 })
+    if (!reserved.ok) throw new Error(reserved.message)
+    expect(puts).toContain(`runs:${reserved.run.id}`)
+    expect(puts).not.toContain(`runs:update:${reserved.run.id}`)
+    const paused = await store.work.setControl(change.id, 'paused', 3)
+    expect(paused).toMatchObject({ id: change.id, control: 'paused' })
+    expect(puts.at(-1)).toBe(`changes:update:${change.id}`)
+    const reloaded = new DotStore(domain)
+    expect(reloaded.work.change(change.id)?.control).toBe('paused')
+    expect(reloaded.work.input(change.currentInputRef)?.goal).toBe('land it')
+    expect(tables.inputs!.has('input-1')).toBe(true)
+    expect(tables.changes!.has(change.id)).toBe(true)
+  })
+
+  it('seals scheduling when updating an existing work row is unknown', async () => {
+    const { domain } = fakeDomain()
+    const original = domain.table.bind(domain)
+    let unknown = false
+    const wrapped: DotDomainHandle = {
+      ...domain,
+      table: name => {
+        const table = original(name)
+        return {
+          ...table,
+          update: async (key, recipe) => {
+            if (unknown && name === 'changes') throw unknownState()
+            return table.update!(key, recipe)
+          },
+        }
+      },
+    }
+    const store = new DotStore(wrapped)
+    const change = await store.work.createChange({ title: 'A', cwd: 'H:\\proj', goal: 'a', at: 1 })
+    unknown = true
+    await expect(store.work.setControl(change.id, 'paused', 2)).rejects.toMatchObject({ code: 'unknown-state' })
+    expect(store.work.change(change.id)?.control).toBe('open')
+    expect(store.work.recoveryError).toMatch(/unknown-state/)
+    expect(await store.work.reserveRun({ changeId: change.id, cwd: 'H:\\else', writeScope: { kind: 'paths', paths: [] }, at: 3 })).toMatchObject({ code: 'recovery' })
   })
 })
 
@@ -310,5 +480,37 @@ describe('DotStore knowledge migration commit', () => {
     expect(reloaded.settings.scope).toBe('tracked')
     expect(store.settings.scope).toBe('tracked')
     expect(store.knowledgeMigrated).toBe(true)
+  })
+})
+
+describe('factory reset of the store', () => {
+  it('wipes tables, restores default settings, and keeps the migration marker', async () => {
+    const { domain, tables } = fakeDomain({
+      tasks: { s1: { sessionId: 's1', origin: 'started', title: 't', goal: 'g', cwd: '/w', status: 'idle', createdAt: 1, updatedAt: 1, unseenTurns: 0 } },
+      schedules: { sch: { id: 'sch', title: 'ping', prompt: 'check', timing: { kind: 'once', at: 9 }, createdAt: 1, nextAt: 9 } },
+      proposals: { p1: { id: 'p1', field: 'scope', before: 'all', after: 'tracked', reason: 'less', createdAt: 1 } },
+    })
+    const store = new DotStore(domain)
+    await store.setSettings({ ...DEFAULT_SETTINGS, scope: 'all', reflection: false })
+    await store.setAgreements('do not push')
+    await store.setCognition('short answers')
+    expect(store.list()).toHaveLength(1)
+    await store.factoryReset(5000)
+    expect(store.list()).toEqual([])
+    expect(store.schedules).toEqual([])
+    expect(store.settingProposals).toEqual([])
+    expect(store.agreements).toBe('')
+    expect(store.cognition).toBe('')
+    expect(store.settings).toEqual(DEFAULT_SETTINGS)
+    expect(store.knowledgeMigrated).toBe(true)
+    expect(store.lastFactoryResetAt).toBe(5000)
+    expect(store.dotSessionId).toBeUndefined()
+    expect([...tables.tasks.keys()]).toEqual([])
+    expect([...tables.schedules.keys()]).toEqual([])
+    const reloaded = new DotStore(domain)
+    expect(reloaded.settings).toEqual(DEFAULT_SETTINGS)
+    expect(reloaded.lastFactoryResetAt).toBe(5000)
+    expect(reloaded.knowledgeMigrated).toBe(true)
+    expect(reloaded.list()).toEqual([])
   })
 })

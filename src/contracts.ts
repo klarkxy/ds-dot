@@ -135,9 +135,11 @@ export interface ScheduleRecord {
   readonly prompt: string
   readonly timing: ScheduleTiming
   readonly createdAt: number
-  /** When it is due next. */
+  /** When it is due next. A delivered once reminder keeps this and does not become due again. */
   readonly nextAt: number
   readonly lastFiredAt?: number
+  /** Set when a once reminder was handed off. Later ticks, late catch-up and restarts must not wake again. */
+  readonly deliveredAt?: number
 }
 
 /** Where a tracked session came from: dot started it, or the human asked dot to watch it. */
@@ -213,6 +215,8 @@ export interface PendingView {
   readonly subject: string
   readonly detail?: string
   readonly questions?: readonly PendingQuestionItem[]
+  /** Set when this approval is high-risk or truncated. The model cannot settle it. */
+  readonly humanRequired?: boolean
 }
 
 export interface PendingQuestionItem {
@@ -290,7 +294,7 @@ export interface DotSettings {
   readonly model?: ModelChoice
   readonly approvals: ApprovalMode
   readonly questions: TakeoverMode
-  /** all: every top-level session; tracked: only sessions on dot's board. */
+  /** all: every top-level session; tracked: only sessions on dot's board. New installs start at tracked. */
   readonly scope: 'all' | 'tracked'
   /** Models dot may start tasks on. */
   readonly taskModels: TaskModelRule
@@ -316,11 +320,37 @@ export interface DotSettings {
 export const DEFAULT_SETTINGS: DotSettings = {
   approvals: 'dot',
   questions: 'dot',
-  scope: 'all',
+  scope: 'tracked',
   taskModels: { mode: 'all', list: [] },
   taskPermission: 'workspace-write',
   reflection: true,
   idleCheckMinutes: 10,
+}
+
+/** What a factory-reset preview shows before the human confirms. */
+export interface FactoryResetPreview {
+  readonly token: string
+  readonly expiresAt: number
+  readonly tasks: number
+  readonly tickets: number
+  readonly changes: number
+  readonly runs: number
+  readonly schedules: number
+  readonly proposals: number
+  readonly cards: number
+  readonly ownedSessions: number
+  readonly pastSegments: number
+  readonly reflections: number
+  readonly hasAgreements: boolean
+  readonly hasCognition: boolean
+  readonly archiveSessionIds: readonly string[]
+}
+
+export interface FactoryResetResult {
+  readonly archived: readonly string[]
+  readonly archiveFailed: readonly { readonly sessionId: string; readonly message: string }[]
+  readonly sessionId: string
+  readonly at: number
 }
 
 /** The part of the settings that routes an incoming request. */
@@ -463,7 +493,7 @@ export interface TrajectoryView {
 export type ChatItem = ChatItemRow & { readonly turn?: number; readonly trigger?: 'human' | 'background' }
 
 type ChatItemRow =
-  | { readonly kind: 'user'; readonly key: string; readonly text: string; readonly at: number }
+  | { readonly kind: 'user'; readonly key: string; readonly text: string; readonly at: number; readonly images?: readonly { readonly mediaType: string; readonly name?: string }[] }
   /** The human's answer to one of dot's cards. */
   | { readonly kind: 'answer'; readonly key: string; readonly text: string; readonly at: number }
   /** A batch of task updates the host delivered to dot. */

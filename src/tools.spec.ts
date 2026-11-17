@@ -113,6 +113,16 @@ describe('dot tools', () => {
     }
   })
 
+  it('lists inspect/files on workspaces and names the Deep View rich nodes', () => {
+    const workspace = load().find(row => row.name === TOOL.workspace) as { parameters: { properties?: { action?: { enum?: string[] } }; action?: { enum?: string[] } }; description: string }
+    const action = workspace.parameters.properties?.action ?? workspace.parameters.action
+    expect(action?.enum).toEqual(['list', 'inspect', 'files', 'create'])
+    expect(workspace.description).toContain('inspect')
+    expect(workspace.description).toContain('files')
+    const view = load().find(row => row.name === 'show_view') as { description: string }
+    for (const node of ['steps', 'math', 'flow', 'explore', 'map']) expect(view.description).toContain(node)
+  })
+
   it('no tool parameter schema uses oneOf / anyOf / allOf / const or a union type', () => {
     const tools = allSchemas()
     const forbidden = ['oneOf', 'anyOf', 'allOf', 'const']
@@ -175,6 +185,17 @@ describe('dot tools', () => {
     expect(tool.output.presentationMeta(undefined, result)).toMatchObject({ owner: 'dsh-deep-view', title: 'Pick target', interactive: true, awaitReply: true, dotCard: { number: 1 } })
   })
 
+  it('accepts Deep View 0.3.0 math cards through checkShownView', async () => {
+    const tool = load().find(row => row.name === 'show_view') as unknown as {
+      execute: (args: unknown, exec: { callId?: string; concludeTurn(): void }) => Promise<Record<string, unknown>>
+    }
+    const result = await tool.execute({
+      title: 'Plot',
+      view: JSON.stringify({ type: 'math', id: 'm', mathPoints: [{ id: 'p', x: 0, y: 0 }] }),
+    }, { callId: 'm1', concludeTurn: () => {} })
+    expect(result.status).toBe('shown')
+  })
+
   it('keeps an invalid show_view in the same turn without concluding it', async () => {
     const tool = load().find(row => row.name === 'show_view') as unknown as { execute: (args: unknown, exec: { callId?: string; concludeTurn(): void }) => Promise<Record<string, unknown>> }
     let concluded = 0
@@ -220,7 +241,10 @@ describe('dot tools', () => {
     const rows = rowsOf(join(root, 'cordis.patch.yml'))
     expect(rows).toEqual([{ id: 'deep-view', name: '@klarkxy/dsh-deep-view' }, { id: 'dot', name: 'ds-dot' }])
     const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'))
-    expect(pkg.dependencies['@klarkxy/dsh-deep-view']).toBe('^0.2.0')
+    expect(String(pkg.dependencies['@klarkxy/dsh-deep-view'])).toMatch(/0\.3\.0|dsh-deep-view/)
+    expect(pkg.files).toContain('src')
+    expect(pkg.peerDependencies['@klarkxy/dsh-dev-index']).toBeTruthy()
+    expect(pkg.peerDependenciesMeta['@klarkxy/dsh-dev-index']?.optional).toBe(true)
   })
 
   it('injects a settings-snapshot section after the frozen blocks', () => {
@@ -292,7 +316,7 @@ describe('dot tools', () => {
 describe('settingsSnapshotBlock', () => {
   it('includes all core hard-switch fields', () => {
     const block = settingsSnapshotBlock(DEFAULT_SETTINGS)
-    expect(block).toContain('scope: all')
+    expect(block).toContain('scope: tracked')
     expect(block).toContain('approvals: dot')
     expect(block).toContain('questions: dot')
     expect(block).toContain('[settings snapshot')

@@ -6,7 +6,7 @@
   "panel": {
     "cardPreparing": "Preparing card…",
     "cardExpired": "Expired",
-    "cardsHint": "You can still answer expired cards; replies reach the current conversation.",
+    "cardsHint": "This card has expired; start a new request.",
     "personaTitle": "Persona & agreements",
     "agreements": "Agreements",
     "agreementsHint": "The rules you set, kept in your own words. They win over her cognition.",

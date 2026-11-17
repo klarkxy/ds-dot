@@ -43,6 +43,20 @@ export function textOf(content: unknown): string {
   }).join('')
 }
 
+function imageNotes(content: unknown): { readonly mediaType: string; readonly name?: string }[] {
+  if (!Array.isArray(content)) return []
+  const notes: { readonly mediaType: string; readonly name?: string }[] = []
+  for (const block of content) {
+    const row = rec(block)
+    if (row?.type !== 'image') continue
+    const attachment = rec(row.attachment)
+    const mediaType = typeof attachment?.mediaType === 'string' ? attachment.mediaType : 'image'
+    const name = typeof attachment?.name === 'string' ? attachment.name : undefined
+    notes.push({ mediaType, ...(name ? { name } : {}) })
+  }
+  return notes
+}
+
 /**
  * A human message can carry held notices into the same model turn. The source
  * stores only their character count; readers split the log text back into the
@@ -131,14 +145,15 @@ export class ChatFold {
         } else if (!this.inTurn) this.trigger = 'background'
         const parts = splitCarriedNotice(source, data.content)
         const text = parts.text.trim()
+        const images = source?.kind === 'user' ? imageNotes(data.content) : []
         if (parts.notice) this.push({ kind: 'notice', key: `${key}:notice`, text: parts.notice, at })
-        if (!text) return parts.notice !== undefined
+        if (!text && images.length === 0) return parts.notice !== undefined
         if (source?.kind === 'user') {
           const answer = viewAnswerOf(source)
           if (answer) {
             this.answers[answer.id] = { action: answer.action, values: answer.values }
             this.push({ kind: 'answer', key, text, at })
-          } else this.push({ kind: 'user', key, text, at })
+          } else this.push({ kind: 'user', key, text, at, ...(images.length > 0 ? { images } : {}) })
           return true
         }
         if (source?.kind === 'agent-message') { this.push({ kind: 'notice', key, text, at }); return true }

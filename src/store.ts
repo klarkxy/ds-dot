@@ -2,8 +2,8 @@
  * In-memory ledger mirrored to the storage domain. Writes are serialized so
  * the durable copy follows the in-memory order; reads never wait on disk.
  */
-import type { BoardView, CognitionVersion, DotContextUsage, DotSettings, DotUsageOffset, PendingView, ReflectionRun, ScheduleRecord, SettingProposal, TaskRecord, Ticket, TicketAccess, TicketPriority, TicketRound, TicketStatus } from './contracts.ts'
-import { COGNITION_HISTORY_MAX } from './contracts.ts'
+import { APPROVAL_DETAIL_LIMIT } from './approval-risk.ts'
+import { COGNITION_HISTORY_MAX, type BoardView, type CognitionVersion, type DotContextUsage, type DotSettings, type DotUsageOffset, type PendingView, type ReflectionRun, type ScheduleRecord, type SettingProposal, type TaskRecord, type Ticket, type TicketAccess, type TicketPriority, type TicketRound, type TicketStatus } from './contracts.ts'
 import { ZERO_USAGE, addUsage } from './context.ts'
 import { applyEvent, createTask, ledgerSummary, markSeen, sortTasks, withPending, type LedgerEvent, type NewTask } from './ledger.ts'
 import { MAX_PAST_SEGMENTS, type PastSegment, type Segment } from './segments.ts'
@@ -13,14 +13,17 @@ import { clip } from './ledger.ts'
 import { appendTicketRound, moveTicket } from './ticket.ts'
 import { deriveTicketViews } from './ticket-view.ts'
 import { lockHolders } from './lock.ts'
+import { ownedSessionIds, sessionIsOwned } from './peer.ts'
+import { WorkBook, isUnknownState, type WorkPersist } from './work.ts'
 
-type TableName = 'state' | 'tasks' | 'tickets' | 'schedules' | 'proposals'
+type TableName = 'state' | 'tasks' | 'tickets' | 'schedules' | 'proposals' | 'changes' | 'inputs' | 'runs' | 'verifications' | 'peers'
 
 export interface DotTable {
   entries(): IterableIterator<[unknown, unknown]>
   get(key: string): unknown
   put(key: string, value: unknown): Promise<void>
   delete(key: string): Promise<unknown>
+  update?(key: string, recipe: (current: unknown) => unknown): Promise<unknown>
 }
 
 export interface DotDomainHandle {
@@ -46,6 +49,7 @@ export class DotStore {
   private cognitionRevision = 0
   get cognitionVersion(): number { return this.cognitionRevision }
   private readonly listeners = new Set<() => void>()
+  readonly work: WorkBook
 
   constructor(private readonly domain: DotDomainHandle | undefined, initialTasks?: readonly TaskRecord[]) {
     this.state = domain ? parseState(domain.table('state').get(STATE_KEY)) : {}
@@ -69,6 +73,54 @@ export class DotStore {
         const proposal = parseSettingProposal(value)
         if (proposal && proposal.id === key) this.proposals.set(proposal.id, proposal)
       }
+    }
+    this.work = WorkBook.restore({
+      changes: this.loadWork('changes'),
+      inputs: this.loadWork('inputs'),
+      runs: this.loadWork('runs'),
+      verifications: this.loadWork('verifications'),
+    }, (table, key, value) => this.persistWork(table, key, value))
+    for (const repair of this.work.takeRepairs()) {
+      const op = this.tail.then(() => this.persistWork('runs', repair.id, repair))
+      this.tail = op.catch(() => undefined)
+    }
+  }
+
+  /** `null` is an unreadable table. An empty array is a table that really has no rows. */
+  private loadWork(name: TableName): unknown[] | null {
+    if (!this.domain) return []
+    try {
+      const table = this.domain.table(name)
+      if (!table || typeof table.entries !== 'function') return null
+      return [...table.entries()].map(([, value]) => value)
+    } catch {
+      return null
+    }
+  }
+
+  /**
+   * A new key is a put. update is only for a key the table already has,
+   * because the real domain rejects a missing key instead of inserting it.
+   */
+  private async persistWork(table: Parameters<WorkPersist>[0], key: string, value: unknown): Promise<void> {
+    if (!this.domain) return
+    const handle = this.domain.table(table)
+    await this.durable(async () => {
+      if (typeof handle.update === 'function' && handle.get(key) !== undefined) {
+        await handle.update(key, () => value)
+        return
+      }
+      await handle.put(key, value)
+    })
+  }
+
+  /** Any shared-domain mutation. An unknown outcome seals scheduling; a definite failure does not. */
+  private async durable(work: () => Promise<unknown>): Promise<void> {
+    try {
+      await work()
+    } catch (error) {
+      if (isUnknownState(error)) this.work.sealUnknown(error)
+      throw error
     }
   }
 
@@ -95,7 +147,7 @@ export class DotStore {
     const domain = this.domain
     const op = this.tail.then(async () => {
       const next = { ...this.state, ticketsMigrated: '1' }
-      if (domain) await domain.table('state').put(STATE_KEY, next)
+      if (domain) await this.durable(() => domain.table('state').put(STATE_KEY, next))
       this.state = { ...this.state, ticketsMigrated: '1' }
       this.pruneTickets()
       this.changed()
@@ -107,11 +159,18 @@ export class DotStore {
   get cards(): readonly import('./card-state.ts').DotCardRecord[] { return this.state.cards ?? [] }
   get approvalDetails(): readonly import('./contracts.ts').ApprovalDetail[] { return this.state.approvalDetails ?? [] }
   saveApprovalDetail(detail: import('./contracts.ts').ApprovalDetail): Promise<void> {
-    return this.setDot({ approvalDetails: [...this.approvalDetails.filter(row => row.requestId !== detail.requestId), detail] })
+    const next = [...this.approvalDetails.filter(row => row.requestId !== detail.requestId), detail].slice(-APPROVAL_DETAIL_LIMIT)
+    return this.setDot({ approvalDetails: next })
+  }
+  replaceApprovalDetails(details: readonly import('./contracts.ts').ApprovalDetail[]): Promise<void> {
+    const current = this.approvalDetails
+    if (details.length === current.length && details.every((row, index) => row === current[index])) return Promise.resolve()
+    return this.setDot({ approvalDetails: [...details] })
   }
   get cardSequence(): number { return this.cards.reduce((max, card) => Math.max(max, card.number), this.state.cardSequence ?? 0) }
   get lastReplyAt(): number | undefined { return this.state.lastReplyAt }
   get lastConversationAt(): number | undefined { return this.state.lastConversationAt }
+  get lastFactoryResetAt(): number | undefined { return this.state.lastFactoryResetAt }
 
   addCard(card: import('./card-state.ts').DotCardRecord): Promise<void> {
     return this.setDot({ cardSequence: card.number, cards: [...this.cards.map(row => row.answer ? row : { ...row, expired: true }), card] })
@@ -358,7 +417,7 @@ export class DotStore {
     }
     const op = this.tail.then(async () => {
       const next = { ...this.state, ...effective }
-      await domain.table('state').put(STATE_KEY, next)
+      await this.durable(() => domain.table('state').put(STATE_KEY, next))
       // Merge onto the latest memory state so concurrent settings/segment fields survive;
       // the state write that landed meanwhile is re-issued with the latest snapshot below.
       this.state = { ...this.state, ...effective }
@@ -373,6 +432,38 @@ export class DotStore {
   setSettings(next: DotSettings): Promise<void> {
     this.current = next
     return this.setDot({ settings: { ...next } as Record<string, unknown> })
+  }
+
+  /**
+   * Wipe Dorothy's durable tables and in-memory ledger. Settings return to
+   * defaults. The migration marker stays so legacy note files are not
+   * re-imported. `lastFactoryResetAt` is the surviving audit.
+   */
+  async factoryReset(now = Date.now()): Promise<void> {
+    await this.flush()
+    const names: TableName[] = ['tasks', 'tickets', 'schedules', 'proposals', 'changes', 'inputs', 'runs', 'verifications', 'peers']
+    const domain = this.domain
+    const op = this.tail.then(async () => {
+      if (domain) {
+        for (const name of names) {
+          const table = domain.table(name)
+          const keys = [...table.entries()].map(([key]) => String(key))
+          for (const key of keys) await this.durable(() => table.delete(key))
+        }
+      }
+      this.tasks.clear()
+      this.tickets.clear()
+      this.reminders.clear()
+      this.proposals.clear()
+      this.work.clear()
+      this.current = parseSettings(undefined)
+      this.cognitionRevision++
+      this.state = { lastFactoryResetAt: now, knowledgeMigrated: '1' }
+      if (domain) await this.durable(() => domain.table('state').put(STATE_KEY, this.state))
+      this.changed()
+    })
+    this.tail = op.catch(() => undefined)
+    await op
   }
 
   setDot(next: DotState): Promise<void> {
@@ -462,7 +553,7 @@ export class DotStore {
     if (ticket.status !== 'draft') throw new Error('Only draft tickets can be deleted')
     const domain = this.domain
     if (domain) {
-      const op = this.tail.then(() => domain.table('tickets').delete(id))
+      const op = this.tail.then(() => this.durable(() => domain.table('tickets').delete(id)))
       this.tail = op.catch(() => undefined)
       await op
     }
@@ -492,6 +583,24 @@ export class DotStore {
   private pruneTickets(): void {
     const finished = [...this.tickets.values()].filter(ticket => ticket.status === 'done' || ticket.status === 'cancelled').sort((a, b) => a.updatedAt - b.updatedAt)
     for (const ticket of finished.slice(0, Math.max(0, this.tickets.size - MAX_TASKS))) this.tickets.delete(ticket.id)
+  }
+
+  /** Sessions dot opened. Dot's own session and a merely watched human session are not included. */
+  ownsSession(sessionId: string): boolean {
+    return sessionIsOwned(sessionId, this.ownedInput())
+  }
+
+  ownedSessionIds(): string[] {
+    return ownedSessionIds(this.ownedInput())
+  }
+
+  private ownedInput() {
+    return {
+      ...(this.dotSessionId ? { dotSessionId: this.dotSessionId } : {}),
+      runs: this.work.listRuns(),
+      tasks: this.list(),
+      tickets: this.listTickets(),
+    }
   }
 
   task(sessionId: string): TaskRecord | undefined { return this.tasks.get(sessionId) }
@@ -565,7 +674,7 @@ export class DotStore {
     this.changed()
     const domain = this.domain
     if (!domain) return Promise.resolve(true)
-    const op = this.tail.then(() => domain.table('proposals').delete(id))
+    const op = this.tail.then(() => this.durable(() => domain.table('proposals').delete(id)))
     this.tail = op.catch(() => undefined)
     return op.then(() => true)
   }
@@ -584,7 +693,7 @@ export class DotStore {
     this.changed()
     const domain = this.domain
     if (domain === undefined) return Promise.resolve(true)
-    const op = this.tail.then(() => domain.table('schedules').delete(id))
+    const op = this.tail.then(() => this.durable(() => domain.table('schedules').delete(id)))
     this.tail = op.catch(() => undefined)
     return op.then(() => true)
   }
@@ -632,7 +741,7 @@ export class DotStore {
     // State is a single document: read the latest in-memory state when the queued
     // slot actually runs, so an older queued snapshot cannot overwrite a change that
     // landed in the meantime (e.g. the migration marker merged into it).
-    const op = this.tail.then(() => domain.table(table).put(key, table === 'state' ? this.state : value))
+    const op = this.tail.then(() => this.durable(() => domain.table(table).put(key, table === 'state' ? this.state : value)))
     this.tail = op.catch(() => undefined)
     return op
   }

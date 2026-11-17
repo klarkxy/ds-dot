@@ -7,7 +7,7 @@
 import { randomUUID } from 'node:crypto'
 import { realTimer, type Timer } from './batcher.ts'
 import type { ScheduleRecord } from './contracts.ts'
-import { MAX_SCHEDULES, ScheduleInputError, formatReminders, nextOccurrence, parseSchedule, type ScheduleInput } from './schedule.ts'
+import { MAX_SCHEDULES, ScheduleInputError, formatReminders, nextOccurrence, onceDelivered, parseSchedule, type ScheduleInput } from './schedule.ts'
 import type { DotStore } from './store.ts'
 
 /** The timer never sleeps longer than this, so a suspended host or a changed clock is noticed. */
@@ -49,7 +49,8 @@ export class ReminderClock {
 
   async add(input: ScheduleInput): Promise<ScheduleRecord> {
     const store = this.options.store
-    if (store.schedules.length >= MAX_SCHEDULES) throw new ScheduleInputError(`${MAX_SCHEDULES} reminders are set already; remove one first`)
+    const active = store.schedules.filter(record => !onceDelivered(record))
+    if (active.length >= MAX_SCHEDULES) throw new ScheduleInputError(`${MAX_SCHEDULES} reminders are set already; remove one first`)
     const now = this.options.now()
     const parsed = parseSchedule(input, now)
     let id = ''
@@ -77,16 +78,23 @@ export class ReminderClock {
     try { this.options.onPeriodic?.() } catch (error) {
       this.options.log?.(`dsh-dot: periodic check failed: ${error instanceof Error ? error.message : String(error)}`)
     }
-    const due = store.schedules.filter(record => record.nextAt <= now)
+    const due = store.schedules.filter(record => !onceDelivered(record) && record.nextAt <= now)
     if (due.length === 0) { this.arm(); return }
     this.firing = true
     let failed = false
     try {
-      // Deliver first, then move on: a crash in between repeats a reminder instead of losing it.
+      // A once reminder is claimed before the wake. An unknown ack, a crash, or a
+      // restart must not deliver it again. Repeating reminders still move only
+      // after a wake that did not throw, so a failed one stays due.
+      for (const record of due) {
+        if (record.timing.kind !== 'once' || onceDelivered(record)) continue
+        await store.putSchedule({ ...record, deliveredAt: now, lastFiredAt: now })
+      }
       await this.options.deliver(formatReminders(due, now))
       for (const record of due) {
         // Removed while the delivery was underway: it stays removed.
         if (!store.schedule(record.id)) continue
+        if (record.timing.kind === 'once') continue
         const next = nextOccurrence(record.timing, now)
         if (next === undefined) await store.deleteSchedule(record.id)
         else await store.putSchedule({ ...record, nextAt: next, lastFiredAt: now })
@@ -106,10 +114,13 @@ export class ReminderClock {
     this.handle = undefined
   }
 
+  /** Re-arm after the store was wiped. */
+  refresh(): void { this.arm() }
+
   private arm(wait?: number): void {
     if (!this.started || this.disposed) return
     if (this.handle !== undefined) { this.timer.clear(this.handle); this.handle = undefined }
-    const next = this.options.store.schedules[0]?.nextAt
+    const next = this.options.store.schedules.find(record => !onceDelivered(record))?.nextAt
     // With periodic work attached the clock keeps a wake-up even when no
     // reminder exists, so the periodic check still runs on an otherwise idle dot.
     if (next === undefined && this.options.onPeriodic === undefined) return

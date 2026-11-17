@@ -55,6 +55,14 @@ const click = (element: Element) => act(async () => { (element as HTMLElement).c
 const named = (scope: ParentNode, text: string) => buttons(scope).find(button => button.textContent === text)!
 
 describe('Board', () => {
+  it('keeps the last snapshot visible and offers retry after a later read fails', async () => {
+    const { root, props } = await render(full, { error: 'offline' })
+    expect(document.body.textContent).toContain('offline')
+    expect(document.body.textContent).toContain('Busy')
+    await click(named(document, 'Retry'))
+    expect(props.onRetry).toHaveBeenCalledOnce()
+    await act(async () => root.unmount())
+  })
   it('draws the groups in order: needs you, in progress, to do, recently finished, watched sessions, reminders', async () => {
     const { root } = await render(full)
     expect(labels()).toEqual(['Needs you', 'In progress', 'To do', 'Recently finished', 'Watched sessions', 'Reminders'])

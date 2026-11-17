@@ -16,7 +16,7 @@ Install from npm into the profile you use:
 dsh plugin --profile web add ds-dot
 ```
 
-Restart the profile if DSH asks. Pin a version with `ds-dot@0.1.0`. Deep View is installed with it and draws Dorothy's cards, including math plots, node graphs, maps and data exploration in Deep View 0.3.0. GitHub installs need `@klarkxy/dsh-deep-view@0.3.0` on npm; until then this checkout links the local Deep View source. If `@klarkxy/dsh-dev-index` is in the same profile, Dorothy also gets its documentation and plugin-search tools. If `@klarkxy/dsh-model-picker` is installed, her model setting uses that searcher.
+Restart the profile if DSH asks. Pin a version with `ds-dot@0.1.0`. Deep View is installed with it and draws Dorothy's cards; this release depends on the published `@klarkxy/dsh-deep-view@0.2.1`. Deep View 0.3.0 adds math plots, node graphs, maps and data exploration and is not on npm yet, so Dorothy draws only the cards 0.2.1 renders until it is published. If `@klarkxy/dsh-dev-index` is in the same profile, Dorothy also gets its documentation and plugin-search tools. If `@klarkxy/dsh-model-picker` is installed, her model setting uses that searcher.
 
 To install a source revision instead, use `github:klarkxy/ds-dot#<commit>`. If pnpm asks you to allow its build, add `ds-dot: true` under `allowBuilds` in that profile's `pnpm-workspace.yaml`, then repeat the install.
 

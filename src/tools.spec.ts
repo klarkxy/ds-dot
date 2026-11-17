@@ -1,4 +1,5 @@
 import { readFileSync } from 'node:fs'
+import { createRequire } from 'node:module'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
@@ -8,6 +9,19 @@ import { DEFAULT_SETTINGS, TOOL, type DotSettings } from './contracts.ts'
 import { DEFAULT_PERSONA } from './persona.ts'
 import { settingsSnapshotBlock, SelfSettings } from './self-settings.ts'
 import { DotStore } from './store.ts'
+
+const resolveFrom = createRequire(import.meta.url)
+
+/** The Deep View this profile installed, which decides the card types show_view knows. */
+function installedDeepViewVersion(): string {
+  const manifest = JSON.parse(readFileSync(resolveFrom.resolve('@klarkxy/dsh-deep-view/package.json'), 'utf8')) as { version: string }
+  return manifest.version
+}
+
+function reached(version: string, major: number, minor: number): boolean {
+  const [whole = 0, part = 0] = version.split('.').map(Number)
+  return whole > major || (whole === major && part >= minor)
+}
 
 interface Seg { sessionId: string; persona: string; opening?: string; agreements?: string; cognition?: string }
 
@@ -185,7 +199,10 @@ describe('dot tools', () => {
     expect(tool.output.presentationMeta(undefined, result)).toMatchObject({ owner: 'dsh-deep-view', title: 'Pick target', interactive: true, awaitReply: true, dotCard: { number: 1 } })
   })
 
-  it('accepts Deep View 0.3.0 math cards through checkShownView', async () => {
+  it('takes only the card types the installed Deep View knows', async () => {
+    // Math cards arrive with Deep View 0.3.0. Until that is on npm, show_view has
+    // to pass 0.2.1's rejection through instead of promising a card nobody draws.
+    const version = installedDeepViewVersion()
     const tool = load().find(row => row.name === 'show_view') as unknown as {
       execute: (args: unknown, exec: { callId?: string; concludeTurn(): void }) => Promise<Record<string, unknown>>
     }
@@ -193,7 +210,7 @@ describe('dot tools', () => {
       title: 'Plot',
       view: JSON.stringify({ type: 'math', id: 'm', mathPoints: [{ id: 'p', x: 0, y: 0 }] }),
     }, { callId: 'm1', concludeTurn: () => {} })
-    expect(result.status).toBe('shown')
+    expect(result.status).toBe(reached(version, 0, 3) ? 'shown' : 'invalid')
   })
 
   it('keeps an invalid show_view in the same turn without concluding it', async () => {
@@ -241,7 +258,10 @@ describe('dot tools', () => {
     const rows = rowsOf(join(root, 'cordis.patch.yml'))
     expect(rows).toEqual([{ id: 'deep-view', name: '@klarkxy/dsh-deep-view' }, { id: 'dot', name: 'ds-dot' }])
     const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'))
-    expect(String(pkg.dependencies['@klarkxy/dsh-deep-view'])).toMatch(/0\.3\.0|dsh-deep-view/)
+    // The dependency has to resolve from npm: a link:/file: spec only resolves on
+    // the machine that owns that checkout, so a GitHub install would find no Deep View.
+    expect(String(pkg.dependencies['@klarkxy/dsh-deep-view'])).toMatch(/^\^?\d+\.\d+\.\d+$/)
+    expect(JSON.stringify(pkg.pnpm ?? {})).not.toContain('dsh-deep-view')
     expect(pkg.files).toContain('src')
     expect(pkg.peerDependencies['@klarkxy/dsh-dev-index']).toBeTruthy()
     expect(pkg.peerDependenciesMeta['@klarkxy/dsh-dev-index']?.optional).toBe(true)

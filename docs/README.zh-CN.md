@@ -16,7 +16,7 @@ DeepSeek Harness 的常驻调度管家桃乐丝，简称 dot。在她自己的�
 dsh plugin --profile web add ds-dot
 ```
 
-DSH 提示时重启 profile。需要固定版本时使用 `ds-dot@0.1.0`。Deep View 会一起装上，负责绘制卡片、确认框、图表，以及 0.3.0 的数学图、节点图、地图和数据探索。GitHub 安装需要 npm 上的 `@klarkxy/dsh-deep-view@0.3.0`；在此之前本仓库链接本地 Deep View 源码。若同一 profile 装了 `@klarkxy/dsh-dev-index`，桃乐丝还能用它的文档和插件检索工具。若装了 `@klarkxy/dsh-model-picker`，设置里的模型选择会走那个搜索器。
+DSH 提示时重启 profile。需要固定版本时使用 `ds-dot@0.1.0`。Deep View 会一起装上，负责绘制卡片、确认框和图表；这一版依赖 npm 上已发布的 `@klarkxy/dsh-deep-view@0.2.1`。0.3.0 的数学图、节点图、地图和数据探索还没上 npm，在它发布前桃乐丝只画得出 0.2.1 支持的卡片。若同一 profile 装了 `@klarkxy/dsh-dev-index`，桃乐丝还能用它的文档和插件检索工具。若装了 `@klarkxy/dsh-model-picker`，设置里的模型选择会走那个搜索器。
 
 需要安装源码修订时，使用 `github:klarkxy/ds-dot#<commit>`。如果 pnpm 提示需要允许构建，在该 profile 的 `pnpm-workspace.yaml` 的 `allowBuilds` 下加入 `ds-dot: true`，再执行安装。
 

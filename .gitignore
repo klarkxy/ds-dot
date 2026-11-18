@@ -4,3 +4,5 @@ lib/
 *.tsbuildinfo
 .scratch/
 workspace/
+.ghcache/
+.playwright-cli/

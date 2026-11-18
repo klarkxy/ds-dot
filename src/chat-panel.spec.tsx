@@ -12,6 +12,11 @@ vi.stubGlobal('document', dom.window.document)
 vi.stubGlobal('navigator', dom.window.navigator)
 vi.stubGlobal('localStorage', dom.window.localStorage)
 vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
+dom.window.requestAnimationFrame = (callback: FrameRequestCallback) => {
+  callback(0)
+  return 0
+}
+vi.stubGlobal('requestAnimationFrame', dom.window.requestAnimationFrame)
 let createRoot: typeof import('react-dom/client').createRoot
 beforeAll(async () => { createRoot = (await import('react-dom/client')).createRoot })
 afterEach(() => { dom.window.localStorage.clear(); document.body.innerHTML = '<div id="root"></div>' })
@@ -878,6 +883,18 @@ describe('Composer images', () => {
     await act(async () => { root.render(<ChatPanel locale="en" api={api} onOpenSession={() => {}} />) })
     await act(async () => { await Promise.resolve() })
     const input = document.querySelector<HTMLTextAreaElement>('textarea.dsh-dot-input')!
+    const activeCmd = () => document.querySelector('.dsh-dot-slash-item[data-active] code')?.textContent
+
+    // Typing "/" opens the menu on the first command; arrows move that highlight,
+    // and Enter runs the highlighted command instead of sending the slash text.
+    await act(async () => { typeInto(input, '/') })
+    expect(document.querySelector('.dsh-dot-slash-menu')).not.toBeNull()
+    expect(activeCmd()).toBe('/overview')
+    await act(async () => { key(input, 'ArrowDown') })
+    expect(activeCmd()).toBe('/pending')
+    await act(async () => { key(input, 'Enter') })
+    expect(input.value).toBe('Is anything waiting on my call?')
+    expect(api.say).not.toHaveBeenCalled()
 
     await act(async () => { typeInto(input, '/task') })
     await act(async () => { key(input, 'Enter') })
@@ -894,6 +911,9 @@ describe('Composer images', () => {
     expect(document.querySelector('.dsh-dot-slash-menu')).not.toBeNull()
     await act(async () => { quickBtn.click() })
     expect(document.querySelector('.dsh-dot-slash-menu')).toBeNull()
+    await act(async () => { quickBtn.click() })
+    expect(document.querySelector('.dsh-dot-slash-menu')).not.toBeNull()
+    expect(activeCmd()).toBe('/segment')
     await act(async () => root.unmount())
   })
 

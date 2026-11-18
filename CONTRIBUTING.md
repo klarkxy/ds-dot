@@ -58,6 +58,8 @@ A pull request changes the frontend when it changes what a person sees or does i
 
 When the pull request does change the frontend, the body shows a GIF recorded in DeepSeek Harness from this pull request's code. The recording covers the interaction that changed and the result on screen, including the effect of a fix. Name the commit the recording shows. Embed the GIF in the body, or link an image URL that renders there, and leave the file off the branch. The recording shows the real interface. A still screenshot, a mockup, a generated animation of the UI, or a sentence that says a recording exists leaves the requirement unmet.
 
+Record it with the `dsh-web-acceptance` skill in `.agents/skills/dsh-web-acceptance/`: the bundled script starts an isolated `dsh web` with its own `DSH_HOME`, exchanges the launch token for a cookie, and writes screenshots or a palette-optimized GIF outside the checkout.
+
 Keep API keys, tokens, cookies, and personal data out of the recording.
 
 A pull request that leaves the interface unchanged writes `No frontend changes` in the body. That sentence is for a diff that really leaves the interface alone, such as a backend-only, test-only, or docs-only change. A note that the change is small, internal, or unlikely to be noticed does not excuse a diff that changes the interface.

@@ -179,19 +179,28 @@ export async function captureScopeAsync(root: string, scope: string, type: 'file
   const scanned = await scanScopeAsync(root, scope, type, platform)
   const files = new Array<SnapshotSource>(scanned.files.length)
   let cursor = 0
+  // One failed worker stops the others at their next iteration, so a rejected
+  // capture does not keep reading the scope after the caller saw the failure.
+  let stop = false
   const workers = Array.from({ length: Math.min(ASYNC_READ_CONCURRENCY, scanned.files.length) }, async () => {
-    while (cursor < scanned.files.length) {
+    while (!stop && cursor < scanned.files.length) {
       const index = cursor++
       const rel = scanned.files[index]!
       const full = join(root, ...rel.split('/'))
       const info = await statAsync(full)
       if (info.size > maxFileBytes) {
+        stop = true
         throw new SnapshotError(`file ${rel} exceeds snapshot size limit (${info.size} > ${maxFileBytes} bytes)`)
       }
       files[index] = { path: rel, body: new Uint8Array(await readFileAsync(full)) }
     }
   })
-  await Promise.all(workers)
+  try {
+    await Promise.all(workers)
+  } catch (error) {
+    stop = true
+    throw error
+  }
   return { files, empty: scanned.files.length === 0, exclusions: scanned.exclusions }
 }
 

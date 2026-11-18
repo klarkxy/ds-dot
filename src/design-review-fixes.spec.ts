@@ -290,6 +290,37 @@ describe('4. Unknown creation/delivery recovery and human forceReleaseChange', (
     expect(book.occupying()).toEqual([])
     expect(reconcileRun).toBeTypeOf('function')
   })
+
+  it('refuses a force release on a change that is not cancelled before it stops any session', async () => {
+    const h = makeServiceHarness()
+    try {
+      const stopped: string[] = []
+      const stopActivity = h.host.stopActivity.bind(h.host)
+      Object.assign(h.host, {
+        stopActivity: async (sessionId: string) => {
+          stopped.push(sessionId)
+          return stopActivity(sessionId)
+        },
+      })
+      const change = await h.store.work.createChange({ title: 'Live', cwd: h.project, goal: 'g', at: 1 })
+      const reserved = await h.store.work.reserveRun({
+        changeId: change.id, cwd: h.project, root: { workspaceRoot: h.project }, writeScope: { kind: 'workspace-exclusive' }, at: 2,
+      })
+      if (!reserved.ok) throw new Error(reserved.message)
+      const confirmed = await h.store.work.confirmSession(reserved.run.id, { sessionId: reserved.run.requestedSessionId, cwd: h.project }, 3)
+      if (!confirmed.ok) throw new Error(confirmed.message)
+
+      const refused = await h.service.forceReleaseWork(change.id)
+      expect(refused).toMatchObject({ ok: false, code: 'invalid' })
+      expect(stopped).toEqual([])
+      expect(h.store.work.run(reserved.run.id)?.phase).toBe('reserved')
+
+      expect(await h.service.forceReleaseWork('c-unknown')).toMatchObject({ ok: false, code: 'missing' })
+      expect(stopped).toEqual([])
+    } finally {
+      h.cleanup()
+    }
+  })
 })
 
 describe('5. Legacy acceptance, deliverable, and priority parameter synthesis', () => {

@@ -1605,6 +1605,13 @@ export class DotService {
 
   /** Human-initiated escape hatch for a cancelled Change whose runs are wedged in settling/unknown/rejected. */
   async forceReleaseWork(changeId: string) {
+    // Refuse before touching the host: a release that is going to be rejected must
+    // not stop the sessions an open change is still working in.
+    const change = this.store.work.change(changeId)
+    if (!change) return { ok: false as const, code: 'missing' as const, message: `unknown change ${changeId}` }
+    if (change.control !== 'cancelled') {
+      return { ok: false as const, code: 'invalid' as const, message: `cancel ${changeId} before force-releasing its runs` }
+    }
     const runs = this.store.work.listRuns().filter(run => run.changeId === changeId && !['completed', 'failed', 'stopped'].includes(run.phase))
     for (const run of runs) {
       if (run.creation === 'confirmed' && run.sessionId) {

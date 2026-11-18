@@ -429,6 +429,7 @@ const enUi: UiText = {
   workAccept: 'Accept',
   workReject: 'Send back',
   workResume: 'Retry finishing',
+  workForceRelease: 'Release lock',
   workLookAccept: 'Looks good',
   workLookReject: 'Send back',
   workStatusCancelled: 'Cancelled',

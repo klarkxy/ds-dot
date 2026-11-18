@@ -429,6 +429,7 @@ export const zhUi = {
   workAccept: '接受',
   workReject: '退回',
   workResume: '重试完成',
+  workForceRelease: '释放占用',
   workLookAccept: '过目通过',
   workLookReject: '过目退回',
   workStatusCancelled: '已取消',

@@ -17,6 +17,7 @@ export type CheckVerdict = 'pass' | 'fail' | 'unverified' | 'not-applicable'
 export type VerificationVerdict = 'accept' | 'rework' | 'unverified'
 
 const TERMINAL: ReadonlySet<RunPhase> = new Set(['completed', 'failed', 'stopped'])
+export const MAX_COMPLETED_CHANGES = 200
 
 export interface WritePath { readonly path: string; readonly type: 'file' | 'directory' }
 export type WriteScope = { readonly kind: 'paths'; readonly paths: readonly WritePath[] } | { readonly kind: 'workspace-exclusive' }
@@ -566,6 +567,8 @@ export class WorkBook {
   private readonly quarantined = new Map<string, IllegalVerification & { readonly record: unknown }>()
   /** In-process session lookups. A restarted book does not have these, so a persisted claim is leftover. */
   private readonly liveSessionClaims = new Set<string>()
+  /** In-process relay/peer followups currently awaiting host completion. */
+  private readonly liveRelayClaims = new Set<string>()
 
   constructor(private readonly persist: WorkPersist, private readonly platform: NodeJS.Platform = process.platform) {}
 
@@ -606,6 +609,7 @@ export class WorkBook {
     this.verifications.clear()
     this.quarantined.clear()
     this.liveSessionClaims.clear()
+    this.liveRelayClaims.clear()
     this.chain = Promise.resolve()
     this.currentRevision = 0
     this.changeSeq = 0
@@ -1460,6 +1464,12 @@ export class WorkBook {
 
   releaseLiveSessionClaim(runId: string): void { this.liveSessionClaims.delete(runId) }
 
+  claimLiveRelay(deliveryId: string): void { this.liveRelayClaims.add(deliveryId) }
+
+  releaseLiveRelay(deliveryId: string): void { this.liveRelayClaims.delete(deliveryId) }
+
+  hasLiveRelay(deliveryId: string): boolean { return this.liveRelayClaims.has(deliveryId) }
+
   /** A persisted cancel covers every run that never reached settling. */
   adoptCancel(runId: string, at = Date.now()): Promise<{ readonly ok: true; readonly adopted: boolean } | WorkRefusal> {
     return this.exclusive(async () => {
@@ -1529,6 +1539,49 @@ export class WorkBook {
       this.runs.set(next.id, next)
       this.currentRevision += 1
       return { ok: true, abandoned: true }
+    })
+  }
+
+  /** Reset a reserved run whose earlier lookup/create failed once the host confirms no session exists. */
+  abandonUnknownCreation(runId: string, at = Date.now()): Promise<{ readonly ok: true; readonly reset: boolean } | WorkRefusal> {
+    return this.exclusive(async () => {
+      const refused = this.recoveryRefusal()
+      if (refused) return refused
+      const run = this.runs.get(runId)
+      if (!run) return { ok: false, code: 'missing', message: `unknown run ${runId}` }
+      if (run.phase !== 'reserved' || run.creation !== 'unknown' || run.sessionId !== undefined) return { ok: true, reset: false }
+      if (this.liveSessionClaims.has(runId)) return { ok: true, reset: false }
+      if (run.deliveries.some(item => item.status === 'accepted' || item.status === 'unknown' || item.hostRequestId !== undefined)) {
+        return { ok: true, reset: false }
+      }
+      const next: RunRecord = dropClaim({ ...run, creation: 'intent', updatedAt: at })
+      await this.commit('runs', next.id, next)
+      this.runs.set(next.id, next)
+      this.currentRevision += 1
+      return { ok: true, reset: true }
+    })
+  }
+
+  /** Release a cancelled/settling run whose creation was unknown once the host confirms the session is absent. */
+  releaseAbsentUnknown(runId: string, seenUpdatedAt: number, at = Date.now()): Promise<{ readonly ok: true; readonly phase: RunPhase } | WorkRefusal> {
+    return this.exclusive(async () => {
+      const refused = this.recoveryRefusal()
+      if (refused) return refused
+      const run = this.runs.get(runId)
+      if (!run) return { ok: false, code: 'missing', message: `unknown run ${runId}` }
+      if (run.updatedAt !== seenUpdatedAt) return { ok: false, code: 'stale', message: `${runId} changed while it was stopping` }
+      if (run.phase !== 'settling' || run.closeIntent !== 'stopped') return { ok: false, code: 'closed-run', message: `${runId} is ${run.phase}` }
+      if (this.liveSessionClaims.has(runId) || run.creation !== 'unknown' || run.sessionId !== undefined) {
+        return { ok: false, code: 'unknown', message: `${runId} creation is still bound` }
+      }
+      if (run.deliveries.some(item => item.status === 'accepted' || item.status === 'unknown' || item.hostRequestId !== undefined)) {
+        return { ok: false, code: 'unknown', message: `${runId} already attempted delivery` }
+      }
+      const next: RunRecord = dropClaim({ ...run, phase: 'stopped', closeReason: 'unsent', updatedAt: at })
+      await this.commit('runs', next.id, next)
+      this.runs.set(next.id, next)
+      this.currentRevision += 1
+      return { ok: true, phase: next.phase }
     })
   }
 
@@ -1745,11 +1798,22 @@ export class WorkBook {
       }
       if (run.closeIntent !== phase) return { ok: false, code: 'unknown', message: `${runId} has no persisted ${phase} close` }
       if (run.creation === 'inflight' || run.creation === 'unknown' || run.creation === 'rejected') return { ok: false, code: 'unknown', message: `${runId} still has an unconfirmed host call` }
-      if (run.deliveries.some(item => item.status === 'unknown' || (item.status === 'intent' && item.hostRequestId !== undefined))) {
+      if (!evidence?.queueCleared || !evidence.agentIdle || !evidence.jobsSettled) return { ok: false, code: 'unknown', message: `${runId} is not confirmed stopped` }
+      const hasBlockingDelivery = run.deliveries.some(item => {
+        if (item.status === 'intent' && item.hostRequestId !== undefined) return true
+        if (item.status !== 'unknown') return false
+        if (phase !== 'stopped' || item.kind === 'initial' || this.liveRelayClaims.has(item.id)) return true
+        return false
+      })
+      if (hasBlockingDelivery) {
         return { ok: false, code: 'unknown', message: `${runId} still has an in-flight delivery` }
       }
-      if (!evidence?.queueCleared || !evidence.agentIdle || !evidence.jobsSettled) return { ok: false, code: 'unknown', message: `${runId} is not confirmed stopped` }
-      const next: RunRecord = { ...run, phase, closureEvidence: evidence, closeReason: phase, updatedAt: at }
+      const deliveries = phase === 'stopped'
+        ? run.deliveries.map(item => item.status === 'unknown' && item.kind !== 'initial' && !this.liveRelayClaims.has(item.id)
+          ? { ...item, status: 'rejected' as const, evidence: 'superseded-by-verified-stop', updatedAt: at }
+          : item)
+        : run.deliveries
+      const next: RunRecord = { ...run, deliveries, phase, closureEvidence: evidence, closeReason: phase, updatedAt: at }
       await this.commit('runs', next.id, next)
       this.runs.set(next.id, next)
       this.currentRevision += 1
@@ -1796,6 +1860,103 @@ export class WorkBook {
       this.runs.set(next.id, next)
       this.currentRevision += 1
       return next
+    })
+  }
+
+  /**
+   * Human-only escape hatch: release wedged runs on an already-cancelled change
+   * so a permanently unreachable session or missing host job registry cannot
+   * brick the workspace forever. Never called automatically by model tools.
+   */
+  forceReleaseChange(changeId: string, at = Date.now()): Promise<{ readonly ok: true; readonly released: readonly string[] } | WorkRefusal> {
+    return this.exclusive(async () => {
+      const refused = this.recoveryRefusal()
+      if (refused) return refused
+      const change = this.changes.get(changeId)
+      if (!change) return { ok: false, code: 'missing', message: `unknown change ${changeId}` }
+      if (change.control !== 'cancelled') {
+        return { ok: false, code: 'invalid', message: `cancel ${changeId} before force-releasing its runs` }
+      }
+      const open = [...this.runs.values()].filter(run => run.changeId === changeId && !TERMINAL.has(run.phase))
+      const released: string[] = []
+      for (const run of open) {
+        const deliveries = run.deliveries.map(item => item.status === 'unknown' || item.status === 'intent'
+          ? { ...item, status: 'rejected' as const, evidence: 'force-released-by-human', updatedAt: at }
+          : item)
+        const next: RunRecord = dropClaim({
+          ...run,
+          deliveries,
+          phase: 'stopped',
+          closeReason: 'force-released',
+          updatedAt: at,
+        })
+        await this.commit('runs', next.id, next)
+        this.runs.set(next.id, next)
+        this.liveSessionClaims.delete(next.id)
+        for (const item of run.deliveries) this.liveRelayClaims.delete(item.id)
+        released.push(next.id)
+      }
+      if (released.length > 0) this.currentRevision += 1
+      return { ok: true, released }
+    })
+  }
+
+  /** All artifact snapshot ids referenced by remaining changes, runs, and verifications. */
+  referencedArtifacts(): Set<string> {
+    const refs = new Set<string>()
+    for (const run of this.runs.values()) {
+      for (const base of run.baselineRefs) refs.add(base.artifactRef)
+    }
+    for (const verification of this.verifications.values()) {
+      if (verification.subject?.artifactRef) refs.add(verification.subject.artifactRef)
+      for (const base of verification.subject?.baselineRefs ?? []) refs.add(base.artifactRef)
+    }
+    return refs
+  }
+
+  /**
+   * Evict oldest terminal (done or cancelled, with zero non-terminal runs) changes
+   * past `maxKeep` so durable work tables and snapshots stay bounded over time.
+   */
+  pruneCompletedChanges(
+    maxKeep = MAX_COMPLETED_CHANGES,
+    removeDurable?: (table: 'changes' | 'inputs' | 'runs' | 'verifications', key: string) => Promise<void>,
+  ): Promise<{ readonly prunedChanges: readonly string[]; readonly keptArtifacts: ReadonlySet<string> }> {
+    return this.exclusive(async () => {
+      if (this.recovery) return { prunedChanges: [], keptArtifacts: this.referencedArtifacts() }
+      const terminalChanges = [...this.changes.values()]
+        .filter(change => {
+          const runs = [...this.runs.values()].filter(run => run.changeId === change.id)
+          if (runs.some(run => !TERMINAL.has(run.phase))) return false
+          return change.control === 'cancelled' || change.closeout !== undefined
+        })
+        .sort((a, b) => a.updatedAt - b.updatedAt || Number(a.id.slice(2)) - Number(b.id.slice(2)))
+      const excess = Math.max(0, terminalChanges.length - Math.max(1, maxKeep))
+      if (excess === 0) return { prunedChanges: [], keptArtifacts: this.referencedArtifacts() }
+      const victims = terminalChanges.slice(0, excess)
+      const prunedChanges: string[] = []
+      for (const change of victims) {
+        const changeRuns = [...this.runs.values()].filter(run => run.changeId === change.id)
+        const changeInputs = [...this.inputs.values()].filter(inp => inp.changeId === change.id)
+        const changeVers = [...this.verifications.values()].filter(ver => ver.changeId === change.id)
+        for (const ver of changeVers) {
+          if (removeDurable) await removeDurable('verifications', ver.id)
+          this.verifications.delete(ver.id)
+        }
+        for (const run of changeRuns) {
+          if (removeDurable) await removeDurable('runs', run.id)
+          this.runs.delete(run.id)
+        }
+        for (const inp of changeInputs) {
+          if (removeDurable) await removeDurable('inputs', inp.id)
+          this.inputs.delete(inp.id)
+        }
+        if (removeDurable) await removeDurable('changes', change.id)
+        this.changes.delete(change.id)
+        prunedChanges.push(change.id)
+      }
+      if (prunedChanges.length > 0) this.currentRevision += 1
+      return { prunedChanges, keptArtifacts: this.referencedArtifacts() }
     })
   }
 

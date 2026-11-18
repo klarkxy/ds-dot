@@ -428,6 +428,7 @@ const frUi: UiText = {
   workAccept: 'Accepter',
   workReject: 'Renvoyer',
   workResume: 'Réessayer la clôture',
+  workForceRelease: 'Libérer le verrou',
   workLookAccept: 'C’est bon',
   workLookReject: 'Renvoyer',
   workStatusCancelled: 'Annulé',

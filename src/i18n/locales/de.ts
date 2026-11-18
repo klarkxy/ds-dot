@@ -428,6 +428,7 @@ const deUi: UiText = {
   workAccept: 'Akzeptieren',
   workReject: 'Zurückweisen',
   workResume: 'Abschluss erneut versuchen',
+  workForceRelease: 'Sperre lösen',
   workLookAccept: 'Sieht gut aus',
   workLookReject: 'Zurückweisen',
   workStatusCancelled: 'Abgebrochen',

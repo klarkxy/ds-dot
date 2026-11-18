@@ -124,9 +124,14 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
   }), 'dot.locale-settings')
   const feed = new ChatFeed(host, store)
   // The chat follows dot into every new segment and keeps the earlier ones above it.
-  const follow = () => { if (store.dotSessionId) feed.attach(store.dotSessionId, store.pastSegments); feed.cardsChanged() }
+  const follow = () => {
+    if (store.dotSessionId) feed.attach(store.dotSessionId, store.pastSegments)
+    feed.boardChanged()
+    feed.cardsChanged()
+  }
   follow()
   const unfollow = store.onChange(follow)
+  const unpending = service.pending.onChange(() => feed.boardChanged())
   const ensureDot = async () => {
     const sessionId = await service.ensureDot()
     follow()
@@ -135,6 +140,7 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
   ctx.provide(SERVICE_NAME, service)
   ctx.effect(() => () => {
     unfollow()
+    unpending()
     const done = (async () => {
       service.releaseChildSeals()
       await service.dispose().catch(err => { logger.fault('service.dispose-failed', 'DotService disposal failed.', err) })
@@ -373,10 +379,13 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
   const str = (payload: unknown, key: string): string => { const value = field(payload, key); return typeof value === 'string' ? value : '' }
   // The kit's 64 KiB default answers 413 before `say` runs. A PNG of about
   // 51 KB does not fit after base64; the cap below fits the advertised images.
+  const PASSIVE_ENDPOINTS = new Set(['wait', 'board', 'work.list', 'work.read', 'card.pending', 'card.detail'])
   ctx.effect(() => registerHostRpc(ctx as unknown as HostRpcContext, RPC_CHANNEL, async (endpoint, payload, signal) => {
     try {
       const reqLocale = field(payload, 'uiLocale')
-      if (typeof reqLocale === 'string' && reqLocale.trim()) await service.syncLocale(reqLocale)
+      if (typeof reqLocale === 'string' && reqLocale.trim() && (!PASSIVE_ENDPOINTS.has(endpoint) || store.uiLocale === undefined)) {
+        await service.syncLocale(reqLocale)
+      }
       switch (endpoint) {
         case 'locale.sync': return { ok: true, value: await service.syncLocale(str(payload, 'locale') || str(payload, 'uiLocale')) }
         case 'board': return { ok: true, value: service.board() }
@@ -440,7 +449,7 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
           await ensureDot()
           return { ok: true, value: await service.contextView() }
         }
-        case 'context.clearUsage': {
+        case 'context.clear': {
           await ensureDot()
           return { ok: true, value: await service.clearUsage() }
         }
@@ -498,6 +507,11 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
         }
         case 'work.resume': {
           const result = await service.resumeWorkCloseout(str(payload, 'id'))
+          if (result && 'ok' in result && result.ok === false) return { ok: false, error: { code: result.code, message: result.message } }
+          return { ok: true, value: true }
+        }
+        case 'work.release': {
+          const result = await service.forceReleaseWork(str(payload, 'id'))
           if (result && 'ok' in result && result.ok === false) return { ok: false, error: { code: result.code, message: result.message } }
           return { ok: true, value: true }
         }

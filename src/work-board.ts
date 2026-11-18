@@ -171,6 +171,12 @@ export function resumePayload(item: WorkBoardItem): { readonly id: string } | un
   return { id: item.id }
 }
 
+/** Force-release wedged runs on an already-cancelled change that still holds blockers. */
+export function forceReleasePayload(item: WorkBoardItem): { readonly id: string } | undefined {
+  if (item.status !== 'cancelled' || item.blockers.length === 0) return undefined
+  return { id: item.id }
+}
+
 /**
  * The pending card is the only answer path. A card for another version is stale.
  * No card means there is nothing to answer; the panel does not record a decision.

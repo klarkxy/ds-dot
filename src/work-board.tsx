@@ -4,7 +4,7 @@ import { BOARD_ROOT } from './board.tsx'
 import { FINISHED_SHOWN } from './board-groups.ts'
 import { t, type CopyLocale, type TextKey } from './ui-copy.ts'
 import {
-  acceptPayload, groupWork, lookRequest, rejectPayload, resumePayload, scopeText, shortId, workFactKey, workFactTone, workFailure,
+  acceptPayload, forceReleasePayload, groupWork, lookRequest, rejectPayload, resumePayload, scopeText, shortId, workFactKey, workFactTone, workFailure,
   type PendingGlance, type WorkAcceptPayload, type WorkBoardItem, type WorkReadRequest, type WorkRejectPayload, type WorkRunView, type WorkStatus,
 } from './work-board.ts'
 
@@ -25,6 +25,7 @@ export interface WorkApi {
   workReject(payload: WorkRejectPayload): Promise<void>
   workAnswer(payload: { readonly id: string; readonly allow: boolean }): Promise<void>
   workResume(payload: { readonly id: string }): Promise<void>
+  workForceRelease?(payload: { readonly id: string }): Promise<void>
   workRead?(request: WorkReadRequest): Promise<{ readonly source: string; readonly body: string; readonly truncated?: boolean; readonly totalBytes?: number }>
 }
 
@@ -33,7 +34,7 @@ type WorkRead = NonNullable<WorkApi['workRead']>
 /** Which groups the drawer filter keeps: everything, only what needs the human, or only work in progress. */
 export type WorkFilter = 'all' | 'waiting' | 'active'
 
-export function WorkBoard({ locale, items, pending, notice, filter = 'all', onAccept, onReject, onAnswer, onResume, onRead }: {
+export function WorkBoard({ locale, items, pending, notice, filter = 'all', onAccept, onReject, onAnswer, onResume, onForceRelease, onRead }: {
   readonly locale: CopyLocale
   readonly filter?: WorkFilter
   readonly items: readonly WorkBoardItem[]
@@ -43,6 +44,7 @@ export function WorkBoard({ locale, items, pending, notice, filter = 'all', onAc
   readonly onReject: (payload: WorkRejectPayload) => void
   readonly onAnswer: (payload: { readonly id: string; readonly allow: boolean }) => void
   readonly onResume: (payload: { readonly id: string }) => void
+  readonly onForceRelease?: (payload: { readonly id: string }) => void
   readonly onRead?: WorkRead
 }) {
   const groups = useMemo(() => groupWork(items, pending), [items, pending])
@@ -51,7 +53,7 @@ export function WorkBoard({ locale, items, pending, notice, filter = 'all', onAc
   const section = (title: TextKey, rows: readonly WorkBoardItem[]) => rows.length === 0 ? null : (
     <section className="dsh-ui-stack" aria-label={t(locale, title)}>
       <span className="dsh-ui-meta">{t(locale, title)} · {rows.length}</span>
-      {rows.map(row => <WorkRow key={row.id} locale={locale} item={row} pending={pending} onAccept={onAccept} onReject={onReject} onAnswer={onAnswer} onResume={onResume} {...onRead ? { onRead } : {}} />)}
+      {rows.map(row => <WorkRow key={row.id} locale={locale} item={row} pending={pending} onAccept={onAccept} onReject={onReject} onAnswer={onAnswer} onResume={onResume} {...onForceRelease ? { onForceRelease } : {}} {...onRead ? { onRead } : {}} />)}
     </section>
   )
   return (
@@ -66,7 +68,7 @@ export function WorkBoard({ locale, items, pending, notice, filter = 'all', onAc
             <Button variant="ghost" size="sm" className="dsh-dot-fold" aria-expanded={showDone} onClick={() => setShowDone(open => !open)}>
               {t(locale, 'workDone')} · {groups.done.length}
             </Button>
-            {showDone ? groups.done.slice(0, FINISHED_SHOWN).map(row => <WorkRow key={row.id} locale={locale} item={row} pending={pending} onAccept={onAccept} onReject={onReject} onAnswer={onAnswer} onResume={onResume} {...onRead ? { onRead } : {}} />) : null}
+            {showDone ? groups.done.slice(0, FINISHED_SHOWN).map(row => <WorkRow key={row.id} locale={locale} item={row} pending={pending} onAccept={onAccept} onReject={onReject} onAnswer={onAnswer} onResume={onResume} {...onForceRelease ? { onForceRelease } : {}} {...onRead ? { onRead } : {}} />) : null}
           </section>
         ) : null}
       </div>
@@ -174,9 +176,33 @@ function WorkFacts({ locale, item, onRead }: {
     setSlot(current => current.identity === token ? current : { identity: token, loaded: {}, full: {} })
     const evidenceJobs = evidenceKey.split('\n').filter(Boolean).map(ref => ({ kind: 'evidence' as const, ref }))
     const changeJobs = changeKey.split('\n').filter(Boolean).filter(row => !row.startsWith('deleted:')).map(row => ({ kind: 'change' as const, ref: row.slice(row.indexOf(':') + 1) }))
-    // Reopening keeps what was already read; only missing or failed sources are asked for again.
+    // Reopening keeps what was already read; queue missing sources with bounded concurrency.
     const known = slotRef.current.identity === token ? slotRef.current.loaded : {}
-    for (const job of [...evidenceJobs, ...changeJobs]) if (known[`${job.kind}:${job.ref}`]?.ok !== true) loadPreview(job.kind, job.ref, token, () => cancel)
+    const pendingJobs = [...evidenceJobs, ...changeJobs].filter(job => known[`${job.kind}:${job.ref}`]?.ok !== true)
+    let cursor = 0
+    const pump = async () => {
+      while (!cancel && cursor < pendingJobs.length) {
+        const job = pendingJobs[cursor++]!
+        await new Promise<void>(resolve => {
+          const key = `${job.kind}:${job.ref}`
+          const ticket = life.current
+          onRead({ id: item.id, kind: job.kind, ref: job.ref, verificationId, inputRef, inputRevision }).then(result => {
+            if (!cancel && life.current === ticket) {
+              const row = previewFrom(result)
+              setSlot(current => current.identity === token ? { ...current, loaded: { ...current.loaded, [key]: row } } : current)
+            }
+            resolve()
+          }, failure => {
+            if (!cancel && life.current === ticket) {
+              const message = failure instanceof Error ? failure.message : String(failure)
+              setSlot(current => current.identity === token ? { ...current, loaded: { ...current.loaded, [key]: { ok: false, message } } } : current)
+            }
+            resolve()
+          })
+        })
+      }
+    }
+    for (let worker = 0; worker < Math.min(4, pendingJobs.length); worker++) void pump()
     return () => { cancel = true }
   }, [open, onRead, loadPreview, evidenceKey, changeKey, identity, verificationId])
   const outcome = (kind: 'evidence' | 'change', ref: string) => {
@@ -328,7 +354,7 @@ function itemDot(item: WorkBoardItem, needsHuman: boolean): StateDotState {
   return 'ongoing'
 }
 
-function WorkRow({ locale, item, pending, onAccept, onReject, onAnswer, onResume, onRead }: {
+function WorkRow({ locale, item, pending, onAccept, onReject, onAnswer, onResume, onForceRelease, onRead }: {
   readonly locale: CopyLocale
   readonly item: WorkBoardItem
   readonly pending: readonly PendingGlance[]
@@ -336,14 +362,16 @@ function WorkRow({ locale, item, pending, onAccept, onReject, onAnswer, onResume
   readonly onReject: (payload: WorkRejectPayload) => void
   readonly onAnswer: (payload: { readonly id: string; readonly allow: boolean }) => void
   readonly onResume: (payload: { readonly id: string }) => void
+  readonly onForceRelease?: (payload: { readonly id: string }) => void
   readonly onRead?: WorkRead
 }) {
   const accept = acceptPayload(item)
   const reject = rejectPayload(item)
   const resume = resumePayload(item)
+  const forceRelease = onForceRelease ? forceReleasePayload(item) : undefined
   const look = lookRequest(item, pending)
   const lookOpen = Boolean(look && look !== 'stale' && look !== 'withdrawn')
-  const actions = lookOpen || accept || reject || resume
+  const actions = lookOpen || accept || reject || resume || forceRelease
   const delivery = item.runs.flatMap(run => run.deliveries ?? []).at(-1)
   return (
     <div className="dsh-dot-work" data-work={item.id} data-status={item.status}>
@@ -366,6 +394,7 @@ function WorkRow({ locale, item, pending, onAccept, onReject, onAnswer, onResume
           {accept ? <Button variant="primary" size="sm" onClick={() => onAccept(accept)}>{t(locale, 'workAccept')}</Button> : null}
           {reject ? <Button variant="ghost" size="sm" onClick={() => onReject(reject)}>{t(locale, 'workReject')}</Button> : null}
           {resume ? <Button variant="ghost" size="sm" onClick={() => onResume(resume)}>{t(locale, 'workResume')}</Button> : null}
+          {forceRelease && onForceRelease ? <Button variant="ghost" size="sm" onClick={() => onForceRelease(forceRelease)}>{t(locale, 'workForceRelease')}</Button> : null}
         </div>
       ) : null}
       {look === 'stale' ? <p className="dsh-ui-hint">{t(locale, 'workLookStale')}</p> : null}
@@ -404,6 +433,7 @@ export function WorkBoardPanel({ locale, api, items, pending, filter = 'all', on
       onReject={payload => run(api.workReject(payload))}
       onAnswer={payload => run(api.workAnswer(payload))}
       onResume={payload => run(api.workResume(payload))}
+      {...api.workForceRelease ? { onForceRelease: payload => run(api.workForceRelease!(payload)) } : {}}
       {...api.workRead ? { onRead: api.workRead } : {}}
     />
   )

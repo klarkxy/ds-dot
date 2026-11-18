@@ -29,6 +29,7 @@ import { DotAvatar } from './whale.tsx'
 export const CHAT_ROOT = 'dsh-dot-chat'
 
 const BOARD_POLL_MS = 5_000
+const BOARD_FALLBACK_POLL_MS = 30_000
 const RETRY_MS = 2_000
 /** A sent message waits this long to show up in the log before its local echo is dropped. */
 const ECHO_MS = 60_000
@@ -46,6 +47,7 @@ export interface ChatApi extends SettingsApi, ContextApi, TrajectoryApi, Knowled
   workReject?(payload: WorkRejectPayload): Promise<void>
   workAnswer?(payload: { readonly id: string; readonly allow: boolean }): Promise<void>
   workResume?(payload: { readonly id: string }): Promise<void>
+  workForceRelease?(payload: { readonly id: string }): Promise<void>
   workRead?(request: WorkReadRequest): Promise<{ readonly source: string; readonly body: string; readonly truncated?: boolean; readonly totalBytes?: number }>
   settings(signal: AbortSignal): Promise<DotSettings>
 }
@@ -90,30 +92,31 @@ function useChatFeed(api: ChatApi): { state: ChatState; error?: string; retry: (
   return { state, ...error === undefined ? {} : { error }, retry: useCallback(() => setAttempt(value => value + 1), []) }
 }
 
-function useBoard(api: ChatApi): [BoardView | undefined, string | undefined, () => void] {
+function useBoard(api: ChatApi, feedBoardRev?: number): [BoardView | undefined, string | undefined, () => void] {
   const [view, setView] = useState<BoardView>()
   const [error, setError] = useState<string>()
   const [round, setRound] = useState(0)
+  const lastTextRef = useRef('')
+  const pollMs = feedBoardRev !== undefined ? BOARD_FALLBACK_POLL_MS : BOARD_POLL_MS
   useEffect(() => {
     const lifetime = new AbortController()
     let timer: ReturnType<typeof setTimeout> | undefined
     // An unchanged poll keeps the old object, so the chat and the board do not redraw every few seconds.
-    let last = ''
     const run = () => {
       api.board(lifetime.signal).then(next => {
         if (lifetime.signal.aborted) return
         const text = JSON.stringify(next)
-        if (text !== last) { last = text; setView(next) }
+        if (text !== lastTextRef.current) { lastTextRef.current = text; setView(next) }
         setError(undefined)
       }, failure => {
         if (!lifetime.signal.aborted) setError(failure instanceof Error ? failure.message : String(failure))
       }).finally(() => {
-        if (!lifetime.signal.aborted) timer = setTimeout(run, BOARD_POLL_MS)
+        if (!lifetime.signal.aborted) timer = setTimeout(run, pollMs)
       })
     }
     run()
     return () => { lifetime.abort(); if (timer !== undefined) clearTimeout(timer) }
-  }, [api, round])
+  }, [api, round, feedBoardRev, pollMs])
   return [view, error, useCallback(() => setRound(value => value + 1), [])]
 }
 
@@ -310,12 +313,13 @@ export interface ChatPanelProps {
 
 export function ChatPanel({ locale, api, Card, onOpenSession, renderFactorySlot }: ChatPanelProps) {
   const { state, error, retry } = useChatFeed(api)
-  const [board, boardError, refreshBoard] = useBoard(api)
+  const [board, boardError, refreshBoard] = useBoard(api, state.snapshot?.boardRev)
   const removeSchedule = useCallback((id: string) => { void api.removeSchedule(id).then(refreshBoard, refreshBoard) }, [api, refreshBoard])
   const workApi = useMemo<WorkApi | undefined>(() => {
     if (!api.workAccept || !api.workReject || !api.workAnswer || !api.workResume) return undefined
     return {
       workAccept: api.workAccept, workReject: api.workReject, workAnswer: api.workAnswer, workResume: api.workResume,
+      ...(api.workForceRelease ? { workForceRelease: api.workForceRelease } : {}),
       ...(api.workRead ? { workRead: api.workRead } : {}),
     }
   }, [api])

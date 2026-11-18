@@ -428,6 +428,7 @@ const esUi: UiText = {
   workAccept: 'Aceptar',
   workReject: 'Devolver',
   workResume: 'Reintentar cierre',
+  workForceRelease: 'Liberar bloqueo',
   workLookAccept: 'Visto bueno',
   workLookReject: 'Devolver',
   workStatusCancelled: 'Cancelado',

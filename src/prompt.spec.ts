@@ -45,6 +45,8 @@ describe('coordinator prompt contract', () => {
       'After three unsuccessful verification rounds',
       'The service does not count those rounds',
       'cannot override it',
+      'A missing match is not permission',
+      'only when the approval text is truncated',
       'When approvals=human',
       'When questions=human',
       'When questions=off',

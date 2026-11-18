@@ -40,12 +40,16 @@ Create a workspace at D:\work\site and fix the broken links on the docs page. Te
 
 - **Handle approvals and questions:** Watch only her dispatched tasks or all DSH sessions. With
   the defaults (`approvals=dot`, `questions=dot`) she decides routine reversible approvals and
-  questions herself, after checking agreements, history, and what she can look up. High-risk or
-  truncated approvals (deleting outside the workspace, pushing, spending, credentials, or an
-  incomplete request) are forced to you, and she cannot override that gate. Set either control
-  to you to relay every item, or leave questions on the session. A question she still asks
-  includes one recommendation; silence is not treated as consent. When questions are left to
-  you or the session, answer in the original session.
+  questions herself, after checking agreements, history, and what she can look up. Work that is
+  already authorized is not asked again. Code forces a human decision, and she cannot override
+  it, only for the patterns in `assessApprovalRisk` (`src/approval-risk.ts`): truncated approval
+  text, sandbox escalation, publish commands (`npm`/`pnpm`/`yarn publish`, `git push`,
+  `gh release`), recursive delete, a PEM private key, a subagent shell, or a write from a
+  read-only run. That list is the pattern match, not every deletion outside the workspace,
+  every secret, or every act of spending. She still judges those from the authorization and the
+  consequence. A question she asks includes one recommendation; silence is not consent. Set
+  either control to you to relay every item, or leave questions on the session. When questions
+  are left to you or the session, answer in the original session.
 
 - **Watch sessions and recall history:** Ask her to watch a session you started yourself,
   check on everything running, or search earlier conversations and sessions.

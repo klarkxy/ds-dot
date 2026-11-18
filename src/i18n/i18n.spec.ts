@@ -41,15 +41,36 @@ const DITHERING: Record<CopyLocale, RegExp> = {
   pt: /distraíd/,
   ru: /рассеянн/,
 }
-const STEADY: Record<CopyLocale, RegExp> = {
-  zh: /做事稳妥/,
-  en: /\bsteady\b/,
-  ja: /落ち着いて/,
-  de: /ruhig entschlossen/,
-  es: /firme/,
-  pt: /firme/,
-  fr: /posée/,
-  ru: /собранная/,
+/** Phrases added for this policy. They must not be words the previous default already used. */
+const DECISION: Record<CopyLocale, string> = {
+  zh: '已经选定的做法',
+  en: 'the choice you already made',
+  ja: 'すでに選んだやり方',
+  de: 'deine Entscheidung',
+  es: 'la decisión que ya tomaste',
+  fr: 'seul l’utilisateur tranche',
+  pt: 'escolha que você já fez',
+  ru: 'уже выбранный шаг',
+}
+const SILENCE: Record<CopyLocale, string> = {
+  zh: '不把沉默当成同意',
+  en: 'never treat silence as consent',
+  ja: '沈黙を同意とはみなしません',
+  de: 'Schweigen nie als Zustimmung',
+  es: 'nunca tomas el silencio como permiso',
+  fr: 'ne prends jamais le silence pour un accord',
+  pt: 'nunca trata o silêncio como permissão',
+  ru: 'не принимай молчание за согласие',
+}
+const QUESTION_POLICY: Record<CopyLocale, { readonly label: string; readonly help: string }> = {
+  zh: { label: '可逆的自己定', help: '只有猜错会改变结果时才问你' },
+  en: { label: 'Choose reversible defaults', help: 'only when a wrong guess would change the result' },
+  ja: { label: '可逆なものは自分で決める', help: '誤りが結果を変えるときだけ' },
+  de: { label: 'Umkehrbares selbst entscheiden', help: 'wenn ein Fehlgriff das Ergebnis ändern würde' },
+  es: { label: 'Decidir lo reversible', help: 'solo si un error cambiaría el resultado' },
+  fr: { label: 'Décider le réversible', help: 'seulement si une erreur changerait le résultat' },
+  pt: { label: 'Decidir o reversível', help: 'só se um erro mudaria o resultado' },
+  ru: { label: 'Решать обратимое', help: 'только если ошибка изменила бы результат' },
 }
 
 const human = (text: string, time: number): RawEvent => ({
@@ -415,9 +436,19 @@ describe('i18n locale resolution and pack completeness', () => {
       expect(pers.split(/\n\s*\n/).filter(Boolean), `${loc} 4-section persona`).toHaveLength(4)
       expect(pers, `${loc} banned terms`).not.toMatch(BANNED_PERSONA_TERMS)
       expect(pers, `${loc} dithering`).not.toMatch(DITHERING[loc])
-      expect(pers, `${loc} steady judgment`).toMatch(STEADY[loc])
-      const kept = patchSettings({ ...DEFAULT_SETTINGS, persona: 'Custom voice kept' }, {}, loc)
-      expect(kept.persona, `${loc} custom persona`).toBe('Custom voice kept')
+      // String presence only. This does not run a model and is not evidence of live behavior.
+      expect(pers, `${loc} decision phrase`).toContain(DECISION[loc])
+      expect(pers, `${loc} silence is not consent`).toContain(SILENCE[loc])
+      expect(t(loc, 'sQuestions_dot'), `${loc} questions label`).toBe(QUESTION_POLICY[loc].label)
+      expect(t(loc, 'sQuestionsDesc_dot'), `${loc} questions help`).toContain(QUESTION_POLICY[loc].help)
+      expect(t(loc, 'sQuestionsDesc_dot'), `${loc} old scope question`).not.toMatch(/scope or direction|方向或范围|範囲や方針|Umfang oder Richtung|alcance o el rumbo|portée ou l’orientation|escopo ou a direção|границы или направление/)
+      expect(t(loc, 'sApprovalsDesc_dot'), `${loc} approvals not a blanket gate`).not.toMatch(/spending or credentials|付费或涉及凭据|課金・認証情報|Ausgaben oder Zugangsdaten|gastos o credenciales|dépenses ou identifiants|gastos ou credenciais|расходы или учётные данные/)
+      const kept = patchSettings({ ...DEFAULT_SETTINGS, persona: 'Custom voice kept', address: 'Kept name' }, { approvals: 'human' }, loc)
+      expect(kept.persona, `${loc} custom persona survives another setting`).toBe('Custom voice kept')
+      expect(kept.address, `${loc} custom address survives another setting`).toBe('Kept name')
+      const restored = patchSettings(kept, { persona: defaultPersona(loc), address: defaultAddress(loc) }, loc)
+      expect(restored.persona, `${loc} restoring the default text clears storage`).toBeUndefined()
+      expect(restored.address, `${loc} restoring the default address clears storage`).toBeUndefined()
 
       const defaultBuilt = personaSection({}, loc)
       expect(defaultBuilt.startsWith(pack.sectionLead)).toBe(true)
@@ -587,8 +618,8 @@ describe('i18n end-to-end lifecycle and PersonaPanel integration', () => {
     }
   })
 
-  it('scenario 5: PersonaPanel renders localized defaults for ja and en and restores defaults via pRestore buttons', async () => {
-    for (const loc of ['ja', 'en'] as const) {
+  it('scenario 5: PersonaPanel keeps a custom persona across address restore, then restores the default, for all 8 locales', async () => {
+    for (const loc of SUPPORTED_LOCALES) {
       let current: DotSettings = { ...DEFAULT_SETTINGS }
       const knowledge = {
         agreements: { text: '', maxChars: 4000, canUndo: false },
@@ -639,6 +670,8 @@ describe('i18n end-to-end lifecycle and PersonaPanel integration', () => {
       await act(async () => { saveBtn.click() })
       expect(current.address).toBe('Alice')
       expect(current.persona).toBe('Custom voice')
+      expect(personaInput.value).toBe('Custom voice')
+      expect(personaInput.value).not.toContain(DECISION[loc])
 
       const restoreButtons = () => [...document.querySelectorAll('button')].filter(btn => btn.textContent === t(loc, 'pRestore'))
       expect(restoreButtons()).toHaveLength(2)
@@ -646,10 +679,14 @@ describe('i18n end-to-end lifecycle and PersonaPanel integration', () => {
       await act(async () => { restoreButtons()[0]!.click() })
       expect(current.address).toBeUndefined()
       expect(addressInput.value).toBe(defaultAddress(loc))
+      expect(current.persona, `${loc} address restore leaves the custom persona`).toBe('Custom voice')
+      expect(personaInput.value, `${loc} textarea still shows the custom persona`).toBe('Custom voice')
 
       await act(async () => { restoreButtons()[1]!.click() })
       expect(current.persona).toBeUndefined()
       expect(personaInput.value).toBe(defaultPersona(loc))
+      expect(personaInput.value).toContain(DECISION[loc])
+      expect(personaInput.value).toContain(SILENCE[loc])
 
       await act(async () => { root.unmount() })
     }

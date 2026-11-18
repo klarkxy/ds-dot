@@ -357,11 +357,24 @@ export function ignoreCovered(exclusions: readonly SnapshotExclusion[], rel: str
   return exclusions.some(item => isIgnoredDirectoryReason(item.reason) && relUnder(item.path, rel, platform))
 }
 
-function isLink(target: string): boolean {
+/**
+ * Whether the leaf of `target` resolves somewhere other than the resolved
+ * directory that holds it. Comparing against the resolved parent, rather than
+ * `resolve(target)`, keeps a path that only passes through a link, a junction,
+ * or a Windows 8.3 short name (`RUNNER~1`) from reading as a link at the target
+ * itself, while a link or junction *at* the target still differs.
+ */
+function leafDiffers(target: string, actual: string, parent: string, platform: NodeJS.Platform): boolean {
+  const api = platform === 'win32' ? path.win32 : path.posix
+  const expected = api.join(unwrap(parent), api.basename(target))
+  return canonicalPath(unwrap(actual), platform) !== canonicalPath(expected, platform)
+}
+
+function isLink(target: string, platform: NodeJS.Platform = process.platform): boolean {
   const stat = lstatSync(target)
   if (stat.isSymbolicLink()) return true
   try {
-    return canonicalPath(unwrap(realpathSync(target))) !== canonicalPath(unwrap(resolve(target)))
+    return leafDiffers(target, realpathSync(target), realpathSync(dirname(target)), platform)
   } catch {
     return true
   }
@@ -379,8 +392,8 @@ function linkReason(target: string): string {
   }
 }
 
-function linkAt(target: string): boolean {
-  try { return isLink(target) } catch { return true }
+function linkAt(target: string, platform: NodeJS.Platform = process.platform): boolean {
+  try { return isLink(target, platform) } catch { return true }
 }
 
 export interface ScopeScan {
@@ -396,7 +409,7 @@ export interface ScopeScan {
  */
 export function scanScope(root: string, scope: string, type: 'file' | 'directory', platform: NodeJS.Platform = process.platform): ScopeScan {
   if (!existsSync(scope)) return { files: [], exclusions: [] }
-  if (isLink(scope)) throw new SnapshotError(`refusing to follow a link at ${scope}`)
+  if (isLink(scope, platform)) throw new SnapshotError(`refusing to follow a link at ${scope}`)
   if (type === 'file') {
     if (!lstatSync(scope).isFile()) throw new SnapshotError(`${scope} is not a file`)
     return { files: [relativePath(root, scope)], exclusions: [] }
@@ -408,7 +421,7 @@ export function scanScope(root: string, scope: string, type: 'file' | 'directory
       if (entry.name === '.' || entry.name === '..') continue
       const full = join(dir, entry.name)
       const rel = relativePath(root, full)
-      if (entry.isSymbolicLink() || linkAt(full)) {
+      if (entry.isSymbolicLink() || linkAt(full, platform)) {
         exclusions.push({
           path: rel,
           reason: ignoredDirName(entry.name, platform) ? 'ignored directory' : linkReason(full),
@@ -438,18 +451,19 @@ export function scanScope(root: string, scope: string, type: 'file' | 'directory
   return { files, exclusions }
 }
 
-async function isLinkAsync(target: string): Promise<boolean> {
+async function isLinkAsync(target: string, platform: NodeJS.Platform = process.platform): Promise<boolean> {
   const stat = await lstatAsync(target)
   if (stat.isSymbolicLink()) return true
   try {
-    return canonicalPath(unwrap(await realpathAsync(target))) !== canonicalPath(unwrap(resolve(target)))
+    const [actual, parent] = await Promise.all([realpathAsync(target), realpathAsync(dirname(target))])
+    return leafDiffers(target, actual, parent, platform)
   } catch {
     return true
   }
 }
 
-async function linkAtAsync(target: string): Promise<boolean> {
-  try { return await isLinkAsync(target) } catch { return true }
+async function linkAtAsync(target: string, platform: NodeJS.Platform = process.platform): Promise<boolean> {
+  try { return await isLinkAsync(target, platform) } catch { return true }
 }
 
 async function linkReasonAsync(target: string): Promise<string> {
@@ -467,7 +481,7 @@ export async function scanScopeAsync(root: string, scope: string, type: 'file' |
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { files: [], exclusions: [] }
     throw error
   }
-  if (await isLinkAsync(scope)) throw new SnapshotError(`refusing to follow a link at ${scope}`)
+  if (await isLinkAsync(scope, platform)) throw new SnapshotError(`refusing to follow a link at ${scope}`)
   if (type === 'file') {
     if (!scopeStat.isFile()) throw new SnapshotError(`${scope} is not a file`)
     return { files: [relativePath(root, scope)], exclusions: [] }
@@ -480,7 +494,7 @@ export async function scanScopeAsync(root: string, scope: string, type: 'file' |
       if (entry.name === '.' || entry.name === '..') continue
       const full = join(dir, entry.name)
       const rel = relativePath(root, full)
-      if (entry.isSymbolicLink() || await linkAtAsync(full)) {
+      if (entry.isSymbolicLink() || await linkAtAsync(full, platform)) {
         exclusions.push({
           path: rel,
           reason: ignoredDirName(entry.name, platform) ? 'ignored directory' : await linkReasonAsync(full),

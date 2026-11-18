@@ -10,14 +10,14 @@
  * 7. CJK-aware queryTerms segmentation & concurrent multi-session searchHistory.
  * 8. Locale-aware cardAnswerText, boardRev watermark on ChatFeed, and forceReleasePayload on WorkBoard.
  */
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { assessApprovalRisk } from './approval-risk.ts'
 import {
   captureScope, captureScopeAsync, ignoredDirName, pruneSnapshots,
-  readManifest, readSnapshotEntry, saveSnapshot,
+  readManifest, readSnapshotEntry, saveSnapshot, scanScope,
 } from './artifacts.ts'
 import { DotCards, cardAnswerText } from './card-state.ts'
 import { DEFAULT_SETTINGS, TOOL } from './contracts.ts'
@@ -217,6 +217,32 @@ describe('3. Async snapshot capture, manifest-only reads, size guard, and orphan
     } finally {
       rmSync(root, { recursive: true, force: true })
       rmSync(home, { recursive: true, force: true })
+    }
+  })
+
+  it('walks a scope reached through a linked parent, and still refuses a link at the scope itself', async () => {
+    const real = mkdtempSync(join(tmpdir(), 'dot-art-real-'))
+    const aliasRoot = mkdtempSync(join(tmpdir(), 'dot-art-alias-'))
+    const alias = join(aliasRoot, 'alias')
+    try {
+      mkdirSync(join(real, 'src'), { recursive: true })
+      writeFileSync(join(real, 'src', 'one.ts'), 'one')
+      symlinkSync(real, alias, process.platform === 'win32' ? 'junction' : 'dir')
+
+      // A path that only passes through a link (or a Windows 8.3 short name such as
+      // RUNNER~1) is not a link at the scope, so both walks must read it.
+      const scope = join(alias, 'src')
+      expect(scanScope(scope, scope, 'directory').files).toEqual(['one.ts'])
+      const captured = await captureScopeAsync(scope, scope, 'directory')
+      expect(captured.files.map(file => file.path)).toEqual(['one.ts'])
+
+      // A link at the scope itself is still refused.
+      expect(() => scanScope(alias, alias, 'directory')).toThrow(/refusing to follow a link/)
+      await expect(captureScopeAsync(alias, alias, 'directory')).rejects.toThrow(/refusing to follow a link/)
+    } finally {
+      rmSync(alias, { force: true })
+      rmSync(real, { recursive: true, force: true })
+      rmSync(aliasRoot, { recursive: true, force: true })
     }
   })
 })

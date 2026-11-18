@@ -521,6 +521,8 @@ export interface ChatSnapshot {
   readonly rev: number
   /** Changes when the item list changes; items are sent only when it moved past the client's. */
   readonly itemsRev: number
+  /** Monotonic watermark bumped whenever board/task/work/pending state changes. */
+  readonly boardRev?: number
   readonly items?: readonly ChatItem[]
   /** Answers to dot's cards by view id, for cards already answered. */
   readonly answers?: Readonly<Record<string, { readonly action: string; readonly values: Record<string, unknown> }>>

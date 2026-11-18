@@ -37,6 +37,9 @@ export const MAX_TASKS = 300
 /** Reflection runs remembered for the trajectory list. */
 export const MAX_REFLECTION_RUNS = 30
 
+/** Interactive cards retained in the state row; older settled/expired cards are evicted. */
+export const MAX_STORED_CARDS = 100
+
 export class DotStore {
   private state: DotState
   private current: DotSettings
@@ -172,7 +175,17 @@ export class DotStore {
   get lastFactoryResetAt(): number | undefined { return this.state.lastFactoryResetAt }
 
   addCard(card: import('./card-state.ts').DotCardRecord): Promise<void> {
-    return this.setDot({ cardSequence: card.number, cards: [...this.cards.map(row => row.answer ? row : { ...row, expired: true }), card] })
+    const updated = [...this.cards.map(row => row.answer ? row : { ...row, expired: true }), card]
+    if (updated.length <= MAX_STORED_CARDS) {
+      return this.setDot({ cardSequence: card.number, cards: updated })
+    }
+    let toDrop = updated.length - MAX_STORED_CARDS
+    const pruned = updated.filter(row => {
+      if (toDrop <= 0 || row.id === card.id || row.notificationPending || (!row.expired && !row.answer)) return true
+      toDrop -= 1
+      return false
+    })
+    return this.setDot({ cardSequence: card.number, cards: pruned })
   }
 
   expireCards(keepId?: string): Promise<void> {
@@ -649,12 +662,29 @@ export class DotStore {
     return this.write('tasks', task.sessionId, task)
   }
 
+  /** Evict oldest terminal WorkBook changes from both memory and durable storage. */
+  pruneWorkHistory(maxKeep?: number): Promise<{ readonly prunedChanges: readonly string[]; readonly keptArtifacts: ReadonlySet<string> }> {
+    return this.work.pruneCompletedChanges(maxKeep, async (table, key) => {
+      const domain = this.domain
+      if (!domain) return
+      const op = this.tail.then(() => this.durable(() => domain.table(table).delete(key)))
+      this.tail = op.catch(() => undefined)
+      await op
+    })
+  }
+
   private prune(): void {
     if (this.tasks.size <= MAX_TASKS) return
     const archived = [...this.tasks.values()].filter(task => task.status === 'archived').sort((a, b) => a.updatedAt - b.updatedAt)
-    // Pruned rows leave the memory view only; the domain has no delete and the
-    // stale row is skipped again on the next load by the same cap.
-    for (const task of archived.slice(0, this.tasks.size - MAX_TASKS)) this.tasks.delete(task.sessionId)
+    const evicted = archived.slice(0, this.tasks.size - MAX_TASKS)
+    for (const task of evicted) this.tasks.delete(task.sessionId)
+    const domain = this.domain
+    if (domain && evicted.length > 0) {
+      const op = this.tail.then(async () => {
+        for (const task of evicted) await this.durable(() => domain.table('tasks').delete(task.sessionId))
+      })
+      this.tail = op.catch(() => undefined)
+    }
   }
 
   private write(table: TableName, key: string, value: unknown): Promise<void> {

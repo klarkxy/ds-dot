@@ -31,6 +31,7 @@ export class ChatFeed {
   private lastSeq = -1
   private rev = 1
   private itemsRev = 1
+  private boardRev = 1
   private streaming = ''
   private streamTimer: ReturnType<typeof setTimeout> | undefined
   private readonly waiters = new Set<() => void>()
@@ -46,6 +47,11 @@ export class ChatFeed {
   constructor(private readonly host: DotHost, private readonly cardStore?: import('./store.ts').DotStore) {}
 
   cardsChanged(): void { this.bump(true) }
+
+  boardChanged(): void {
+    this.boardRev += 1
+    this.bump(false)
+  }
 
   /**
    * Point the feed at dot's current session. A new session starts a fresh
@@ -132,7 +138,7 @@ export class ChatFeed {
       }
       this.fold = fold
     }
-    const base = { sessionId, running: this.host.isRunning(sessionId), streaming: this.streaming, preparingCard: this.preparingCard, rev: this.rev, itemsRev: this.itemsRev }
+    const base = { sessionId, running: this.host.isRunning(sessionId), streaming: this.streaming, preparingCard: this.preparingCard, rev: this.rev, itemsRev: this.itemsRev, boardRev: this.boardRev }
     if (knownItemsRev === this.itemsRev) return base
     const cards = new Map(this.cardStore?.cards.map(card => [card.id, card]))
     const answers = { ...this.historyAnswers, ...this.fold.answers }

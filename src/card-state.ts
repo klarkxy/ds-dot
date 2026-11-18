@@ -2,6 +2,7 @@
 import type { ShownView, ViewAnswer, ViewNode, ViewPresentation } from '@klarkxy/dsh-deep-view/contracts'
 import { checkShownView, validateViewAnswer } from '@klarkxy/dsh-deep-view/core'
 import { answerText } from '@klarkxy/dsh-deep-view/answer-text'
+import type { CopyLocale } from './i18n/types.ts'
 import type { DotStore } from './store.ts'
 
 export interface DotCardRecord {
@@ -62,6 +63,18 @@ export class DotCards {
   }
 }
 
-export function cardAnswerText(card: DotCardRecord, answer: ViewAnswer): string {
-  return `[答复卡片 #${card.number}「${card.title}」] ${answerText(card, answer.action, answer.values)}`
+const CARD_REPLY_HEAD: Record<CopyLocale, (n: number, title: string) => string> = {
+  zh: (n, title) => `[答复卡片 #${n}「${title}」]`,
+  en: (n, title) => `[Card reply #${n} "${title}"]`,
+  ja: (n, title) => `[カード返信 #${n}「${title}」]`,
+  de: (n, title) => `[Kartenantwort #${n} „${title}"]`,
+  es: (n, title) => `[Respuesta a tarjeta #${n} «${title}»]`,
+  fr: (n, title) => `[Réponse à la carte #${n} « ${title} »]`,
+  pt: (n, title) => `[Resposta ao cartão #${n} "${title}"]`,
+  ru: (n, title) => `[Ответ на карточку #${n} «${title}»]`,
+}
+
+export function cardAnswerText(card: DotCardRecord, answer: ViewAnswer, locale: CopyLocale = 'zh'): string {
+  const head = (CARD_REPLY_HEAD[locale] ?? CARD_REPLY_HEAD.en)(card.number, card.title)
+  return `${head} ${answerText(card, answer.action, answer.values)}`
 }

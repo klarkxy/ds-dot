@@ -47,6 +47,40 @@ export function stepList(value: unknown): StepSpec[] {
   })
 }
 
+/**
+ * Synthesize structured requirements when the model supplies legacy `acceptance`
+ * and/or `deliverable` text instead of an explicit `requirements` array.
+ */
+export function synthesizeRequirements(
+  goal: string,
+  explicit: Requirement[] | undefined,
+  acceptance?: string,
+  deliverable?: string,
+): Requirement[] | undefined {
+  const acc = acceptance?.trim()
+  const deliv = deliverable?.trim()
+  if (explicit !== undefined) {
+    if (!acc && !deliv) return explicit
+    return explicit.map((req, index) => {
+      if (index !== 0) return req
+      const text = deliv && !req.text.includes(deliv) ? `${req.text} (Deliverable: ${deliv})` : req.text
+      const scenarios = req.scenarios && req.scenarios.length > 0
+        ? req.scenarios
+        : acc ? [{ scenarioRef: `${req.requirementRef}.1`, when: 'the delivery is verified', then: acc }] : undefined
+      return { ...req, text, ...(scenarios ? { scenarios } : {}) }
+    })
+  }
+  if (!acc && !deliv) return undefined
+  const baseGoal = goal.trim()
+  const text = deliv ? `${baseGoal} (Deliverable: ${deliv})` : baseGoal
+  return [{
+    requirementRef: 'goal',
+    text,
+    required: true,
+    ...(acc ? { scenarios: [{ scenarioRef: 'goal.1', when: 'the delivery is verified', then: acc }] } : {}),
+  }]
+}
+
 export function requirementList(value: unknown): Requirement[] | undefined {
   const rows = jsonArray(value)
   if (!rows) return undefined

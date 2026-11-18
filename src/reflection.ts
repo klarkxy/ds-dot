@@ -45,12 +45,12 @@ export const REFLECTION_FAILURE_COOLDOWN_MS = 7_200_000
  * like the dot persona; the human never sees this.
  */
 export const REFLECTION_INSTRUCTIONS = [
-  "You are dot's private reflection pass: a short, silent background job that reviews the recent collaboration between the human and dot and rewrites dot's own cognition so she understands the human and herself better.",
-  'You are not dot talking to the human. Do not address the human and do not produce a chat reply. Work quietly, then finish.',
-  `Read the record with ${TOOL.searchHistory} and ${TOOL.readHistory} before deciding. Trust the record over your impressions.`,
-  `You may rewrite only dot's [cognition], by calling ${REFLECTION_SUBMIT_TOOL} once with the complete new text. You must never add, remove or reword an agreement: the [agreements] are the human's own words and only they change them.`,
-  'If some agreements look out of date or conflict with each other, record a short note in agreementNotes; dot will raise it with the human later. Do not ask the human anything yourself.',
-  'Keep the cognition short and useful, with two parts: what she understands about the human, and what she understands about herself — preferences formed here, shared jokes and what they have accomplished together. Preserve useful entries about herself as well as those about the human. Do not include task details, transient facts, or anything that can simply be looked up in the history.',
+  "You are dot's private background reflection pass: a silent job that reviews recent collaboration between the human and dot, then updates dot's [cognition] so she understands both the human and herself better.",
+  'You are not addressing the human. Emit no chat reply — inspect the record quietly, submit once, and end the turn.',
+  `Inspect actual messages via ${TOOL.searchHistory} and ${TOOL.readHistory} before changing anything; trust the recorded transcript over assumptions.`,
+  `You may rewrite only [cognition] by calling ${REFLECTION_SUBMIT_TOOL} once with the full replacement text. Never add, remove, or reword [agreements]: agreements are the human's exact standing rules and only the human edits them.`,
+  'When any [agreements] entries appear outdated or mutually contradictory, summarize the issue briefly in agreementNotes so dot can raise it with the human next time. Never ask the human directly.',
+  'Keep [cognition] concise, durable, and split into two parts: (1) what she understands about the human and how best to collaborate with them, and (2) what she understands about herself — preferences formed here, shared jokes, and what they have accomplished together. Preserve useful entries about herself alongside insights about the human. Exclude transient task details, one-off status notes, or facts easily retrieved from history.',
 ].join('\n')
 
 /** The gate inputs, all read live from the store and the host at check time. */
@@ -91,18 +91,18 @@ export function buildReflectionInstruction(input: { readonly agreements: string;
   const agreements = input.agreements.trim() || '(none yet)'
   const cognition = input.cognition.trim() || '(none yet)'
   return [
-    "Run dot's private background reflection pass now. The human is not here; you are not talking to them.",
-    `Review what happened between the human and dot since ${since} and bring dot's cognition up to date. Use ${TOOL.searchHistory} and ${TOOL.readHistory} to read the actual record first; your own conversation is part of it.`,
+    "Run dot's private background reflection pass now. The human is not present; do not write a chat reply.",
+    `Review collaboration between the human and dot since ${since} using ${TOOL.searchHistory} and ${TOOL.readHistory} (including dot's own conversation segments), then bring [cognition] up to date.`,
     '',
-    '[agreements] (the human\'s own requirements — read-only; never change these):',
+    "[agreements] (the human's standing rules — strictly read-only; never change these):",
     agreements,
     '',
-    '[cognition] (dot\'s own understanding — rewrite it whole):',
+    "[cognition] (dot's evolving understanding — rewrite as a complete block):",
     cognition,
     '',
-    `When ready, call ${REFLECTION_SUBMIT_TOOL} exactly once with the complete new cognition. Keep it short and preserve what still holds in both parts: what she understands about the human and how best to work with them, and what she understands about herself — preferences formed here, shared jokes and what they have accomplished together. Leave out task details and anything that can simply be looked up.`,
-    'Then check the agreements for entries that are stale or contradict each other. If any, pass them in agreementNotes on the same call; dot raises them with the human next time and lets the human decide. Never edit the agreements yourself.',
-    'If nothing needs to change, submit the current cognition unchanged and leave agreementNotes out.',
+    `Call ${REFLECTION_SUBMIT_TOOL} exactly once with the complete updated cognition. Keep it concise and retain what still holds across both parts: what she understands about the human and their working style, and what she understands about herself — preferences formed here, shared jokes, and what they have accomplished together. Omit transient task details and facts that can be looked up on demand.`,
+    'Check [agreements] for stale or conflicting entries; if you find any, pass a brief note in agreementNotes on the same call so dot can surface it to the human next turn. Never edit [agreements] yourself.',
+    'If no updates are needed, submit the existing cognition text unchanged and omit agreementNotes.',
   ].join('\n')
 }
 
@@ -203,10 +203,6 @@ export class ReflectionRunner {
     return { sessionId, ...foldTrajectory(events) }
   }
 
-  /**
-   * Stop on plugin unload: cancel a pass in flight and wait for it to release
-   * its session, so nothing keeps running (or holds the session) after unload.
-   */
   /**
    * Stop on plugin unload: cancel the pass in flight, then await it so its
    * `finally` really finishes (releasing the session and completing any store
@@ -336,13 +332,13 @@ export function apply(ctx: Context): void {
   // ── dot_search_history (read-only) ─────────────────────────────────────
   tool({
     name: TOOL.searchHistory,
-    description: 'Find what was said earlier in dot\'s conversation with the human and in the sessions of the tasks on her ledger. Every word of the query must occur in one message (any order, any case). Hits come with session_id and seq for dot_read_history.',
+    description: "Search earlier messages across dot's conversation segments and tracked task sessions. Every query word must appear in the same message (case-insensitive, any order). Returns session_id and seq for dot_read_history.",
     parameters: {
-      query: { type: 'string', required: true, description: 'Words to find; fewer words find more.' },
-      scope: { type: 'string', enum: ['all', 'own', 'tasks'], description: 'own: dot\'s conversation; tasks: task sessions; all (default): both.' },
-      session_id: { type: 'string', description: 'Search this one session only.' },
-      tools: { type: 'boolean', description: 'Also search tool calls and results; default false.' },
-      limit: { type: 'integer', description: 'Matches to list, default 12, at most 40.' },
+      query: { type: 'string', required: true, description: 'Literal keywords to match; fewer words broaden recall.' },
+      scope: { type: 'string', enum: ['all', 'own', 'tasks'], description: "own: dot's conversation; tasks: tracked task sessions; all (default): both." },
+      session_id: { type: 'string', description: 'Restrict search to one session id.' },
+      tools: { type: 'boolean', description: 'Include tool calls and results; default false.' },
+      limit: { type: 'integer', description: 'Maximum hits to return (default 12, max 40).' },
     },
     output: TEXT_OUTPUT,
     isConcurrencySafe: () => false,
@@ -362,12 +358,12 @@ export function apply(ctx: Context): void {
   // ── dot_read_history (read-only) ───────────────────────────────────────
   tool({
     name: TOOL.readHistory,
-    description: 'Read a stretch of one session word for word: the messages around seq, or the last messages when seq is left out. Use it after dot_search_history.',
+    description: 'Read verbatim messages from one session: centered around seq (from dot_search_history), or the latest messages when seq is omitted.',
     parameters: {
-      session_id: { type: 'string', required: true, description: 'Session to read.' },
-      seq: { type: 'integer', description: 'Position to read around, from a search hit.' },
-      before: { type: 'integer', description: 'Messages before it, default 4, at most 30.' },
-      after: { type: 'integer', description: 'Messages after it, default 4, at most 30.' },
+      session_id: { type: 'string', required: true, description: 'Session id to read.' },
+      seq: { type: 'integer', description: 'Anchor sequence number from a search hit.' },
+      before: { type: 'integer', description: 'Messages before seq (default 4, max 30).' },
+      after: { type: 'integer', description: 'Messages after seq (default 4, max 30).' },
       tools: { type: 'boolean', description: 'Include tool calls and results; default false.' },
     },
     output: TEXT_OUTPUT,
@@ -390,10 +386,10 @@ export function apply(ctx: Context): void {
   // ── dot_reflection_submit (the only write, cognition only) ─────────────
   tool({
     name: REFLECTION_SUBMIT_TOOL,
-    description: `Save the result of this reflection pass and end the run. cognition is the complete new [cognition] text (it replaces the whole block; an empty string clears it). agreementNotes is optional: short notes about agreements that look stale or conflict; dot will raise them with the human later. This tool never changes the agreements.`,
+    description: 'Persist the reflection result and conclude this pass. cognition replaces the entire [cognition] block (empty string clears it). agreementNotes optionally flags stale or conflicting [agreements] for dot to mention to the human next turn; this tool never edits [agreements].',
     parameters: {
-      cognition: { type: 'string', required: true, description: 'The complete new cognition text (at most 4000 characters); empty clears it.' },
-      agreementNotes: { type: 'string', description: 'Optional notes about outdated or conflicting agreements, for dot to raise with the human.' },
+      cognition: { type: 'string', required: true, description: 'Complete replacement [cognition] text (max 4000 characters; empty clears it).' },
+      agreementNotes: { type: 'string', description: 'Optional brief note on stale or conflicting agreements for dot to raise with the human.' },
     },
     output: SUBMIT_OUTPUT,
     isConcurrencySafe: () => false,

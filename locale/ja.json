@@ -1,7 +1,7 @@
 {
   "meta": {
     "title": "ドロシー（dot）",
-    "description": "常駐のコーディネーター「ドロシー」：専用パネルで話しかけるだけで、ワークスペースの作成、セッションの開始と進捗確認、承認や質問の対応、そして結果の報告まで担います。",
+    "description": "DeepSeek Harness 常駐コーディネーター「ドロシー」：専用パネルで話しかけるだけで、ワークスペース管理、セッション横断のタスク実行・検証、定型的な承認や質問への対応、簡潔な結果報告まで一貫して担います。",
     "detail": "docs/README.ja.md"
   },
   "panel": {
@@ -10,14 +10,14 @@
     "cardsHint": "このカードは期限切れです。新しくリクエストを開始してください。",
     "personaTitle": "ペルソナと取り決め",
     "agreements": "取り決め",
-    "agreementsHint": "あなたが決めたルールをそのままの言葉で保持します。認知よりも常に優先されます。",
+    "agreementsHint": "あなたが定めた常駐ルールをそのままの言葉で保持します。認知よりも常に優先されます。",
     "agreementsPlaceholder": "- 例：個人リポジトリへのプッシュは許可してよい",
     "agreementsEmpty": "取り決めはまだありません。",
     "saveAgreements": "取り決めを保存",
     "undoAgreements": "前回の保存を取り消す",
     "cognition": "認知",
-    "cognitionHint": "ドロシーがあなたについて記録した理解です（編集可能）。",
-    "cognitionPlaceholder": "あなたの好みや作業リズムについて彼女が気づいたこと…",
+    "cognitionHint": "ドロシーが蓄積した協業メモです（編集可能）。",
+    "cognitionPlaceholder": "あなたの仕事の進め方や好み、ここで培った習慣や一緒に達成したことについての理解…",
     "cognitionEmpty": "認知はまだありません。",
     "saveCognition": "認知を保存",
     "cognitionHistory": "履歴バージョン",
@@ -30,18 +30,18 @@
     "taskPermission_workspace-write": "ワークスペース書き込み",
     "taskPermission_danger-full-access": "フルアクセス",
     "taskPermission_default": "ホストに従う",
-    "taskPermissionDesc": "新規タスクにのみ適用され、承認ルーティングとは独立しています。",
+    "taskPermissionDesc": "新しく割り当てるタスクにのみ適用され、承認ルーティングとは独立しています。",
     "approvals_dot": "ドロシー",
     "approvals_human": "あなた",
     "approvals_deny": "すべて拒否",
     "reflection": "バックグラウンド振り返り",
-    "reflectionDesc": "待機中に直近の作業を振り返り認知を更新します。古いまたは競合する取り決めを見つけた場合は、次回のメッセージ時にお知らせして判断を仰ぎます。",
+    "reflectionDesc": "待機中に直近の協業を振り返って認知を更新します。古くなった取り決めや矛盾を見つけた場合は、次回のメッセージ時にお知らせして判断を仰ぎます。",
     "reflection_on": "オン",
     "reflection_off": "オフ"
   },
   "context": {
     "promptSections": "プロンプトセクション",
-    "promptSectionsHint": "このセグメントのプロンプトに実際に含まれる内容です。",
+    "promptSectionsHint": "現在のセグメントのシステムプロンプトに固定されている内容です。",
     "sectionPersona": "ペルソナ",
     "sectionAgreements": "取り決め",
     "sectionCognition": "認知",

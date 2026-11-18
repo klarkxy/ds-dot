@@ -12,7 +12,7 @@ import type { Session } from '@deepseek-ai/dsh-session'
 export type StepTranscript = Pick<Session, 'deriveMessages'>
 
 /** Model-facing refusal. The view may be valid; it is just not the only call. */
-export const SHOW_VIEW_MIXED_SUMMARY = 'show_view shares this step with another tool, so the card was not shown and the turn was not ended. Wait for those results, then call show_view once by itself.'
+export const SHOW_VIEW_MIXED_SUMMARY = 'show_view shared this step with another tool call, so the card was deferred and the turn remains open. Wait for the other tool results, then call show_view alone in its own step.'
 
 /**
  * Durable tool/result meta. The canonical status is not stored on the event.

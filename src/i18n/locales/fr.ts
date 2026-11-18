@@ -192,7 +192,7 @@ const frUi: UiText = {
   sApprovals_dot: 'Dorothy',
   sApprovals_human: 'Vous',
   sApprovals_deny: 'Tout refuser',
-  sApprovalsDesc_dot: 'Elle juge les approbations courantes. Un motif dangereux détecté dans l’avis vous impose la décision. Ce n’est pas chaque suppression, secret ou écriture.',
+  sApprovalsDesc_dot: 'Elle traite les approbations courantes et réversibles. Les avis tronqués ou présentant un motif à haut risque requièrent toujours votre accord (ce contrôle cible des motifs précis, pas chaque suppression, secret ou écriture).',
   sApprovalsDesc_human: 'Chaque demande d’approbation vous est transmise.',
   sApprovalsDesc_deny: 'Toutes les demandes d’approbation sont refusées.',
   sQuestions: 'Questions du modèle',
@@ -444,6 +444,7 @@ const frUi: UiText = {
   workAccept: 'Accepter',
   workReject: 'Renvoyer',
   workResume: 'Réessayer la clôture',
+  workForceRelease: 'Libérer le verrou',
   workLookAccept: 'C’est bon',
   workLookReject: 'Renvoyer',
   workStatusCancelled: 'Annulé',
@@ -576,8 +577,8 @@ export const fr: LocalePack = {
   ui: frUi,
   card: frCard,
   config: {
-    homeDir: 'Dossier de l’espace de travail propre à Dorothy, qui contient aussi sa propre session ; s’il est vide, utilise un dossier dot dans le répertoire principal DSH. Les autres paramètres se trouvent via l’engrenage dans le panneau de Dorothy',
-    approvalGraceMs: 'Délai de grâce des notifications d’approbation en millisecondes (10000 par défaut) ; les approbations réglées dans la session d’origine pendant ce délai ne réveillent pas Dorothy',
+    homeDir: 'Dossier de l’espace de travail et de la session propres à Dorothy ; laissez vide pour utiliser le dossier dot du répertoire principal DSH. Les autres paramètres sont accessibles via l’engrenage du panneau de Dorothy.',
+    approvalGraceMs: 'Délai de grâce des notifications d’approbation en millisecondes (10000 par défaut) ; les approbations réglées dans la session d’origine pendant cette fenêtre ne réveillent pas Dorothy.',
   },
   approvalCard: {
     title: 'Approbation',

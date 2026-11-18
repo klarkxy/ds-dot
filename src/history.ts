@@ -92,9 +92,28 @@ export function historyRows(events: Iterable<RawEvent>, tools = false, skip: Rea
   return rows
 }
 
+const CJK_SCRIPT_RE = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u
+const cjkSegmenter = typeof Intl !== 'undefined' && typeof Intl.Segmenter === 'function'
+  ? new Intl.Segmenter('zh', { granularity: 'word' })
+  : undefined
+
 /** The words of a query: every one has to occur in a row, in any order and any letter case. */
 export function queryTerms(query: string): string[] {
-  return [...new Set(query.toLowerCase().split(/\s+/).filter(Boolean))]
+  const rawTokens = query.toLowerCase().split(/\s+/).filter(Boolean)
+  const terms: string[] = []
+  for (const token of rawTokens) {
+    if (!CJK_SCRIPT_RE.test(token) || token.length <= 2 || !cjkSegmenter) {
+      terms.push(token)
+      continue
+    }
+    const parts = [...cjkSegmenter.segment(token)]
+      .filter(seg => seg.isWordLike !== false)
+      .map(seg => seg.segment.trim())
+      .filter(Boolean)
+    if (parts.length > 0) terms.push(...parts)
+    else terms.push(token)
+  }
+  return [...new Set(terms)]
 }
 
 /** Rows that hold every term, with the text around the first one. */

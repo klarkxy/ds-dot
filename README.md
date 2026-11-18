@@ -25,6 +25,8 @@ pnpm watch
 
 The linked checkout includes `src`; watch rebuilds `lib` as you edit. If pnpm requires build permission for a source install, allow `ds-dot` in that profile's `pnpm-workspace.yaml` and repeat the install.
 
+Contributions go through issues and pull requests into `dev`; see [CONTRIBUTING.md](CONTRIBUTING.md). Releases are described in [docs/releasing.md](docs/releasing.md).
+
 ## Use
 
 Open **Dorothy** beside **Plugins** and **Automations** in the sidebar. Her panel has its own conversation. Tell her what you need:

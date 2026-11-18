@@ -18,7 +18,22 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          fetch-depth: 0
           persist-credentials: false
+      - name: Check release branch
+        if: github.event_name == 'release'
+        env:
+          RELEASE_PRERELEASE: ${{ github.event.release.prerelease }}
+        run: |
+          # Stable releases come from main; prereleases may also come from dev.
+          if git merge-base --is-ancestor HEAD origin/main; then
+            echo "OK: release commit is on main."
+          elif [ "$RELEASE_PRERELEASE" = true ] && git merge-base --is-ancestor HEAD origin/dev; then
+            echo "OK: prerelease commit is on dev."
+          else
+            echo "::error::Stable releases must be tagged on main; prereleases on main or dev."
+            exit 1
+          fi
       - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:

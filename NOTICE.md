@@ -2,16 +2,16 @@
 
 ## dsh-context
 
-The current-surface categories and token estimates in `src/context-surface.ts`, plus the context composition, stacked bar, legend, donut, slice list, and tooltip components in `src/context-*.tsx`, are adapted from **dsh-context v0.82.2**, by **bowenliang123**, under the Apache License, Version 2.0.
+Dorothy's context usage view adapts context breakdown and chart components from **dsh-context v0.82.2**, by **bowenliang123**, under the Apache License, Version 2.0.
 
 Upstream: https://github.com/bowenliang123/dsh-context
 Source revision: https://github.com/bowenliang123/dsh-context/tree/432c5cbb9911778de070f34b297ca4d982106048
 
-The adaptations scope the widgets to Dorothy's panel, connect them to her session projections, fold her live prompt into seven browsable categories, replace the dashboard cards with continuous sections, and leave out unrelated fleet, promotion, history, and cross-session surfaces.
+The components were adapted and scoped to Dorothy's panel.
 
 ## DeepSeek fish logo
 
-`icon.svg` and `src/whale.tsx` reuse the DeepSeek fish silhouette path from **@deepseek-ai/dsh-client-ui-primitives**, under the MIT License, Copyright (c) 2026 DeepSeek. The path is recoloured pink as Dorothy's look and mirrored so she faces right.
+Dorothy's icon adapts the DeepSeek fish silhouette from **@deepseek-ai/dsh-client-ui-primitives**, under the MIT License, Copyright (c) 2026 DeepSeek, recolored pink and mirrored to face right.
 
 ---
 

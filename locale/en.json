@@ -1,7 +1,7 @@
 {
   "meta": {
     "title": "Dorothy (dot)",
-    "description": "An always-on coordinator: talk to Dorothy in her own panel, and she opens workspaces, starts sessions, follows their progress, settles approvals and questions for you, and reports back."
+    "description": "Always-on coordinator for DeepSeek Harness: talk to Dorothy in her dedicated panel to manage workspaces, dispatch and verify tasks across sessions, handle routine approvals and questions, and get concise reports."
   },
   "panel": {
     "cardPreparing": "Preparing card…",
@@ -9,14 +9,14 @@
     "cardsHint": "This card has expired; start a new request.",
     "personaTitle": "Persona & agreements",
     "agreements": "Agreements",
-    "agreementsHint": "The rules you set, kept in your own words. They win over her cognition.",
+    "agreementsHint": "Standing rules kept in your exact words. They always take precedence over cognition.",
     "agreementsPlaceholder": "- e.g. Pushing to my personal repos is fine",
     "agreementsEmpty": "No agreements yet.",
     "saveAgreements": "Save agreements",
     "undoAgreements": "Revert last save",
     "cognition": "Cognition",
-    "cognitionHint": "What Dorothy has noted about you. Editable.",
-    "cognitionPlaceholder": "What she has noticed about your preferences and rhythm…",
+    "cognitionHint": "Working understanding Dorothy has built up. Editable.",
+    "cognitionPlaceholder": "Her understanding of you and of herself — workflow preferences, shared jokes, and accomplishments together…",
     "cognitionEmpty": "No cognition yet.",
     "saveCognition": "Save cognition",
     "cognitionHistory": "Versions",
@@ -29,18 +29,18 @@
     "taskPermission_workspace-write": "Workspace write",
     "taskPermission_danger-full-access": "Full access",
     "taskPermission_default": "Follow the host",
-    "taskPermissionDesc": "Applies to new tasks, independently of approval routing.",
+    "taskPermissionDesc": "Applies to newly dispatched tasks, independently of approval routing.",
     "approvals_dot": "Dorothy",
     "approvals_human": "You",
     "approvals_deny": "Deny all",
     "reflection": "Background reflection",
-    "reflectionDesc": "Reviews recent work when idle and updates her cognition; flags stale or conflicting agreements the next time you message her, for you to decide.",
+    "reflectionDesc": "Reviews recent collaboration while idle to keep cognition current, and flags outdated or conflicting agreements on your next message for you to decide.",
     "reflection_on": "On",
     "reflection_off": "Off"
   },
   "context": {
     "promptSections": "Prompt sections",
-    "promptSectionsHint": "What this segment actually carries in its prompt.",
+    "promptSectionsHint": "Sections currently frozen in this segment’s system prompt.",
     "sectionPersona": "Persona",
     "sectionAgreements": "Agreements",
     "sectionCognition": "Cognition",

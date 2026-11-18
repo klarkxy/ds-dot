@@ -164,7 +164,7 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
     void ctx.agentPresets.register({
       id: PRESET_ID,
       name: 'Dorothy',
-      description: 'Dorothy (dot): talks to you, starts and checks other sessions; no file or shell tools.',
+      description: 'Dorothy (dot): coordinates workspaces and task sessions, settles routine requests, and reports back; carries no file or shell tools.',
       order: 90,
       plugins: [
         { id: 'persona', name: '@deepseek-ai/dsh-persona', config: { prefix: DOT_INSTRUCTIONS } },
@@ -201,7 +201,7 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
     void ctx.agentPresets.register({
       id: REFLECTION_PRESET_ID,
       name: 'Dot reflection',
-      description: 'Internal background reflection pass for Dorothy; not used for tasks.',
+      description: 'Internal background reflection pass that updates Dorothy’s cognition; never used for tasks.',
       order: 91,
       plugins: [
         { id: 'persona', name: '@deepseek-ai/dsh-persona', config: { prefix: REFLECTION_INSTRUCTIONS } },

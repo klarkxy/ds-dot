@@ -10,9 +10,9 @@ dsh plugin --profile web add link:/path/to/ds-dot
 pnpm watch
 ```
 
-The linked checkout exposes `src`, and `pnpm watch` rebuilds `lib` as you edit. If pnpm asks for build permission when linking from source, allow `ds-dot` in that profile's `pnpm-workspace.yaml` and run `dsh plugin --profile web add link:/path/to/ds-dot` again.
+The linked checkout exposes `src`, and `pnpm watch` rebuilds `lib` as you edit. If `pnpm` prompts for build permission when linking from source, allow `ds-dot` in that profile's `pnpm-workspace.yaml` and rerun `dsh plugin --profile web add link:/path/to/ds-dot`.
 
-Before pushing, run the same checks CI runs:
+Before pushing, run the full CI gate locally:
 
 ```sh
 pnpm typecheck && pnpm test && pnpm build
@@ -20,7 +20,7 @@ pnpm typecheck && pnpm test && pnpm build
 
 ## Branches and workflow
 
-`dev` is the integration branch for ongoing work; `main` holds only published releases and hotfixes. Direct pushes to either branch are blocked by repository rulesets.
+`dev` is the integration branch for ongoing work; `main` holds only published releases and hotfixes. Direct pushes to both branches are blocked by repository rulesets.
 
 ```mermaid
 flowchart LR
@@ -33,38 +33,32 @@ flowchart LR
   M -->|"sync PR, merge commit"| D
 ```
 
-Feature and fix pull requests squash-merge into `dev` so the PR title becomes the single commit and release-notes line. Release (`dev` → `main`), hotfix (`hotfix/*` → `main`), and sync (`main` → `dev`) pull requests use merge commits so `main` and `dev` continue sharing history.
+Feature and fix PRs squash-merge into `dev` so the PR title becomes the single commit and release-notes entry. Release (`dev` → `main`), hotfix (`hotfix/*` → `main`), and sync (`main` → `dev`) PRs use merge commits so `main` and `dev` continue sharing history.
 
-1. **Start from an issue.** Open or pick an issue and assign yourself so nobody duplicates the work (small typo or docs fixes can skip this).
-2. **Branch from the latest `dev`** (using `feat/<issue>-<slug>`, `fix/<issue>-<slug>`, `refactor/...`, or `docs/...`):
+1. **Start from an issue.** Open or claim an issue so work is not duplicated (trivial typo or docs fixes may skip this).
+2. **Branch from the latest `dev`** (`feat/<issue>-<slug>`, `fix/<issue>-<slug>`, `refactor/...`, or `docs/...`):
    ```sh
    git switch dev && git pull
    git switch -c feat/123-short-name
    ```
-   If `dev` moves on while you work, update with `git merge origin/dev` (or rebase and force-push your own branch only).
-3. **Commit as you like** on your branch, then **open a pull request into `dev`**. GitHub preselects `main` (the default branch); change the base to `dev`.
-   - Use a [Conventional Commits](https://www.conventionalcommits.org/) title (`feat(work): render English work orders`). Allowed types: `feat`, `fix`, `perf`, `refactor`, `docs`, `test`, `build`, `ci`, `chore`, `revert`, `release`. Add `!` for breaking changes (`feat(api)!: ...`).
-   - Add `Closes #123` in the description so the issue closes when merged.
-   - Keep PRs focused; prefer several small PRs to one large one.
-   - If the pull request changes the interface, put a recorded GIF in the body. See [Frontend changes](#frontend-changes).
-4. **Pass checks and review.** `CI result` (typecheck, test, build, and pack on Linux and Windows) and `PR title` must pass, and all review threads must be resolved before squash-merging into `dev`. A frontend change also needs the GIF from [Frontend changes](#frontend-changes) visible in the body. The checks do not look for that GIF.
-5. **Squash and merge**, then delete the branch.
+   If `dev` advances while you work, sync with `git merge origin/dev` (or rebase your feature branch).
+3. **Open a pull request targeting `dev`** (GitHub defaults to `main`, so switch the base branch to `dev`):
+   - Use a [Conventional Commits](https://www.conventionalcommits.org/) PR title (`feat(work): render English work orders`). Allowed types: `feat`, `fix`, `perf`, `refactor`, `docs`, `test`, `build`, `ci`, `chore`, `revert`, `release` (append `!` for breaking changes, e.g. `feat(api)!: ...`).
+   - Reference the issue with `Closes #123` in the PR body.
+   - Keep PRs focused; prefer small, reviewable changes over monolithic diffs.
+   - Include a live interaction GIF whenever the PR touches the frontend (see [Frontend changes](#frontend-changes)).
+4. **Pass CI and review.** `CI result` (typecheck, test, build, and pack on Linux and Windows) and `PR title` must pass, all review threads must be resolved, and any required frontend GIF must be embedded in the PR body before squash-merging.
+5. **Squash and merge**, then delete the feature branch.
 
 ## Frontend changes
 
-Every author follows this rule. Reviewers apply it to every pull request.
+A pull request counts as a frontend change whenever it alters what a user sees or interacts with in Dorothy's UI inside DeepSeek Harness — including client components (`src/**/*.tsx`, excluding `*.spec.tsx`), user-facing copy (`src/ui-copy.ts`, `src/i18n/locales/*.ts`, `locale/*.json`), and icons (`icon.svg` or inline SVG glyphs). Backend-only, test-only, and docs-only diffs do not count.
 
-A pull request changes the frontend when it changes what a person sees or does in Dorothy's interface inside DeepSeek Harness. That includes the client components (`src/**/*.tsx`, other than `*.spec.tsx`), the words those screens show (`src/ui-copy.ts` and `locale/*.json`), and icons the interface uses (`icon.svg` and the icon components). Any other diff that changes that interface counts as well. Server behavior, tests, and documentation that leave the interface unchanged do not.
+- **When a PR changes the frontend:** Embed a real interaction GIF in the PR body recorded from a live `dsh web` instance running your branch, and state the commit SHA recorded (e.g. `Recorded on commit <sha>`). Show the actual interaction and visual outcome on screen — static screenshots, mockups, synthetic animations, or text claims do not satisfy this requirement. Keep the GIF file off the Git branch.
+- **How to record safely:** Use the bundled `dsh-web-acceptance` skill in `.agents/skills/dsh-web-acceptance/`, which launches an isolated `DSH_HOME` instance, exchanges the startup token for an `HttpOnly` cookie prior to recording, and exports a palette-optimized GIF outside the repository with zero API keys, `?token=` URLs, cookies, or personal data.
+- **When a PR leaves the frontend untouched:** Write `No frontend changes` in the PR body. Do not use that marker on diffs that touch UI components, styles, icons, or user-facing copy, regardless of how small the change is.
 
-When the pull request does change the frontend, the body shows a GIF recorded in DeepSeek Harness from this pull request's code. The recording covers the interaction that changed and the result on screen, including the effect of a fix. Name the commit the recording shows. Embed the GIF in the body, or link an image URL that renders there, and leave the file off the branch. The recording shows the real interface. A still screenshot, a mockup, a generated animation of the UI, or a sentence that says a recording exists leaves the requirement unmet.
-
-Record it with the `dsh-web-acceptance` skill in `.agents/skills/dsh-web-acceptance/`: the bundled script starts an isolated `dsh web` with its own `DSH_HOME`, exchanges the launch token for a cookie, and writes screenshots or a palette-optimized GIF outside the checkout.
-
-Keep API keys, tokens, cookies, and personal data out of the recording.
-
-A pull request that leaves the interface unchanged writes `No frontend changes` in the body. That sentence is for a diff that really leaves the interface alone, such as a backend-only, test-only, or docs-only change. A note that the change is small, internal, or unlikely to be noticed does not excuse a diff that changes the interface.
-
-Nothing in CI checks that a GIF is present, or that a GIF is a real recording of the interface. Reviewers compare the body with the diff.
+Reviewers verify the PR body against the diff directly (CI does not validate GIF presence).
 
 ## Releases and hotfixes
 

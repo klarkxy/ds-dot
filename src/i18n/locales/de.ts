@@ -176,7 +176,7 @@ const deUi: UiText = {
   sApprovals_dot: 'Dorothy',
   sApprovals_human: 'Du',
   sApprovals_deny: 'Alle ablehnen',
-  sApprovalsDesc_dot: 'Routinefreigaben entscheidet sie. Ein im Hinweis erkanntes Gefahrensmuster zwingt dich. Das ist nicht jedes Löschen, jedes Geheimnis oder jedes Schreiben.',
+  sApprovalsDesc_dot: 'Umkehrbare Routinefreigaben entscheidet sie selbst. Gekürzte Hinweise oder erkannte Risikomuster erfordern weiterhin deine Freigabe (prüft gezielte Muster, nicht jedes Löschen, jedes Geheimnis oder jedes Schreiben).',
   sApprovalsDesc_human: 'Jede Genehmigungsanfrage geht an dich.',
   sApprovalsDesc_deny: 'Jede Genehmigungsanfrage wird abgelehnt.',
   sQuestions: 'Modellfragen',
@@ -561,8 +561,8 @@ export const de: LocalePack = {
   ui: deUi,
   card: deCard,
   config: {
-    homeDir: 'Ordner für Dorothys eigenen Arbeitsbereich, in dem auch ihre eigene Sitzung liegt; leer verwendet einen dot-Ordner im DSH-Home. Weitere Einstellungen befinden sich hinter dem Zahnrad in Dorothys Panel',
-    approvalGraceMs: 'Schonfrist für Genehmigungsbenachrichtigungen in Millisekunden (Standard 10000); Genehmigungen, die in dieser Zeit in der Originalsitzung geklärt werden, wecken Dorothy nicht',
+    homeDir: 'Ordner für Dorothys eigenen Arbeitsbereich und ihre Sitzung; leer verwendet den Ordner dot im DSH-Home. Weitere Einstellungen befinden sich hinter dem Zahnrad-Symbol in Dorothys Panel.',
+    approvalGraceMs: 'Schonfrist für Genehmigungsbenachrichtigungen in Millisekunden (Standard 10000); Genehmigungen, die währenddessen in der Ursprungssitzung geklärt werden, wecken Dorothy nicht.',
   },
   approvalCard: {
     title: 'Genehmigung',

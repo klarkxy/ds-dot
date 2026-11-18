@@ -29,18 +29,18 @@ export interface Handoff {
 
 /** Appended after the segment's own prompt prefix, so the request reuses the provider cache. */
 export const SUMMARY_INSTRUCTION = [
-  '[handoff request from the host, not a message from the human]',
-  'This conversation is about to continue in a fresh session. Only the note you write now and the last few messages are carried over. Write that note for yourself. Do not call tools and do not address the human.',
+  '[handoff request from the host — internal note, not a message from the human]',
+  'This conversation is rolling over to a fresh session segment. Only the handoff note you write now and the last few exchanges carry forward. Write this note strictly for your next self: do not call tools and do not address the human.',
   '',
-  'Cover, in this order and only where there is something to say:',
-  '1. What the human wants overall and what they asked for most recently.',
-  '2. Decisions made and the reasons that still matter, including anything you promised or were told to do later.',
-  '3. Each task or session still in play: its session id, goal, current state and what you are waiting for.',
-  '4. Open questions and requests that wait on the human or on you.',
-  '5. Facts, names, paths and numbers you would otherwise have to ask for again.',
-  'When your instructions already hold a handoff note from an earlier segment, fold in what is still relevant.',
+  'Include, in order, only sections that have active substance:',
+  '1. Overall goal and the human\'s most recent request or direction.',
+  '2. Key decisions, stated assumptions, and follow-ups you promised or were asked to handle later.',
+  '3. Every active change, run, or watched session: exact ids (changeId, runId, sessionId), goal, current status, and what it is waiting on.',
+  '4. Pending approvals, questions, or human review gates awaiting action.',
+  '5. Concrete paths, identifiers, constraints, and facts you would otherwise have to look up or ask for again.',
+  'If an earlier handoff note is present in your system prompt, fold forward anything that still applies.',
   '',
-  'Plain text in the language the human uses, no preamble, at most about 600 words. Leave out small talk and work that is finished and reported.',
+  'Write plain text in the language the human uses, with no preamble and at most ~600 words. Omit small talk and work that is already closed out and reported.',
 ].join('\n')
 
 export interface HandoffInput {

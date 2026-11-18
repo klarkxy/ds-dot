@@ -68,6 +68,21 @@ describe('chatItems', () => {
     expect(items[1]).toMatchObject({ kind: 'answer', text: 'Confirmed' })
   })
 
+  it('keeps deferred drafts out of chat while preserving the lookup and final card', () => {
+    const draft = ev(1, 'tool/call', { callId: 'draft', name: 'show_view', arguments: '{"view":{"type":"text","text":"稍等"}}' })
+    expect(chatItems([draft])).toEqual([])
+    const items = chatItems([
+      draft,
+      ev(2, 'tool/result', { message: { toolCallId: 'draft', isError: false }, meta: { dshDot: { showView: 'deferred' } } }),
+      ev(3, 'tool/call', { callId: 'search', name: 'web_search', arguments: '{}' }),
+      ev(4, 'tool/result', { message: { toolCallId: 'search', content: 'rules' } }),
+      ev(5, 'tool/call', { callId: 'final', name: 'show_view', arguments: '{}' }),
+      ev(6, 'tool/result', { message: { toolCallId: 'final' }, meta: { owner: 'dsh-deep-view', view: { type: 'text', text: 'Rules summary' } } }),
+    ])
+    expect(items.map(item => item.key)).toEqual(['search', 'final'])
+    expect(items[1]).toHaveProperty('presentation')
+  })
+
   it('marks failed tools and a card whose result carried no presentation', () => {
     const items = chatItems([
       ev(1, 'tool/call', { callId: 'a', name: 'dot_read', arguments: JSON.stringify({ session_id: 's1' }) }),

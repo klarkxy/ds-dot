@@ -116,6 +116,7 @@ export function viewAnswerOf(source: unknown): { id: string; action: string; val
 export class ChatFold {
   private readonly list: ChatItem[] = []
   private readonly byCall = new Map<string, number>()
+  private readonly pendingCards = new Map<string, Extract<ChatItem, { kind: 'view' }>>()
   readonly answers: Record<string, { action: string; values: Record<string, unknown> }> = {}
 
   private turn?: number
@@ -181,26 +182,34 @@ export class ChatFold {
       case 'tool/call': {
         const callId = typeof data.callId === 'string' ? data.callId : key
         const name = typeof data.name === 'string' ? data.name : 'tool'
-        this.byCall.set(callId, this.list.length)
         if (name === SHOW_VIEW) {
           const args = parseArgs(data.arguments)
-          this.push({ kind: 'view', key: callId, title: args?.title, view: args?.view, at })
-        } else {
-          const args = compactArgs(data.arguments)
-          this.push({ kind: 'tool', key: callId, name, status: 'running', ...args ? { args } : {}, at })
+          // The feed already shows a preparing indicator. Publish the card only
+          // after the tool accepts it; a mixed-step draft is never a reply.
+          this.pendingCards.set(callId, { kind: 'view', key: callId, title: args?.title, view: args?.view, at })
+          return true
         }
+        this.byCall.set(callId, this.list.length)
+        const args = compactArgs(data.arguments)
+        this.push({ kind: 'tool', key: callId, name, status: 'running', ...args ? { args } : {}, at })
         return true
       }
       case 'tool/result': {
         const message = rec(data.message)
         const callId = typeof message?.toolCallId === 'string' ? message.toolCallId : undefined
-        const index = callId === undefined ? undefined : this.byCall.get(callId)
+        if (callId === undefined) return false
+        const card = this.pendingCards.get(callId)
+        if (card) {
+          this.pendingCards.delete(callId)
+          const meta = rec(data.meta)
+          if (message?.isError !== true && rec(meta?.dshDot)?.showView === 'deferred') return true
+          this.push(meta && message?.isError !== true && cardText(meta) !== undefined ? { ...card, presentation: meta } : { ...card, failed: true })
+          return true
+        }
+        const index = this.byCall.get(callId)
         if (index === undefined) return false
         const item = this.list[index]!
-        if (item.kind === 'view') {
-          const meta = rec(data.meta)
-          this.list[index] = meta && message?.isError !== true && cardText(meta) !== undefined ? { ...item, presentation: meta } : { ...item, failed: true }
-        } else if (item.kind === 'tool') {
+        if (item.kind === 'tool') {
           const detail = textOf(message?.content).trim()
           const failed = toolResultFailed(data)
           const saved = rec(rec(data.meta)?.dshDot)?.display as ToolDisplay | undefined
@@ -215,6 +224,7 @@ export class ChatFold {
         return true
       }
       case 'turn/end': {
+        this.pendingCards.clear()
         this.inTurn = false
         this.turn = undefined
         this.trigger = 'background'

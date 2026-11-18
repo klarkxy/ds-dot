@@ -15,7 +15,7 @@
  * ViewPresentation is the metadata shape dsh-deep-view already persists for a
  * shown view; reusing it keeps the two plugins' result meta interchangeable.
  */
-import { asText, checkShownView, choiceValue, inputDefault, resolve, viewScope } from '@klarkxy/dsh-deep-view/core'
+import { asText, checkShownView, choiceValue, inputDefault, resolve, viewScope, viewSummary } from '@klarkxy/dsh-deep-view/core'
 import { isRecord, VIEW_OWNER, type ViewNode, type ViewPresentation } from '@klarkxy/dsh-deep-view/contracts'
 
 /** What output.presentationMeta stamps on a dot show_view result and the log keeps. */
@@ -106,6 +106,20 @@ function componentText(node: Rec, lookup: (name: string) => unknown): string | u
         .join(', ')
       return `sources: ${body}`
     }
+    case 'steps': {
+      const items = Array.isArray(node.items) ? node.items : []
+      const body = items
+        .map(item => {
+          if (!isRecord(item)) return ''
+          const label = flat(item.label)
+          const detail = typeof item.detail === 'string' ? ` (${flat(item.detail)})` : ''
+          const status = typeof item.status === 'string' ? ` [${item.status}]` : ''
+          return `${label}${detail}${status}`
+        })
+        .filter(Boolean)
+        .join('; ')
+      return `steps: ${body}`
+    }
     case 'slider':
     case 'number':
     case 'choice':
@@ -139,6 +153,11 @@ function componentText(node: Rec, lookup: (name: string) => unknown): string | u
     }
     case 'submit':
       return `submit: ${flat(node.label ?? 'Send')}`
+    case 'math':
+    case 'flow':
+    case 'explore':
+    case 'map':
+      return viewSummary(node as unknown as ViewNode)
     default:
       return undefined
   }

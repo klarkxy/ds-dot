@@ -12,6 +12,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { checkShownView } from '@klarkxy/dsh-deep-view/core'
 import type { ShownView } from '@klarkxy/dsh-deep-view/contracts'
+import { SHOW_VIEW_DEFERRED_META, SHOW_VIEW_MIXED_SUMMARY, showViewSharesStep, type StepTranscript } from './card-step.ts'
 import { cardPresentation, type DotCardMeta } from './cards.ts'
 import { SERVICE_NAME, TOOL } from './contracts.ts'
 import { personaSection } from './persona.ts'
@@ -129,13 +130,15 @@ export function apply(ctx: Context): void {
   // ── show_view (dot scope, single-step) ────────────────────────────────────
   // Same name as dsh-deep-view's global tool. A preset row registers into the
   // agent scope, and a scoped registration shadows the global one, so only dot
-  // gets this variant: a valid card concludes the turn in the same request.
-  // Ordinary sessions keep deep-view's two-step show_view untouched.
+  // gets this variant: a valid card that is the step's only call concludes
+  // the turn. A card sent beside another tool is refused before it is shown,
+  // and the turn stays open so those calls can finish. Ordinary sessions keep
+  // deep-view's two-step show_view untouched.
   tool({
     name: 'show_view',
     description: [
-      'Show the human one card and end this turn. This is how every reply to the human goes out: put your reply text inside the card (a text node is enough), then call show_view once as the very last step.',
-      'Calling it ends the turn at once — finish every other tool call first and have its result in hand. If it reports an invalid view, fix the view and call show_view again in the same turn.',
+      'Show the human one card and end this turn. This is how every reply to the human goes out: put your reply text inside the card (a text node is enough), then call show_view once by itself, after every other tool in earlier steps has finished.',
+      'Call it only as its own step, with those results already in hand. If it is in the same step as another tool, in either order, the card is not shown and the turn does not end; call it again alone after those results arrive. If it reports an invalid view, fix the view and call show_view again in the same turn.',
       'Write the view as JSON text in view. Every ViewNode must carry a "type" field; nodes nest under stack|row (children, optional let).',
       'Display nodes: text, metric{label,value}, table{columns,rows}, chart{kind,categories,series}, progress{percent|value+max}, callout{text}, sources{items}, steps{items}. Rich nodes: math (plots), flow (node graphs), explore (scatter), map (locations). Inputs: slider, number, choice, toggle.',
       'To ask the human to choose, confirm or fill something in, use an options, confirm or form node and set await_reply true; a display-only card must not set it. For a human approval pass approval_id with the exact request id: the host renders a bound approval confirmation and applies its answer directly. A background wake-up with nothing for the human must not call this tool: end silently with no message.',
@@ -162,12 +165,21 @@ export function apply(ctx: Context): void {
         const status = (value as { status?: unknown } | null)?.status
         return [{ type: 'text' as const, text: status === 'shown' || status === 'pending' ? 'shown' : String((value as { summary?: unknown } | null)?.summary ?? 'invalid view') }]
       },
-      presentationMeta: (_args: unknown, value: unknown) => cardPresentation(value) ?? null,
+      // A deferred mix is a successful result with no card. Its meta is the only
+      // durable marker; an invalid view still contributes none.
+      presentationMeta: (_args: unknown, value: unknown) =>
+        (value as { status?: unknown } | null)?.status === 'deferred' ? SHOW_VIEW_DEFERRED_META : cardPresentation(value) ?? null,
     },
     isConcurrencySafe: () => false,
-    execute: async (args: unknown, exec: { callId?: string; concludeTurn(): void }) => {
+    execute: async (args: unknown, exec: { callId?: string; concludeTurn(): void; agent?: { session?: StepTranscript } }) => {
       const input = (args !== null && typeof args === 'object' ? args : {}) as Record<string, unknown>
       const invalid = (summary: string) => ({ status: 'invalid' as const, summary })
+      // Refuse before presentCard. Later exclusive calls are not logged yet,
+      // so the assistant message committed for this step is the whole batch.
+      const session = exec.agent?.session
+      if (session !== undefined && typeof session.deriveMessages === 'function' && showViewSharesStep(session.deriveMessages(), exec.callId)) {
+        return { status: 'deferred' as const, summary: SHOW_VIEW_MIXED_SUMMARY }
+      }
       let view = input.view
       if (typeof view === 'string') {
         try { view = JSON.parse(view) } catch { return invalid('view: expected JSON text describing one ViewNode') }

@@ -1936,8 +1936,10 @@ export class DotService {
       const asked = await this.store.work.requestOversight(changeId, this.now())
       if (!('id' in asked)) throw new DotError('dot/invalid', asked.message)
     }
+    // Human-required: only the human entry point may record this decision, so dot cannot answer its own request.
     const opened = this.pending.open({
       kind: 'approval',
+      humanRequired: true,
       sessionId: this.store.dotSessionId || changeId,
       subject: `Look at ${changeId}`,
       detail: JSON.stringify({ changeId, inputRevision: expectedInputRevision, verificationId, subjectKey }),

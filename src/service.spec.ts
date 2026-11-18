@@ -1617,7 +1617,14 @@ describe('closed legacy work entries', () => {
       const asked = await h.service.manageTask(args)
       expect(asked).toContain('pending')
       expect(h.store.work.change(created.id)?.closeout).toBeUndefined()
-      await h.service.answerWorkReview(/pending (\S+)/.exec(asked)![1]!, true)
+      const pendingId = /pending (\S+)/.exec(asked)![1]!
+      // Under the default approvals=dot, only the human entry point records this decision.
+      expect(h.store.settings.approvals).toBe('dot')
+      expect(h.service.pending.get(pendingId)?.humanRequired).toBe(true)
+      expect(() => h.service.answer(pendingId, { kind: 'approval', allow: true })).toThrow(/direct human decision/)
+      expect(h.service.pending.get(pendingId)).toBeDefined()
+      await h.service.answerWorkReview(pendingId, true)
+      expect(h.store.work.change(created.id)?.oversight?.decision).toMatchObject({ result: 'accept', source: 'user' })
       writeFileSync(join(dir, 'late.ts'), 'later')
       await expect(h.service.manageTask(args)).rejects.toThrow(/live file|not in the delivery/)
       rmSync(join(dir, 'late.ts'))

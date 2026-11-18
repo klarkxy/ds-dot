@@ -11,7 +11,9 @@ import {
   assertOutsideCheckouts,
   buildIsolatedEnv,
   cleanBaseUrl,
+  commandSpawnInvocation,
   ensureIsolatedHome,
+  formatSpawnFailure,
   gitToplevel,
   isInsideDir,
   isPluginOrApiUrl,
@@ -30,6 +32,7 @@ import {
   terminateProcessTree,
   urlHasLaunchToken,
   waitForDshReady,
+  windowsCmdInvocation,
 } from './dsh-qa-harness.js'
 
 function parsePackOutput(stdout) {
@@ -388,6 +391,76 @@ test('quoteWindowsCmdArg quotes cmd metacharacters', () => {
   assert.equal(quoteWindowsCmdArg('C:\\Program Files\\plugin'), '"C:\\Program Files\\plugin"')
   assert.equal(quoteWindowsCmdArg('a&b'), '"a&b"')
   assert.equal(quoteWindowsCmdArg('%PATH%'), '"%%PATH%%"')
+  assert.equal(quoteWindowsCmdArg('calc()'), '"calc()"')
+  assert.equal(quoteWindowsCmdArg('a!b'), '"a!b"')
+  assert.throws(() => quoteWindowsCmdArg('a\nb'), /newlines or NUL/)
+  assert.throws(() => quoteWindowsCmdArg('a\0b'), /newlines or NUL/)
+})
+
+test('windows command invocation quotes argv and does not enable shell', () => {
+  const packArgs = ['pack', '--dry-run', '--ignore-scripts', '--json']
+  const pack = windowsCmdInvocation('npm', packArgs, { COMSPEC: 'C:\\Windows\\System32\\cmd.exe' })
+  assert.equal(pack.file, 'C:\\Windows\\System32\\cmd.exe')
+  assert.deepEqual(pack.args, ['/d', '/v:off', '/s', '/c', '"npm pack --dry-run --ignore-scripts --json"'])
+  assert.equal(pack.windowsVerbatimArguments, true)
+  assert.equal(pack.windowsHide, true)
+  assert.equal(pack.shell, undefined)
+
+  const hostile = windowsCmdInvocation('npm', ['pack', 'a&whoami', '%TEMP%', 'say "hi"', 'C:\\Program Files (x86)\\plugin'], {
+    PATH: 'C:\\Windows\\System32',
+  })
+  assert.equal(hostile.file, 'cmd.exe')
+  assert.equal(hostile.args.length, 5)
+  assert.equal(hostile.shell, undefined)
+  assert.equal(
+    hostile.args[4],
+    '"npm pack "a&whoami" "%%TEMP%%" "say ""hi""" "C:\\Program Files (x86)\\plugin""',
+  )
+  assert.throws(() => windowsCmdInvocation('npm', ['pack', 'line1\nline2']), /newlines or NUL/)
+})
+
+test('commandSpawnInvocation leaves posix commands unwrapped', () => {
+  const spec = commandSpawnInvocation('npm', ['pack', '--json'], { COMSPEC: 'C:\\Windows\\System32\\cmd.exe' })
+  if (process.platform === 'win32') {
+    assert.equal(spec.file, 'C:\\Windows\\System32\\cmd.exe')
+    assert.equal(spec.args[0], '/d')
+    assert.equal(spec.args[2], '/s')
+    assert.equal(spec.args[3], '/c')
+    assert.equal(spec.shell, undefined)
+    return
+  }
+  assert.equal(spec.file, 'npm')
+  assert.deepEqual(spec.args, ['pack', '--json'])
+  assert.equal(spec.shell, undefined)
+  assert.equal(spec.windowsVerbatimArguments, undefined)
+})
+
+test('formatSpawnFailure reports a command that never started', () => {
+  const text = formatSpawnFailure({
+    status: null,
+    signal: null,
+    error: Object.assign(new Error('spawnSync npm ENOENT'), {
+      code: 'ENOENT',
+      syscall: 'spawnSync npm',
+      path: 'npm',
+    }),
+    stderr: '',
+    stdout: '',
+  })
+  assert.match(text, /status=null/)
+  assert.match(text, /signal=/)
+  assert.match(text, /error=ENOENT spawnSync npm npm spawnSync npm ENOENT/)
+  assert.equal(text.includes('stderr='), false)
+  const redacted = redactForLog(formatSpawnFailure({
+    status: 1,
+    signal: null,
+    stderr: 'failed in /home/maintainer/.npm token=launch-secret',
+    stdout: '',
+  }), '/home/maintainer')
+  assert.match(redacted, /<HOME>\/\.npm/)
+  assert.match(redacted, /token=<REDACTED>/)
+  assert.equal(redacted.includes('launch-secret'), false)
+  assert.equal(redacted.includes('maintainer'), false)
 })
 
 test('prepareBrowserEnv drops Playwright debug switches', () => {
@@ -612,7 +685,10 @@ test('published package files do not include the agent skill', async () => {
     const isolated = buildIsolatedEnv(npmHome, [])
     assert.equal(isolated.HOME, npmHome)
     assert.equal(isolated.USERPROFILE, npmHome)
-    const res = spawnSync('npm', ['pack', '--dry-run', '--ignore-scripts', '--json'], {
+    const packArgs = ['pack', '--dry-run', '--ignore-scripts', '--json']
+    const invocation = commandSpawnInvocation('npm', packArgs, isolated)
+    assert.equal(invocation.shell, undefined)
+    const res = spawnSync(invocation.file, invocation.args, {
       cwd: repoRoot,
       encoding: 'utf8',
       timeout: 60_000,
@@ -626,8 +702,11 @@ test('published package files do not include the agent skill', async () => {
         npm_config_fund: 'false',
         npm_config_audit: 'false',
       },
+      ...(invocation.windowsVerbatimArguments ? { windowsVerbatimArguments: true } : {}),
+      ...(invocation.windowsHide ? { windowsHide: true } : {}),
     })
-    assert.equal(res.status, 0, redactForLog(res.stderr))
+    const failure = redactForLog(redactForLog(formatSpawnFailure(res), npmHome))
+    assert.equal(res.status, 0, failure)
     const packed = parsePackOutput(res.stdout)
     const names = packed.flatMap(entry => (entry.files || []).map(file => file.path || file.name || ''))
     assert.ok(names.length > 0)

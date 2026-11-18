@@ -444,9 +444,60 @@ export function buildIsolatedEnv(tempHome, allowEnv = [], source = process.env) 
 
 export function quoteWindowsCmdArg(arg) {
   const value = String(arg)
+  if (/[\0\r\n]/.test(value)) {
+    throw new Error('Windows command arguments cannot contain newlines or NUL.')
+  }
   if (value.length === 0) return '""'
-  if (!/[\s"%&|<>^]/.test(value)) return value
+  // ( ) and ! are cmd metacharacters. Quoting them keeps one argument intact
+  // when the line is handed to cmd.exe /c. % is doubled because cmd expands
+  // %VAR% even inside quotes.
+  if (!/[\s"%&|<>^()!]/.test(value)) return value
   return `"${value.replace(/%/g, '%%').replace(/"/g, '""')}"`
+}
+
+function comSpecFrom(env) {
+  if (env) {
+    const value = env.ComSpec || env.COMSPEC || env.comspec
+    if (typeof value === 'string' && value.trim()) return value
+  }
+  return 'cmd.exe'
+}
+
+// Node 24 does not apply PATHEXT when shell is false, so spawn('npm') is
+// ENOENT. spawn('npm.cmd') is EINVAL (CVE-2024-27980) unless shell is set.
+// shell:true concatenates arguments without quoting. Build one cmd.exe /c
+// argument instead, with each argv element already quoted.
+export function windowsCmdInvocation(bin, args, env = process.env) {
+  const argv = [bin, ...args].map(part => String(part))
+  const inner = argv.map(quoteWindowsCmdArg).join(' ')
+  return {
+    file: comSpecFrom(env),
+    args: ['/d', '/v:off', '/s', '/c', `"${inner}"`],
+    windowsVerbatimArguments: true,
+    windowsHide: true,
+  }
+}
+
+export function commandSpawnInvocation(bin, args, env = process.env) {
+  if (process.platform === 'win32') return windowsCmdInvocation(bin, args, env)
+  return { file: String(bin), args: [...args].map(part => String(part)) }
+}
+
+export function formatSpawnFailure(res) {
+  const error = res && res.error
+  const lines = [
+    `status=${res == null || res.status == null ? 'null' : res.status}`,
+    `signal=${res && res.signal ? res.signal : ''}`,
+  ]
+  if (error) {
+    const bits = [error.code, error.syscall, error.path, error.message].filter(Boolean)
+    lines.push(`error=${bits.join(' ')}`)
+  }
+  const stderr = res && typeof res.stderr === 'string' ? res.stderr.trim() : ''
+  const stdout = res && typeof res.stdout === 'string' ? res.stdout.trim() : ''
+  if (stderr) lines.push(`stderr=${stderr}`)
+  if (stdout) lines.push(`stdout=${stdout}`)
+  return lines.join('\n')
 }
 
 function splitCommand(cmdString) {
@@ -457,8 +508,14 @@ function splitCommand(cmdString) {
 
 function spawnCrossPlatform(bin, args, options) {
   if (process.platform === 'win32') {
-    const inner = [bin, ...args].map(quoteWindowsCmdArg).join(' ')
-    return spawn(process.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', `"${inner}"`], {
+    const childEnv = options.env || process.env
+    const lookup = { ...childEnv }
+    if (!(lookup.ComSpec || lookup.COMSPEC || lookup.comspec)) {
+      const parent = process.env.ComSpec || process.env.COMSPEC || process.env.comspec
+      if (parent) lookup.COMSPEC = parent
+    }
+    const spec = windowsCmdInvocation(bin, args, lookup)
+    return spawn(spec.file, spec.args, {
       ...options,
       windowsHide: true,
       windowsVerbatimArguments: true,

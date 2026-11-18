@@ -110,7 +110,7 @@ export function apply(ctx: Context): void {
     const id = context?.agent?.session?.id
     return segment && (id === undefined || id === segment.sessionId) ? segment : undefined
   }
-  ctx.effect(() => host.systemPrompt.section({ name: 'dsh-dot:persona', order: PERSONA_ORDER, interpolate: false, text: context => segmentOf(context)?.persona ?? personaSection(dot().store.settings) }))
+  ctx.effect(() => host.systemPrompt.section({ name: 'dsh-dot:persona', order: PERSONA_ORDER, interpolate: false, text: context => segmentOf(context)?.persona ?? personaSection(dot().store.settings, dot().locale ?? 'zh') }))
   // The human's own requirements, as they read when the segment started; empty while there are none.
   ctx.effect(() => host.systemPrompt.section({ name: 'dsh-dot:agreements', order: AGREEMENTS_ORDER, interpolate: false, text: context => { const segment = segmentOf(context); return segment ? segment.agreements ?? '' : dot().currentAgreementsBlock() } }))
   // dot's own understanding, as it read when the segment started; empty while dot has written none.

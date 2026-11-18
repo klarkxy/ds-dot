@@ -21,7 +21,7 @@ import type { BoardView, ChatItem, ChatSnapshot, DotSettings, RolloverReason } f
 import { CHAT_IMAGE_LIMIT, ChatImageRejected, imageName, inspectImageBytes, type ChatImage, type ChatImageError } from './chat-images.ts'
 import { SettingsPanel, settingsCss, type SaveNotice, type SettingsApi } from './settings-panel.tsx'
 import type { RenderFactorySlot } from '@klarkxy/dsh-plugin-kit/model-picker'
-import { t, toolLabel, type CopyLocale, type TextKey } from './ui-copy.ts'
+import { cardCopy, intlLocale, t, toolLabel, type CopyLocale, type TextKey } from './ui-copy.ts'
 import { WorkBoardPanel, type WorkApi } from './work-board.tsx'
 import type { WorkAcceptPayload, PendingGlance, WorkBoardItem, WorkReadRequest, WorkRejectPayload } from './work-board.ts'
 import { DotAvatar } from './whale.tsx'
@@ -335,7 +335,10 @@ export function ChatPanel({ locale, api, Card, onOpenSession, renderFactorySlot 
   }, [api])
   const closeDrawer = useCallback(() => setDrawerTab(null), [])
   const configOpen = drawerTab !== null && CONFIG_TABS.has(drawerTab)
-  const labels = useMemo<MarkdownLabels>(() => ({ code: { copyLabel: locale === 'zh' ? '复制' : 'Copy', copiedLabel: locale === 'zh' ? '已复制' : 'Copied' }, footnotes: locale === 'zh' ? '脚注' : 'Footnotes' }), [locale])
+  const labels = useMemo<MarkdownLabels>(() => {
+    const c = cardCopy(locale)
+    return { code: { copyLabel: c.copy, copiedLabel: c.copied }, footnotes: c.footnotes }
+  }, [locale])
 
   // A local echo leaves once the log holds a matching message sent after it.
   // Filtered during render as well, so the frame that brings the logged copy
@@ -491,7 +494,7 @@ const SEGMENT_REASON: Record<RolloverReason, TextKey> = {
 /** Where the conversation moved to a new session segment; opening it says why and when. */
 function SegmentMark({ locale, reason, at }: { locale: CopyLocale; reason?: RolloverReason; at: number }) {
   const [open, setOpen] = useState(false)
-  const when = new Date(at).toLocaleString(locale === 'zh' ? 'zh-CN' : 'en-US', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
+  const when = new Date(at).toLocaleString(intlLocale(locale), { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
   return (
     <div className="dsh-dot-segment-wrap">
       <div className="dsh-dot-segment" role="separator">

@@ -1,0 +1,77 @@
+name: Release guard
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, edited, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  guard:
+    name: Release guard
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Only dev or hotfix/* may target main
+        env:
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          BASE_REPO: ${{ github.repository }}
+        run: |
+          if [ "$HEAD_REPO" != "$BASE_REPO" ]; then
+            echo "::error::Pull requests into main must come from this repository, not a fork."
+            exit 1
+          fi
+          case "$HEAD_REF" in
+            dev|hotfix/*) echo "OK: $HEAD_REF -> main" ;;
+            *)
+              echo "::error::main only accepts pull requests from dev (release) or hotfix/* (hotfix). Got: $HEAD_REF. Target dev instead."
+              exit 1 ;;
+          esac
+
+      - name: Head must already contain everything on main
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          # Release merge commits on main are fine to be missing from dev; any
+          # real change (hotfix, direct commit) must have been merged back first.
+          missing=$(git log --no-merges --format='%h %s' "$BASE_SHA" "^$HEAD_SHA")
+          if [ -n "$missing" ]; then
+            echo "::error::These commits are on main but not on the head branch. Open a pull request main -> dev and merge it with a merge commit (not squash) first."
+            echo "$missing"
+            exit 1
+          fi
+          echo "OK: head contains every change on main."
+
+      - name: Version must be a stable bump
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          git show "$BASE_SHA:package.json" > /tmp/base-package.json
+          git show "$HEAD_SHA:package.json" > /tmp/head-package.json
+          node --input-type=module <<'NODE'
+          import { readFileSync } from 'node:fs'
+          const read = (file) => JSON.parse(readFileSync(file, 'utf8')).version
+          const base = read('/tmp/base-package.json')
+          const head = read('/tmp/head-package.json')
+          const stable = /^(\d+)\.(\d+)\.(\d+)$/
+          if (!stable.test(head)) {
+            throw new Error(`main only receives stable versions; package.json has ${head}. Publish prereleases from dev.`)
+          }
+          const parts = (v) => v.split(/[.-]/).slice(0, 3).map(Number)
+          const [a, b] = [parts(head), parts(base)]
+          const cmp = a[0] - b[0] || a[1] - b[1] || a[2] - b[2]
+          if (cmp <= 0) {
+            throw new Error(`package.json version ${head} must be greater than main's ${base}. Bump it in this pull request.`)
+          }
+          console.log(`OK: ${base} -> ${head}`)
+          NODE

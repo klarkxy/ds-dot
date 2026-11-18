@@ -1,0 +1,7 @@
+# Default reviewers. Add teammates or per-area owners as the team grows, e.g.
+#   /src/client/   @klarkxy @frontend-teammate
+*                  @klarkxy
+
+# Changes to CI, release automation and repository policy need the maintainer.
+/.github/          @klarkxy
+/docs/releasing.md @klarkxy

@@ -1,63 +1,104 @@
 # Dorothy (dot)
 
-[简体中文](docs/README.zh-CN.md)
+[简体中文](docs/README.zh-CN.md) · [日本語](docs/README.ja.md)
 
 ![Dorothy arrives with her suitcase and umbrella, ready to coordinate your projects](docs/images/dot-arrival.png)
 
-Dorothy, dot for short, is an always-on coordinator for DeepSeek Harness. Talk to her in her own panel: she manages workspaces, starts sessions, follows progress, handles approvals, and reports back. Her persona and nickname are customizable.
+Dorothy (`dot`) is an always-on coordinator for DeepSeek Harness (DSH). Talk to her in her
+sidebar panel to manage workspaces, run and follow tasks across sessions, handle routine
+approvals and questions, set reminders, and customize her persona and how she addresses you.
 
 ## Install
 
-Requires DSH 0.2.2-rc.3 or later. Install into the profile you use:
+Requires DSH `0.2.2-rc.3` or later. Install into the profile you use:
 
 ```sh
 dsh plugin --profile web add ds-dot
 ```
 
-Restart the profile if DSH asks. Use `ds-dot@0.2.1` to pin this version, or `github:klarkxy/ds-dot#<commit>` for a source revision. Deep View is included for cards. Optional `@klarkxy/dsh-dev-index` adds documentation and plugin search; `@klarkxy/dsh-model-picker` adds model search in settings.
+Restart the profile if prompted. Use `ds-dot@next` for prereleases, or `ds-dot@<version>` to
+pin a release.
 
-For local development:
+Interactive cards work out of the box (Deep View is bundled). Optional companion plugins
+`@klarkxy/dsh-dev-index` (DSH docs and plugin search) and `@klarkxy/dsh-model-picker`
+(searchable model picker in settings) add extra capabilities when installed.
 
-```sh
-dsh plugin --profile web add link:H:\Code\ds-dot
-pnpm watch
-```
+## Everyday use
 
-The linked checkout includes `src`; watch rebuilds `lib` as you edit. If pnpm requires build permission for a source install, allow `ds-dot` in that profile's `pnpm-workspace.yaml` and repeat the install.
-
-## Use
-
-Open **Dorothy** beside **Plugins** and **Automations** in the sidebar. Her panel has its own conversation. Tell her what you need:
+Open **Dorothy** in the sidebar beside **Plugins** and **Automations**, and tell her what you
+need using plain text or attached PNG, JPEG, WebP, or GIF images:
 
 ```text
 Create a workspace at D:\work\site and fix the broken links on the docs page. Tell me what changed.
 ```
 
-Dorothy keeps each goal as a change with requirements and ordinary session runs:
+- **Delegate and steer tasks:** She dispatches ordinary DSH sessions (in parallel when tasks
+  touch separate paths), verifies delivered files against your requirements rather than taking
+  a session's word for it, and reports back. Follow up anytime to add context, adjust
+  requirements, pause, or cancel, or ask to review the result yourself before she closes it
+  out.
 
-- **Work orders:** Each goal becomes a change: your own words kept verbatim, numbered requirements that each carry concrete check scenarios (WHEN … THEN …), numbered constraints on how the work is done, and optional steps that name what they serve. Each fact is written once and referred to by id.
-- **Progress and completion:** Steps are progress notes. Completion depends on explicit checks for every required item, or a goal check when no requirements are listed. A session saying “finished” does not close the change.
-- **Write scopes:** Dispatch reserves the run's scope and captures its starting state. Delivery is compared within the combined write scopes; out-of-scope observations are reported separately. Non-conflicting runs can proceed in parallel. Scope is released only after the session and its jobs are confirmed stopped.
-- **Closeout:** Direct closeout is the default. Dorothy records per-requirement verdicts, check notes and evidence refs, captures the delivery, and checks it before acceptance. An independent reviewer is optional; its review can be closed out or sent back for rework. Old saved evidence files remain readable.
-- **Run instructions:** Each run's first message is generated from the work order — goal, your original request, scope, requirements and scenarios, constraints, its steps and a fixed report format — and Dorothy adds only background notes, so the run reads the same terms the checks apply. A run declaring its own work a pass is not a verdict.
-- **Working language:** Work orders, run instructions and reports between agents are in English for consistent instruction following. Your own words, exact strings, file contents and quoted text stay verbatim and are never translated; deliverables use the language you ask for or the one the project already uses. Everything shown to you follows your language.
-- **Follow-ups:** Changed requirements create a new input revision. Extra context is delivered once to the active run at its current version. Pausing prevents new runs; cancellation settles open runs before releasing their scopes.
-- **Human decisions:** If you ask to see the result first, Dorothy waits for your decision on that version. Expired cards and stale decisions cannot approve later work. Legacy tickets remain read-only history.
+- **Handle approvals and questions:** Watch only her dispatched tasks or all DSH sessions. With
+  the defaults (`approvals=dot`, `questions=dot`) she decides routine reversible choices inside
+  the goal after checking agreements, history, and what she can look up. Work already authorized
+  is not asked again. A confident guess does not replace missing authority, and an irreversible,
+  external, or costly effect still follows that authorization. `questions=human` relays every
+  question; `questions=off` leaves it on the session. Code forces a human decision, and she
+  cannot override it, when `approvalNotice` in `src/approval-risk.ts` marks the request: the
+  shown text was truncated, or `assessApprovalRisk` detected a dangerous pattern (sandbox
+  escalation, publish commands, a recursive-delete form, a PEM private key, a subagent shell,
+  or some write forms on a read-only run). That is not every deletion, every secret, every
+  write, or spending. She judges the rest from the authorization and the consequence. A question
+  she asks includes one recommendation; silence is not consent. Set either control to you to
+  relay every item. When questions are left to you or the session, answer in the original session.
 
-**Tasks** opens the board with progress, runs, blockers, checks and closeout actions. Expand a check to read its note or reference and delivered files. Long sources offer a preview and full view. Internal IDs appear only under **Diagnostics**. A change shows **Done** after its checks and resource cleanup are proven.
+- **Watch sessions and recall history:** Ask her to watch a session you started yourself,
+  check on everything running, or search earlier conversations and sessions.
 
-Dorothy also tracks sessions you ask her to watch and collects approvals and questions. Routine requests can settle silently under your settings; requests needing your decision arrive as cards. In human question mode, answer in the original session.
+- **Set reminders:** Ask in natural language (*"check in half an hour"*, *"summarize overnight
+  builds at 9:00 every weekday"*); reminders persist across conversation segments and DSH
+  restarts.
 
-Ask for reminders such as “check in half an hour” or “summarize progress at nine every weekday.” They persist across conversation segments and DSH restarts.
+Dorothy replies in your language while keeping deliverables in the language you or the project
+use. Long chats automatically hand off to a new **segment** without losing active work,
+reminders, or memory.
 
-## Settings and limits
+## Panel and settings
 
-The gear opens settings, persona, context and trajectory. **Agreements** hold your standing rules; **Cognition** holds Dorothy's understanding of how you collaborate. Factory reset clears her work records, sessions she opened, reminders and settings while preserving your own sessions and project files.
+- **Tasks:** Filter by *All*, *Needs you*, *In progress*, or *Watched & reminders*; inspect
+  delivered files and check notes, accept or send back work awaiting review, jump to
+  underlying sessions, or remove reminders.
 
-Write scopes coordinate dispatch; they do not block external editors or processes. A read-only run requires host enforcement. Stale inputs are refused, and an unproven stop keeps its scope occupied. Acceptance alone does not authorize publishing, pushing or spending.
+- **Settings** (gear icon): Choose **Dorothy's model**, toggle **Background reflection**,
+  configure **Session takeover** (*Scope*, *Permission approvals*, *Model questions*, *Task
+  permissions*), and set **Dispatched tasks** options (*Allowed task models* and the idle
+  **Routine check** interval). Each setting carries a padlock icon: locked prevents her from
+  proposing changes, while unlocked lets her submit proposals for your approval. Optional DSH
+  plugin settings configure `homeDir` (folder for Dorothy's own workspace and session,
+  defaulting to a `dot` folder in DSH home) and `approvalGraceMs` (grace period in
+  milliseconds, default `10000`, during which approvals settled in the original session do not
+  wake Dorothy).
 
-The work model has unit, UI-layer and isolated-host coverage. Live multi-run collaboration, real-browser board behavior and full model-driven behavior are still being verified.
+- **Persona:** Customize how she addresses you and her voice, edit **Agreements** (standing
+  rules kept in your own words that always win over cognition, with undo), and edit or restore
+  earlier versions of **Cognition** (her notes on how you work).
 
-## License
+- **Context & Trajectory:** Check token usage, prompt sections, and cache stats, or start a
+  new segment manually; search turn-by-turn steps, tool calls, and reflection logs.
 
-[Apache License 2.0](LICENSE)
+- **Factory reset:** Previews and clears Dorothy's work history, sessions she opened,
+  reminders, agreements, cognition, and settings while leaving your own sessions, project
+  files, and the host persona untouched.
+
+## Good to know
+
+- Write scopes coordinate Dorothy's dispatched tasks without locking external editors or
+  processes.
+- Read-only tasks require host enforcement.
+- Accepting a task result closes out the task and never authorizes pushing, publishing, or
+  spending on its own.
+
+## Contributing and license
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) to contribute, [docs/releasing.md](docs/releasing.md)
+for releases, and [Apache License 2.0](LICENSE) for licensing.

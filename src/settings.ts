@@ -10,7 +10,8 @@
  */
 import { z } from 'zod'
 import { DEFAULT_SETTINGS, SETTING_FIELDS, TASK_MODEL_LIST_MAX, type DotSettings, type SettingField, type TaskPermission } from './contracts.ts'
-import { ADDRESS_MAX_CHARS, DEFAULT_ADDRESS, DEFAULT_PERSONA, PERSONA_MAX_CHARS } from './persona.ts'
+import { type CopyLocale } from './i18n/index.ts'
+import { ADDRESS_MAX_CHARS, PERSONA_MAX_CHARS, defaultAddress, defaultPersona } from './persona.ts'
 
 const FIELDS = {
   model: z.object({
@@ -35,8 +36,6 @@ const FIELDS = {
 
 /** Settings a patch may clear with null, going back to their defaults. */
 const CLEARABLE = new Set<string>(['model', 'persona', 'address'])
-/** A value equal to its default is stored as absent, so later default updates still reach it. */
-const DEFAULTS: Record<string, string> = { persona: DEFAULT_PERSONA, address: DEFAULT_ADDRESS }
 
 type Field = keyof typeof FIELDS
 
@@ -95,8 +94,9 @@ export function parseSettings(value: unknown): DotSettings {
 }
 
 /** Apply a patch from the settings view; null on model, persona or address goes back to the default. */
-export function patchSettings(current: DotSettings, patch: unknown): DotSettings {
+export function patchSettings(current: DotSettings, patch: unknown, locale: CopyLocale = 'zh'): DotSettings {
   if (!isRecord(patch)) throw new SettingsError('settings patch must be an object')
+  const defaults: Record<string, string> = { persona: defaultPersona(locale), address: defaultAddress(locale) }
   const next: Record<string, unknown> = { ...current }
   for (const [key, value] of Object.entries(patch)) {
     if (!(key in FIELDS)) throw new SettingsError(`unknown setting: ${key}`)
@@ -104,7 +104,7 @@ export function patchSettings(current: DotSettings, patch: unknown): DotSettings
     const parsed = FIELDS[key as Field].safeParse(value)
     if (!parsed.success) throw new SettingsError(`invalid value for ${key}`)
     if (key === 'approvals' && parsed.data === 'allow') throw new SettingsError('invalid value for approvals')
-    if (key in DEFAULTS && (parsed.data as string).trim() === DEFAULTS[key]!.trim()) { delete next[key]; continue }
+    if (key in defaults && (parsed.data as string).trim() === defaults[key]!.trim()) { delete next[key]; continue }
     next[key] = parsed.data
   }
   return next as unknown as DotSettings

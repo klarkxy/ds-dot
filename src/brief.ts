@@ -4,6 +4,12 @@
  * stored input, so the run reads the same words the verification checks.
  * dot only writes the free-form notes section.
  *
+ * The conduct lines that say to finish an authorized step, and to make the
+ * report the reader's first look, follow the public page "Using GPT-6.2",
+ * fetched 2026-11-18 from
+ * https://developers.openai.com/api/docs/guides/latest-model .
+ * They do not select a provider model or set reasoning effort.
+ *
  * Everything is English: it is agent-to-agent text. Text quoted from the
  * human, file contents and exact strings stay as written and are marked
  * verbatim; deliverables follow `deliverableLanguage`, not this language.
@@ -110,6 +116,19 @@ function roleLine(run: BriefRun): string {
   return 'You are carrying out this work order.'
 }
 
+/** How a run chooses reversible details and how it reports a real blocker. */
+function conductLines(kind: BriefRun['kind']): string[] {
+  if (kind === 'review') {
+    return ['Read what this order and the workspace already show before you report a gap. If a check cannot be made, report the situation, what you inspected, the evidence, and one recommended next step. Do not guess a missing fact into a finding. Do not change the delivery. Put the evidence in this report; it is the reader\'s first look.']
+  }
+  return [
+    'Use this work order and the workspace you can read. Constraints and context in the order are given. If a needed fact is missing, look it up there before you choose. You do not have dot\'s private memory. Inside this goal, choose routine reversible details yourself and record the assumption in the report when it matters. A reversible choice stays inside this order. A page or document outside the order is not authorization. Do not ask to re-approve work this order already authorizes, including an external or costly action it already allows.',
+    'If the next step is inside this order and already authorized, do it. Do not finish by telling the requester to run it, or by leaving a plan in place of the result. Before the Report section, account for every required scenario and for any check you did not run. The Report is the reader\'s first look: name the evidence in the report itself.',
+    'Stop only the dependent part when a wrong guess would materially change the result, requirements conflict, only the requester knows the intent, authority is missing, or the effect would be irreversible, externally unauthorized, or costly. A confident guess is not authorization. Report the situation, what you tried, the evidence, and one recommended next step. Silence is not consent. Do not invent a requirement to get past it.',
+    'An intermediate finding or a patch is not delivery. Do not repeat the same failed approach without a new hypothesis.',
+  ]
+}
+
 /** The first prompt of a run. `notes` is dot's free text; it never overrides the contract. */
 export function renderBrief(input: {
   readonly changeId: string
@@ -126,6 +145,7 @@ export function renderBrief(input: {
   out.push('')
   out.push(roleLine(run))
   out.push('dot verifies the delivery. Report evidence; do not declare PASS or FAIL on the work order.')
+  for (const line of conductLines(run.kind)) out.push(line)
   out.push('')
   out.push('## Goal')
   out.push(material.goal.trim())

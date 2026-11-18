@@ -15,7 +15,7 @@ import { makeLegend, makeStackedBar } from './context-stacked-bar.tsx'
 import { officialSurfaceParts } from './context-surface.ts'
 import { SurfaceBrowser, SURFACE_CATEGORIES, SURFACE_COLORS } from './context-surface-browser.tsx'
 import type { PartsPart, ViewKit } from './context-widget-types.ts'
-import { formatPercent, formatTokens, t, type CopyLocale, type TextKey } from './ui-copy.ts'
+import { formatPercent, formatTokens, intlLocale, t, type CopyLocale, type TextKey } from './ui-copy.ts'
 import { PaneSkeleton } from './settings-panel.tsx'
 
 const REFRESH_MS = 5_000
@@ -205,7 +205,7 @@ export function ContextPanel({ locale, api, running = false }: { locale: CopyLoc
   const shownUsage = total > 0 ? usageParts.filter(part => part.value > 0) : usageParts
   const prompt = usage ? usage.input + usage.cacheRead + usage.cacheWrite : 0
   const time = view.lastCompactionAt !== undefined
-    ? new Date(view.lastCompactionAt).toLocaleString(locale === 'zh' ? 'zh-CN' : 'en-US', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+    ? new Date(view.lastCompactionAt).toLocaleString(intlLocale(locale), { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })
     : undefined
 
   return (

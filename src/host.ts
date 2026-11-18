@@ -31,8 +31,10 @@ import { assembledSurface, type AssembledPromptInput } from './context-surface.t
 import type { DotContextUsage, DotContextView, ModelChoice, TrajectoryView } from './contracts.ts'
 import type { CatalogModel, TaskModelCatalog } from './task-models.ts'
 import type { CatalogPreset, TaskPresetCatalog } from './task-presets.ts'
-import { REFLECTION_PRESET_ID } from './reflection.ts'
+import { REFLECTION_PRESET_ID, REFLECTION_ALLOW } from './reflection.ts'
 import { foldTrajectory } from './trajectory.ts'
+import { restrictInheritedTools } from './tool-scope.ts'
+import { DOT_INHERITED_ALLOW, dotDevIndexReady } from './tools.ts'
 
 declare module '@deepseek-ai/dsh-llm' {
   interface MessageSourceMap {
@@ -287,10 +289,24 @@ export function bindHost(get: Get, log?: (message: string) => void, modelOf?: ()
     } as AgentOptions
   }
   // Same composition the controller uses for its own sessions: model selection, then the preset.
-  const setupFor = async (preset: string) => {
+  const setupFor = async (preset: string, allow: readonly string[]) => {
     const presets = need<PresetRegistry>('agentPresets')
     const id = (await presets.resolve(preset)).id
-    return { id, setup: async (agentCtx: unknown) => { installModelSelection(agentCtx as never); await presets.mount(agentCtx, id) } }
+    return {
+      id,
+      setup: async (agentCtx: unknown) => {
+        installModelSelection(agentCtx as never)
+        await presets.mount(agentCtx, id)
+        if (allow === DOT_INHERITED_ALLOW) await dotDevIndexReady()
+        // Visibility gate on the agent scope, after the preset mounted its
+        // tools: restricting the preset scope instead would also hide the
+        // preset's own tools from this agent child scope (the one assembling
+        // the request), leaving the model with no tool list at all. The allow
+        // list must wait for the late dev-index row: restrict keeps a
+        // snapshot, so a name registered after the call would stay hidden.
+        restrictInheritedTools(agentCtx, allow)
+      },
+    }
   }
   const permit = (session: unknown, preset: string): boolean => {
     const permissions = get('permissionPresets') as Permissions | undefined
@@ -564,7 +580,7 @@ export function bindHost(get: Get, log?: (message: string) => void, modelOf?: ()
 
     async createDot(cwd, preset) {
       await mkdir(cwd, { recursive: true })
-      const { id, setup } = await setupFor(preset)
+      const { id, setup } = await setupFor(preset, preset === REFLECTION_PRESET_ID ? REFLECTION_ALLOW : DOT_INHERITED_ALLOW)
       const sessionId = `session-${randomUUID()}` as SessionId
       const handle = await agents().create({ sessionId, agentOptions: agentOptions(), meta: { cwd, origin: 'subagent', agentPreset: id }, setup })
       handles.set(sessionId, handle)
@@ -574,7 +590,7 @@ export function bindHost(get: Get, log?: (message: string) => void, modelOf?: ()
     },
     async createInternal(cwd, preset) {
       await mkdir(cwd, { recursive: true })
-      const { id, setup } = await setupFor(preset)
+      const { id, setup } = await setupFor(preset, REFLECTION_ALLOW)
       const sessionId = `session-${randomUUID()}` as SessionId
       // A reflection pass needs no file system or shell access, so it keeps the
       // host's default permissions instead of dot's full access.
@@ -620,7 +636,7 @@ export function bindHost(get: Get, log?: (message: string) => void, modelOf?: ()
       const live = registryAgent(sessionId)
       if (live) return live.session.header.origin === 'subagent'
       try {
-        const { setup } = await setupFor(preset)
+        const { setup } = await setupFor(preset, preset === REFLECTION_PRESET_ID ? REFLECTION_ALLOW : DOT_INHERITED_ALLOW)
         const handle = await agents().resume({ resumeSessionId: sessionId as SessionId, agentOptions: agentOptions(), setup })
         handles.set(sessionId, handle)
         if (handle.agent.session.header.origin === 'subagent') return true

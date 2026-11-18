@@ -1,0 +1,33 @@
+name: PR title
+
+on:
+  pull_request:
+    branches: [dev, main]
+    types: [opened, edited, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  title:
+    name: PR title
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require a Conventional Commits title
+        env:
+          TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          node --input-type=module <<'NODE'
+          // Feature PRs are squash-merged into dev, so the PR title becomes the
+          // commit subject and the release-notes line.
+          const types = ['feat', 'fix', 'perf', 'refactor', 'docs', 'test', 'build', 'ci', 'chore', 'revert', 'release']
+          const pattern = new RegExp(`^(${types.join('|')})(\\([\\w./ -]+\\))?!?: \\S.*$`)
+          const title = process.env.TITLE ?? ''
+          if (!pattern.test(title)) {
+            console.error(`PR title "${title}" does not follow Conventional Commits.`)
+            console.error(`Use "<type>(<optional scope>): <summary>", type one of: ${types.join(', ')}.`)
+            console.error('Examples: "feat(work): render English work orders", "release: v0.3.0".')
+            process.exit(1)
+          }
+          console.log(`OK: ${title}`)
+          NODE

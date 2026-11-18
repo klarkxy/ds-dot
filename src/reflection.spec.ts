@@ -295,7 +295,9 @@ describe('reflection preset tool row', () => {
     expect(registered.map(tool => tool.name).sort()).toEqual([TOOL.searchHistory, TOOL.readHistory, REFLECTION_SUBMIT_TOOL].sort())
     // Model-facing reflection tools never bind cognition to a fixed character.
     expect(JSON.stringify(registered)).not.toMatch(/Dorothy|桃乐丝/)
-    // Inherited global tools are hidden; only the scope-local three remain.
-    expect(filters).toEqual([{ allow: [] }])
+    // Visibility is no longer restricted on the preset scope (that also hid the
+    // preset's own tools from the agent child scope assembling the request);
+    // it is applied to the agent scope in host.ts setupFor instead.
+    expect(filters).toEqual([])
   })
 })

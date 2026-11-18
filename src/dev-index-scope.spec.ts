@@ -35,4 +35,54 @@ describe('dot-scoped dsh-dev-index tools', () => {
     await installDotDevIndex(missing.ctx as never, async () => undefined)
     expect(missing.registered).toEqual([])
   })
+
+  it('settles and rolls back a partial registration when register throws', async () => {
+    const released: string[] = []
+    let disposed = false
+    const ctx = {
+      tools: {
+        register(definition: { name?: string }) {
+          if (definition.name === 'dsh_plugins') throw new Error('duplicate')
+          return () => { released.push(definition.name ?? '') }
+        },
+      },
+      effect(start: () => () => void) { start(); return () => {} },
+    }
+    await expect(installDotDevIndex(ctx as never, async () => ({
+      tools: [{ name: 'dsh_docs' }, { name: 'dsh_plugins' }],
+      dispose() { disposed = true },
+    }))).resolves.toBeUndefined()
+    expect(released).toEqual(['dsh_docs'])
+    expect(disposed).toBe(true)
+  })
+
+  it('settles when loading throws synchronously and does not reject', async () => {
+    const present = host()
+    await expect(installDotDevIndex(present.ctx as never, () => { throw new Error('sync') })).resolves.toBeUndefined()
+    expect(present.registered).toEqual([])
+  })
+
+  it('settles a pending load when the effect is disposed and does not register afterwards', async () => {
+    let releaseLoad!: (value: { tools: Array<{ name: string }>; dispose(): void } | undefined) => void
+    const loaded = new Promise<{ tools: Array<{ name: string }>; dispose(): void } | undefined>(resolve => { releaseLoad = resolve })
+    let disposeEffect = () => {}
+    let registered = 0
+    let disposed = false
+    const ctx = {
+      tools: {
+        register() { registered += 1; return () => {} },
+      },
+      effect(start: () => () => void) {
+        disposeEffect = start()
+        return () => {}
+      },
+    }
+    const ready = installDotDevIndex(ctx as never, () => loaded)
+    disposeEffect()
+    await expect(ready).resolves.toBeUndefined()
+    releaseLoad({ tools: [{ name: 'dsh_docs' }], dispose() { disposed = true } })
+    await new Promise(resolve => setImmediate(resolve))
+    expect(registered).toBe(0)
+    expect(disposed).toBe(true)
+  })
 })

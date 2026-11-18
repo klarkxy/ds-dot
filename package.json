@@ -1,6 +1,6 @@
 {
   "name": "ds-dot",
-  "version": "0.1.0",
+  "version": "0.2.1",
   "description": "Dorothy (dot): an always-on coordinator for DeepSeek Harness. Talk to Dorothy in her own panel, and she opens workspaces, starts sessions, follows their progress, settles their approvals and questions for you, and reports back.",
   "icon": "./icon.svg",
   "license": "Apache-2.0",
@@ -97,6 +97,7 @@
     "@deepseek-ai/dsh-llm": ">=0.2.2-rc.3",
     "@deepseek-ai/dsh-session": ">=0.2.2-rc.3",
     "@deepseek-ai/dsh-session-query": ">=0.2.2-rc.3",
+    "@deepseek-ai/dsh-scope": ">=0.2.2-rc.1",
     "@deepseek-ai/dsh-tools": ">=0.2.2-rc.3",
     "@deepseek-ai/dsh-storage-domain": ">=0.2.2-rc.3",
     "@deepseek-ai/dsh-agent-preset-registry": ">=0.2.2-rc.3",
@@ -125,6 +126,9 @@
       "optional": true
     },
     "@deepseek-ai/dsh-session-query": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-scope": {
       "optional": true
     },
     "@deepseek-ai/dsh-tools": {

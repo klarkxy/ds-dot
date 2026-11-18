@@ -24,12 +24,14 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import { SERVICE_NAME, TOOL, type ReflectionRun } from './contracts.ts'
 import type { DotHost } from './host.ts'
 import type { DotStore } from './store.ts'
-import { restrictInheritedTools } from './tool-scope.ts'
+import { gateToolExecution } from './tool-scope.ts'
 
 /** The internal preset the reflection session runs on. Kept out of the task preset roster. */
 export const REFLECTION_PRESET_ID = 'dot-reflection'
 /** The reflection-only submission tool. Not part of dot's public tools. */
 export const REFLECTION_SUBMIT_TOOL = 'dot_reflection_submit'
+/** Names the reflection agent scope may see: its own three tools only. */
+export const REFLECTION_ALLOW = [TOOL.searchHistory, TOOL.readHistory, REFLECTION_SUBMIT_TOOL] as const
 
 /** One reflection pass runs at most this long before it is treated as failed. */
 export const REFLECTION_TIMEOUT_MS = 10 * 60_000
@@ -323,9 +325,9 @@ export const inject = ['tools', SERVICE_NAME] as const
 export function apply(ctx: Context): void {
   const host = ctx as ToolHost
   const dot = () => host[SERVICE_NAME]
-  // Keep every inherited (global) tool out of this preset scope; only the three
-  // tools registered below may be visible to the reflection session.
-  restrictInheritedTools(ctx, [TOOL.searchHistory, TOOL.readHistory, REFLECTION_SUBMIT_TOOL])
+  // Execution gate only; visibility is restricted on the agent scope in
+  // setupFor, so only the three tools registered below may run here.
+  gateToolExecution(ctx, [TOOL.searchHistory, TOOL.readHistory, REFLECTION_SUBMIT_TOOL])
   const tool = (definition: ToolInput, readOnly = false) => {
     const made = (defineTool as unknown as (input: ToolInput) => Record<string, unknown>)(definition)
     ctx.effect(() => host.tools.register(readOnly ? { ...made, hostEffect: 'read-only' as const } : made))

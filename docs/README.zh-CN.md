@@ -14,7 +14,7 @@
 dsh plugin --profile web add ds-dot
 ```
 
-DSH 提示时重启 profile。用 `ds-dot@0.1.0` 固定这一版，或用 `github:klarkxy/ds-dot#<commit>` 安装源码修订。Deep View 随包安装，负责卡片展示。可选的 `@klarkxy/dsh-dev-index` 提供文档和插件检索，`@klarkxy/dsh-model-picker` 为设置提供模型搜索。
+DSH 提示时重启 profile。用 `ds-dot@0.2.1` 固定这一版，或用 `github:klarkxy/ds-dot#<commit>` 安装源码修订。Deep View 随包安装，负责卡片展示。可选的 `@klarkxy/dsh-dev-index` 提供文档和插件检索，`@klarkxy/dsh-model-picker` 为设置提供模型搜索。
 
 本地开发：
 

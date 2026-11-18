@@ -1,5 +1,5 @@
 /** dot's own answer channel around Deep View's shared renderer. */
-import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import { MarkdownText, type MarkdownLabels } from '@deepseek-ai/dsh-client-ui-primitives'
 import { WidgetCard, type Answer } from '@klarkxy/dsh-deep-view/widget'
 import { checkShownView } from '@klarkxy/dsh-deep-view/core'
@@ -84,6 +84,7 @@ export function createDotCards(call: (endpoint: string, payload: unknown) => Pro
     const [pending, setPending] = useState(false)
     const [rpcExpired, setRpcExpired] = useState(false)
     const [busy, setBusy] = useState(false)
+    const answering = useRef(false)
     const [failed, setFailed] = useState(false)
     const [detailFailed, setDetailFailed] = useState(false)
     const [answerStatus, setAnswerStatus] = useState<'answered' | 'busy'>()
@@ -134,7 +135,8 @@ export function createDotCards(call: (endpoint: string, payload: unknown) => Pro
     // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [call, id, valid?.interactive])
     const submit = useCallback((action: string, values: Record<string, unknown>) => {
-      if (!id || !pending || expired || busy) return
+      if (!id || !pending || expired || busy || answering.current) return
+      answering.current = true
       setBusy(true); setFailed(false)
       void call('card.answer', { viewId: id, action, values }).then(result => {
         const res = result !== null && typeof result === 'object' ? result as { notificationPending?: unknown } : null
@@ -156,9 +158,10 @@ export function createDotCards(call: (endpoint: string, payload: unknown) => Pro
             setAnswerStatus('answered')
           } else if (rec.expired === true) setRpcExpired(true)
           else if (String(failure).includes('already being answered')) setAnswerStatus('busy')
+          else if (rec.expired === false && rec.notificationPending !== true) setPending(true)
         } catch { setDetailFailed(true) }
         setFailed(true)
-      }).finally(() => setBusy(false))
+      }).finally(() => { answering.current = false; setBusy(false) })
     }, [call, id, pending, expired, busy, valid])
     const retryNotification = useCallback(() => {
       if (!id || retryBusy) return

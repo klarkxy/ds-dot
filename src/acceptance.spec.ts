@@ -35,7 +35,7 @@ async function ready(persist?: WorkPersist) {
   mkdirSync(join(artifacts, 'evidence'), { recursive: true })
   const before = new TextEncoder().encode('before')
   writeFileSync(join(project, 'a.ts'), before)
-  const book = new WorkBook(persist ?? (async () => undefined), 'win32')
+  const book = new WorkBook(persist ?? (async () => undefined), process.platform)
   const change = await book.createChange({
     title: 'Ship', cwd: project, goal: 'land',
     requirements: [{ requirementRef: 'r1', text: 'builds', required: true }], at: 1,
@@ -171,7 +171,7 @@ describe('shared delivery and closeout', () => {
       changes: [book.change(change.id)], inputs: [book.input(change.currentInputRef)],
       runs: [{ ...book.run(reviewId)!, creation: 'intent', sessionId: undefined }, writer],
       verifications: [],
-    }, async () => undefined, 'win32')
+    }, async () => undefined, process.platform)
     expect(await unstarted.recordVerification(change.id, pass, [writerId], 12, {
       inputRef: verification.inputRef, inputRevision: verification.inputRevision,
       reviewRunId: reviewId, reviewerSessionId: writer.requestedSessionId, subject,
@@ -180,7 +180,7 @@ describe('shared delivery and closeout', () => {
       changes: [book.change(change.id)], inputs: [book.input(change.currentInputRef)],
       runs: [{ ...book.run(reviewId)!, workspaceRoot: 'H:\\else', cwd: 'H:\\else' }, writer],
       verifications: [],
-    }, async () => undefined, 'win32')
+    }, async () => undefined, process.platform)
     expect(await elsewhere.recordVerification(change.id, pass, [writerId], 13, {
       inputRef: verification.inputRef, inputRevision: verification.inputRevision,
       reviewRunId: reviewId, reviewerSessionId: book.run(reviewId)!.sessionId, subject,
@@ -223,7 +223,7 @@ describe('shared delivery and closeout', () => {
     const restored = WorkBook.restore({
       changes: [rejected.book.change(rejected.change.id)], inputs: [rejected.book.input(rejected.change.currentInputRef)],
       runs: [poisoned, rejected.book.run(rejected.writerId)], verifications: [rejected.verification],
-    }, async () => undefined, 'win32')
+    }, async () => undefined, process.platform)
     expect(await restored.reopenAfterReview(rejected.change.id, rejected.reviewId, 12, rejected.change.currentRevision)).toMatchObject({ code: 'unknown' })
     expect(restored.occupying().map(run => run.id)).toEqual([rejected.reviewId])
     expect(restored.change(rejected.change.id)?.closeout).toBeUndefined()
@@ -237,7 +237,7 @@ describe('shared delivery and closeout', () => {
     const blocked = WorkBook.restore({
       changes: [book.change(change.id)], inputs: [book.input(change.currentInputRef)],
       runs: [uncleared, book.run(writerId)!], verifications: [verification],
-    }, async () => undefined, 'win32')
+    }, async () => undefined, process.platform)
     expect(await blocked.accept(change.id, verification.id, change.currentInputRef, verification.subjectKey!, 'user', 12, {
       expectedInputRevision: change.currentRevision, expectedVerificationId: verification.id,
     }, look)).toMatchObject({ code: 'unknown' })
@@ -304,7 +304,7 @@ describe('shared delivery and closeout', () => {
     const gone = new TextEncoder().encode('gone')
     writeFileSync(join(project, 'a.ts'), before)
     writeFileSync(join(project, 'gone.ts'), gone)
-    const book = new WorkBook(async () => undefined, 'win32')
+    const book = new WorkBook(async () => undefined, process.platform)
     const change = await book.createChange({ title: 'Trim', cwd: project, goal: 'drop', requirements: [{ requirementRef: 'r1', text: 'builds', required: true }], at: 1 })
     const writer = await book.reserveRun({ changeId: change.id, cwd: project, root: { workspaceRoot: project }, writeScope: { kind: 'paths', paths: [{ path: project, type: 'directory' }] }, at: 2 })
     if (!writer.ok) throw new Error(writer.message)
@@ -403,7 +403,7 @@ describe('shared delivery and closeout', () => {
     const restored = WorkBook.restore({
       changes: [book.change(change.id)], inputs: [book.input(change.currentInputRef)],
       runs: [open, book.run(writerId)!], verifications: [],
-    }, async () => undefined, 'win32')
+    }, async () => undefined, process.platform)
     const prepared = await restored.prepareReviewHold(reviewId, 20)
     if (!prepared.ok) throw new Error(prepared.message)
     expect(restored.run(reviewId)?.phase).toBe('settling')
@@ -415,7 +415,7 @@ describe('shared delivery and closeout', () => {
       changes: [book.change(change.id)], inputs: [book.input(change.currentInputRef)],
       runs: [{ ...sent, phase: 'active' as const, closureEvidence: undefined, deliveries: sent.deliveries.map(item => item.kind === 'initial' ? { ...item, status: 'intent' as const } : item) }, book.run(writerId)!],
       verifications: [],
-    }, async () => undefined, 'win32')
+    }, async () => undefined, process.platform)
     expect(await unsent.prepareReviewHold(reviewId, 23)).toMatchObject({ code: 'unknown' })
     expect(await unsent.holdReview(reviewId, evidence, 24)).toMatchObject({ code: 'unknown' })
     cleanup()
@@ -439,7 +439,7 @@ describe('shared delivery and closeout', () => {
       inputs: [...rows.values()].filter(row => (row as { goal?: string }).goal !== undefined),
       runs: [...rows.values()].filter(row => (row as { phase?: string }).phase),
       verifications: [...rows.values()].filter(row => (row as { verdict?: string }).verdict),
-    }, async () => undefined, 'win32')
+    }, async () => undefined, process.platform)
     expect(await restored.resumeCloseout(change.id, 13)).toEqual({ ok: true, released: true })
     expect(await restored.resumeCloseout(change.id, 14)).toEqual({ ok: true, released: false })
     expect(await restored.noteObservation(reviewId, 'late pass', 15)).toEqual({ ok: true, phase: 'stopped' })

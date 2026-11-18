@@ -125,6 +125,29 @@ describe('ChatPanel activity and notice cards', () => {
     expect(!button || button.disabled).toBe(true)
     await act(async () => root.unmount())
   })
+  it('allows retry after a failed answer only when detail confirms it is still open', async () => {
+    const view = { type: 'confirm', id: 'ok' }
+    let rejectAnswer: (error: Error) => void = () => {}
+    let answers = 0
+    const call = vi.fn((endpoint: string): Promise<unknown> => {
+      if (endpoint === 'card.detail') return Promise.resolve({ id: 'card', expired: false })
+      if (endpoint === 'card.answer' && answers++ === 0) return new Promise((_resolve, reject) => { rejectAnswer = reject })
+      return Promise.resolve({ notificationPending: false })
+    })
+    const { Card } = createDotCards(call)
+    const root = createRoot(document.getElementById('root')!)
+    await act(async () => { root.render(<Card sessionId="s" callId="c" presentation={{ title: 'Confirm', view, viewId: 'card' }} />) })
+    const confirm = () => [...document.querySelectorAll<HTMLButtonElement>('.dvui-root button')].find(button => button.textContent === 'Confirm')!
+    await act(async () => { confirm().click(); confirm().click() })
+    expect(answers).toBe(1)
+    await act(async () => { rejectAnswer(new Error('temporary failure')); await Promise.resolve() })
+    expect(confirm().disabled).toBe(false)
+    await act(async () => { confirm().click() })
+    expect(answers).toBe(2)
+    expect(!confirm() || confirm().disabled).toBe(true)
+    await act(async () => root.unmount())
+  })
+
   it('restores notification retry after an answer response is lost', async () => {
     const view = { type: 'confirm', id: 'ok' }
     let reads = 0
@@ -645,6 +668,51 @@ describe('ChatPanel activity and notice cards', () => {
     await act(async () => { gear.click() })
     await act(async () => { document.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'Escape' })) })
     expect(document.querySelector('aside.dsh-dot-drawer')).toBeNull()
+    await act(async () => { root.unmount() })
+  })
+})
+
+describe('ChatPanel bottom pin', () => {
+  it('follows the bottom, lets a slight upward scroll go, and re-pins at the bottom', async () => {
+    const snap = (rev: number, streaming: string): ChatSnapshot => ({
+      sessionId: 'dot-1', running: true, streaming, rev, itemsRev: rev, items: [{ kind: 'user', key: 'u', text: 'hi', at: 1 }],
+    })
+    let push: (snapshot: ChatSnapshot) => void = () => {}
+    const api = makeApi(snap(1, ''))
+    api.wait = (_rev, _itemsRev, signal) => new Promise(resolve => {
+      signal.addEventListener('abort', () => resolve(undefined), { once: true })
+      push = resolve
+    })
+    const root = createRoot(document.getElementById('root')!)
+    await act(async () => { root.render(<ChatPanel locale="en" api={api} onOpenSession={() => {}} />) })
+    await act(async () => { await Promise.resolve(); await Promise.resolve() })
+    const el = document.querySelector<HTMLElement>('.dsh-dot-scroll')!
+    let top = 0
+    Object.defineProperty(el, 'scrollHeight', { configurable: true, get: () => 1000 })
+    Object.defineProperty(el, 'clientHeight', { configurable: true, get: () => 400 })
+    Object.defineProperty(el, 'scrollTop', { configurable: true, get: () => top, set: value => { top = value } })
+    const scrollTo = async (value: number) => {
+      top = value
+      await act(async () => { el.dispatchEvent(new dom.window.Event('scroll')) })
+    }
+    const stream = async (rev: number) => {
+      await act(async () => { push(snap(rev, 'streamed '.repeat(rev))); await Promise.resolve(); await Promise.resolve() })
+    }
+
+    // At the bottom: a streaming update keeps following.
+    await scrollTo(600)
+    await stream(2)
+    expect(top).toBe(1000)
+
+    // Slight upward scroll (30px, inside STICK_PX): the update must not pull it back.
+    await scrollTo(570)
+    await stream(3)
+    expect(top).toBe(570)
+
+    // Back at the bottom: following resumes.
+    await scrollTo(600)
+    await stream(4)
+    expect(top).toBe(1000)
     await act(async () => { root.unmount() })
   })
 })

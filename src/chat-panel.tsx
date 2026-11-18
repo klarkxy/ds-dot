@@ -367,13 +367,25 @@ export function ChatPanel({ locale, api, Card, onOpenSession, renderFactorySlot 
   const rows = useMemo(() => rowsOf(filtered.items), [filtered.items])
   const scroller = useRef<HTMLDivElement>(null)
   const stuck = useRef(true)
+  const lastTop = useRef(0)
+  // Direction-aware: any real upward scroll releases the bottom pin, even within STICK_PX of the
+  // bottom, so streaming updates cannot yank the viewport back. Scrolling back down to within
+  // STICK_PX re-pins. A scrollTop drop that lands at the bottom is a browser clamp after the
+  // content shrank, not a user gesture, so it keeps the pin.
   const onScroll = useCallback(() => {
     const el = scroller.current
-    if (el) stuck.current = el.scrollHeight - el.scrollTop - el.clientHeight < STICK_PX
+    if (!el) return
+    const gap = el.scrollHeight - el.scrollTop - el.clientHeight
+    const up = el.scrollTop < lastTop.current - 3 && gap > 3
+    stuck.current = up ? false : gap < STICK_PX
+    lastTop.current = el.scrollTop
   }, [])
   useLayoutEffect(() => {
     const el = scroller.current
-    if (el && stuck.current) el.scrollTop = el.scrollHeight
+    if (el && stuck.current) {
+      el.scrollTop = el.scrollHeight
+      lastTop.current = el.scrollTop
+    }
   }, [rows, streaming, pendingEchoes, running])
 
   const counts = useMemo(() => headerBoardCounts(board), [board])

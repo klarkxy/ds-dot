@@ -2,7 +2,7 @@ import { act } from 'react'
 import { JSDOM } from 'jsdom'
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 import { DEFAULT_SETTINGS, type ChatItem, type ChatSnapshot } from './contracts.ts'
-import { ChatPanel, rowsOf, type ChatApi } from './chat-panel.tsx'
+import { ChatPanel, chatCss, rowsOf, type ChatApi } from './chat-panel.tsx'
 import { filterVisibleChat } from './chat-filter.ts'
 import { createDotCards } from './client.tsx'
 
@@ -949,7 +949,113 @@ describe('Composer images', () => {
     await act(async () => again.unmount())
   })
 
-  it('drops the drag mask when the pointer leaves before the next paint', async () => {
+  it('prefers a command-id prefix over description text and still runs a complete id', async () => {
+    const snapshot: ChatSnapshot = { sessionId: 'dot-prefix', running: false, streaming: '', rev: 1, itemsRev: 1, items: [] }
+    const api = makeApi(snapshot)
+    api.say = vi.fn(async () => {})
+    const root = createRoot(document.getElementById('root')!)
+    await act(async () => { root.render(<ChatPanel locale="en" api={api} onOpenSession={() => {}} />) })
+    await act(async () => { await Promise.resolve() })
+    const input = document.querySelector<HTMLTextAreaElement>('textarea.dsh-dot-input')!
+    const activeCmd = () => document.querySelector('.dsh-dot-slash-item[data-active] code')?.textContent
+    const drawerKind = () => document.querySelector('aside.dsh-dot-drawer')?.getAttribute('data-kind')
+
+    await act(async () => { typeInto(input, '/se') })
+    expect(activeCmd()).toBe('/settings')
+    await act(async () => { key(input, 'Enter') })
+    expect(api.say).not.toHaveBeenCalled()
+    expect(drawerKind()).toBe('settings')
+    expect(input.value).toBe('')
+
+    await act(async () => { typeInto(input, '/re') })
+    expect(activeCmd()).toBe('/remind')
+    await act(async () => { key(input, 'Enter') })
+    expect(api.say).not.toHaveBeenCalled()
+    expect(input.value).toContain('Remind me every day at 09:00')
+
+    await act(async () => { typeInto(input, '/set') })
+    expect(activeCmd()).toBe('/settings')
+    await act(async () => { key(input, 'Enter') })
+    expect(api.say).not.toHaveBeenCalled()
+    expect(drawerKind()).toBe('settings')
+
+    await act(async () => { typeInto(input, '/task') })
+    expect(activeCmd()).toBe('/task')
+    await act(async () => { key(input, 'Enter') })
+    expect(api.say).not.toHaveBeenCalled()
+    expect(input.value).toContain('Please start a new task:')
+
+    await act(async () => { typeInto(input, '/model') })
+    expect(activeCmd()).toBe('/settings')
+    await act(async () => root.unmount())
+  })
+
+  it('shows a visible selection on a disabled slash row and does not send', async () => {
+    const style = document.createElement('style')
+    style.textContent = chatCss
+    document.head.appendChild(style)
+    const snapshot: ChatSnapshot = { sessionId: 'dot-disabled-highlight', running: true, streaming: '', rev: 1, itemsRev: 1, items: [] }
+    const api = makeApi(snapshot)
+    api.say = vi.fn(async () => {})
+    api.newSegment = vi.fn(async () => 'dot-2')
+    const root = createRoot(document.getElementById('root')!)
+    await act(async () => { root.render(<ChatPanel locale="en" api={api} onOpenSession={() => {}} />) })
+    await act(async () => { await Promise.resolve() })
+    const input = document.querySelector<HTMLTextAreaElement>('textarea.dsh-dot-input')!
+    const row = (cmd: string) => [...document.querySelectorAll<HTMLButtonElement>('.dsh-dot-slash-item')].find(button => button.querySelector('code')?.textContent === cmd)
+    const paint = (cmd: string) => dom.window.getComputedStyle(row(cmd)!).backgroundColor
+    await act(async () => { typeInto(input, '/se') })
+    expect(row('/settings')?.hasAttribute('data-active')).toBe(true)
+    await act(async () => { key(input, 'ArrowDown') })
+    const segment = row('/segment')!
+    const segmentPaint = paint('/segment')
+    const settingsPaint = paint('/settings')
+    expect(segment.hasAttribute('data-active')).toBe(true)
+    expect(row('/settings')?.hasAttribute('data-active')).toBe(false)
+    expect(segment.disabled).toBe(true)
+    expect({ segmentPaint, settingsPaint }).toEqual({
+      segmentPaint: 'rgba(128, 128, 128, 0.22)',
+      settingsPaint: 'rgba(0, 0, 0, 0)',
+    })
+    await act(async () => { key(input, 'Enter') })
+    expect(api.say).not.toHaveBeenCalled()
+    expect(api.newSegment).not.toHaveBeenCalled()
+    expect(input.value).toBe('/se')
+    await act(async () => root.unmount())
+    style.remove()
+  })
+
+  it('writes a recalled prompt to the draft and puts the empty draft back on ArrowDown', async () => {
+    const snapshot: ChatSnapshot = {
+      sessionId: 'dot-history-draft',
+      running: false,
+      streaming: '',
+      rev: 1,
+      itemsRev: 1,
+      items: [{ kind: 'user', key: 'u1', text: 'sent one', at: 1 }],
+    }
+    const root = createRoot(document.getElementById('root')!)
+    await act(async () => { root.render(<ChatPanel locale="en" api={makeApi(snapshot)} onOpenSession={() => {}} />) })
+    await act(async () => { await Promise.resolve() })
+    const input = document.querySelector<HTMLTextAreaElement>('textarea.dsh-dot-input')!
+    const keyName = 'dsh-dot:draft:dot-history-draft'
+    expect(dom.window.localStorage.getItem(keyName)).toBeNull()
+    await act(async () => { input.setSelectionRange(0, 0); key(input, 'ArrowUp') })
+    expect(input.value).toBe('sent one')
+    expect(dom.window.localStorage.getItem(keyName)).toBe('sent one')
+    await act(async () => { key(input, 'ArrowDown') })
+    expect(input.value).toBe('')
+    expect(dom.window.localStorage.getItem(keyName)).toBeNull()
+    await act(async () => root.unmount())
+
+    const again = createRoot(document.getElementById('root')!)
+    await act(async () => { again.render(<ChatPanel locale="en" api={makeApi(snapshot)} onOpenSession={() => {}} />) })
+    await act(async () => { await Promise.resolve(); await Promise.resolve() })
+    expect(document.querySelector<HTMLTextAreaElement>('textarea.dsh-dot-input')!.value).toBe('')
+    await act(async () => again.unmount())
+  })
+
+  it('shows the drop mask on drag enter and clears it when the pointer leaves', async () => {
     const snapshot: ChatSnapshot = { sessionId: 'dot-drag', running: false, streaming: '', rev: 1, itemsRev: 1, items: [] }
     const root = createRoot(document.getElementById('root')!)
     await act(async () => { root.render(<ChatPanel locale="en" api={makeApi(snapshot)} onOpenSession={() => {}} />) })
@@ -960,11 +1066,18 @@ describe('Composer images', () => {
       Object.defineProperty(event, 'dataTransfer', { value: { types: ['Files'], dropEffect: 'none', files: [] } })
       return event
     }
+    await act(async () => { card.dispatchEvent(drag('dragenter')) })
+    expect(card.hasAttribute('data-dragging')).toBe(true)
+    expect(card.querySelector('.dsh-dot-drop-mask')).not.toBeNull()
+    await act(async () => { card.dispatchEvent(drag('dragleave')) })
+    expect(card.hasAttribute('data-dragging')).toBe(false)
+    expect(card.querySelector('.dsh-dot-drop-mask')).toBeNull()
     await act(async () => {
       card.dispatchEvent(drag('dragenter'))
       card.dispatchEvent(drag('dragleave'))
     })
     expect(card.hasAttribute('data-dragging')).toBe(false)
+    expect(card.querySelector('.dsh-dot-drop-mask')).toBeNull()
     await act(async () => root.unmount())
   })
 })

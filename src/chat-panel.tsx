@@ -919,6 +919,20 @@ interface SlashCommandItem {
   readonly run: () => void
 }
 
+/**
+ * Lower is a closer match. A command id outranks keywords, and both outrank
+ * label and description text, so `/se` stays on `/settings` instead of a
+ * sentence that merely contains "session".
+ */
+function slashMatchRank(item: SlashCommandItem, token: string): number | undefined {
+  const id = item.cmd.slice(1)
+  if (id === token) return 0
+  if (id.startsWith(token)) return 1
+  if (id.includes(token) || item.keywords?.toLowerCase().includes(token)) return 2
+  if (item.label.toLowerCase().includes(token) || item.desc.toLowerCase().includes(token)) return 3
+  return undefined
+}
+
 interface ComposerProps {
   readonly locale: CopyLocale
   readonly sessionId: string
@@ -1165,12 +1179,11 @@ function Composer({
     if (slashPinned && slashToken === undefined) return commands
     if (slashToken === undefined) return []
     if (!slashToken) return commands
-    return commands.filter(item =>
-      item.cmd.slice(1).includes(slashToken)
-      || (item.keywords?.toLowerCase().includes(slashToken) ?? false)
-      || item.label.toLowerCase().includes(slashToken)
-      || item.desc.toLowerCase().includes(slashToken),
-    )
+    return commands
+      .map((item, index) => ({ item, index, rank: slashMatchRank(item, slashToken) }))
+      .filter((row): row is { item: SlashCommandItem; index: number; rank: number } => row.rank !== undefined)
+      .sort((a, b) => a.rank - b.rank || a.index - b.index)
+      .map(row => row.item)
   }, [commands, slashPinned, slashToken])
 
   const slashOpen = !disabled && filteredCommands.length > 0 && (slashPinned || (slashToken !== undefined && !slashDismissed))
@@ -2105,6 +2118,11 @@ export const chatCss = settingsCss + `
 .dsh-dot-chat .dsh-dot-slash-item[data-active]:not(:disabled),
 .dsh-dot-chat .dsh-dot-slash-item:hover:not(:disabled) {
   background: var(--dsw-alias-interactive-bg-hover);
+}
+.dsh-dot-chat .dsh-dot-slash-item[data-active]:disabled,
+.dsh-dot-chat .dsh-dot-slash-item[data-active][disabled] {
+  background-color: rgba(128, 128, 128, 0.22);
+  box-shadow: inset 0 0 0 1px rgba(128, 128, 128, 0.7);
 }
 .dsh-dot-chat .dsh-dot-slash-item:disabled { opacity: 0.45; cursor: default; }
 .dsh-dot-chat .dsh-dot-slash-cmd {

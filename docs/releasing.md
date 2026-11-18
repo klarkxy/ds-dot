@@ -91,7 +91,9 @@ These live in GitHub, not in the code. Configure them once:
 2. **General → Pull Requests** — enable *Allow squash merging* with default
    message *Pull request title*, enable *Allow merge commits*, disable *Allow
    rebase merging*, and enable *Automatically delete head branches*.
-3. **Default branch** — set to `dev`, so new PRs and clones target it by
-   default. README links still work, and npm users never see `dev`.
+3. **Default branch** — keep `main`, so visitors see the published code and
+   README. Contributors must pick `dev` as the PR base; `Release guard` rejects
+   feature PRs aimed at `main`. Note that `Closes #123` only auto-closes issues
+   when merged into the default branch, so issues close on release (or by hand).
 4. **Actions → General** — keep *Workflow permissions* at *Read repository
    contents*.

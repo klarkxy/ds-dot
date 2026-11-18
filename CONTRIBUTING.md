@@ -33,7 +33,8 @@ flowchart LR
    ```
 3. **Commit as you like** on your branch; the PR is squashed, so only the PR
    title ends up in `dev`.
-4. **Open a pull request into `dev`.**
+4. **Open a pull request into `dev`.** GitHub preselects `main` (the default
+   branch); change the base to `dev`.
    - Title in [Conventional Commits](https://www.conventionalcommits.org/) form:
      `feat(work): render English work orders`. Allowed types: `feat`, `fix`,
      `perf`, `refactor`, `docs`, `test`, `build`, `ci`, `chore`, `revert`,

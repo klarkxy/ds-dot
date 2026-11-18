@@ -20,6 +20,11 @@ export function defaultPersona(locale: CopyLocale = 'zh'): string {
 export const DEFAULT_ADDRESS = defaultAddress('zh')
 export const DEFAULT_PERSONA = defaultPersona('zh')
 
+/** Substitute `{address}` literally so `$` patterns in an address stay unchanged. */
+function fillAddress(template: string, value: string): string {
+  return template.replace('{address}', () => value)
+}
+
 /** The persona section of dot's system prompt for the current settings. */
 export function personaSection(settings: { readonly persona?: string; readonly address?: string }, locale: CopyLocale = 'zh'): string {
   const pack = personaPack(locale)
@@ -28,7 +33,7 @@ export function personaSection(settings: { readonly persona?: string; readonly a
   const lines = [pack.sectionLead]
   if (persona) lines.push(persona)
   lines.push(address
-    ? pack.addressCustom.replace('{address}', address)
-    : pack.addressDefault.replace('{address}', pack.defaultAddress))
+    ? fillAddress(pack.addressCustom, address)
+    : fillAddress(pack.addressDefault, pack.defaultAddress))
   return lines.join('\n')
 }

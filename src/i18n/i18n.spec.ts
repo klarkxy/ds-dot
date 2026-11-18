@@ -407,6 +407,25 @@ describe('i18n locale resolution and pack completeness', () => {
       expect(extractPlaceholders(customBuilt)).toEqual([])
     }
   })
+
+  it("keeps $$, $&, $', and $` literal inside a custom address", () => {
+    const addresses = ['$$', '$&', "$'", '$`', "O$'Brien", 'Sam$$', 'A$&B', 'pre$`post', '$1']
+    for (const loc of SUPPORTED_LOCALES) {
+      const pack = personaPack(loc)
+      const defaultLine = personaSection({}, loc).split('\n').at(-1)
+      expect(defaultLine, `${loc} default address`).toBe(pack.addressDefault.split('{address}').join(defaultAddress(loc)))
+
+      for (const address of addresses) {
+        const built = personaSection({ persona: 'Custom voice', address: `  ${address}  ` }, loc)
+        const line = built.split('\n').at(-1)
+        expect(line, `${loc} custom address ${address}`).toBe(pack.addressCustom.split('{address}').join(address))
+        expect(line).toContain(address)
+        expect(built.startsWith(pack.sectionLead)).toBe(true)
+        expect(built).toContain('Custom voice')
+        expect(extractPlaceholders(line ?? '')).toEqual([])
+      }
+    }
+  })
 })
 
 describe('i18n end-to-end lifecycle and PersonaPanel integration', () => {

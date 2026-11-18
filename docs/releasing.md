@@ -1,13 +1,13 @@
 # Publishing ds-dot
 
-The current package version is `0.2.0`. The npm package includes the built host
+The current package version is `0.2.1`. The npm package includes the built host
 entries and browser client; consumers do not need to build it.
 
 ## Release
 
 1. Update `package.json` to the version being released and commit the changes.
 2. Push the commit and create a GitHub Release with a matching tag, such as
-   `v0.2.0` for package version `0.2.0`.
+   `v0.2.1` for package version `0.2.1`.
 3. Publish the Release. Publishing the GitHub Release is the single action that
    both records the tag and starts npm publish. The **Publish to npm** workflow
    checks the version, installs the locked dependencies, runs type checks and
@@ -39,8 +39,6 @@ registry=https://registry.npmjs.org/
 npm publish --access public --ignore-scripts
 ```
 
-Each npm version can be published only once. The initial `0.1.0` is already
-published locally. Later versions, including `0.2.0`, use the Release workflow.
-A bare `git push` of a tag does not publish: the workflow listens for a
-published GitHub Release, not for tag pushes. Manual **workflow_dispatch** runs
-the same checks without publishing.
+Each npm version can be published only once. The initial `0.1.0` was
+published locally. GitHub Release `v0.2.0` reached GitHub only because its
+Linux tests failed before the npm publish step.

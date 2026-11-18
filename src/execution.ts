@@ -163,21 +163,27 @@ async function settleRelay(book: WorkBook, host: RunSessionHost, runId: string, 
   const beforeSend = book.dispatchAllowed(runId)
   if (!beforeSend.ok) return beforeSend
   let call: 'sent' | 'rejected' | 'unknown' = 'sent'
+  // Hold the claim through the proof and the receipt write. Releasing it before
+  // relayInserts lets a verified stop treat this in-flight delivery as quiescent
+  // and reject a message the host already inserted.
   book.claimLiveRelay(deliveryId)
   try {
-    const status = await host.relay(sessionId, senderId, text, deliveryId)
-    call = status === 'rejected' ? 'rejected' : 'sent'
-  } catch { call = 'unknown' }
-  finally { book.releaseLiveRelay(deliveryId) }
-  let after: number | undefined
-  try { after = await host.relayInserts(sessionId, deliveryId, senderId, text) } catch { after = undefined }
-  const gate = book.dispatchAllowed(runId)
-  const status = after === 1 && gate.ok ? 'accepted' : after === 0 && call === 'rejected' && gate.ok ? 'rejected' : 'unknown'
-  const settled = await book.settleDelivery(runId, deliveryId, status, undefined, at)
-  if (!settled.ok) return settled
-  if (!gate.ok) return gate
-  if (status === 'unknown') return { ok: false, code: 'unknown', message: `${runId} delivery ${deliveryId} was not proved` }
-  return { ok: true, phase: settled.phase }
+    try {
+      const status = await host.relay(sessionId, senderId, text, deliveryId)
+      call = status === 'rejected' ? 'rejected' : 'sent'
+    } catch { call = 'unknown' }
+    let after: number | undefined
+    try { after = await host.relayInserts(sessionId, deliveryId, senderId, text) } catch { after = undefined }
+    const gate = book.dispatchAllowed(runId)
+    const status = after === 1 ? 'accepted' : after === 0 && call === 'rejected' && gate.ok ? 'rejected' : 'unknown'
+    const settled = await book.settleDelivery(runId, deliveryId, status, undefined, at)
+    if (!settled.ok) return settled
+    if (!gate.ok) return gate
+    if (status === 'unknown') return { ok: false, code: 'unknown', message: `${runId} delivery ${deliveryId} was not proved` }
+    return { ok: true, phase: settled.phase }
+  } finally {
+    book.releaseLiveRelay(deliveryId)
+  }
 }
 
 async function ensureAccess(book: WorkBook, host: RunSessionHost, runId: string): Promise<WorkRefusal | undefined> {

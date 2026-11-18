@@ -6,9 +6,10 @@
  * link boundaries in `exclusions` without following them.
  */
 import { createHash } from 'node:crypto'
-import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs'
-import { lstat as lstatAsync, readFile as readFileAsync, readdir as readdirAsync, readlink as readlinkAsync, realpath as realpathAsync, stat as statAsync } from 'node:fs/promises'
+import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync, realpathSync, realpath as realpathCallback, rmSync, statSync, writeFileSync } from 'node:fs'
+import { lstat as lstatAsync, readFile as readFileAsync, readdir as readdirAsync, readlink as readlinkAsync, stat as statAsync } from 'node:fs/promises'
 import path, { dirname, join, relative, resolve } from 'node:path'
+import { promisify } from 'node:util'
 import { absoluteScopePath, canonicalPath, scopeWrites, type WriteScope } from './work.ts'
 
 /** Maximum single-file size admitted into an in-memory snapshot buffer (64 MiB). */
@@ -438,11 +439,18 @@ export function scanScope(root: string, scope: string, type: 'file' | 'directory
   return { files, exclusions }
 }
 
+/**
+ * Same lstat walk as {@link realpathSync}. `fs.promises.realpath` uses the
+ * native binding, which on Windows expands 8.3 short names (`RUNNER~1`) and
+ * makes an ordinary file look like a link.
+ */
+const realpathLikeSync = promisify(realpathCallback)
+
 async function isLinkAsync(target: string): Promise<boolean> {
   const stat = await lstatAsync(target)
   if (stat.isSymbolicLink()) return true
   try {
-    return canonicalPath(unwrap(await realpathAsync(target))) !== canonicalPath(unwrap(resolve(target)))
+    return canonicalPath(unwrap(await realpathLikeSync(target))) !== canonicalPath(unwrap(resolve(target)))
   } catch {
     return true
   }

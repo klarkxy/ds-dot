@@ -17,7 +17,7 @@ import { describe, expect, it } from 'vitest'
 import { assessApprovalRisk } from './approval-risk.ts'
 import {
   captureScope, captureScopeAsync, ignoredDirName, pruneSnapshots,
-  readManifest, readSnapshotEntry, saveSnapshot,
+  readManifest, readSnapshotEntry, saveSnapshot, scanScope, scanScopeAsync,
 } from './artifacts.ts'
 import { DotCards, cardAnswerText } from './card-state.ts'
 import { DEFAULT_SETTINGS, TOOL } from './contracts.ts'
@@ -194,6 +194,9 @@ describe('3. Async snapshot capture, manifest-only reads, size guard, and orphan
       writeFileSync(join(root, 'src', 'two.ts'), 'two')
 
       expect(ignoredDirName('.vite', 'linux')).toBe(true)
+      // The async walk uses the lstat realpath. Native Windows realpath expands
+      // 8.3 short names such as RUNNER~1 and would refuse this ordinary directory.
+      expect(await scanScopeAsync(root, root, 'directory')).toEqual(scanScope(root, root, 'directory'))
       const captured = await captureScopeAsync(root, root, 'directory')
       expect(captured.files.map(f => f.path).sort()).toEqual(['src/one.ts', 'src/two.ts'])
 
@@ -320,6 +323,55 @@ describe('4. Unknown creation/delivery recovery and human forceReleaseChange', (
     } finally {
       h.cleanup()
     }
+  })
+
+  it('keeps a proved supplement when a verified stop runs during the receipt check', async () => {
+    const book = new WorkBook(async () => undefined, 'linux')
+    const change = await book.createChange({ title: 'Relay', cwd: '/repo', goal: 'g', at: 1 })
+    const res = await book.reserveRun({
+      changeId: change.id, cwd: '/repo', root: { workspaceRoot: '/repo' },
+      writeScope: { kind: 'paths', paths: [{ path: '/repo/a.ts', type: 'file' }] }, at: 2,
+    })
+    if (!res.ok) throw new Error(res.message)
+    await book.publishBaseline(res.run.id, book.revision, 'base-relay', 3)
+    const launched = await launchReservedRun(book, minimalHost({ findSession: async () => ({ cwd: '/repo' }) }), res.run.id, 'start')
+    expect(launched.ok).toBe(true)
+
+    let relayReturned = false
+    let claimHeld = false
+    let stopDuringProof: { ok: boolean } | undefined
+    const host = minimalHost({
+      findSession: async () => ({ cwd: '/repo' }),
+      relay: async () => {
+        await book.prepareCancel(change.id, 9)
+        relayReturned = true
+        return 'accepted'
+      },
+      relayInserts: async () => {
+        if (!relayReturned) return 0
+        const delivery = book.run(res.run.id)?.deliveries.find(item => item.kind === 'context')
+        claimHeld = delivery !== undefined && book.hasLiveRelay(delivery.id)
+        const current = book.run(res.run.id)
+        stopDuringProof = current
+          ? await book.finishSettled(res.run.id, current.updatedAt, 'stopped', { queueCleared: true, agentIdle: true, jobsSettled: true }, 10)
+          : undefined
+        return 1
+      },
+    })
+
+    const sent = await supplementRun(book, host, res.run.id, 'landed', 'dot', 8)
+    expect(claimHeld).toBe(true)
+    expect(stopDuringProof).toMatchObject({ ok: false })
+    expect(sent).toMatchObject({ ok: false, code: 'closed-run' })
+    const delivery = book.run(res.run.id)?.deliveries.find(item => item.kind === 'context')
+    expect(delivery).toMatchObject({ status: 'accepted', contentRef: 'landed' })
+    expect(delivery?.evidence).not.toBe('superseded-by-verified-stop')
+    expect(book.run(res.run.id)?.phase).toBe('settling')
+
+    const current = book.run(res.run.id)
+    const stopped = await book.finishSettled(res.run.id, current!.updatedAt, 'stopped', { queueCleared: true, agentIdle: true, jobsSettled: true }, 11)
+    expect(stopped).toMatchObject({ ok: true, phase: 'stopped' })
+    expect(book.run(res.run.id)?.deliveries.find(item => item.id === delivery?.id)).toMatchObject({ status: 'accepted' })
   })
 })
 

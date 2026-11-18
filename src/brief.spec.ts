@@ -67,7 +67,7 @@ describe('renderBrief', () => {
     expect(text).toContain('You do not have dot\'s private memory.')
     expect(text).toContain('A confident guess is not authorization.')
     expect(text).toContain('choose routine reversible details yourself')
-    expect(text).toContain('Do not ask to re-approve work this order already authorizes.')
+    expect(text).toContain('including an external or costly action it already allows.')
     expect(text).toContain('wrong guess would materially change the result')
     expect(text).toContain('externally unauthorized, or costly')
     expect(text).toContain('Silence is not consent.')

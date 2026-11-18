@@ -48,7 +48,7 @@ describe('coordinator prompt contract', () => {
       'A missing match is not permission',
       'when approvalNotice marks the request',
       'A confident guess is not authorization',
-      'That default does not apply when questions=human or questions=off',
+      'Every other case follows the decision principles above',
       'When approvals=human',
       'When questions=human',
       'When questions=off',

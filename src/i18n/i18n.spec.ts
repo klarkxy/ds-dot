@@ -65,7 +65,7 @@ const SILENCE: Record<CopyLocale, string> = {
 const QUESTION_POLICY: Record<CopyLocale, { readonly label: string; readonly help: string }> = {
   zh: { label: '可逆的自己定', help: '缺授权，或不可逆、外部、费用后果' },
   en: { label: 'Choose reversible defaults', help: 'Missing authority, or an irreversible, external, or costly effect' },
-  ja: { label: '可逆なものは自分で決める', help: '認可がないとき、または不可逆・外部・費用の影響' },
+  ja: { label: 'ドロシーが可逆なものを決める', help: 'ドロシーが目標内の可逆な既定を決めます' },
   de: { label: 'Umkehrbares selbst entscheiden', help: 'Fehlende Befugnis oder eine unumkehrbare, externe oder teure Folge' },
   es: { label: 'Decidir lo reversible', help: 'Si falta autorización, o el efecto es irreversible, externo o costoso' },
   fr: { label: 'Décider le réversible', help: 'Sans autorisation, ou si l’effet est irréversible, externe ou coûteux' },
@@ -443,6 +443,10 @@ describe('i18n locale resolution and pack completeness', () => {
       expect(t(loc, 'sQuestionsDesc_dot'), `${loc} questions help`).toContain(QUESTION_POLICY[loc].help)
       expect(t(loc, 'sQuestionsDesc_dot'), `${loc} old scope question`).not.toMatch(/scope or direction|方向或范围|範囲や方針|Umfang oder Richtung|alcance o el rumbo|portée ou l’orientation|escopo ou a direção|границы или направление/)
       expect(t(loc, 'sQuestionsDesc_dot'), `${loc} exclusive guess`).not.toMatch(/只有猜错|only when a wrong guess|ときだけ|nur, wenn ein Fehlgriff|solo si un error|seulement si une erreur|só se um erro|только если ошибка/)
+      if (loc === 'ja') {
+        expect(t(loc, 'sQuestions_dot')).not.toContain('自分で')
+        expect(t(loc, 'sQuestionsDesc_dot')).not.toContain('自分で')
+      }
       expect(t(loc, 'sApprovalsDesc_dot'), `${loc} approvals not a blanket gate`).not.toMatch(/spending or credentials|付费或涉及凭据|課金・認証情報|Ausgaben oder Zugangsdaten|gastos o credenciales|dépenses ou identifiants|gastos ou credenciais|расходы или учётные данные/)
       const kept = patchSettings({ ...DEFAULT_SETTINGS, persona: 'Custom voice kept', address: 'Kept name' }, { approvals: 'human' }, loc)
       expect(kept.persona, `${loc} custom persona survives another setting`).toBe('Custom voice kept')

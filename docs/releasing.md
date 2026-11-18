@@ -93,7 +93,8 @@ These live in GitHub, not in the code. Configure them once:
    rebase merging*, and enable *Automatically delete head branches*.
 3. **Default branch** — keep `main`, so visitors see the published code and
    README. Contributors must pick `dev` as the PR base; `Release guard` rejects
-   feature PRs aimed at `main`. Note that `Closes #123` only auto-closes issues
-   when merged into the default branch, so issues close on release (or by hand).
+   feature PRs aimed at `main`. GitHub only auto-closes `Closes #123` issues on
+   the default branch, so `.github/workflows/close-issues.yml` closes them when
+   the PR is merged into `dev`.
 4. **Actions → General** — keep *Workflow permissions* at *Read repository
    contents*.

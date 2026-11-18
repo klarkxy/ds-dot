@@ -756,4 +756,74 @@ describe('Composer images', () => {
     expect(document.body.textContent).not.toContain('note.txt')
     await act(async () => root.unmount())
   })
+
+  it('keeps the toolbar minimal while supporting slash quick-actions, low-frequency /segment and /settings entries, history recall, expand, and clear', async () => {
+    const snapshot: ChatSnapshot = {
+      sessionId: 'dot-composer-streamlined',
+      running: false,
+      streaming: '',
+      rev: 1,
+      itemsRev: 1,
+      items: [
+        { kind: 'user', key: 'u1', text: 'check nightly build', at: 1 },
+        { kind: 'bot', key: 'b1', text: 'All green.', at: 2 },
+      ],
+    }
+    const api = makeApi(snapshot)
+    api.newSegment = vi.fn(async () => 'dot-seg-2')
+
+    const root = createRoot(document.getElementById('root')!)
+    await act(async () => { root.render(<ChatPanel locale="en" api={api} onOpenSession={() => {}} />) })
+    await act(async () => { await Promise.resolve(); await Promise.resolve() })
+
+    // No persistent model pill or segment button in the bottom composer bar.
+    expect(document.querySelector('.dsh-dot-composer-bar .dsh-dot-model-pill')).toBeNull()
+    expect(document.querySelector('.dsh-dot-composer-bar button[aria-label="Start new segment"]')).toBeNull()
+
+    const input = document.querySelector<HTMLTextAreaElement>('textarea.dsh-dot-input')!
+
+    // ArrowUp on empty input recalls the last sent user prompt; ArrowDown restores empty draft.
+    await act(async () => {
+      input.setSelectionRange(0, 0)
+      input.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'ArrowUp', bubbles: true }))
+    })
+    expect(input.value).toBe('check nightly build')
+    await act(async () => {
+      input.setSelectionRange(input.value.length, input.value.length)
+      input.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }))
+    })
+    expect(input.value).toBe('')
+
+    // Quick actions button opens the slash menu and inserts the structured task template.
+    const quickBtn = document.querySelector<HTMLButtonElement>('button[aria-label="Quick actions"]')!
+    await act(async () => { quickBtn.click() })
+    const taskOption = [...document.querySelectorAll<HTMLButtonElement>('.dsh-dot-slash-item')].find(btn => btn.textContent?.includes('/task'))!
+    expect(taskOption).toBeDefined()
+    await act(async () => { taskOption.click() })
+    expect(input.value).toContain('Please start a new task:')
+    expect(document.querySelector('.dsh-dot-slash-menu')).toBeNull()
+
+    // Expand toggle appears for multi-line template and Clear resets both text and expanded state.
+    const expandBtn = document.querySelector<HTMLButtonElement>('button[aria-label="Expand editor"]')!
+    await act(async () => { expandBtn.click() })
+    expect(document.querySelector('.dsh-dot-composer-card')?.hasAttribute('data-expanded')).toBe(true)
+    const clearBtn = document.querySelector<HTMLButtonElement>('button[aria-label="Clear input"]')!
+    await act(async () => { clearBtn.click() })
+    expect(input.value).toBe('')
+    expect(document.querySelector('.dsh-dot-composer-card')?.hasAttribute('data-expanded')).toBe(false)
+
+    // Low-frequency /segment and /settings entries remain reachable via the / menu.
+    await act(async () => { quickBtn.click() })
+    const segOption = [...document.querySelectorAll<HTMLButtonElement>('.dsh-dot-slash-item')].find(btn => btn.textContent?.includes('/segment'))!
+    await act(async () => { segOption.click(); await Promise.resolve() })
+    expect(api.newSegment).toHaveBeenCalledOnce()
+    expect(document.querySelector('.dsh-dot-seg-feedback')?.textContent).toContain('Started a new segment')
+
+    await act(async () => { quickBtn.click() })
+    const settingsOption = [...document.querySelectorAll<HTMLButtonElement>('.dsh-dot-slash-item')].find(btn => btn.textContent?.includes('/settings'))!
+    await act(async () => { settingsOption.click(); await Promise.resolve() })
+    expect(document.querySelector('aside.dsh-dot-drawer')?.getAttribute('data-kind')).toBe('settings')
+
+    await act(async () => root.unmount())
+  })
 })

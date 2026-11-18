@@ -6,10 +6,11 @@
  * the host feed and redraws on every change.
  */
 import {
-  Button, DisclosureRow, IconCheckOutlineRegular, IconCloseOutlineRegular,
-  MarkdownText, StateDot, Tag, TextShimmer, UserMessageBubble, type MarkdownLabels, type StateDotState, type TagTone,
+  Button, DisclosureRow, IconCheckOutlineRegular, IconCloseOutlineRegular, IconWarningOutlineRegular,
+  MarkdownText, StateDot, Tag, TextShimmer, Tooltip, UserMessageBubble, useDismissOnOutsidePointer,
+  type MarkdownLabels, type StateDotState, type TagTone,
 } from '@deepseek-ai/dsh-client-ui-primitives'
-import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ChangeEvent, type ClipboardEvent, type ComponentType, type KeyboardEvent, type ReactNode } from 'react'
+import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ChangeEvent, type ClipboardEvent, type ComponentType, type DragEvent, type KeyboardEvent, type ReactNode } from 'react'
 import { Board, boardCounts, type BoardFilter } from './board.tsx'
 import { headerBoardCounts, sessionLookup } from './board-groups.ts'
 import { filterVisibleChat } from './chat-filter.ts'
@@ -454,12 +455,28 @@ export function ChatPanel({ locale, api, Card, onOpenSession, renderFactorySlot 
         </div>
       </div>
       {error !== undefined ? (
-        <div className="dsh-dot-banner" role="alert">
-          <span>{t(locale, 'loadFailed')}: {error}</span>
-          <Button variant="ghost" size="sm" onClick={retry}>{t(locale, 'retry')}</Button>
+        <div className="dsh-dot-banner-wrap">
+          <div className="dsh-dot-banner" role="alert">
+            <IconWarningOutlineRegular size={14} className="dsh-dot-banner-icon" />
+            <span className="dsh-dot-banner-text">{t(locale, 'loadFailed')}: {error}</span>
+            <Button variant="ghost" size="sm" onClick={retry}>{t(locale, 'retry')}</Button>
+          </div>
         </div>
       ) : null}
-      <Composer locale={locale} running={running} disabled={snapshot === undefined} onSend={send} onStop={() => { void api.stop() }} {...sendError === undefined ? {} : { error: sendError }} />
+      <Composer
+        locale={locale}
+        sessionId={sessionId}
+        running={running}
+        disabled={snapshot === undefined}
+        items={state.items}
+        onNewSegment={() => api.newSegment()}
+        onOpenTasks={() => setDrawerTab('tasks')}
+        onOpenSettings={() => setDrawerTab('settings')}
+        onSend={send}
+        onStop={() => { void api.stop() }}
+        onDismissError={() => setSendError(undefined)}
+        {...sendError === undefined ? {} : { error: sendError }}
+      />
       </section>
       {drawerTab !== null ? (
         <WorkDrawer
@@ -872,19 +889,109 @@ function ImageNotes({ locale, images }: { locale: CopyLocale; images: readonly {
   )
 }
 
-function Composer({ locale, running, disabled, error, onSend, onStop }: { locale: CopyLocale; running: boolean; disabled: boolean; error?: string; onSend: (text: string, images: readonly ChatImage[]) => Promise<void>; onStop: () => void }) {
+const COMPOSER_TEXT_LIMIT = 20_000
+const DRAFT_KEY_PREFIX = 'dsh-dot:draft:'
+
+function readDraft(sessionId: string): string {
+  if (!sessionId) return ''
+  try { return globalThis.localStorage?.getItem(DRAFT_KEY_PREFIX + sessionId) ?? '' } catch { return '' }
+}
+
+function writeDraft(sessionId: string, value: string): void {
+  if (!sessionId) return
+  try {
+    if (value) globalThis.localStorage?.setItem(DRAFT_KEY_PREFIX + sessionId, value)
+    else globalThis.localStorage?.removeItem(DRAFT_KEY_PREFIX + sessionId)
+  } catch { /* storage blocked in restricted frames */ }
+}
+
+interface SlashCommandItem {
+  readonly id: string
+  readonly cmd: string
+  readonly keywords?: string
+  readonly label: string
+  readonly desc: string
+  readonly disabled?: boolean
+  readonly run: () => void
+}
+
+interface ComposerProps {
+  readonly locale: CopyLocale
+  readonly sessionId: string
+  readonly running: boolean
+  readonly disabled: boolean
+  readonly items: readonly ChatItem[]
+  readonly error?: string
+  readonly onNewSegment: () => Promise<string>
+  readonly onOpenTasks: () => void
+  readonly onOpenSettings: () => void
+  readonly onSend: (text: string, images: readonly ChatImage[]) => Promise<void>
+  readonly onStop: () => void
+  readonly onDismissError: () => void
+}
+
+function Composer({
+  locale, sessionId, running, disabled, items, error,
+  onNewSegment, onOpenTasks, onOpenSettings, onSend, onStop, onDismissError,
+}: ComposerProps) {
   const [text, setText] = useState('')
   const [images, setImages] = useState<ChatImage[]>([])
   const [busy, setBusy] = useState(false)
+  const [expanded, setExpanded] = useState(false)
+  const [dragging, setDragging] = useState(false)
   const [localError, setLocalError] = useState<string>()
+  const [segmentBusy, setSegmentBusy] = useState(false)
+  const [segmentDone, setSegmentDone] = useState(false)
+  const [slashPinned, setSlashPinned] = useState(false)
+  const [slashDismissed, setSlashDismissed] = useState(false)
+  const [slashIndex, setSlashIndex] = useState(0)
+  const [historyCursor, setHistoryCursor] = useState(-1)
+  const historyDraft = useRef('')
+  const dragDepth = useRef(0)
+  const hydratedSession = useRef('')
+  const composerRef = useRef<HTMLDivElement>(null)
   const area = useRef<HTMLTextAreaElement>(null)
   const picker = useRef<HTMLInputElement>(null)
+
+  // Restore per-session unsent draft once sessionId arrives without overwriting active edits.
+  useEffect(() => {
+    if (!sessionId || hydratedSession.current === sessionId) return
+    hydratedSession.current = sessionId
+    const saved = readDraft(sessionId)
+    if (saved) setText(current => current || saved)
+  }, [sessionId])
+
+  const updateText = useCallback((next: string, resetHistory = true) => {
+    setText(next)
+    writeDraft(sessionId, next)
+    if (resetHistory) setHistoryCursor(-1)
+    if (!next.startsWith('/')) setSlashDismissed(false)
+  }, [sessionId])
+
   useLayoutEffect(() => {
     const el = area.current
     if (!el) return
     el.style.height = 'auto'
-    el.style.height = Math.min(el.scrollHeight, 200) + 'px'
-  }, [text])
+    const cap = expanded ? 360 : 180
+    el.style.height = Math.min(el.scrollHeight, cap) + 'px'
+  }, [text, expanded])
+
+  useEffect(() => {
+    if (!segmentDone) return
+    const timer = setTimeout(() => setSegmentDone(false), 2200)
+    return () => clearTimeout(timer)
+  }, [segmentDone])
+
+  const sentHistory = useMemo(() => {
+    const out: string[] = []
+    for (const item of items) {
+      if (item.kind === 'user' && item.text.trim()) {
+        if (out.at(-1) !== item.text) out.push(item.text)
+      }
+    }
+    return out.slice(-30)
+  }, [items])
+
   const addFiles = useCallback(async (files: readonly File[]) => {
     setLocalError(undefined)
     const next = [...images]
@@ -897,61 +1004,543 @@ function Composer({ locale, running, disabled, error, onSend, onStop }: { locale
     }
     setImages(next)
   }, [images, locale])
+
   const submit = useCallback(() => {
     const body = text.trim()
     if ((!body && images.length === 0) || busy || disabled) return
     setBusy(true)
+    setSlashPinned(false)
     const sending = images
-    onSend(body, sending).then(() => { setText(''); setImages([]) }, () => {}).finally(() => { setBusy(false); area.current?.focus() })
-  }, [text, images, busy, disabled, onSend])
+    onSend(body, sending)
+      .then(() => {
+        setText('')
+        writeDraft(sessionId, '')
+        setImages([])
+        setHistoryCursor(-1)
+        setExpanded(false)
+      }, () => {})
+      .finally(() => { setBusy(false); area.current?.focus() })
+  }, [text, images, busy, disabled, sessionId, onSend])
+
+  const startNewSegment = useCallback(() => {
+    if (disabled || running || segmentBusy) return
+    setSegmentBusy(true)
+    setLocalError(undefined)
+    setSlashPinned(false)
+    onNewSegment().then(
+      () => { setSegmentDone(true) },
+      failure => setLocalError(failure instanceof Error ? failure.message : String(failure)),
+    ).finally(() => setSegmentBusy(false))
+  }, [disabled, running, segmentBusy, onNewSegment])
+
+  const insertTemplate = useCallback((template: string) => {
+    setSlashPinned(false)
+    updateText(template)
+    requestAnimationFrame(() => {
+      const el = area.current
+      if (!el) return
+      el.focus()
+      el.setSelectionRange(template.length, template.length)
+    })
+  }, [updateText])
+
+  const firePrompt = useCallback((promptText: string) => {
+    setSlashPinned(false)
+    if (running || busy || disabled) {
+      insertTemplate(promptText)
+      return
+    }
+    setBusy(true)
+    onSend(promptText, [])
+      .then(() => {
+        if (text.trim().startsWith('/')) {
+          setText('')
+          writeDraft(sessionId, '')
+        }
+      }, () => {})
+      .finally(() => { setBusy(false); area.current?.focus() })
+  }, [running, busy, disabled, text, sessionId, onSend, insertTemplate])
+
+  const commands = useMemo<readonly SlashCommandItem[]>(() => [
+    {
+      id: 'overview',
+      cmd: '/overview',
+      label: t(locale, 'starter1'),
+      desc: t(locale, 'cmdOverviewDesc'),
+      run: () => firePrompt(t(locale, 'starter1')),
+    },
+    {
+      id: 'pending',
+      cmd: '/pending',
+      label: t(locale, 'starter2'),
+      desc: t(locale, 'cmdPendingDesc'),
+      run: () => firePrompt(t(locale, 'starter2')),
+    },
+    {
+      id: 'task',
+      cmd: '/task',
+      label: t(locale, 'cmdTaskLabel'),
+      desc: t(locale, 'cmdTaskDesc'),
+      run: () => insertTemplate(t(locale, 'cmdTaskTemplate')),
+    },
+    {
+      id: 'remind',
+      cmd: '/remind',
+      label: t(locale, 'cmdRemindLabel'),
+      desc: t(locale, 'cmdRemindDesc'),
+      run: () => insertTemplate(t(locale, 'cmdRemindTemplate')),
+    },
+    {
+      id: 'board',
+      cmd: '/board',
+      label: t(locale, 'tasks'),
+      desc: t(locale, 'cmdBoardDesc'),
+      run: () => {
+        if (text.trim().startsWith('/')) updateText('')
+        setSlashPinned(false)
+        onOpenTasks()
+      },
+    },
+    {
+      id: 'settings',
+      cmd: '/settings',
+      keywords: 'model 模型',
+      label: t(locale, 'settings'),
+      desc: `${t(locale, 'sModel')} · ${t(locale, 'sRequests')}`,
+      run: () => {
+        if (text.trim().startsWith('/')) updateText('')
+        setSlashPinned(false)
+        onOpenSettings()
+      },
+    },
+    {
+      id: 'segment',
+      cmd: '/segment',
+      label: t(locale, 'ctxNewSegment'),
+      desc: running ? t(locale, 'ctxNewSegmentBusy') : t(locale, 'ctxNewSegmentHelp'),
+      disabled: running || segmentBusy,
+      run: () => {
+        if (text.trim().startsWith('/')) updateText('')
+        startNewSegment()
+      },
+    },
+  ], [locale, running, segmentBusy, text, firePrompt, insertTemplate, startNewSegment, updateText, onOpenTasks, onOpenSettings])
+
+  const slashToken = useMemo(() => {
+    if (!text.startsWith('/') || text.includes('\n') || /\s/.test(text)) return undefined
+    return text.slice(1).toLowerCase()
+  }, [text])
+
+  const filteredCommands = useMemo(() => {
+    if (slashPinned && slashToken === undefined) return commands
+    if (slashToken === undefined) return []
+    if (!slashToken) return commands
+    return commands.filter(item =>
+      item.cmd.slice(1).includes(slashToken)
+      || (item.keywords?.toLowerCase().includes(slashToken) ?? false)
+      || item.label.toLowerCase().includes(slashToken)
+      || item.desc.toLowerCase().includes(slashToken),
+    )
+  }, [commands, slashPinned, slashToken])
+
+  const slashOpen = !disabled && filteredCommands.length > 0 && (slashPinned || (slashToken !== undefined && !slashDismissed))
+
+  useEffect(() => { setSlashIndex(0) }, [slashToken, slashPinned])
+  useDismissOnOutsidePointer(composerRef, slashOpen, open => {
+    if (!open) {
+      setSlashPinned(false)
+      if (slashToken !== undefined) setSlashDismissed(true)
+    }
+  })
+
   const onKeyDown = useCallback((event: KeyboardEvent<HTMLTextAreaElement>) => {
-    if (event.key !== 'Enter' || event.shiftKey || event.nativeEvent.isComposing || event.keyCode === 229) return
+    if (event.nativeEvent.isComposing || event.keyCode === 229) return
+    if (slashOpen) {
+      if (event.key === 'ArrowDown') {
+        event.preventDefault()
+        setSlashIndex(idx => (idx + 1) % filteredCommands.length)
+        return
+      }
+      if (event.key === 'ArrowUp') {
+        event.preventDefault()
+        setSlashIndex(idx => (idx + filteredCommands.length - 1) % filteredCommands.length)
+        return
+      }
+      if (event.key === 'Escape') {
+        event.preventDefault()
+        setSlashPinned(false)
+        setSlashDismissed(true)
+        return
+      }
+      if ((event.key === 'Enter' && !event.shiftKey) || event.key === 'Tab') {
+        const picked = filteredCommands[slashIndex] ?? filteredCommands[0]
+        if (picked && !picked.disabled) {
+          event.preventDefault()
+          picked.run()
+          return
+        }
+      }
+    }
+
+    // Recall recent sent prompts with ArrowUp / ArrowDown when empty or browsing history.
+    if (event.key === 'ArrowUp' && !event.shiftKey && !event.altKey && !event.metaKey && sentHistory.length > 0) {
+      const el = event.currentTarget
+      const atStart = el.selectionStart === 0 && el.selectionEnd === 0
+      if ((text === '' || historyCursor >= 0) && atStart) {
+        event.preventDefault()
+        if (historyCursor === -1) historyDraft.current = text
+        const nextIdx = historyCursor === -1 ? sentHistory.length - 1 : Math.max(0, historyCursor - 1)
+        const recalled = sentHistory[nextIdx] ?? ''
+        setHistoryCursor(nextIdx)
+        setText(recalled)
+        return
+      }
+    }
+    if (event.key === 'ArrowDown' && !event.shiftKey && !event.altKey && !event.metaKey && historyCursor >= 0) {
+      const el = event.currentTarget
+      const atEnd = el.selectionStart === text.length && el.selectionEnd === text.length
+      if (atEnd) {
+        event.preventDefault()
+        if (historyCursor >= sentHistory.length - 1) {
+          setHistoryCursor(-1)
+          setText(historyDraft.current)
+        } else {
+          const nextIdx = historyCursor + 1
+          setHistoryCursor(nextIdx)
+          setText(sentHistory[nextIdx] ?? '')
+        }
+        return
+      }
+    }
+
+    if (event.key !== 'Enter' || event.shiftKey) return
     event.preventDefault()
     submit()
-  }, [submit])
+  }, [slashOpen, filteredCommands, slashIndex, sentHistory, text, historyCursor, submit])
+
   const onPaste = useCallback((event: ClipboardEvent<HTMLTextAreaElement>) => {
     const files = [...event.clipboardData.files]
     if (files.length === 0) return
     event.preventDefault()
     void addFiles(files)
   }, [addFiles])
+
   const onPick = useCallback((event: ChangeEvent<HTMLInputElement>) => {
     const files = [...event.target.files ?? []]
     event.target.value = ''
     if (files.length > 0) void addFiles(files)
   }, [addFiles])
+
+  const hasDragFiles = (event: DragEvent<HTMLElement>) => Array.from(event.dataTransfer?.types ?? []).includes('Files')
+  const onDragEnter = useCallback((event: DragEvent<HTMLDivElement>) => {
+    if (disabled || !hasDragFiles(event)) return
+    event.preventDefault()
+    dragDepth.current += 1
+    setDragging(true)
+  }, [disabled])
+  const onDragOver = useCallback((event: DragEvent<HTMLDivElement>) => {
+    if (disabled || !hasDragFiles(event)) return
+    event.preventDefault()
+    event.dataTransfer.dropEffect = 'copy'
+  }, [disabled])
+  const onDragLeave = useCallback((event: DragEvent<HTMLDivElement>) => {
+    if (!dragging) return
+    event.preventDefault()
+    dragDepth.current = Math.max(0, dragDepth.current - 1)
+    if (dragDepth.current === 0) setDragging(false)
+  }, [dragging])
+  const onDrop = useCallback((event: DragEvent<HTMLDivElement>) => {
+    if (disabled) return
+    event.preventDefault()
+    dragDepth.current = 0
+    setDragging(false)
+    const files = [...event.dataTransfer?.files ?? []]
+    if (files.length > 0) void addFiles(files)
+  }, [disabled, addFiles])
+
+  const clearAll = useCallback(() => {
+    updateText('')
+    setImages([])
+    setLocalError(undefined)
+    setExpanded(false)
+    onDismissError()
+    area.current?.focus()
+  }, [updateText, onDismissError])
+
   const shownError = localError ?? error
+  const canSend = !disabled && !busy && (Boolean(text.trim()) || images.length > 0)
+  const hasContent = text.length > 0 || images.length > 0
+  const showExpandToggle = expanded || text.length > 100 || text.includes('\n')
+  const charCount = text.length
+
   return (
-    <div className="dsh-dot-composer">
-      {shownError !== undefined ? <div className="dsh-dot-error">{localError !== undefined ? shownError : `${t(locale, 'sendFailed')}${shownError}`}</div> : null}
-      {images.length > 0 ? (
-        <div className="dsh-dot-images">
-          {images.map((image, index) => (
-            <span key={`${image.name ?? image.mediaType}:${index}`} className="dsh-dot-image-chip">
-              {image.name ?? t(locale, 'imageAttached')}
-              <button type="button" aria-label={t(locale, 'removeImage')} onClick={() => setImages(list => list.filter((_, item) => item !== index))}>×</button>
-            </span>
-          ))}
+    <div className="dsh-dot-composer" ref={composerRef}>
+      {shownError !== undefined ? (
+        <div className="dsh-dot-error" role="alert">
+          <IconWarningOutlineRegular size={14} className="dsh-dot-error-icon" />
+          <span className="dsh-dot-error-text">{localError !== undefined ? shownError : `${t(locale, 'sendFailed')}${shownError}`}</span>
+          <button
+            type="button"
+            className="dsh-dot-error-dismiss"
+            aria-label={t(locale, 'dismissError')}
+            title={t(locale, 'dismissError')}
+            onClick={() => { setLocalError(undefined); onDismissError() }}
+          >
+            <IconCloseOutlineRegular size={13} />
+          </button>
         </div>
       ) : null}
-      <div className="dsh-dot-inputrow">
-        <input ref={picker} className="dsh-dot-file" type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple onChange={onPick} />
-        <Button variant="outline" size="sm" disabled={disabled || busy} aria-label={t(locale, 'attachImage')} onClick={() => picker.current?.click()}>{t(locale, 'attachImage')}</Button>
-        <textarea
-          ref={area}
-          className="dsh-dot-input"
-          rows={1}
-          value={text}
-          placeholder={running ? t(locale, 'placeholderRunning') : t(locale, 'placeholder')}
-          onChange={event => setText(event.target.value)}
-          onKeyDown={onKeyDown}
-          onPaste={onPaste}
-          disabled={disabled}
-        />
-        {running ? <Button variant="outline" size="sm" onClick={onStop}>{t(locale, 'stop')}</Button> : null}
-        <Button variant="primary" size="sm" disabled={disabled || busy || (!text.trim() && images.length === 0)} onClick={submit}>{busy ? t(locale, 'sending') : t(locale, 'send')}</Button>
+
+      {slashOpen ? (
+        <div className="dsh-dot-slash-menu" role="listbox" aria-label={t(locale, 'quickActions')}>
+          <div className="dsh-dot-slash-head">
+            <span>{t(locale, 'quickActions')}</span>
+            <span className="dsh-dot-slash-kbd">↑↓ · Enter</span>
+          </div>
+          <div className="dsh-dot-slash-list">
+            {filteredCommands.map((item, idx) => (
+              <button
+                key={item.id}
+                type="button"
+                role="option"
+                aria-selected={idx === slashIndex}
+                {...(item.disabled ? { disabled: true } : {})}
+                className="dsh-dot-slash-item"
+                data-active={idx === slashIndex ? '' : undefined}
+                onMouseEnter={() => setSlashIndex(idx)}
+                onClick={() => item.run()}
+              >
+                <code className="dsh-dot-slash-cmd">{item.cmd}</code>
+                <div className="dsh-dot-slash-copy">
+                  <span className="dsh-dot-slash-label">{item.label}</span>
+                  <span className="dsh-dot-slash-desc">{item.desc}</span>
+                </div>
+              </button>
+            ))}
+          </div>
+        </div>
+      ) : null}
+
+      <div
+        className="dsh-dot-composer-card"
+        data-running={running ? '' : undefined}
+        data-disabled={disabled ? '' : undefined}
+        data-dragging={dragging ? '' : undefined}
+        data-expanded={expanded ? '' : undefined}
+        onDragEnter={onDragEnter}
+        onDragOver={onDragOver}
+        onDragLeave={onDragLeave}
+        onDrop={onDrop}
+      >
+        {dragging ? (
+          <div className="dsh-dot-drop-mask" aria-hidden="true">
+            <ImageGlyph />
+            <span>{t(locale, 'dropImagesHint').replace('{max}', String(CHAT_IMAGE_LIMIT))}</span>
+          </div>
+        ) : null}
+
+        {images.length > 0 ? (
+          <div className="dsh-dot-attachments">
+            {images.map((image, index) => (
+              <div key={`${image.name ?? image.mediaType}:${index}`} className="dsh-dot-attachment">
+                <img
+                  className="dsh-dot-attachment-thumb"
+                  src={`data:${image.mediaType};base64,${image.data}`}
+                  alt={image.name ?? t(locale, 'imageAttached')}
+                />
+                <div className="dsh-dot-attachment-meta">
+                  <span className="dsh-dot-attachment-name">{image.name ?? t(locale, 'imageAttached')}</span>
+                  <span className="dsh-dot-attachment-ext">{image.mediaType.replace('image/', '').toUpperCase()}</span>
+                </div>
+                <button
+                  type="button"
+                  className="dsh-dot-attachment-remove"
+                  aria-label={t(locale, 'removeImage')}
+                  title={t(locale, 'removeImage')}
+                  onClick={() => setImages(list => list.filter((_, item) => item !== index))}
+                >
+                  ×
+                </button>
+              </div>
+            ))}
+            {images.length < CHAT_IMAGE_LIMIT ? (
+              <button
+                type="button"
+                className="dsh-dot-attachment-add"
+                disabled={disabled || busy}
+                aria-label={t(locale, 'attachImage')}
+                title={`${t(locale, 'attachImage')} (${images.length}/${CHAT_IMAGE_LIMIT})`}
+                onClick={() => picker.current?.click()}
+              >
+                <PlusGlyph />
+                <span>{images.length}/{CHAT_IMAGE_LIMIT}</span>
+              </button>
+            ) : null}
+          </div>
+        ) : null}
+
+        <div className="dsh-dot-editor-wrap">
+          <textarea
+            ref={area}
+            className="dsh-dot-input"
+            rows={1}
+            maxLength={COMPOSER_TEXT_LIMIT}
+            value={text}
+            placeholder={running ? t(locale, 'placeholderRunning') : t(locale, 'placeholder')}
+            onChange={event => updateText(event.target.value)}
+            onKeyDown={onKeyDown}
+            onPaste={onPaste}
+            disabled={disabled}
+          />
+          {showExpandToggle ? (
+            <Tooltip label={t(locale, expanded ? 'collapseInput' : 'expandInput')} side="top">
+              <button
+                type="button"
+                className="dsh-dot-expand-btn"
+                aria-label={t(locale, expanded ? 'collapseInput' : 'expandInput')}
+                aria-pressed={expanded}
+                onClick={() => setExpanded(value => !value)}
+              >
+                {expanded ? <NarrowGlyph /> : <WidenGlyph />}
+              </button>
+            </Tooltip>
+          ) : null}
+        </div>
+
+        <div className="dsh-dot-composer-bar">
+          <div className="dsh-dot-composer-tools">
+            <input ref={picker} className="dsh-dot-file" type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple onChange={onPick} />
+            <Tooltip label={t(locale, 'attachImage')} side="top">
+              <button
+                type="button"
+                className="dsh-dot-tool-btn"
+                disabled={disabled || busy || images.length >= CHAT_IMAGE_LIMIT}
+                aria-label={t(locale, 'attachImage')}
+                onClick={() => picker.current?.click()}
+              >
+                <ImageGlyph />
+                {images.length > 0 ? <span className="dsh-dot-tool-count">{images.length}</span> : null}
+              </button>
+            </Tooltip>
+
+            <Tooltip label={t(locale, 'quickActions')} side="top">
+              <button
+                type="button"
+                className="dsh-dot-tool-btn"
+                disabled={disabled}
+                aria-label={t(locale, 'quickActions')}
+                aria-expanded={slashOpen}
+                aria-pressed={slashOpen}
+                onClick={() => {
+                  setSlashDismissed(false)
+                  setSlashPinned(open => !open)
+                }}
+              >
+                <SlashCommandGlyph />
+              </button>
+            </Tooltip>
+
+            {segmentBusy || segmentDone ? (
+              <span className="dsh-dot-seg-feedback" data-done={segmentDone ? '' : undefined} role="status">
+                {segmentDone ? <IconCheckOutlineRegular size={12} /> : null}
+                <span>{segmentBusy ? t(locale, 'ctxNewSegmentRunning') : t(locale, 'ctxNewSegmentDone')}</span>
+              </span>
+            ) : null}
+          </div>
+
+          <div className="dsh-dot-composer-right">
+            {charCount >= 200 ? (
+              <span className="dsh-dot-char-count" data-warn={charCount >= COMPOSER_TEXT_LIMIT * 0.9 ? '' : undefined}>
+                {charCount.toLocaleString()}/{COMPOSER_TEXT_LIMIT.toLocaleString()}
+              </span>
+            ) : (
+              <span className="dsh-dot-composer-hint">{t(locale, 'composerHint')}</span>
+            )}
+
+            {hasContent && !busy ? (
+              <Tooltip label={t(locale, 'clearInput')} side="top">
+                <button
+                  type="button"
+                  className="dsh-dot-tool-btn dsh-dot-clear-btn"
+                  aria-label={t(locale, 'clearInput')}
+                  onClick={clearAll}
+                >
+                  <ClearGlyph />
+                </button>
+              </Tooltip>
+            ) : null}
+
+            {running ? (
+              <button type="button" className="dsh-dot-stop-btn" onClick={onStop}>
+                <StopSquareGlyph />
+                <span>{t(locale, 'stop')}</span>
+              </button>
+            ) : null}
+
+            <button
+              type="button"
+              className="dsh-dot-send-btn"
+              disabled={!canSend}
+              onClick={submit}
+            >
+              <SendArrowGlyph />
+              <span>{busy ? t(locale, 'sending') : t(locale, 'send')}</span>
+            </button>
+          </div>
+        </div>
       </div>
     </div>
+  )
+}
+
+function ImageGlyph() {
+  return (
+    <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.35" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <rect x="2" y="2.5" width="12" height="11" rx="2" />
+      <circle cx="5.6" cy="6" r="1.1" />
+      <path d="M2.5 11.5 6 8.2a1 1 0 0 1 1.4 0L10 10.7l1.6-1.5a1 1 0 0 1 1.4 0l1 1" />
+    </svg>
+  )
+}
+
+function SlashCommandGlyph() {
+  return (
+    <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <rect x="2" y="2" width="12" height="12" rx="3" />
+      <path d="M9.6 4.8 6.4 11.2" />
+    </svg>
+  )
+}
+
+function ClearGlyph() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.35" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M3 4.5h10M6 4.5V3.2c0-.4.3-.7.7-.7h2.6c.4 0 .7.3.7.7v1.3M4.5 4.5l.6 8.2c0 .7.6 1.3 1.3 1.3h3.2c.7 0 1.3-.6 1.3-1.3l.6-8.2" />
+    </svg>
+  )
+}
+
+function PlusGlyph() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" aria-hidden="true">
+      <path d="M8 3.5v9M3.5 8h9" />
+    </svg>
+  )
+}
+
+function SendArrowGlyph() {
+  return (
+    <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M8 12.8V3.5M4.2 7.2 8 3.4l3.8 3.8" />
+    </svg>
+  )
+}
+
+function StopSquareGlyph() {
+  return (
+    <svg width="11" height="11" viewBox="0 0 12 12" fill="currentColor" aria-hidden="true">
+      <rect x="2" y="2" width="8" height="8" rx="1.8" />
+    </svg>
   )
 }
 
@@ -1020,7 +1609,7 @@ export const chatCss = settingsCss + `
 }
 .dsh-dot-chat .dsh-dot-head > button,
 .dsh-dot-chat .dsh-dot-drawer-head > button,
-.dsh-dot-chat .dsh-dot-inputrow > button,
+.dsh-dot-chat .dsh-dot-composer-bar button,
 .dsh-dot-chat .dsh-dot-banner > button,
 .dsh-dot-chat .dsh-ui-actions > button { flex-shrink: 0; white-space: nowrap; }
 .dsh-dot-chat .dsh-ui-actions { flex-wrap: wrap; }
@@ -1252,24 +1841,231 @@ export const chatCss = settingsCss + `
   font-size: 12px; line-height: 16px; color: var(--dsw-alias-label-tertiary);
 }
 .dsh-dot-chat .dsh-dot-segment::before, .dsh-dot-chat .dsh-dot-segment::after { content: ''; flex: 1; height: 0.5px; background: var(--dsw-alias-border-l2); }
-.dsh-dot-chat .dsh-dot-error { font-size: 13px; line-height: 20px; color: var(--dsw-alias-label-error); }
+.dsh-dot-chat .dsh-dot-banner-wrap {
+  width: 100%; max-width: 760px; margin: 0 auto; padding: 4px 16px 0; box-sizing: border-box;
+}
 .dsh-dot-chat .dsh-dot-banner {
-  display: flex; align-items: center; gap: 8px; justify-content: center; padding: 6px 16px;
-  font-size: 12px; color: var(--dsw-alias-label-error); background: var(--dsw-alias-bg-layer-1);
-}
-.dsh-dot-chat .dsh-dot-composer {
-  display: flex; flex-direction: column; gap: 6px;
-  width: 100%; max-width: 760px; margin: 0 auto; padding: 8px 16px 16px; box-sizing: border-box;
-}
-.dsh-dot-chat .dsh-dot-inputrow {
-  display: flex; align-items: flex-end; gap: 8px; padding: 8px 8px 8px 14px;
+  display: flex; align-items: center; gap: 8px; padding: 7px 10px 7px 12px;
   border-radius: var(--dsw-radius-md); background: var(--dsw-alias-bg-layer-1);
   box-shadow: var(--dsw-elevation-stroke);
+  font-size: 12px; line-height: 18px; color: var(--dsw-alias-label-error);
+}
+.dsh-dot-chat .dsh-dot-banner-icon { flex-shrink: 0; }
+.dsh-dot-chat .dsh-dot-banner-text { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.dsh-dot-chat .dsh-dot-error {
+  display: flex; align-items: center; gap: 8px; padding: 7px 10px 7px 12px;
+  border-radius: var(--dsw-radius-md); background: var(--dsw-alias-bg-layer-1);
+  box-shadow: var(--dsw-elevation-stroke);
+  font-size: 12px; line-height: 18px; color: var(--dsw-alias-label-error);
+}
+.dsh-dot-chat .dsh-dot-error-icon { flex-shrink: 0; }
+.dsh-dot-chat .dsh-dot-error-text { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.dsh-dot-chat .dsh-dot-error-dismiss {
+  display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 22px;
+  padding: 0; border: 0; border-radius: var(--dsw-radius-sm); background: transparent;
+  color: var(--dsw-alias-label-tertiary); cursor: pointer; flex-shrink: 0;
+}
+.dsh-dot-chat .dsh-dot-error-dismiss:hover { background: var(--dsw-alias-interactive-bg-hover); color: var(--dsw-alias-label-primary); }
+.dsh-dot-chat .dsh-dot-composer {
+  position: relative; display: flex; flex-direction: column; gap: 8px;
+  width: 100%; max-width: 760px; margin: 0 auto; padding: 8px 16px 16px; box-sizing: border-box;
+}
+.dsh-dot-chat .dsh-dot-composer-card {
+  position: relative; display: flex; flex-direction: column;
+  border-radius: 14px; background: var(--dsw-alias-bg-layer-1);
+  border: 1px solid var(--dsw-alias-border-l2, rgba(128, 128, 128, 0.22));
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.12);
+  transition: border-color var(--ds-transition-duration, 0.18s) ease, box-shadow var(--ds-transition-duration, 0.18s) ease, background-color var(--ds-transition-duration, 0.18s) ease;
+}
+.dsh-dot-chat .dsh-dot-composer-card:hover:not([data-disabled]) {
+  border-color: var(--dsw-alias-border-l3, rgba(128, 128, 128, 0.34));
+}
+.dsh-dot-chat .dsh-dot-composer-card:focus-within {
+  border-color: var(--dsw-alias-brand-primary, #4d6bfe);
+  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.16), 0 0 0 2px color-mix(in srgb, var(--dsw-alias-brand-primary, #4d6bfe) 16%, transparent);
+}
+.dsh-dot-chat .dsh-dot-composer-card[data-running]:not(:focus-within) {
+  border-color: color-mix(in srgb, var(--dsw-alias-state-business-primary, #4d6bfe) 40%, var(--dsw-alias-border-l2, transparent));
+}
+.dsh-dot-chat .dsh-dot-composer-card[data-disabled] { opacity: 0.65; }
+.dsh-dot-chat .dsh-dot-composer-card[data-dragging] {
+  border-color: var(--dsw-alias-brand-primary, #4d6bfe);
+}
+.dsh-dot-chat .dsh-dot-drop-mask {
+  position: absolute; inset: 3px; z-index: 4; display: flex; align-items: center; justify-content: center; gap: 8px;
+  border-radius: 11px; border: 1.5px dashed var(--dsw-alias-brand-primary, #4d6bfe);
+  background: color-mix(in srgb, var(--dsw-alias-bg-layer-1) 90%, var(--dsw-alias-brand-primary, #4d6bfe));
+  color: var(--dsw-alias-label-primary); font-size: 13px; font-weight: 500; pointer-events: none;
+}
+.dsh-dot-chat .dsh-dot-attachments {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 8px;
+  padding: 10px 12px 2px;
+}
+.dsh-dot-chat .dsh-dot-attachment {
+  position: relative; display: inline-flex; align-items: center; gap: 8px; max-width: 200px;
+  padding: 4px 26px 4px 4px; border-radius: 9px; background: var(--dsw-alias-bg-layer-2);
+  box-shadow: var(--dsw-elevation-stroke);
+}
+.dsh-dot-chat .dsh-dot-attachment-thumb {
+  width: 36px; height: 36px; border-radius: 6px; object-fit: cover; flex-shrink: 0;
+  background: var(--dsw-alias-bg-base);
+}
+.dsh-dot-chat .dsh-dot-attachment-meta { display: flex; flex-direction: column; min-width: 0; gap: 1px; }
+.dsh-dot-chat .dsh-dot-attachment-name {
+  font-size: 12px; line-height: 16px; color: var(--dsw-alias-label-primary);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.dsh-dot-chat .dsh-dot-attachment-ext {
+  font: 10px/13px var(--ds-font-family-code); color: var(--dsw-alias-label-tertiary);
+}
+.dsh-dot-chat .dsh-dot-attachment-remove {
+  position: absolute; top: 4px; right: 4px; width: 18px; height: 18px;
+  display: inline-flex; align-items: center; justify-content: center; padding: 0;
+  border: 0; border-radius: 9px; background: transparent; color: var(--dsw-alias-label-tertiary);
+  font-size: 14px; line-height: 1; cursor: pointer;
+}
+.dsh-dot-chat .dsh-dot-attachment-remove:hover {
+  background: var(--dsw-alias-interactive-bg-hover); color: var(--dsw-alias-label-primary);
+}
+.dsh-dot-chat .dsh-dot-attachment-add {
+  display: inline-flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px;
+  width: 44px; height: 44px; padding: 0; border-radius: 9px;
+  border: 1px dashed var(--dsw-alias-border-l2, rgba(128, 128, 128, 0.3));
+  background: transparent; color: var(--dsw-alias-label-tertiary);
+  font: 10px/12px var(--ds-font-family-code); cursor: pointer;
+}
+.dsh-dot-chat .dsh-dot-attachment-add:hover:not(:disabled) {
+  border-color: var(--dsw-alias-label-secondary); color: var(--dsw-alias-label-primary);
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+.dsh-dot-chat .dsh-dot-editor-wrap {
+  position: relative; display: flex; align-items: flex-start; gap: 6px;
+  padding: 11px 12px 4px 14px;
 }
 .dsh-dot-chat .dsh-dot-input {
-  flex: 1; min-width: 0; resize: none; border: 0; outline: none; background: transparent;
+  flex: 1; min-width: 0; min-height: 26px; max-height: 180px; resize: none;
+  border: 0; outline: none; background: transparent;
   color: var(--dsw-alias-label-primary); font: inherit; font-size: 14px; line-height: 22px;
-  padding: 3px 0; max-height: 200px;
+  padding: 2px 0; overflow-y: auto;
+}
+.dsh-dot-chat .dsh-dot-composer-card[data-expanded] .dsh-dot-input {
+  min-height: 132px; max-height: 360px;
+}
+.dsh-dot-chat .dsh-dot-input::placeholder { color: var(--dsw-alias-label-dimmed); }
+.dsh-dot-chat .dsh-dot-expand-btn {
+  display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 24px;
+  padding: 0; border: 0; border-radius: var(--dsw-radius-sm); background: transparent;
+  color: var(--dsw-alias-label-tertiary); cursor: pointer; flex-shrink: 0;
+}
+.dsh-dot-chat .dsh-dot-expand-btn:hover {
+  background: var(--dsw-alias-interactive-bg-hover); color: var(--dsw-alias-label-primary);
+}
+.dsh-dot-chat .dsh-dot-composer-bar {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  padding: 4px 8px 8px 10px; flex-wrap: wrap;
+}
+.dsh-dot-chat .dsh-dot-composer-tools {
+  display: flex; align-items: center; gap: 4px; min-width: 0;
+}
+.dsh-dot-chat .dsh-dot-composer-right {
+  display: flex; align-items: center; gap: 6px; margin-left: auto; flex-shrink: 0;
+}
+.dsh-dot-chat .dsh-dot-tool-btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 4px;
+  min-width: 28px; height: 28px; padding: 0 6px; border: 0; border-radius: 8px;
+  background: transparent; color: var(--dsw-alias-label-secondary); font: inherit; cursor: pointer;
+  transition: background-color 0.15s ease, color 0.15s ease;
+}
+.dsh-dot-chat .dsh-dot-tool-btn:hover:not(:disabled),
+.dsh-dot-chat .dsh-dot-tool-btn[aria-pressed='true'] {
+  background: var(--dsw-alias-interactive-bg-hover); color: var(--dsw-alias-label-primary);
+}
+.dsh-dot-chat .dsh-dot-tool-btn:disabled { opacity: 0.4; cursor: default; }
+.dsh-dot-chat .dsh-dot-tool-count {
+  font: 11px/14px var(--ds-font-family-code); padding: 0 4px; border-radius: 6px;
+  background: var(--dsw-alias-bg-layer-2); color: var(--dsw-alias-label-primary);
+}
+.dsh-dot-chat .dsh-dot-seg-feedback {
+  display: inline-flex; align-items: center; gap: 4px; margin-left: 4px;
+  font-size: 12px; line-height: 16px; color: var(--dsw-alias-label-tertiary); white-space: nowrap;
+}
+.dsh-dot-chat .dsh-dot-seg-feedback[data-done] { color: var(--dsw-alias-state-success-primary); }
+.dsh-dot-chat .dsh-dot-composer-hint {
+  font-size: 11px; line-height: 16px; color: var(--dsw-alias-label-dimmed);
+  white-space: nowrap; user-select: none; margin-right: 2px;
+}
+.dsh-dot-chat .dsh-dot-char-count {
+  font: 11px/16px var(--ds-font-family-code); color: var(--dsw-alias-label-tertiary);
+  font-variant-numeric: tabular-nums; white-space: nowrap; margin-right: 2px;
+}
+.dsh-dot-chat .dsh-dot-char-count[data-warn] { color: var(--dsw-alias-state-warn-primary); }
+@container (max-width: 560px) {
+  .dsh-dot-chat .dsh-dot-composer-hint { display: none; }
+}
+.dsh-dot-chat .dsh-dot-stop-btn {
+  display: inline-flex; align-items: center; gap: 5px; height: 30px; padding: 0 11px;
+  border: 0.5px solid var(--dsw-alias-border-l2); border-radius: 15px;
+  background: var(--dsw-alias-bg-layer-2); color: var(--dsw-alias-label-primary);
+  font: inherit; font-size: 12px; line-height: 16px; font-weight: 500; white-space: nowrap; cursor: pointer;
+  transition: background-color 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+.dsh-dot-chat .dsh-dot-stop-btn:hover {
+  border-color: var(--dsw-alias-label-error); color: var(--dsw-alias-label-error);
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+.dsh-dot-chat .dsh-dot-send-btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 5px;
+  height: 30px; padding: 0 13px 0 11px; border: 0; border-radius: 15px;
+  background: var(--dsw-alias-brand-primary, #4d6bfe);
+  color: var(--dsw-alias-label-primary-foreground, #ffffff);
+  font: inherit; font-size: 12px; line-height: 16px; font-weight: 500; white-space: nowrap; cursor: pointer;
+  transition: opacity 0.15s ease, transform 0.12s ease, background-color 0.15s ease;
+}
+.dsh-dot-chat .dsh-dot-send-btn:hover:not(:disabled) { filter: brightness(1.08); }
+.dsh-dot-chat .dsh-dot-send-btn:active:not(:disabled) { transform: scale(0.97); }
+.dsh-dot-chat .dsh-dot-send-btn:disabled {
+  background: var(--dsw-alias-bg-layer-2); color: var(--dsw-alias-label-dimmed);
+  cursor: default; filter: none;
+}
+.dsh-dot-chat .dsh-dot-slash-menu {
+  position: absolute; left: 16px; right: 16px; bottom: calc(100% - 4px); z-index: 8;
+  max-width: 440px; border-radius: 12px; overflow: hidden;
+  background: var(--dsw-alias-bg-layer-1); border: 0.5px solid var(--dsw-alias-border-l2);
+  box-shadow: var(--dsw-elevation-prominent);
+  animation: dsh-dot-fade 0.14s ease-out;
+}
+.dsh-dot-chat .dsh-dot-slash-head {
+  display: flex; align-items: center; justify-content: space-between; padding: 7px 12px;
+  border-bottom: 0.5px solid var(--dsw-alias-border-l2);
+  font-size: 11px; line-height: 16px; font-weight: 600; color: var(--dsw-alias-label-tertiary);
+}
+.dsh-dot-chat .dsh-dot-slash-kbd { font-family: var(--ds-font-family-code); font-weight: 400; }
+.dsh-dot-chat .dsh-dot-slash-list {
+  display: flex; flex-direction: column; gap: 2px; max-height: 256px; overflow-y: auto; padding: 5px;
+}
+.dsh-dot-chat .dsh-dot-slash-item {
+  display: flex; align-items: center; gap: 10px; width: 100%; padding: 7px 9px;
+  border: 0; border-radius: 8px; background: transparent; text-align: left;
+  color: var(--dsw-alias-label-primary); font: inherit; cursor: pointer;
+}
+.dsh-dot-chat .dsh-dot-slash-item[data-active]:not(:disabled),
+.dsh-dot-chat .dsh-dot-slash-item:hover:not(:disabled) {
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+.dsh-dot-chat .dsh-dot-slash-item:disabled { opacity: 0.45; cursor: default; }
+.dsh-dot-chat .dsh-dot-slash-cmd {
+  flex-shrink: 0; padding: 2px 6px; border-radius: 5px;
+  background: var(--dsw-alias-bg-layer-2); color: var(--dsw-alias-label-secondary);
+  font: 11px/16px var(--ds-font-family-code);
+}
+.dsh-dot-chat .dsh-dot-slash-copy { display: flex; flex-direction: column; min-width: 0; gap: 1px; }
+.dsh-dot-chat .dsh-dot-slash-label {
+  font-size: 13px; line-height: 18px; font-weight: 500;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.dsh-dot-chat .dsh-dot-slash-desc {
+  font-size: 11px; line-height: 15px; color: var(--dsw-alias-label-tertiary);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .dsh-dot-chat .dsh-dot-file { display: none; }
 .dsh-dot-chat .dsh-dot-images { display: flex; flex-wrap: wrap; gap: 6px; }
@@ -1281,5 +2077,4 @@ export const chatCss = settingsCss + `
 .dsh-dot-chat .dsh-dot-image-chip button {
   border: 0; background: transparent; color: inherit; cursor: pointer; padding: 0; font: inherit;
 }
-.dsh-dot-chat .dsh-dot-input::placeholder { color: var(--dsw-alias-label-dimmed); }
 `

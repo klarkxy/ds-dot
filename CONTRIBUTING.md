@@ -1,15 +1,26 @@
 # Contributing to ds-dot
 
-## Branches
+## Local development
 
-| Branch | Purpose | Who writes to it |
-|---|---|---|
-| `main` | Exactly what is published on npm. Every commit here is a release or hotfix. | Release and hotfix pull requests only |
-| `dev` | Integration branch. Always green, always releasable as a prerelease. | Pull requests only |
-| `feat/<issue>-<slug>`, `fix/<issue>-<slug>`, `refactor/...`, `docs/...` | One piece of work, cut from `dev`. | You |
-| `hotfix/<slug>` | Urgent fix for the published version, cut from `main`. | Maintainers |
+Install dependencies, link your checkout into DeepSeek Harness, and run a watch build while developing:
 
-Nobody pushes directly to `main` or `dev`; repository rulesets enforce this.
+```sh
+pnpm install
+dsh plugin --profile web add link:/path/to/ds-dot
+pnpm watch
+```
+
+The linked checkout exposes `src`, and `pnpm watch` rebuilds `lib` as you edit. If pnpm asks for build permission when linking from source, allow `ds-dot` in that profile's `pnpm-workspace.yaml` and run `dsh plugin --profile web add link:/path/to/ds-dot` again.
+
+Before pushing, run the same checks CI runs:
+
+```sh
+pnpm typecheck && pnpm test && pnpm build
+```
+
+## Branches and workflow
+
+`dev` is the integration branch for ongoing work; `main` holds only published releases and hotfixes. Direct pushes to either branch are blocked by repository rulesets.
 
 ```mermaid
 flowchart LR
@@ -22,51 +33,21 @@ flowchart LR
   M -->|"sync PR, merge commit"| D
 ```
 
-## Everyday work
+Feature and fix pull requests squash-merge into `dev` so the PR title becomes the single commit and release-notes line. Release (`dev` → `main`), hotfix (`hotfix/*` → `main`), and sync (`main` → `dev`) pull requests use merge commits so `main` and `dev` continue sharing history.
 
-1. **Start from an issue.** Open one (or pick one) and assign yourself so nobody
-   duplicates the work. Small typo or docs fixes can skip this.
-2. **Branch from the latest `dev`:**
+1. **Start from an issue.** Open or pick an issue and assign yourself so nobody duplicates the work (small typo or docs fixes can skip this).
+2. **Branch from the latest `dev`** (using `feat/<issue>-<slug>`, `fix/<issue>-<slug>`, `refactor/...`, or `docs/...`):
    ```sh
    git switch dev && git pull
    git switch -c feat/123-short-name
    ```
-3. **Commit as you like** on your branch; the PR is squashed, so only the PR
-   title ends up in `dev`.
-4. **Open a pull request into `dev`.** GitHub preselects `main` (the default
-   branch); change the base to `dev`.
-   - Title in [Conventional Commits](https://www.conventionalcommits.org/) form:
-     `feat(work): render English work orders`. Allowed types: `feat`, `fix`,
-     `perf`, `refactor`, `docs`, `test`, `build`, `ci`, `chore`, `revert`,
-     `release`. Add `!` for breaking changes: `feat(api)!: ...`.
-   - Put `Closes #123` in the description so the issue closes on merge.
-   - Keep it focused; prefer several small PRs to one large one.
-5. **Pass checks and review.** `CI result` (typecheck, test, build and pack on
-   Linux and Windows) and `PR title` must be green. Get a review (a teammate,
-   Dorothy or a review bot) and resolve every review thread; unresolved
-   threads block the merge. No approval count is enforced while the project
-   has a single maintainer.
-6. **Squash and merge**, then delete the branch.
-
-If `dev` moved on while you worked, update your branch with
-`git merge origin/dev` (or rebase if you prefer, then force-push your own
-branch only).
-
-Run the same checks locally before pushing:
-
-```sh
-pnpm install
-pnpm typecheck && pnpm test && pnpm build
-```
-
-## Merge methods at a glance
-
-| Pull request | Method | Why |
-|---|---|---|
-| feature/fix → `dev` | **Squash** | One commit per PR, title becomes the release-notes line |
-| `dev` → `main` (release) | **Merge commit** | Keeps `main` and `dev` sharing history |
-| `hotfix/*` → `main` | **Merge commit** | Same |
-| `main` → `dev` (sync) | **Merge commit** | Squashing here would leave `main` and `dev` permanently diverged |
+   If `dev` moves on while you work, update with `git merge origin/dev` (or rebase and force-push your own branch only).
+3. **Commit as you like** on your branch, then **open a pull request into `dev`**. GitHub preselects `main` (the default branch); change the base to `dev`.
+   - Use a [Conventional Commits](https://www.conventionalcommits.org/) title (`feat(work): render English work orders`). Allowed types: `feat`, `fix`, `perf`, `refactor`, `docs`, `test`, `build`, `ci`, `chore`, `revert`, `release`. Add `!` for breaking changes (`feat(api)!: ...`).
+   - Add `Closes #123` in the description so the issue closes when merged.
+   - Keep PRs focused; prefer several small PRs to one large one.
+4. **Pass checks and review.** `CI result` (typecheck, test, build, and pack on Linux and Windows) and `PR title` must pass, and all review threads must be resolved before squash-merging into `dev`.
+5. **Squash and merge**, then delete the branch.
 
 ## Releases and hotfixes
 

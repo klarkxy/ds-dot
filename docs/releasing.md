@@ -1,68 +1,39 @@
 # Publishing ds-dot
 
-The npm package includes the built host entries and browser client; consumers
-do not need to build it. Publishing a GitHub Release is the single action that
-both records the tag and starts npm publish (`.github/workflows/publish.yml`).
+Publishing a GitHub Release runs [`.github/workflows/publish.yml`](../.github/workflows/publish.yml) to check, build, and publish `ds-dot` to npm.
 
-| Release kind | Version example | Tagged on | GitHub Release | npm dist-tag |
+| Release kind | Version example | Target branch | GitHub Release | npm dist-tag |
 |---|---|---|---|---|
 | Stable | `0.3.0` | `main` | normal | `latest` |
 | Prerelease | `0.3.0-rc.1` | `dev` (or `main`) | marked *pre-release* | `next` |
 
-The publish workflow refuses a release whose tag does not match
-`package.json`, whose prerelease flag does not match the version, or whose
-commit is not on the allowed branch.
+The release tag (`v<version>`), `package.json` `version`, GitHub *pre-release* flag, and branch must agree.
 
 ## Stable release
 
-1. **Prepare on `dev`.** Open a PR into `dev` titled `release: prepare v0.3.0`
-   that sets `package.json` `version` to `0.3.0` (and updates the version shown
-   in this file if needed). Squash-merge it.
-2. **Open the release PR** from `dev` into `main`, titled `release: v0.3.0`.
-   The `Release guard` check verifies that:
-   - the source branch is `dev` (or `hotfix/*`),
-   - `dev` already contains every change on `main` (see *Sync* below),
-   - the version is stable and greater than the one on `main`.
-3. **Merge with a merge commit** (the only method allowed on `main`).
-4. **Publish.** On GitHub, *Releases → Draft a new release*, create tag
-   `v0.3.0` on `main`, click *Generate release notes* (they list the squashed
-   PR titles from `dev`), and publish. Watch the **Publish to npm** run.
-5. **Sync `main` back into `dev`.** Open a PR from `main` into `dev` titled
-   `chore: sync main into dev` and merge it with a **merge commit**. It
-   carries no code changes after a normal release, but keeps the branches
-   sharing history.
+1. **Prepare on `dev`.** Open a PR into `dev` titled `release: prepare v0.3.0` that sets `package.json` `version` to `0.3.0`, and squash-merge it.
+2. **Open the release PR** from `dev` into `main`, titled `release: v0.3.0`. (`Release guard` requires `dev` to contain everything on `main` and `package.json` to have a higher stable version.)
+3. **Merge with a merge commit**, the only merge method allowed on `main`.
+4. **Publish.** In GitHub *Releases → Draft a new release*, create tag `v0.3.0` on `main`, click *Generate release notes*, and publish. Watch the **Publish to npm** workflow complete.
+5. **Sync `main` back into `dev`.** Open a PR from `main` into `dev` titled `chore: sync main into dev` and merge it with a **merge commit** so the branches keep sharing history.
 
 ## Prerelease
 
-Bump `package.json` on `dev` to e.g. `0.3.0-rc.1` through a normal PR, then
-create a GitHub Release with tag `v0.3.0-rc.1` targeting `dev` and tick
-*Set as a pre-release*. It publishes under npm `next`; `latest` is untouched.
+Bump `package.json` `version` on `dev` (for example `0.3.0-rc.1`) through a normal PR, then publish a GitHub Release with tag `v0.3.0-rc.1` targeting `dev` and tick *Set as a pre-release*. This publishes to npm `next` without touching `latest`.
 
 ## Hotfix
 
 1. Branch from `main`: `git switch main && git pull && git switch -c hotfix/short-name`.
-2. Fix, and bump the patch version (`0.3.0` → `0.3.1`) in the same branch.
-3. Open a PR into `main` titled `fix(scope): ...`; merge with a merge commit.
+2. Fix the issue and bump the patch version (`0.3.0` → `0.3.1`) on the same branch.
+3. Open a PR into `main` titled `fix(scope): ...` and merge with a merge commit.
 4. Publish a GitHub Release `v0.3.1` on `main`.
-5. Sync `main` back into `dev` (step 5 above). Until this is done, the next
-   release PR from `dev` fails `Release guard` on purpose.
+5. Sync `main` back into `dev` with a **merge commit** (step 5 under *Stable release*) before the next release PR from `dev`.
 
-## Secrets
+## Credentials and emergency publish
 
-The workflow reads the repository's `NPM_TOKEN` Actions secret. If the token
-expires or is revoked, replace that secret with a token that can publish
-`ds-dot` without an interactive two-factor prompt. Never commit the token.
-
-You can run the workflow manually from GitHub Actions to check installation,
-tests, building, and packing without publishing. Failed release runs can be
-rerun from GitHub Actions after fixing their cause. Each npm version can be
-published only once; if a published version is broken, release a new patch.
-
-## Local publication (emergency only)
-
-Run `pnpm typecheck`, `pnpm test`, and `pnpm build`, then inspect the package with
-`npm pack --dry-run --ignore-scripts`. Publish the checked build using an npm
-configuration that reads your token from the environment:
+- **Token:** CI publishes with the repository's `NPM_TOKEN` Actions secret. If it expires or is revoked, replace it with a token able to publish `ds-dot` without an interactive two-factor prompt. Never commit the token.
+- **Dry runs and reruns:** Trigger **Publish to npm** manually via *Actions* (`workflow_dispatch`) to verify checks and packing without publishing. Failed release runs can be rerun after fixing the cause. Published npm versions are immutable — fix a broken release with a new patch version.
+- **Emergency local publish:** Run `pnpm typecheck && pnpm test && pnpm build` and inspect with `npm pack --dry-run --ignore-scripts`, then publish using an environment-backed npm config:
 
 ```ini
 //registry.npmjs.org/:_authToken=${NPM_TOKEN}
@@ -73,32 +44,11 @@ registry=https://registry.npmjs.org/
 npm publish --access public --ignore-scripts
 ```
 
-The initial `0.1.0` was published locally. GitHub Release `v0.2.0` reached
-GitHub only because its Linux tests failed before the npm publish step.
+## Repository setup
 
-## Repository settings
+Configure once in GitHub repository settings:
 
-These live in GitHub, not in the code. Configure them once:
-
-1. **Rulesets** — *Settings → Rules → Rulesets → New ruleset → Import a
-   ruleset*, and import [`.github/rulesets/main.json`](../.github/rulesets/main.json)
-   and [`.github/rulesets/dev.json`](../.github/rulesets/dev.json). They block
-   direct pushes, force pushes and deletion, require a pull request with every
-   review thread resolved, require the checks `CI result` and `PR title` (plus
-   `Release guard` on `main`), and allow only merge commits on `main` and squash
-   or merge on `dev`. No approval count is required, because a single
-   maintainer cannot approve their own PRs and review bots usually comment
-   rather than approve. When regular human reviewers join, raise
-   `required_approving_review_count` to 1 (and consider
-   `require_code_owner_review` on `main`). Repository admins may still bypass
-   the rules through a pull request for emergencies.
-2. **General → Pull Requests** — enable *Allow squash merging* with default
-   message *Pull request title*, enable *Allow merge commits*, disable *Allow
-   rebase merging*, and enable *Automatically delete head branches*.
-3. **Default branch** — keep `main`, so visitors see the published code and
-   README. Contributors must pick `dev` as the PR base; `Release guard` rejects
-   feature PRs aimed at `main`. GitHub only auto-closes `Closes #123` issues on
-   the default branch, so `.github/workflows/close-issues.yml` closes them when
-   the PR is merged into `dev`.
-4. **Actions → General** — keep *Workflow permissions* at *Read repository
-   contents*.
+- **Rulesets:** Under *Settings → Rules → Rulesets → New ruleset → Import a ruleset*, import [`.github/rulesets/main.json`](../.github/rulesets/main.json) and [`.github/rulesets/dev.json`](../.github/rulesets/dev.json).
+- **Pull Requests:** Under *Settings → General → Pull Requests*, enable *Allow squash merging* (default message: *Pull request title*) and *Allow merge commits*, disable *Allow rebase merging*, and enable *Automatically delete head branches*.
+- **Default branch:** Keep `main` as the default branch so the repository opens on the latest published release.
+- **Actions permissions:** Under *Settings → Actions → General*, keep *Workflow permissions* set to *Read repository contents*.

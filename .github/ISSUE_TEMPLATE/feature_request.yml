@@ -1,5 +1,5 @@
 name: Feature or change
-description: Propose a feature, improvement or refactor before working on it.
+description: Suggest a feature or improvement for Dorothy.
 labels: [enhancement]
 body:
   - type: textarea

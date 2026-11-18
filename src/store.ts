@@ -8,6 +8,7 @@ import { ZERO_USAGE, addUsage } from './context.ts'
 import { applyEvent, createTask, ledgerSummary, markSeen, sortTasks, withPending, type LedgerEvent, type NewTask } from './ledger.ts'
 import { MAX_PAST_SEGMENTS, type PastSegment, type Segment } from './segments.ts'
 import { parseSettings } from './settings.ts'
+import { isCopyLocale, type CopyLocale } from './i18n/index.ts'
 import { STATE_KEY, parseScheduleRecord, parseSettingProposal, parseState, parseTask, parseTicket, type DotState } from './storage.ts'
 import { clip } from './ledger.ts'
 import { deriveTicketViews } from './ticket-view.ts'
@@ -39,6 +40,7 @@ export const MAX_REFLECTION_RUNS = 30
 export class DotStore {
   private state: DotState
   private current: DotSettings
+  private localePref: CopyLocale | undefined
   private readonly tasks = new Map<string, TaskRecord>()
   private readonly tickets = new Map<string, Ticket>()
   private readonly reminders = new Map<string, ScheduleRecord>()
@@ -52,6 +54,8 @@ export class DotStore {
   constructor(private readonly domain: DotDomainHandle | undefined, initialTasks?: readonly TaskRecord[]) {
     this.state = domain ? parseState(domain.table('state').get(STATE_KEY)) : {}
     this.current = parseSettings(this.state.settings)
+    const savedLocale = this.state.settings?.uiLocale
+    this.localePref = isCopyLocale(savedLocale) ? savedLocale : undefined
     for (const task of initialTasks ?? []) this.tasks.set(task.sessionId, task)
     if (domain) {
       for (const [key, value] of domain.table('tasks').entries()) {
@@ -423,10 +427,19 @@ export class DotStore {
   }
 
   get settings(): DotSettings { return this.current }
+  get uiLocale(): CopyLocale | undefined { return this.localePref }
 
   setSettings(next: DotSettings): Promise<void> {
     this.current = next
-    return this.setDot({ settings: { ...next } as Record<string, unknown> })
+    const settings: Record<string, unknown> = { ...next }
+    if (this.localePref !== undefined) settings.uiLocale = this.localePref
+    return this.setDot({ settings })
+  }
+
+  setUiLocale(locale: CopyLocale): Promise<void> {
+    if (this.localePref === locale) return Promise.resolve()
+    this.localePref = locale
+    return this.setDot({ settings: { ...(this.state.settings ?? this.current), uiLocale: locale } })
   }
 
   /**
@@ -451,6 +464,7 @@ export class DotStore {
       this.reminders.clear()
       this.proposals.clear()
       this.work.clear()
+      this.localePref = undefined
       this.current = parseSettings(undefined)
       this.cognitionRevision++
       this.state = { lastFactoryResetAt: now, knowledgeMigrated: '1' }

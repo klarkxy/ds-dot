@@ -50,8 +50,12 @@ export function apply(ctx: Context): void {
   const call = async <T,>(endpoint: string, payload: unknown = {}, signal?: AbortSignal): Promise<T> => {
     const rpc = client.connection?.rpc
     if (!rpc) throw new Error('connection unavailable')
+    const active = client.locale?.getSnapshot().active
+    const body = active !== undefined && payload !== null && typeof payload === 'object' && !Array.isArray(payload)
+      ? { ...(payload as Record<string, unknown>), uiLocale: active }
+      : payload
     try {
-      const reply = await rpc.call(RPC_CHANNEL, endpoint, payload, signal) as RpcReply<T>
+      const reply = await rpc.call(RPC_CHANNEL, endpoint, body, signal) as RpcReply<T>
       if (!reply || reply.ok !== true) throw new Error(reply?.ok === false ? reply.error.message : 'rpc failed')
       return reply.value
     } catch (error) {
@@ -103,6 +107,16 @@ export function apply(ctx: Context): void {
 
   client.effect(() => {
     const stops: Array<() => void> = []
+    if (client.locale) {
+      let lastActive = client.locale.getSnapshot().active
+      stops.push(client.locale.subscribe(() => {
+        const active = client.locale?.getSnapshot().active
+        if (active !== undefined && active !== lastActive) {
+          lastActive = active
+          void call('locale.sync', { locale: active }).catch(() => {})
+        }
+      }))
+    }
     stops.push(client.slots.inject('main', () => client.slots.register({
       name: 'main',
       key: PANEL_ID,

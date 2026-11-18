@@ -4,8 +4,8 @@ import { MarkdownText, type MarkdownLabels } from '@deepseek-ai/dsh-client-ui-pr
 import { WidgetCard, type Answer } from '@klarkxy/dsh-deep-view/widget'
 import { checkShownView } from '@klarkxy/dsh-deep-view/core'
 import { checkedAnswer } from '@klarkxy/dsh-deep-view/answers'
-import { uiEn, uiZh } from '@klarkxy/dsh-deep-view/copy'
-import { t as uiT } from './ui-copy.ts'
+import { uiEn } from '@klarkxy/dsh-deep-view/copy'
+import { cardCopy, copyLocale, t as uiT, type CardTextKey, type CopyLocale } from './ui-copy.ts'
 import type { ApprovalDetail } from './contracts.ts'
 import type { CardComponent } from './chat-panel.tsx'
 
@@ -13,7 +13,7 @@ interface CardLocale {
   getSnapshot(): { active: string }
   subscribe(listener: () => void): () => void
 }
-const translationKeys = new Map(Object.entries(uiEn).map(([key, english]) => [english, key as keyof typeof uiZh]))
+const translationKeys = new Map(Object.entries(uiEn).map(([key, english]) => [english, key as CardTextKey]))
 
 /** A focused key-value row for the approval detail panel. */
 function DetailRow({ label, value }: { label: string; value: string }) {
@@ -26,7 +26,7 @@ function DetailRow({ label, value }: { label: string; value: string }) {
 }
 
 /** Collapsible approval detail panel rendered outside WidgetCard to avoid 2000-char truncation. */
-function ApprovalDetailPanel({ detail, locale, missing }: { detail: ApprovalDetail | null | undefined; locale: 'zh' | 'en'; missing: boolean }) {
+function ApprovalDetailPanel({ detail, locale, missing }: { detail: ApprovalDetail | null | undefined; locale: CopyLocale; missing: boolean }) {
   const [open, setOpen] = useState(false)
   const c = (key: Parameters<typeof uiT>[1]) => uiT(locale, key)
   if (missing) {
@@ -67,12 +67,12 @@ export function createDotCards(call: (endpoint: string, payload: unknown) => Pro
   const active = () => locale?.getSnapshot().active ?? 'en'
   const Card: CardComponent = props => {
     const language = useSyncExternalStore(subscribe, active)
-    const zh = language.toLowerCase().startsWith('zh')
-    const loc = zh ? 'zh' : 'en'
+    const loc = copyLocale(language)
+    const dict = cardCopy(loc)
     const t = useCallback((key: string, params?: Record<string, unknown>) => {
-      const text = zh && translationKeys.has(key) ? uiZh[translationKeys.get(key)!] : key
+      const text = loc !== 'en' && translationKeys.has(key) ? dict[translationKeys.get(key)!] : key
       return text.replace(/\{(\w+)\}/g, (_, name) => String(params?.[name] ?? `{${name}}`))
-    }, [zh])
+    }, [loc, dict])
     const labels = useMemo<MarkdownLabels>(() => ({ code: { copyLabel: t('Copy'), copiedLabel: t('Copied') }, footnotes: t('Footnotes') }), [t])
     const meta = props.presentation as { title?: unknown; view?: unknown; viewId?: string; dotCard?: { number?: number; expired?: boolean } } | undefined
     const presentationExpired = meta?.dotCard?.expired === true
@@ -170,7 +170,7 @@ export function createDotCards(call: (endpoint: string, payload: unknown) => Pro
         setNotifyPending(false)
       }, () => setRetryFailed(true)).finally(() => setRetryBusy(false))
     }, [call, id, retryBusy])
-    if (!valid) return <div className="dvui-root" role="alert">{zh ? uiZh.invalid : uiEn.invalid}</div>
+    if (!valid) return <div className="dvui-root" role="alert">{dict.invalid}</div>
     // An expired card is still shown (not settled/hidden) but its submit is disabled.
     const canAnswer = valid.interactive && pending && !expired && answer === null && !notifyPending
     return (
@@ -195,7 +195,7 @@ export function createDotCards(call: (endpoint: string, payload: unknown) => Pro
         {detailFailed ? <p role="alert">{uiT(loc, 'cardDetailFailed')}</p> : null}
         {expired && !answer ? <p role="status">{uiT(loc, 'cardsHint')}</p> : null}
         {answerStatus ? <p role="status">{uiT(loc, answerStatus === 'answered' ? 'cardAnswered' : 'cardAnswerBusy')}</p> : null}
-        {failed && !notifyPending && !expired && !answerStatus ? <p role="alert">{zh ? uiZh.answerFailed : uiEn.answerFailed}</p> : null}
+        {failed && !notifyPending && !expired && !answerStatus ? <p role="alert">{dict.answerFailed}</p> : null}
       </div>
     )
   }

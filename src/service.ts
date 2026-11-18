@@ -54,8 +54,9 @@ import { eventTier } from './tiers.ts'
 import { TaskModelError, formatTaskModels, pickTaskModel, type TaskModelCatalog } from './task-models.ts'
 import { TaskPresetError, pickTaskPreset, type TaskPresetCatalog, type TaskPresetChoice } from './task-presets.ts'
 import { stamp, transcriptRows, type TranscriptRow } from './transcript.ts'
+import type { RawEvent } from './chat.ts'
 import { SelfSettings } from './self-settings.ts'
-import { APPROVAL_CARD_COPY } from './ui-copy.ts'
+import { approvalCardCopy, copyLocale, type CopyLocale } from './i18n/index.ts'
 
 export interface DotServiceOptions {
   readonly host: DotHost
@@ -63,6 +64,8 @@ export interface DotServiceOptions {
   readonly store: DotStore
   /** Working directory of dot's own session. */
   readonly homeDir: string
+  /** Preferred UI locale when known at construction time. */
+  readonly locale?: CopyLocale
   /** The legacy note file; only the one-time migration reads it. Defaults to memory.md in homeDir. */
   readonly notes?: NoteFile
   /** Let original-session answerers settle approvals before waking dot. */
@@ -128,11 +131,13 @@ export class DotService {
   private readonly childRefreshers = new Set<() => void>()
   private readonly childReleases = new Map<string, () => void>()
   private resetArmed?: { readonly token: string; readonly expiresAt: number }
+  private currentLocale: CopyLocale | undefined
   readonly cards: DotCards
   /** The single background reflection pass; the reminder clock ticks its gate. */
   readonly reflection: ReflectionRunner
 
   constructor(private readonly options: DotServiceOptions) {
+    this.currentLocale = options.locale ?? options.store.uiLocale
     this.cards = new DotCards(options.store, options.log)
     this.now = options.now ?? Date.now
     this.notes = options.notes ?? new MemoryNotes(options.homeDir)
@@ -186,6 +191,23 @@ export class DotService {
   get host(): DotHost { return this.options.host }
   get rules(): RuleConfig { return this.store.settings }
   get dotSessionId(): string | undefined { return this.store.dotSessionId }
+  get locale(): CopyLocale { return this.currentLocale ?? this.store.uiLocale ?? 'zh' }
+
+  async syncLocale(raw: string | undefined): Promise<CopyLocale> {
+    if (!raw?.trim()) return this.locale
+    const next = copyLocale(raw, 'en')
+    const before = this.locale
+    this.currentLocale = next
+    await this.store.setUiLocale(next)
+    if (before !== next && !this.closing) {
+      const dot = this.store.dotSessionId
+      const segment = this.store.segment
+      if (dot && segment && segment.sessionId === dot && !this.host.isRunning(dot)) {
+        await this.serial(() => this.refreezeIfUnreplied(dot)).catch(() => undefined)
+      }
+    }
+    return next
+  }
 
   isDot(sessionId: string | undefined): boolean {
     return sessionId !== undefined && sessionId === this.store.dotSessionId
@@ -356,9 +378,10 @@ export class DotService {
       if (approvalId) {
         const request = this.pending.get(approvalId)
         if (!request || request.kind !== 'approval') throw new DotError('dot/unknown-request', 'approval is no longer pending')
-        shown = { title: APPROVAL_CARD_COPY.title, interactive: true, view: { type: 'stack', children: [
-          { type: 'text', text: `${APPROVAL_CARD_COPY.title} ${request.id}\n${APPROVAL_CARD_COPY.session}: ${request.sessionId}\n${APPROVAL_CARD_COPY.request}: ${request.subject}${request.detail ? `\n${clip(request.detail, 1200)}` : ''}` },
-          { type: 'confirm', id: 'approval', confirmLabel: APPROVAL_CARD_COPY.approve, cancelLabel: APPROVAL_CARD_COPY.deny },
+        const copy = approvalCardCopy(this.locale)
+        shown = { title: copy.title, interactive: true, view: { type: 'stack', children: [
+          { type: 'text', text: `${copy.title} ${request.id}\n${copy.session}: ${request.sessionId}\n${copy.request}: ${request.subject}${request.detail ? `\n${clip(request.detail, 1200)}` : ''}` },
+          { type: 'confirm', id: 'approval', confirmLabel: copy.approve, cancelLabel: copy.deny },
         ] } }
       }
       const presentation = await this.cards.present(shown, callId, approvalId)
@@ -442,6 +465,10 @@ export class DotService {
   /** Context view of dot's live segment, with cumulative token totals across segments. */
   async contextView(): Promise<DotContextView> {
     const id = await this.ensureDot()
+    const segment = this.store.segment
+    if (segment && segment.sessionId === id && segment.persona !== personaSection(this.store.settings, this.locale) && !this.host.isRunning(id)) {
+      await this.refreezeIfUnreplied(id).catch(() => undefined)
+    }
     const raw = await this.host.dotContext(id)
     const sections = this.contextSections()
     if (!raw.live) return { ...raw, sections }
@@ -457,7 +484,7 @@ export class DotService {
   private contextSections(): DotContextSections {
     const segment = this.store.segment
     if (segment) return { persona: segment.persona, agreements: segment.agreements ?? '', cognition: segment.cognition ?? '', handoff: segment.opening ?? '' }
-    return { persona: personaSection(this.store.settings), agreements: this.currentAgreementsBlock(), cognition: this.currentCognitionBlock(), handoff: '' }
+    return { persona: personaSection(this.store.settings, this.locale), agreements: this.currentAgreementsBlock(), cognition: this.currentCognitionBlock(), handoff: '' }
   }
 
   /** Zero cumulative token usage while keeping the current segment intact. */
@@ -538,6 +565,7 @@ export class DotService {
       } catch (failure) {
         throw new DotError('dot/reset-incomplete', `Factory reset is incomplete: sessions were stopped and archived, but cleanup failed (${messageOf(failure)}). Some files may already have been removed; Dorothy's records and settings are retained. Request a new preview to retry.`)
       }
+      const activeLocale = this.currentLocale ?? this.store.uiLocale
       try {
         await this.store.factoryReset(this.now())
       } catch (failure) {
@@ -551,6 +579,7 @@ export class DotService {
       this.ensuring = undefined
       this.migration = undefined
       this.requestedSegment = undefined
+      if (activeLocale) await this.store.setUiLocale(activeLocale)
       let sessionId: string
       try {
         sessionId = await this.ensureDot()
@@ -2424,7 +2453,7 @@ export class DotService {
     const model = this.host.modelKey()
     await this.ensureMigration()
     return {
-      persona: personaSection(this.store.settings),
+      persona: personaSection(this.store.settings, this.locale),
       ...model ? { model } : {},
       agreements: agreementsSection(this.store.agreements),
       cognition: cognitionSection(this.store.cognition),
@@ -2437,14 +2466,7 @@ export class DotService {
   /** Cognition block for a prompt that no segment record covers yet. */
   currentCognitionBlock(): string { return cognitionSection(this.store.cognition) }
 
-  /**
-   * Whether dot's segment has to end before the next message reaches it.
-   * Only a running turn keeps the segment; unanswered cards remain asynchronous.
-   */
-  private async dueBeforeDelivery(dot: string): Promise<RolloverReason | undefined> {
-    const segment = this.store.segment
-    if (!segment || segment.sessionId !== dot || this.host.isRunning(dot)) return undefined
-    const events = await this.host.readEvents(dot)
+  private repliedInEvents(events: readonly RawEvent[]): { readonly replied: boolean; readonly lastReplyAt?: number } {
     let replied = false
     let lastReplyAt: number | undefined
     for (const event of events) {
@@ -2454,6 +2476,27 @@ export class DotService {
       replied = true
       if (typeof event.time === 'number') lastReplyAt = event.time
     }
+    return { replied, ...(lastReplyAt === undefined ? {} : { lastReplyAt }) }
+  }
+
+  private async refreezeIfUnreplied(dot: string): Promise<void> {
+    const segment = this.store.segment
+    if (!segment || segment.sessionId !== dot || this.host.isRunning(dot)) return
+    if (typeof this.host.readEvents !== 'function') return
+    const events = await this.host.readEvents(dot)
+    if (this.repliedInEvents(events).replied) return
+    const wanted = await this.frozen()
+    if (segment.persona !== wanted.persona) await this.store.refreezeSegment(wanted)
+  }
+
+  /**
+   * Whether dot's segment has to end before the next message reaches it.
+   * Only a running turn keeps the segment; unanswered cards remain asynchronous.
+   */
+  private async dueBeforeDelivery(dot: string): Promise<RolloverReason | undefined> {
+    const segment = this.store.segment
+    if (!segment || segment.sessionId !== dot || this.host.isRunning(dot)) return undefined
+    const { replied, lastReplyAt } = this.repliedInEvents(await this.host.readEvents(dot))
     if (this.requestedSegment) return 'dot-requested'
     const wanted = await this.frozen()
     const seenAgreements = segment.agreementsSeen ?? segment.agreements ?? ''

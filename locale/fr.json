@@ -1,0 +1,56 @@
+{
+  "meta": {
+    "title": "Dorothy (dot)",
+    "description": "Une coordinatrice toujours active : échangez avec Dorothy dans son propre panneau ; elle ouvre des espaces de travail, lance des sessions, suit leur avancement, gère pour vous les approbations et questions, puis vous fait un retour."
+  },
+  "panel": {
+    "cardPreparing": "Préparation de la carte…",
+    "cardExpired": "Expirée",
+    "cardsHint": "Cette carte a expiré ; veuillez relancer une demande.",
+    "personaTitle": "Persona et accords",
+    "agreements": "Accords",
+    "agreementsHint": "Les règles que vous fixez, conservées telles quelles. Elles priment sur sa cognition.",
+    "agreementsPlaceholder": "- ex. : Pousser vers mes dépôts personnels est autorisé",
+    "agreementsEmpty": "Aucun accord pour le moment.",
+    "saveAgreements": "Enregistrer les accords",
+    "undoAgreements": "Rétablir le dernier enregistrement",
+    "cognition": "Cognition",
+    "cognitionHint": "Ce que Dorothy a noté à votre sujet. Modifiable.",
+    "cognitionPlaceholder": "Ce qu’elle a remarqué de vos préférences et de votre rythme…",
+    "cognitionEmpty": "Aucune cognition pour le moment.",
+    "saveCognition": "Enregistrer la cognition",
+    "cognitionHistory": "Versions",
+    "cognitionHistoryEmpty": "Aucune version antérieure pour le moment.",
+    "restoreCognition": "Restaurer cette version",
+    "charCount": "{n} / {max} caractères"
+  },
+  "settings": {
+    "taskPermission": "Autorisations des tâches",
+    "taskPermission_workspace-write": "Écriture dans l’espace de travail",
+    "taskPermission_danger-full-access": "Accès complet",
+    "taskPermission_default": "Suivre l’hôte",
+    "taskPermissionDesc": "S’applique aux nouvelles tâches, indépendamment du routage des approbations.",
+    "approvals_dot": "Dorothy",
+    "approvals_human": "Vous",
+    "approvals_deny": "Tout refuser",
+    "reflection": "Réflexion en arrière-plan",
+    "reflectionDesc": "Passe en revue le travail récent en période d’inactivité et met à jour sa cognition ; signale les accords obsolètes ou contradictoires lors de votre prochain message pour que vous décidiez.",
+    "reflection_on": "Activée",
+    "reflection_off": "Désactivée"
+  },
+  "context": {
+    "promptSections": "Sections du prompt",
+    "promptSectionsHint": "Contenu réellement inclus dans le prompt de ce segment.",
+    "sectionPersona": "Persona",
+    "sectionAgreements": "Accords",
+    "sectionCognition": "Cognition",
+    "sectionHandoff": "Relais",
+    "sectionEmpty": "(vide)"
+  },
+  "tools": {
+    "dot_agreement": "Accord",
+    "dot_cognition": "Cognition",
+    "agreementAdded": "Accord ajouté",
+    "agreementRemoved": "Accord supprimé"
+  }
+}

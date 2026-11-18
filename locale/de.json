@@ -1,0 +1,56 @@
+{
+  "meta": {
+    "title": "Dorothy (dot)",
+    "description": "Eine stets aktive Koordinatorin: Sprich mit Dorothy in ihrem eigenen Panel – sie öffnet Arbeitsbereiche, startet Sitzungen, verfolgt deren Fortschritt, klärt Genehmigungen und Fragen für dich und meldet sich zurück."
+  },
+  "panel": {
+    "cardPreparing": "Karte wird vorbereitet…",
+    "cardExpired": "Abgelaufen",
+    "cardsHint": "Diese Karte ist abgelaufen; starte eine neue Anfrage.",
+    "personaTitle": "Persona & Vereinbarungen",
+    "agreements": "Vereinbarungen",
+    "agreementsHint": "Die Regeln, die du festlegst, in deinen eigenen Worten. Sie haben Vorrang vor ihren Erkenntnissen.",
+    "agreementsPlaceholder": "- z. B. Pushes in meine persönlichen Repos sind in Ordnung",
+    "agreementsEmpty": "Noch keine Vereinbarungen.",
+    "saveAgreements": "Vereinbarungen speichern",
+    "undoAgreements": "Letzte Speicherung rückgängig machen",
+    "cognition": "Erkenntnisse",
+    "cognitionHint": "Was Dorothy sich über dich gemerkt hat. Bearbeitbar.",
+    "cognitionPlaceholder": "Was ihr an deinen Vorlieben und deinem Rhythmus aufgefallen ist…",
+    "cognitionEmpty": "Noch keine Erkenntnisse.",
+    "saveCognition": "Erkenntnisse speichern",
+    "cognitionHistory": "Versionen",
+    "cognitionHistoryEmpty": "Noch keine früheren Versionen.",
+    "restoreCognition": "Diese Version wiederherstellen",
+    "charCount": "{n} / {max} Zeichen"
+  },
+  "settings": {
+    "taskPermission": "Aufgabenberechtigungen",
+    "taskPermission_workspace-write": "Arbeitsbereich schreiben",
+    "taskPermission_danger-full-access": "Vollzugriff",
+    "taskPermission_default": "Dem Host folgen",
+    "taskPermissionDesc": "Gilt für neue Aufgaben, unabhängig von der Genehmigungsweiterleitung.",
+    "approvals_dot": "Dorothy",
+    "approvals_human": "Du",
+    "approvals_deny": "Alle ablehnen",
+    "reflection": "Hintergrund-Reflexion",
+    "reflectionDesc": "Prüft im Leerlauf kürzliche Arbeit und aktualisiert ihre Erkenntnisse; weist bei deiner nächsten Nachricht auf veraltete oder widersprüchliche Vereinbarungen hin, damit du entscheiden kannst.",
+    "reflection_on": "Ein",
+    "reflection_off": "Aus"
+  },
+  "context": {
+    "promptSections": "Prompt-Abschnitte",
+    "promptSectionsHint": "Was dieser Abschnitt tatsächlich in seinem Prompt mitführt.",
+    "sectionPersona": "Persona",
+    "sectionAgreements": "Vereinbarungen",
+    "sectionCognition": "Erkenntnisse",
+    "sectionHandoff": "Übergabe",
+    "sectionEmpty": "(leer)"
+  },
+  "tools": {
+    "dot_agreement": "Vereinbarung",
+    "dot_cognition": "Erkenntnisse",
+    "agreementAdded": "Vereinbarung hinzugefügt",
+    "agreementRemoved": "Vereinbarung entfernt"
+  }
+}

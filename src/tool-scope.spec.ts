@@ -13,6 +13,8 @@ function fixture() {
   new ToolsService(ctx)
   const presetKey = {}
   const preset = createScope(ctx, presetKey)
+  // The host builds an agent scope as `createScope(loopCtx, agent)`, so the
+  // Agent handed to setup is the key. The key object stands in for it here.
   const agentKey = {}
   const agent = createScope(ctx, agentKey)
   const register = (host: Context, name: string) => host.tools.register(defineTool({
@@ -36,7 +38,7 @@ describe('dot preset tool restrictions on the rc.3 registry', () => {
     f.register(f.preset.ctx, TOOL.task)
     // The request assembles from the agent scope; the preset layer mounted its
     // tools already, and the restriction is applied there — never earlier.
-    restrictInheritedTools(f.agent.ctx, DOT_INHERITED_ALLOW)
+    restrictInheritedTools(f.agent.ctx, DOT_INHERITED_ALLOW, f.agentKey)
     expect(f.agentNames()).toEqual([TOOL.task, 'show_view'].sort())
     // The preset's own view is untouched by the agent-scope restriction.
     expect(f.presetNames()).toEqual([TOOL.task, 'pwsh', 'show_view'].sort())
@@ -62,7 +64,7 @@ describe('dot preset tool restrictions on the rc.3 registry', () => {
     bindScopeParent(f.agentKey, f.presetKey)
     f.register(f.preset.ctx, TOOL.task)
     // dsh_docs/dsh_plugins/web_search may be absent; restrict must not throw.
-    expect(() => restrictInheritedTools(f.agent.ctx, DOT_INHERITED_ALLOW)).not.toThrow()
+    expect(() => restrictInheritedTools(f.agent.ctx, DOT_INHERITED_ALLOW, f.agentKey)).not.toThrow()
     expect(f.agentNames()).toEqual([TOOL.task])
     await f.agent.dispose()
     await f.preset.dispose()
@@ -71,7 +73,7 @@ describe('dot preset tool restrictions on the rc.3 registry', () => {
     const f = fixture()
     bindScopeParent(f.agentKey, f.presetKey)
     f.register(f.ctx, 'pwsh')
-    restrictInheritedTools(f.agent.ctx, ['show_view'])
+    restrictInheritedTools(f.agent.ctx, ['show_view'], f.agentKey)
     expect(f.agentNames()).toEqual([])
     await f.agent.dispose()
     await f.preset.dispose()
@@ -88,7 +90,79 @@ describe('dot preset tool restrictions on the rc.3 registry', () => {
         },
       },
     }
-    expect(() => restrictInheritedTools(ctx, ['show_view'])).not.toThrow()
+    expect(() => restrictInheritedTools(ctx, ['show_view'], {})).not.toThrow()
     expect(applied).toEqual([{ allow: [] }])
+  })
+})
+
+describe('dot preset tool restrictions read the agent scope key the host chose', () => {
+  it('reads the agent view through the key the setup callback passes', async () => {
+    const f = fixture()
+    bindScopeParent(f.agentKey, f.presetKey)
+    f.register(f.ctx, 'show_view')
+    f.register(f.ctx, 'web_search')
+    f.register(f.ctx, 'pwsh')
+    f.register(f.preset.ctx, TOOL.task)
+    // The key the host created the scope with is the Agent; passing it in is
+    // what keeps the preset's own tool on the allow list, because the view is
+    // then read through the agent scope rather than the global one.
+    expect(scopeOf(f.agent.ctx)).toBe(f.agentKey)
+    restrictInheritedTools(f.agent.ctx, DOT_INHERITED_ALLOW, f.agentKey)
+    expect(f.agentNames()).toEqual([TOOL.task, 'show_view', 'web_search'].sort())
+    await f.agent.dispose()
+    await f.preset.dispose()
+  })
+  it('never reads the global view when the context scope is not resolvable', () => {
+    // A plugin installed with its own copy of @deepseek-ai/dsh-scope compares a
+    // different module-local scope Symbol, so the context cannot answer for
+    // itself; the explicit key is then the only way to the agent view.
+    const foreignTag = Symbol('dsh.scope')
+    const agent = {}
+    const agentView = [TOOL.task, 'show_view', 'web_search', 'pwsh']
+    const asked: unknown[] = []
+    const applied: Array<{ allow?: readonly string[] }> = []
+    const host = {
+      [foreignTag]: {},
+      tools: {
+        schemas(scope: unknown) {
+          asked.push(scope)
+          // The global view lacks every name the preset itself registered.
+          if (scope === undefined) return ['show_view', 'pwsh'].map(name => ({ name }))
+          return agentView.map(name => ({ name }))
+        },
+        restrict(filter: { allow?: readonly string[] }) {
+          applied.push(filter)
+          return () => {}
+        },
+      },
+    }
+    restrictInheritedTools(host, DOT_INHERITED_ALLOW, agent)
+    expect(asked).toEqual([agent])
+    expect(applied).toEqual([{ allow: [TOOL.task, 'show_view', 'web_search'] }])
+  })
+  it('refuses to restrict without the agent scope key', () => {
+    // The production path always holds the Agent; falling back to the global
+    // view instead would hide every tool the preset registered.
+    expect(() => restrictInheritedTools({ tools: { schemas: () => [], restrict: () => () => {} } }, ['show_view'], undefined as never))
+      .toThrow(TypeError)
+  })
+  it('never admits a shell or MCP tool, even when the host registered one', async () => {
+    const f = fixture()
+    bindScopeParent(f.agentKey, f.presetKey)
+    f.register(f.ctx, 'show_view')
+    f.register(f.ctx, 'web_search')
+    f.register(f.ctx, 'pwsh')
+    f.register(f.ctx, 'shell')
+    f.register(f.ctx, 'mcp__magpie__magpie-image__generate_image')
+    f.register(f.preset.ctx, TOOL.task)
+    restrictInheritedTools(f.agent.ctx, DOT_INHERITED_ALLOW, f.agentKey)
+    expect(f.agentNames()).toEqual([TOOL.task, 'show_view', 'web_search'].sort())
+    // The allow list names no shell or MCP tool at all.
+    for (const name of DOT_INHERITED_ALLOW) expect(name).not.toMatch(/^(shell|bash|pwsh|run_code|mcp__)/)
+    // The host still holds what the agent cannot see.
+    expect(f.ctx.tools.get('pwsh')).toBeDefined()
+    expect(f.ctx.tools.get('mcp__magpie__magpie-image__generate_image')).toBeDefined()
+    await f.agent.dispose()
+    await f.preset.dispose()
   })
 })

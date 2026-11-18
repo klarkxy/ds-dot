@@ -6,6 +6,7 @@ import { join } from 'node:path'
 import { act } from 'react'
 import { JSDOM } from 'jsdom'
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
+import { uiEn, uiZh } from '@klarkxy/dsh-deep-view/copy'
 import type { HostRpcContext } from '@klarkxy/dsh-plugin-kit/host-rpc'
 import { DEFAULT_SETTINGS, RPC_CHANNEL, SERVICE_NAME } from './contracts.ts'
 import {
@@ -120,7 +121,7 @@ describe('i18n core & zh/en packs', () => {
     expect(t('en', 'sTaskModelsList')).toBe('{mode}: {models}')
     expect(t('zh', 'sTaskModelsNone')).toBe('{mode}（{empty}）')
     expect(t('en', 'sTaskModelsNone')).toBe('{mode} ({empty})')
-    expect(Object.keys(cardCopy('en'))).toHaveLength(30)
+    expect(cardCopy('en')).toEqual(uiEn)
     expect(Object.keys(configI18n())).toEqual([...SUPPORTED_LOCALES])
     expect(approvalCardCopy('zh').title).toBe('审批')
     expect(approvalCardCopy('en').title).toBe('Approval')
@@ -395,7 +396,7 @@ describe('UI locale wiring & client RPC sync', () => {
     expect(personaBox).toBeDefined()
     expect(personaBox.value).toBe(defaultPersona('en'))
     expect(document.body.textContent).toContain('Allow selected: DeepSeek / DeepSeek Chat')
-    expect(document.body.textContent).toContain('视图数据无效')
+    expect(document.body.textContent).toContain(uiZh.invalid)
     await act(async () => root.unmount())
   })
 

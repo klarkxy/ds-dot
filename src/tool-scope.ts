@@ -7,7 +7,6 @@
  * child scope that assembles the request, leaving the model with no tool
  * list at all (and falling back to raw text-call syntax).
  */
-import { scopeOf } from '@deepseek-ai/dsh-scope'
 import type { Context } from '@deepseek-ai/cordis'
 
 interface ToolScope {
@@ -38,14 +37,21 @@ export function gateToolExecution(ctx: Context, allowedNames: readonly string[])
  * refuses unknown global names. An empty intersection, or a snapshot that
  * throws, still applies `allow: []`, which admits no inherited tool. Returning
  * without a restriction would leave every global tool visible.
+ *
+ * Use the Agent passed by the host to setup as the scope key. A linked plugin
+ * can load a second copy of dsh-scope with a different private Symbol;
+ * scopeOf(ctx) would then select the global view and omit the preset tools.
  */
-export function restrictInheritedTools(agentCtx: unknown, allowedNames: readonly string[]): void {
+export function restrictInheritedTools(agentCtx: unknown, allowedNames: readonly string[], scopeKey: object): void {
   const host = agentCtx as Context & ToolScope
   const tools = host.tools
   if (!tools || typeof tools.restrict !== 'function') return
+  if (!scopeKey) {
+    throw new TypeError('restrictInheritedTools needs the agent scope key: pass the Agent handed to the setup callback')
+  }
   let visible: ReadonlySet<string> | undefined
   try {
-    visible = new Set(tools.schemas(scopeOf(host)).map(tool => tool.name))
+    visible = new Set(tools.schemas(scopeKey).map(tool => tool.name))
   } catch { /* the empty allow below hides inherited tools */ }
   const allow = visible === undefined ? [] : allowedNames.filter(name => visible.has(name))
   tools.restrict({ allow })

@@ -1,27 +1,14 @@
 import { readFileSync } from 'node:fs'
-import { createRequire } from 'node:module'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
+import { SHOW_VIEW_MIXED_SUMMARY, showViewSharesStep } from './card-step.ts'
 import { apply, TASK_ACTIONS } from './tools.ts'
 import { apply as applyReflection, REFLECTION_SUBMIT_TOOL } from './reflection.ts'
 import { DEFAULT_SETTINGS, TOOL, type DotSettings } from './contracts.ts'
 import { DEFAULT_PERSONA } from './persona.ts'
 import { settingsSnapshotBlock, SelfSettings } from './self-settings.ts'
 import { DotStore } from './store.ts'
-
-const resolveFrom = createRequire(import.meta.url)
-
-/** The Deep View this profile installed, which decides the card types show_view knows. */
-function installedDeepViewVersion(): string {
-  const manifest = JSON.parse(readFileSync(resolveFrom.resolve('@klarkxy/dsh-deep-view/package.json'), 'utf8')) as { version: string }
-  return manifest.version
-}
-
-function reached(version: string, major: number, minor: number): boolean {
-  const [whole = 0, part = 0] = version.split('.').map(Number)
-  return whole > major || (whole === major && part >= minor)
-}
 
 interface Seg { sessionId: string; persona: string; opening?: string; agreements?: string; cognition?: string }
 
@@ -199,22 +186,56 @@ describe('dot tools', () => {
     expect(tool.output.presentationMeta(undefined, result)).toMatchObject({ owner: 'dsh-deep-view', title: 'Pick target', interactive: true, awaitReply: true, dotCard: { number: 1 } })
   })
 
-  it('takes only the card types the installed Deep View knows', async () => {
-    // Math cards arrive with Deep View 0.3.0. Until that is on npm, show_view has
-    // to pass 0.2.1's rejection through instead of promising a card nobody draws.
-    const version = installedDeepViewVersion()
+  it('shows a math card', async () => {
     const tool = load().find(row => row.name === 'show_view') as unknown as {
       execute: (args: unknown, exec: { callId?: string; concludeTurn(): void }) => Promise<Record<string, unknown>>
     }
+    let concluded = 0
     const result = await tool.execute({
       title: 'Plot',
       view: JSON.stringify({ type: 'math', id: 'm', mathPoints: [{ id: 'p', x: 0, y: 0 }] }),
-    }, { callId: 'm1', concludeTurn: () => {} })
-    expect(result.status).toBe(reached(version, 0, 3) ? 'shown' : 'invalid')
+    }, { callId: 'm1', concludeTurn: () => { concluded += 1 } })
+    expect(result.status).toBe('shown')
+    expect(concluded).toBe(1)
+  })
+
+  it('treats either tool order as one shared step and does not read an older message', () => {
+    const step = (calls: { id: string }[]) => ({ role: 'assistant', content: calls.map(call => ({ type: 'tool-call', id: call.id })) })
+    const cardFirst = [step([{ id: 'card' }, { id: 'lookup' }])]
+    const workFirst = [step([{ id: 'lookup' }, { id: 'card' }])]
+    expect(showViewSharesStep(cardFirst, 'card')).toBe(true)
+    expect(showViewSharesStep(workFirst, 'card')).toBe(true)
+    expect(showViewSharesStep([step([{ id: 'card' }])], 'card')).toBe(false)
+    expect(showViewSharesStep([step([{ id: 'card' }, { id: 'card' }])], 'card')).toBe(true)
+    const followed = [cardFirst[0]!, step([{ id: 'answer' }])]
+    expect(showViewSharesStep(followed, 'answer')).toBe(false)
+    // The same id in an older message is not this step, and it is not a single card.
+    expect(showViewSharesStep(followed, 'card')).toBe(true)
+    expect(showViewSharesStep(undefined, 'card')).toBe(false)
+    expect(showViewSharesStep([], 'card')).toBe(false)
+  })
+
+  it('tells the model to call the card alone when the step is mixed', async () => {
+    const tool = load().find(row => row.name === 'show_view') as unknown as {
+      output: { render: (args: unknown, value: unknown) => unknown }
+      execute: (args: unknown, exec: { callId?: string; concludeTurn(): void; agent?: { session?: { deriveMessages(): readonly { role?: string; content?: readonly { type?: string; id?: string }[] }[] } } }) => Promise<Record<string, unknown>>
+    }
+    let concluded = 0
+    const result = await tool.execute({ view: JSON.stringify({ type: 'text', text: 'hi' }) }, {
+      callId: 'card',
+      concludeTurn: () => { concluded += 1 },
+      agent: { session: { deriveMessages: () => [{ role: 'assistant', content: [{ type: 'tool-call', id: 'card' }, { type: 'tool-call', id: 'lookup' }] }] } },
+    })
+    expect(result).toMatchObject({ status: 'deferred', summary: SHOW_VIEW_MIXED_SUMMARY })
+    expect(tool.output.render(undefined, result)).toEqual([{ type: 'text', text: SHOW_VIEW_MIXED_SUMMARY }])
+    expect(concluded).toBe(0)
   })
 
   it('keeps an invalid show_view in the same turn without concluding it', async () => {
-    const tool = load().find(row => row.name === 'show_view') as unknown as { execute: (args: unknown, exec: { callId?: string; concludeTurn(): void }) => Promise<Record<string, unknown>> }
+    const tool = load().find(row => row.name === 'show_view') as unknown as {
+      output: { presentationMeta: (args: unknown, value: unknown) => unknown }
+      execute: (args: unknown, exec: { callId?: string; concludeTurn(): void }) => Promise<Record<string, unknown>>
+    }
     let concluded = 0
     const exec = { callId: 'c', concludeTurn: () => { concluded += 1 } }
     const badJson = await tool.execute({ view: '{not json' }, exec)
@@ -224,6 +245,7 @@ describe('dot tools', () => {
     expect(missingType.status).toBe('invalid')
     const mismatch = await tool.execute({ view: JSON.stringify({ type: 'text', text: 'hi' }), await_reply: true }, exec)
     expect(mismatch.status).toBe('invalid')
+    expect(tool.output.presentationMeta(undefined, mismatch)).toBeNull()
     expect(concluded).toBe(0)
   })
 

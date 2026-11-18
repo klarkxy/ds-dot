@@ -294,7 +294,7 @@ export function bindHost(get: Get, log?: (message: string) => void, modelOf?: ()
     const id = (await presets.resolve(preset)).id
     return {
       id,
-      setup: async (agentCtx: unknown) => {
+      setup: async (agentCtx: unknown, agent: Agent) => {
         installModelSelection(agentCtx as never)
         await presets.mount(agentCtx, id)
         if (allow === DOT_INHERITED_ALLOW) await dotDevIndexReady()
@@ -304,7 +304,11 @@ export function bindHost(get: Get, log?: (message: string) => void, modelOf?: ()
         // the request), leaving the model with no tool list at all. The allow
         // list must wait for the late dev-index row: restrict keeps a
         // snapshot, so a name registered after the call would stay hidden.
-        restrictInheritedTools(agentCtx, allow)
+        // The agent scope's key is the Agent itself — the host builds the
+        // scope as `createScope(loopCtx, agent)` — so the supported setup
+        // parameter names it, and nothing here has to read a scope tag through
+        // a possibly duplicated dsh-scope copy.
+        restrictInheritedTools(agentCtx, allow, agent)
       },
     }
   }

@@ -6,9 +6,14 @@
  * link boundaries in `exclusions` without following them.
  */
 import { createHash } from 'node:crypto'
-import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { lstat as lstatAsync, readFile as readFileAsync, readdir as readdirAsync, readlink as readlinkAsync, realpath as realpathAsync, stat as statAsync } from 'node:fs/promises'
 import path, { dirname, join, relative, resolve } from 'node:path'
 import { absoluteScopePath, canonicalPath, scopeWrites, type WriteScope } from './work.ts'
+
+/** Maximum single-file size admitted into an in-memory snapshot buffer (64 MiB). */
+export const SNAPSHOT_MAX_FILE_BYTES = 64 * 1024 * 1024
+const ASYNC_READ_CONCURRENCY = 8
 
 /**
  * Dependency, VCS, and transient build caches skipped during directory walks.
@@ -25,6 +30,13 @@ export const SNAPSHOT_IGNORED_DIRS: ReadonlySet<string> = new Set([
   '.nuxt',
   '.cache',
   '.pytest_cache',
+  '.svelte-kit',
+  '.parcel-cache',
+  '.vite',
+  '.gradle',
+  '.mypy_cache',
+  '.ruff_cache',
+  '.tox',
 ])
 
 const SNAPSHOT_IGNORED_FILES: ReadonlySet<string> = new Set([
@@ -99,8 +111,11 @@ export function saveSnapshot(dir: string, files: readonly SnapshotSource[], fail
     if (!file.body) throw new SnapshotError(`missing body for ${file.path}`)
     const hash = sha256(file.body)
     const target = join(blobs, hash)
-    if (!existsSync(target)) writeFileSync(target, file.body, { flag: 'wx' })
-    if (sha256(readFileSync(target)) !== hash) throw new SnapshotError(`corrupt blob ${file.path}`)
+    if (!existsSync(target)) {
+      writeFileSync(target, file.body, { flag: 'wx' })
+    } else if (sha256(readFileSync(target)) !== hash) {
+      throw new SnapshotError(`corrupt blob ${file.path}`)
+    }
     saved.push({ path: file.path, sha256: hash, bytes: file.body.byteLength })
   }
   const manifest: SnapshotManifest = {
@@ -120,14 +135,91 @@ export function wipeArtifacts(homeDir: string): void {
   rmSync(join(homeDir, 'cas-blobs'), { recursive: true, force: true })
 }
 
+/** Prune completed baseline/subject snapshot directories not present in `keepRefs`. */
+export function pruneSnapshots(homeDir: string, keepRefs: ReadonlySet<string>): number {
+  const root = join(homeDir, 'artifacts')
+  if (!existsSync(root)) return 0
+  let removed = 0
+  for (const entry of readdirSync(root, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue
+    if (!/^(?:base|sub)-/.test(entry.name) || keepRefs.has(entry.name)) continue
+    const dir = join(root, entry.name)
+    if (!existsSync(join(dir, 'manifest.json'))) continue
+    try {
+      rmSync(dir, { recursive: true, force: true })
+      removed += 1
+    } catch { /* best-effort GC */ }
+  }
+  return removed
+}
+
+function resolveBlobPath(dir: string, hash: string): string {
+  const local = join(dir, 'blobs', hash)
+  if (existsSync(local)) return local
+  // Older homes may store the body only in the sibling CAS directory.
+  return join(dirname(dirname(resolve(dir))), 'cas-blobs', hash)
+}
+
 /** Read the live scope into snapshot sources. The caller saves them with {@link saveSnapshot}. */
-export function captureScope(root: string, scope: string, type: 'file' | 'directory', platform: NodeJS.Platform = process.platform): ScopeCapture {
+export function captureScope(root: string, scope: string, type: 'file' | 'directory', platform: NodeJS.Platform = process.platform, maxFileBytes = SNAPSHOT_MAX_FILE_BYTES): ScopeCapture {
   const scanned = scanScope(root, scope, type, platform)
-  const files: SnapshotSource[] = scanned.files.map(rel => ({
-    path: rel,
-    body: new Uint8Array(readFileSync(join(root, ...rel.split('/')))),
-  }))
+  const files: SnapshotSource[] = scanned.files.map(rel => {
+    const full = join(root, ...rel.split('/'))
+    const size = statSync(full).size
+    if (size > maxFileBytes) {
+      throw new SnapshotError(`file ${rel} exceeds snapshot size limit (${size} > ${maxFileBytes} bytes)`)
+    }
+    return { path: rel, body: new Uint8Array(readFileSync(full)) }
+  })
   return { files, empty: scanned.files.length === 0, exclusions: scanned.exclusions }
+}
+
+/** Non-blocking async equivalent of {@link captureScope} with bounded file-read concurrency. */
+export async function captureScopeAsync(root: string, scope: string, type: 'file' | 'directory', platform: NodeJS.Platform = process.platform, maxFileBytes = SNAPSHOT_MAX_FILE_BYTES): Promise<ScopeCapture> {
+  const scanned = await scanScopeAsync(root, scope, type, platform)
+  const files = new Array<SnapshotSource>(scanned.files.length)
+  let cursor = 0
+  const workers = Array.from({ length: Math.min(ASYNC_READ_CONCURRENCY, scanned.files.length) }, async () => {
+    while (cursor < scanned.files.length) {
+      const index = cursor++
+      const rel = scanned.files[index]!
+      const full = join(root, ...rel.split('/'))
+      const info = await statAsync(full)
+      if (info.size > maxFileBytes) {
+        throw new SnapshotError(`file ${rel} exceeds snapshot size limit (${info.size} > ${maxFileBytes} bytes)`)
+      }
+      files[index] = { path: rel, body: new Uint8Array(await readFileAsync(full)) }
+    }
+  })
+  await Promise.all(workers)
+  return { files, empty: scanned.files.length === 0, exclusions: scanned.exclusions }
+}
+
+/**
+ * Read and verify a snapshot manifest and blob presence/byte-lengths without
+ * reading every blob body into memory. Use when only metadata/hashes are needed.
+ */
+export function readManifest(dir: string): SnapshotManifest {
+  const manifest = parseManifest(JSON.parse(readFileSync(join(dir, 'manifest.json'), 'utf8')))
+  for (const entry of manifest.saved) {
+    if (!/^[a-f0-9]{64}$/.test(entry.sha256)) throw new SnapshotError(`invalid blob hash ${entry.path}`)
+    const target = resolveBlobPath(dir, entry.sha256)
+    let size = -1
+    try { size = statSync(target).size } catch { throw new SnapshotError(`missing blob ${entry.path}`) }
+    if (size !== entry.bytes) throw new SnapshotError(`corrupt blob ${entry.path}`)
+  }
+  return manifest
+}
+
+/** Read and SHA-256 verify a single file body from a saved snapshot. */
+export function readSnapshotEntry(dir: string, relPath: string, platform: NodeJS.Platform = process.platform): Uint8Array | undefined {
+  const manifest = parseManifest(JSON.parse(readFileSync(join(dir, 'manifest.json'), 'utf8')))
+  const entry = manifest.saved.find(item => sameRel(item.path, relPath, platform))
+  if (!entry) return undefined
+  if (!/^[a-f0-9]{64}$/.test(entry.sha256)) throw new SnapshotError(`invalid blob hash ${entry.path}`)
+  const body = readFileSync(resolveBlobPath(dir, entry.sha256))
+  if (sha256(body) !== entry.sha256 || body.byteLength !== entry.bytes) throw new SnapshotError(`corrupt blob ${entry.path}`)
+  return new Uint8Array(body)
 }
 
 export function readSnapshot(dir: string): { readonly manifest: SnapshotManifest; readonly bodies: ReadonlyMap<string, Uint8Array> } {
@@ -135,10 +227,7 @@ export function readSnapshot(dir: string): { readonly manifest: SnapshotManifest
   const bodies = new Map<string, Uint8Array>()
   for (const entry of manifest.saved) {
     if (!/^[a-f0-9]{64}$/.test(entry.sha256)) throw new SnapshotError(`invalid blob hash ${entry.path}`)
-    const local = join(dir, 'blobs', entry.sha256)
-    // Older homes may store the body only in the sibling CAS directory.
-    const legacy = join(dirname(dirname(resolve(dir))), 'cas-blobs', entry.sha256)
-    const body = readFileSync(existsSync(local) ? local : legacy)
+    const body = readFileSync(resolveBlobPath(dir, entry.sha256))
     if (sha256(body) !== entry.sha256 || body.byteLength !== entry.bytes) throw new SnapshotError(`corrupt blob ${entry.path}`)
     bodies.set(entry.path, body)
   }
@@ -337,6 +426,78 @@ export function scanScope(root: string, scope: string, type: 'file' | 'directory
     }
   }
   walk(scope)
+  return { files, exclusions }
+}
+
+async function isLinkAsync(target: string): Promise<boolean> {
+  const stat = await lstatAsync(target)
+  if (stat.isSymbolicLink()) return true
+  try {
+    return canonicalPath(unwrap(await realpathAsync(target))) !== canonicalPath(unwrap(resolve(target)))
+  } catch {
+    return true
+  }
+}
+
+async function linkAtAsync(target: string): Promise<boolean> {
+  try { return await isLinkAsync(target) } catch { return true }
+}
+
+async function linkReasonAsync(target: string): Promise<string> {
+  try {
+    return `symlink:${(await readlinkAsync(target, 'utf8')).replaceAll('\\', '/')}`
+  } catch {
+    return 'symlink'
+  }
+}
+
+/** Non-blocking async directory walk matching {@link scanScope} semantics. */
+export async function scanScopeAsync(root: string, scope: string, type: 'file' | 'directory', platform: NodeJS.Platform = process.platform): Promise<ScopeScan> {
+  let scopeStat: Awaited<ReturnType<typeof lstatAsync>> | undefined
+  try { scopeStat = await lstatAsync(scope) } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { files: [], exclusions: [] }
+    throw error
+  }
+  if (await isLinkAsync(scope)) throw new SnapshotError(`refusing to follow a link at ${scope}`)
+  if (type === 'file') {
+    if (!scopeStat.isFile()) throw new SnapshotError(`${scope} is not a file`)
+    return { files: [relativePath(root, scope)], exclusions: [] }
+  }
+  const files: string[] = []
+  const exclusions: SnapshotExclusion[] = []
+  const walk = async (dir: string): Promise<void> => {
+    const entries = await readdirAsync(dir, { withFileTypes: true })
+    for (const entry of entries) {
+      if (entry.name === '.' || entry.name === '..') continue
+      const full = join(dir, entry.name)
+      const rel = relativePath(root, full)
+      if (entry.isSymbolicLink() || await linkAtAsync(full)) {
+        exclusions.push({
+          path: rel,
+          reason: ignoredDirName(entry.name, platform) ? 'ignored directory' : await linkReasonAsync(full),
+        })
+        continue
+      }
+      if (entry.isDirectory()) {
+        if (ignoredDirName(entry.name, platform)) {
+          exclusions.push({ path: rel, reason: 'ignored directory' })
+          continue
+        }
+        await walk(full)
+      } else if (entry.isFile()) {
+        if (ignoredFileName(entry.name, platform)) {
+          exclusions.push({ path: rel, reason: 'ignored file' })
+          continue
+        }
+        if (foldRel(entry.name, platform) === '.git') {
+          exclusions.push({ path: rel, reason: 'ignored directory' })
+          continue
+        }
+        files.push(rel)
+      }
+    }
+  }
+  await walk(scope)
   return { files, exclusions }
 }
 

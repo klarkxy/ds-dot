@@ -428,6 +428,7 @@ const ruUi: UiText = {
   workAccept: 'Принять',
   workReject: 'Вернуть',
   workResume: 'Повторить завершение',
+  workForceRelease: 'Снять блокировку',
   workLookAccept: 'Всё хорошо',
   workLookReject: 'Вернуть',
   workStatusCancelled: 'Отменено',

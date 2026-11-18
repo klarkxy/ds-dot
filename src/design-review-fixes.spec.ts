@@ -1,0 +1,424 @@
+/**
+ * Regression suite covering all 8 design-review fixes:
+ * 1. Async non-blocking snapshot capture, manifest-only verification, single-entry reads,
+ *    oversized file guard, extended cache-dir exclusions, and snapshot GC.
+ * 2. Unknown-creation & dead-relay recovery on absent/stopped sessions + human forceReleaseChange.
+ * 3. Hardened approval-risk gate (reordered rm flags, git -C push, credentials, read-only tool writes).
+ * 4. Runtime tools/pre-execute WriteScope enforcement on sealed child sessions.
+ * 5. Synthesis of legacy acceptance/deliverable/priority parameters in dot_task & dot_start_task.
+ * 6. Bounded state.cards cap, durable task-table deletion on prune, and WorkBook history pruning.
+ * 7. CJK-aware queryTerms segmentation & concurrent multi-session searchHistory.
+ * 8. Locale-aware cardAnswerText, boardRev watermark on ChatFeed, and forceReleasePayload on WorkBoard.
+ */
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { describe, expect, it } from 'vitest'
+import { assessApprovalRisk } from './approval-risk.ts'
+import {
+  captureScope, captureScopeAsync, ignoredDirName, pruneSnapshots,
+  readManifest, readSnapshotEntry, saveSnapshot,
+} from './artifacts.ts'
+import { DotCards, cardAnswerText } from './card-state.ts'
+import { DEFAULT_SETTINGS, TOOL } from './contracts.ts'
+import { cancelWork, launchReservedRun, reconcileReserved, reconcileRun, supplementRun, type RunSessionHost } from './execution.ts'
+import { ChatFeed } from './feed.ts'
+import { queryTerms, searchRows } from './history.ts'
+import { SUPPORTED_LOCALES, localePack } from './i18n/index.ts'
+import { guardRunWriteTool, sealChildSession } from './peer.ts'
+import { DotService } from './service.ts'
+import { DotStore, MAX_STORED_CARDS, MAX_TASKS, type DotDomainHandle } from './store.ts'
+import { apply } from './tools.ts'
+import { forceReleasePayload } from './work-board.ts'
+import { WorkBook } from './work.ts'
+
+function makeFakeDomain() {
+  const tables: Record<string, Map<string, unknown>> = {
+    state: new Map(), tasks: new Map(), tickets: new Map(), schedules: new Map(), proposals: new Map(),
+    changes: new Map(), inputs: new Map(), runs: new Map(), verifications: new Map(), peers: new Map(),
+  }
+  const deletes: string[] = []
+  const domain: DotDomainHandle = {
+    table: name => ({
+      entries: () => tables[name]!.entries(),
+      get: key => tables[name]!.get(key),
+      put: async (key, value) => { tables[name]!.set(key, structuredClone(value)) },
+      delete: async key => { deletes.push(`${name}:${key}`); return tables[name]!.delete(key) },
+      update: async (key, recipe) => {
+        const next = recipe(tables[name]!.get(key))
+        tables[name]!.set(key, structuredClone(next))
+        return next
+      },
+    }),
+    close: async () => {},
+  }
+  return { domain, tables, deletes }
+}
+
+function makeServiceHarness() {
+  const home = mkdtempSync(join(tmpdir(), 'dot-fixes-home-'))
+  const project = mkdtempSync(join(tmpdir(), 'dot-fixes-proj-'))
+  writeFileSync(join(project, 'a.ts'), 'export const a = 1\n')
+  writeFileSync(join(project, 'b.ts'), 'export const b = 2\n')
+  const { domain, tables, deletes } = makeFakeDomain()
+  const store = new DotStore(domain)
+  void store.setSettings({ ...DEFAULT_SETTINGS, reflection: false, idleCheckMinutes: 0 })
+  const sessions = new Map<string, { cwd?: string; preset?: string }>()
+  const events = new Map<string, Array<{ type: string; seq?: number; time?: number; data?: unknown }>>()
+  const host = {
+    isRunning: () => false,
+    listSessions: async () => [],
+    titles: async () => new Map<string, string>(),
+    latestReply: async () => 'done',
+    readEvents: async (id: string) => events.get(id) ?? [],
+    cancel: async () => {},
+    archive: async () => {},
+    modelKey: () => 'p/ok',
+    syncModel: () => {},
+    createWorkspace: async (path: string, title?: string) => ({ id: 'ws-1', title: title ?? 'proj', path, sessionCount: 0 }),
+    listWorkspaces: () => [{ id: 'ws-1', title: 'proj', path: project, sessionCount: 0 }],
+    cwdOf: async () => project,
+    listModels: async () => ({ fallback: { provider: 'p', model: 'ok' }, models: [{ provider: 'p', model: 'ok', name: 'Ok' }] }),
+    listPresets: async () => ({ fallback: 'standard', presets: [{ id: 'standard' }] }),
+    selectModel: async () => {},
+    setReadOnly: async () => true,
+    setWritable: async () => true,
+    verifyTaskPermission: async () => true,
+    createDot: async () => 'dot-session',
+    resumeDot: async () => true,
+    releaseDot: async () => {},
+    dotEvents: () => [],
+    dotContext: async () => ({ live: true, compactions: 0 }),
+    summarize: async () => '',
+    findSession: async (id: string) => sessions.get(id),
+    createSession: async (input: { sessionId?: string; cwd?: string; preset?: string }) => {
+      const id = input.sessionId ?? `session-${sessions.size}`
+      sessions.set(id, { cwd: input.cwd, ...(input.preset ? { preset: input.preset } : {}) })
+      return id
+    },
+    prompt: async () => {},
+    relay: async () => {},
+    stopActivity: async () => ({ cancelAccepted: true, queueCleared: true, idle: true, jobsSettled: true as const }),
+  }
+  const service = new DotService({
+    host: host as never,
+    store,
+    homeDir: home,
+    notes: { path: join(home, 'memory.md'), read: async () => '', readCognition: async () => '' },
+    approvalGraceMs: 0,
+    timer: { set: () => 1, clear: () => {}, now: () => 1000 },
+    now: () => 1000,
+  })
+  const registered: Array<Record<string, unknown>> = []
+  apply({
+    tools: { schemas: () => [], restrict: () => () => {}, register(def: Record<string, unknown>) { registered.push(def); return () => {} } },
+    on: () => () => {},
+    systemPrompt: { section: () => () => {} },
+    dot: service,
+    effect(fn: () => unknown) { fn() },
+  } as never)
+  const taskTool = registered.find(row => row.name === TOOL.task) as { execute(args: Record<string, unknown>): Promise<string> }
+  const startTool = registered.find(row => row.name === TOOL.startTask) as { execute(args: Record<string, unknown>, exec?: unknown): Promise<string> }
+  return {
+    home, project, store, service, host, events, tables, deletes, taskTool, startTool,
+    cleanup: () => {
+      rmSync(project, { recursive: true, force: true })
+      rmSync(home, { recursive: true, force: true })
+    },
+  }
+}
+
+describe('1. Hardened approval-risk static gate', () => {
+  it('catches reordered rm flags, git global flags before push, script deletes, credentials, and structured read-only writes', () => {
+    expect(assessApprovalRisk({ toolName: 'bash', arguments: 'rm -f -r build' }).reasons).toContain('destroy')
+    expect(assessApprovalRisk({ toolName: 'bash', arguments: 'rm build -rf' }).reasons).toContain('destroy')
+    expect(assessApprovalRisk({ toolName: 'bash', arguments: 'git reset --hard HEAD~1' }).reasons).toContain('destroy')
+    expect(assessApprovalRisk({ toolName: 'bash', arguments: 'python3 -c "import shutil; shutil.rmtree(\'out\')"' }).reasons).toContain('destroy')
+    expect(assessApprovalRisk({ toolName: 'bash', arguments: 'rm temp.txt' }).reasons).not.toContain('destroy')
+
+    expect(assessApprovalRisk({ toolName: 'bash', arguments: 'git -C /repo push origin main' }).reasons).toContain('publish')
+    expect(assessApprovalRisk({ toolName: 'bash', arguments: 'git --no-pager push' }).reasons).toContain('publish')
+    expect(assessApprovalRisk({ toolName: 'bash', arguments: 'pnpm --filter pkg publish' }).reasons).toContain('publish')
+    expect(assessApprovalRisk({ toolName: 'bash', arguments: 'gh pr merge 42 --squash' }).reasons).toContain('publish')
+
+    expect(assessApprovalRisk({ toolName: 'read_file', arguments: '{"path":"~/.ssh/id_ed25519"}' }).reasons).toContain('credential')
+    expect(assessApprovalRisk({ toolName: 'bash', arguments: 'cat ~/.aws/credentials' }).reasons).toContain('credential')
+    expect(assessApprovalRisk({ toolName: 'bash', arguments: 'export TOKEN=ghp_1234567890abcdefghijklmnopqrstuvwxyzABCD' }).reasons).toContain('credential')
+
+    expect(assessApprovalRisk({ toolName: 'write_file', arguments: '{"path":"a.ts","content":"x"}', readOnly: true }).reasons).toContain('read-only-write')
+    expect(assessApprovalRisk({ toolName: 'apply_patch', arguments: '*** Update File: a.ts', readOnly: true }).reasons).toContain('read-only-write')
+    expect(assessApprovalRisk({ toolName: 'bash', arguments: 'sed -i "s/a/b/" a.ts', readOnly: true }).reasons).toContain('read-only-write')
+  })
+})
+
+describe('2. Runtime tools/pre-execute WriteScope enforcement on child sessions', () => {
+  it('blocks file writes on read-only runs and out-of-scope paths while permitting declared paths', async () => {
+    const baseRun = {
+      id: 'run-1',
+      cwd: '/repo',
+      workspaceRoot: '/repo',
+      writeScope: { kind: 'paths' as const, paths: [{ path: 'src/allowed.ts', type: 'file' as const }] },
+      access: 'write' as const,
+    }
+    expect(guardRunWriteTool(baseRun, { name: 'write_file', input: { file_path: 'src/allowed.ts' } }, 'linux')).toEqual({ allow: true })
+    expect(guardRunWriteTool(baseRun, { name: 'write_file', input: { file_path: 'src/other.ts' } }, 'linux')).toMatchObject({ allow: false })
+    expect(guardRunWriteTool(baseRun, { name: 'apply_patch', arguments: '*** Begin Patch\n*** Update File: src/other.ts\n*** End Patch' }, 'linux')).toMatchObject({ allow: false })
+    expect(guardRunWriteTool({ ...baseRun, access: 'read', writeScope: { kind: 'paths', paths: [] } }, { name: 'edit_file', input: { path: 'src/allowed.ts' } }, 'linux')).toMatchObject({ allow: false })
+
+    // Verify integration through sealChildSession's single pre-execute hook
+    const gates: Array<(exec: { name: string; input?: unknown }, next: () => Promise<{ kind: string }>) => Promise<{ kind: string; reason?: string }>> = []
+    const fakeAgent = {
+      session: { id: 'session-a' },
+      ctx: {
+        tools: { schemas: () => [], restrict: () => () => {}, register: () => () => {} },
+        systemPrompt: { section: () => () => {} },
+        on: (_ev: string, fn: typeof gates[number]) => { gates.push(fn); return () => {} },
+      },
+    }
+    sealChildSession(fakeAgent, async () => 'ok', new Set(), exec => guardRunWriteTool(baseRun, exec, 'linux'))
+    expect(gates).toHaveLength(1)
+    expect(await gates[0]!({ name: 'write_file', input: { path: 'src/allowed.ts' } }, async () => ({ kind: 'allow' }))).toEqual({ kind: 'allow' })
+    expect((await gates[0]!({ name: 'write_file', input: { path: 'src/forbidden.ts' } }, async () => ({ kind: 'allow' }))).kind).toBe('deny')
+  })
+})
+
+describe('3. Async snapshot capture, manifest-only reads, size guard, and orphan snapshot GC', () => {
+  it('captures asynchronously, validates manifests without reading all blobs, reads single entries, enforces size limits, and prunes unreferenced snapshots', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'dot-art-async-'))
+    const home = mkdtempSync(join(tmpdir(), 'dot-art-home-'))
+    try {
+      mkdirSync(join(root, '.vite'), { recursive: true })
+      writeFileSync(join(root, '.vite', 'cache.js'), 'skip')
+      mkdirSync(join(root, 'src'), { recursive: true })
+      writeFileSync(join(root, 'src', 'one.ts'), 'one')
+      writeFileSync(join(root, 'src', 'two.ts'), 'two')
+
+      expect(ignoredDirName('.vite', 'linux')).toBe(true)
+      const captured = await captureScopeAsync(root, root, 'directory')
+      expect(captured.files.map(f => f.path).sort()).toEqual(['src/one.ts', 'src/two.ts'])
+
+      expect(() => captureScope(root, root, 'directory', process.platform, 2)).toThrow(/exceeds snapshot size limit/)
+      await expect(captureScopeAsync(root, root, 'directory', process.platform, 2)).rejects.toThrow(/exceeds snapshot size limit/)
+
+      const snapKeep = join(home, 'artifacts', 'base-keep-1')
+      const snapDrop = join(home, 'artifacts', 'base-drop-1')
+      saveSnapshot(snapKeep, captured.files, undefined, { root, exclusions: captured.exclusions })
+      saveSnapshot(snapDrop, captured.files, undefined, { root, exclusions: captured.exclusions })
+
+      const manifest = readManifest(snapKeep)
+      expect(manifest.saved).toHaveLength(2)
+      const oneBytes = readSnapshotEntry(snapKeep, 'src/one.ts')
+      expect(new TextDecoder().decode(oneBytes)).toBe('one')
+      expect(readSnapshotEntry(snapKeep, 'src/missing.ts')).toBeUndefined()
+
+      expect(pruneSnapshots(home, new Set(['base-keep-1']))).toBe(1)
+      expect(existsSync(snapKeep)).toBe(true)
+      expect(existsSync(snapDrop)).toBe(false)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+      rmSync(home, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('4. Unknown creation/delivery recovery and human forceReleaseChange', () => {
+  function minimalHost(overrides: Partial<RunSessionHost> = {}): RunSessionHost {
+    return {
+      findSession: async () => undefined,
+      createSession: async input => ({ sessionId: input.sessionId, cwd: input.cwd }),
+      prepareAccess: async () => 'ok',
+      prompt: async () => 'accepted',
+      promptReceipts: async () => 0,
+      relay: async () => 'accepted',
+      relayInserts: async () => 0,
+      stop: async () => ({ cancelAccepted: true, queueCleared: true, idle: true, jobsSettled: true }),
+      ...overrides,
+    }
+  }
+
+  it('recovers an absent unknown creation on reconcile and releases it cleanly on cancel', async () => {
+    const book = new WorkBook(async () => undefined, 'linux')
+    const change = await book.createChange({ title: 'T', cwd: '/repo', goal: 'g', at: 1 })
+    const res = await book.reserveRun({ changeId: change.id, cwd: '/repo', root: { workspaceRoot: '/repo' }, writeScope: { kind: 'paths', paths: [] }, at: 2 })
+    if (!res.ok) throw new Error(res.message)
+
+    // Simulate failed createSession leaving creation='unknown' with no sessionId
+    await launchReservedRun(book, minimalHost({ createSession: async () => { throw new Error('timeout') } }), res.run.id, 'go')
+    expect(book.run(res.run.id)?.creation).toBe('unknown')
+
+    // Reconcile observes session is absent on host -> resets creation back to 'intent'
+    await reconcileReserved(book, minimalHost({ findSession: async () => undefined }), res.run.id)
+    expect(book.run(res.run.id)?.creation).toBe('intent')
+
+    // Even if cancelled while creation='unknown' and absent on host, cancelWork releases it!
+    await book.markCreation(res.run.id, 'unknown', 3)
+    const cancelled = await cancelWork(book, minimalHost({ findSession: async () => undefined }), change.id, 4)
+    expect(cancelled).toMatchObject({ ok: true, runs: [{ id: res.run.id, released: true }] })
+    expect(book.occupying()).toEqual([])
+  })
+
+  it('retires quiescent unknown supplement deliveries when a cancelled run is verified stopped, and supports forceReleaseChange', async () => {
+    const book = new WorkBook(async () => undefined, 'linux')
+    const change = await book.createChange({ title: 'T', cwd: '/repo', goal: 'g', at: 1 })
+    const res = await book.reserveRun({ changeId: change.id, cwd: '/repo', root: { workspaceRoot: '/repo' }, writeScope: { kind: 'paths', paths: [{ path: '/repo/a.ts', type: 'file' }] }, at: 2 })
+    if (!res.ok) throw new Error(res.message)
+    await book.publishBaseline(res.run.id, book.revision, 'base-1', 3)
+    const host = minimalHost({ findSession: async () => ({ cwd: '/repo' }) })
+    expect((await launchReservedRun(book, host, res.run.id, 'start')).ok).toBe(true)
+
+    // Leave a finished-attempt unknown supplement delivery
+    await supplementRun(book, minimalHost({ findSession: async () => ({ cwd: '/repo' }), relayInserts: async () => undefined }), res.run.id, 'extra', 'dot', 4)
+    expect(book.run(res.run.id)?.deliveries.some(d => d.status === 'unknown')).toBe(true)
+
+    // Cancelling with verified stop retires the quiescent unknown supplement and releases the write lock
+    const cancelled = await cancelWork(book, host, change.id, 5)
+    expect(cancelled).toMatchObject({ ok: true, runs: [{ id: res.run.id, released: true }] })
+    expect(book.occupying()).toEqual([])
+
+    // Wedged run (e.g. jobsSettled: 'unknown') can be force-released by the human after cancel
+    const c2 = await book.createChange({ title: 'Wedged', cwd: '/repo', goal: 'g2', at: 6 })
+    const r2 = await book.reserveRun({ changeId: c2.id, cwd: '/repo', root: { workspaceRoot: '/repo' }, writeScope: { kind: 'workspace-exclusive' }, at: 7 })
+    if (!r2.ok) throw new Error(r2.message)
+    await book.publishBaseline(r2.run.id, book.revision, 'base-2', 8)
+    await launchReservedRun(book, host, r2.run.id, 'start')
+    await cancelWork(book, minimalHost({ findSession: async () => ({ cwd: '/repo' }), stop: async () => ({ cancelAccepted: true, queueCleared: true, idle: true, jobsSettled: 'unknown' }) }), c2.id, 9)
+    expect(book.occupying().map(r => r.id)).toEqual([r2.run.id])
+    expect(forceReleasePayload(book.workView(c2.id)!)).toEqual({ id: c2.id })
+
+    const forced = await book.forceReleaseChange(c2.id, 10)
+    expect(forced).toEqual({ ok: true, released: [r2.run.id] })
+    expect(book.occupying()).toEqual([])
+    expect(reconcileRun).toBeTypeOf('function')
+  })
+})
+
+describe('5. Legacy acceptance, deliverable, and priority parameter synthesis', () => {
+  it('preserves acceptance, deliverable, and priority across dot_task create/revise and dot_start_task', async () => {
+    const h = makeServiceHarness()
+    try {
+      const created = JSON.parse(await h.taskTool.execute({
+        action: 'create',
+        title: 'Build CLI',
+        goal: 'Implement CLI help output',
+        dir: h.project,
+        acceptance: 'Running cli --help exits 0 and prints usage',
+        deliverable: 'bin/cli.mjs',
+        priority: 3,
+      })) as { id: string; priority: number }
+      expect(created.priority).toBe(3)
+      const detail = JSON.parse(await h.taskTool.execute({ action: 'read', task_id: created.id })) as {
+        requirements: Array<{ requirementRef: string; text: string; scenarios?: Array<{ scenarioRef: string; then: string }> }>
+      }
+      expect(detail.requirements[0]?.requirementRef).toBe('goal')
+      expect(detail.requirements[0]?.text).toContain('bin/cli.mjs')
+      expect(detail.requirements[0]?.scenarios?.[0]).toMatchObject({ scenarioRef: 'goal.1', then: 'Running cli --help exits 0 and prints usage' })
+
+      const started = await h.startTool.execute({
+        cwd: h.project,
+        title: 'Quick check',
+        instruction: 'Inspect files',
+        goal: 'Audit README',
+        acceptance: 'All links resolve',
+        priority: 1,
+        access: 'read',
+      }, { signal: new AbortController().signal })
+      expect(started).toContain('started run-')
+      const secondChange = h.store.work.listChanges().find(c => c.id !== created.id)!
+      expect(secondChange.priority).toBe(1)
+      expect(h.store.work.input(secondChange.currentInputRef)?.requirements[0]?.scenarios?.[0]?.then).toBe('All links resolve')
+    } finally {
+      h.cleanup()
+    }
+  })
+})
+
+describe('6. Bounded state.cards, durable task-table deletes, and WorkBook history pruning', () => {
+  it('caps stored cards while preserving monotonic cardSequence, and deletes pruned tasks and old changes from durable tables', async () => {
+    const { domain, tables, deletes } = makeFakeDomain()
+    const store = new DotStore(domain)
+    await store.beginSegment({ sessionId: 'dot-1', startedAt: 1, persona: '' })
+    const cards = new DotCards(store)
+    const view = { title: 'Pick', interactive: true, view: { type: 'options' as const, id: 'o', options: [{ label: 'A' }] } }
+    for (let i = 1; i <= MAX_STORED_CARDS + 15; i++) {
+      await cards.present(view, `call-${i}`)
+    }
+    expect(store.cards.length).toBeLessThanOrEqual(MAX_STORED_CARDS)
+    expect(store.cardSequence).toBe(MAX_STORED_CARDS + 15)
+
+    for (let i = 1; i <= MAX_TASKS + 5; i++) {
+      await store.track({ sessionId: `s-${i}`, origin: 'started', title: `T${i}`, goal: 'g', cwd: '/w', at: i })
+      await store.apply({ type: 'archived', sessionId: `s-${i}`, at: i + 1 }, [])
+    }
+    await store.flush()
+    expect(store.list()).toHaveLength(MAX_TASKS)
+    expect(tables.tasks!.size).toBe(MAX_TASKS)
+    expect(deletes.some(d => d.startsWith('tasks:s-'))).toBe(true)
+
+    for (let i = 1; i <= 5; i++) {
+      const c = await store.work.createChange({ title: `C${i}`, cwd: '/w', goal: 'g', at: i })
+      await store.work.setControl(c.id, 'cancelled', i + 10)
+    }
+    const pruned = await store.pruneWorkHistory(2)
+    await store.flush()
+    expect(pruned.prunedChanges).toHaveLength(3)
+    expect(store.work.listChanges()).toHaveLength(2)
+    expect(tables.changes!.size).toBe(2)
+  })
+})
+
+describe('7. CJK-aware history tokenization and parallel session search', () => {
+  it('segments unspaced Chinese phrases while keeping English whitespace terms intact', async () => {
+    expect(queryTerms('  Friday  SHIP friday ')).toEqual(['friday', 'ship'])
+    const cjkTerms = queryTerms('修复失效链接')
+    expect(cjkTerms.length).toBeGreaterThanOrEqual(2)
+    const rows = [{ seq: 1, at: 1000, role: 'human' as const, text: '我已经把文档页里失效的链接全部修复好了' }]
+    expect(searchRows(rows, cjkTerms).map(h => h.seq)).toEqual([1])
+
+    const h = makeServiceHarness()
+    try {
+      for (let i = 1; i <= 20; i++) {
+        await h.store.track({ sessionId: `s-${i}`, origin: 'watched', title: `Task ${i}`, goal: 'g', cwd: h.project, at: i })
+        h.events.set(`s-${i}`, [{ type: 'user/message', seq: 1, time: i * 100, data: { content: [{ type: 'text', text: i === 17 ? '文档页里失效的链接已经修复' : 'ordinary message' }], source: { kind: 'user' } } }])
+      }
+      const res = await h.service.searchHistory({ query: '修复失效链接', scope: 'tasks' })
+      expect(res).toContain('s-17')
+    } finally {
+      h.cleanup()
+    }
+  })
+})
+
+describe('8. Localized cardAnswerText, 8-locale parity, and ChatFeed boardRev watermark', () => {
+  it('formats card reply headers per locale, keeps all 8 locale packs key-identical, and bumps boardRev on ChatFeed', () => {
+    const card = {
+      id: 'dot-card-3',
+      number: 3,
+      sessionId: 'dot-1',
+      callId: 'c3',
+      title: 'Deploy',
+      view: { type: 'confirm' as const, id: 'ok', confirmLabel: 'Yes', cancelLabel: 'No' },
+      expired: false,
+    }
+    const ans = { id: 'dot-card-3', action: 'ok', values: { confirmed: true } }
+    expect(cardAnswerText(card, ans)).toMatch(/^\[答复卡片 #3「Deploy」\]/)
+    expect(cardAnswerText(card, ans, 'en')).toMatch(/^\[Card reply #3 "Deploy"\]/)
+    expect(cardAnswerText(card, ans, 'ja')).toMatch(/^\[カード返信 #3「Deploy」\]/)
+
+    const baseKeys = Object.keys(localePack('zh').ui).sort()
+    for (const loc of SUPPORTED_LOCALES) {
+      expect(Object.keys(localePack(loc).ui).sort()).toEqual(baseKeys)
+      expect(localePack(loc).ui.workForceRelease.length).toBeGreaterThan(0)
+    }
+
+    const h = makeServiceHarness()
+    try {
+      const feed = new ChatFeed(h.host as never, h.store)
+      feed.attach('dot-session', [])
+      const initialRev = feed.snapshot(0)?.boardRev ?? 0
+      feed.boardChanged()
+      expect(feed.snapshot(0)?.boardRev).toBe(initialRev + 1)
+    } finally {
+      h.cleanup()
+    }
+  })
+})

@@ -428,6 +428,7 @@ const jaUi: UiText = {
   workAccept: '受け入れる',
   workReject: '差し戻す',
   workResume: '完了処理を再試行',
+  workForceRelease: '占有を解除',
   workLookAccept: '問題なし',
   workLookReject: '差し戻す',
   workStatusCancelled: 'キャンセル済み',

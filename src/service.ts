@@ -11,14 +11,14 @@ import { mkdir } from 'node:fs/promises'
 import { isAbsolute, join } from 'node:path'
 import { APPROVAL_DETAIL_LIMIT, approvalNotice } from './approval-risk.ts'
 import { writerPrior, evidenceRefGap, deliveryScope, scopeContainsPath, type DeliverySubject, type SubjectLook } from './acceptance.ts'
-import { captureScope, defaultIgnoreCover, foldRel, ignoreCovered, isLinkReason, readSnapshot, relativePath, saveSnapshot, scanScope, baselineCaptures, wipeArtifacts, type SnapshotExclusion, type SnapshotSource } from './artifacts.ts'
+import { captureScopeAsync, defaultIgnoreCover, foldRel, ignoreCovered, isLinkReason, pruneSnapshots, readManifest, readSnapshotEntry, relativePath, saveSnapshot, scanScope, scanScopeAsync, baselineCaptures, wipeArtifacts, type SnapshotExclusion, type SnapshotSource } from './artifacts.ts'
 import { inputConstraints, renderBrief, renderSupplement, runTitle } from './brief.ts'
 import { bindRunSession, cancelWork, countRelayInserts, finishWork, launchReservedRun, observeRun, reconcileRun, supplementRun } from './execution.ts'
 import { detectWorkspaceRoot } from './git-root.ts'
 import {
   WRITE_PATHS_EXAMPLE, artifactName, constraintList, jsonArray,
   occupantOf, pathScope, plannedOccupant, plannedScope, requirementList, samePathList,
-  stepList, verifyRefusal,
+  stepList, synthesizeRequirements, verifyRefusal,
 } from './work-actions.ts'
 import { absoluteScopePath, InputShapeError, occupantsConflict, scopeWithinRoot, scopeWrites, type ChangeRecord, type Occupant, type RunRecord, type WorkRefusal } from './work.ts'
 import type { ShownView, ViewAnswer } from '@klarkxy/dsh-deep-view/contracts'
@@ -39,7 +39,7 @@ import { ACCEPTED_DELIVERY_HINT, IDLE_SILENCE_HINT } from './task-hints.ts'
 import { DOT_TRACE, emitDotTrace, type DotTraceInput } from './trace.ts'
 import type { Ticket, TicketAccess, TicketPriority, SessionRole } from './contracts.ts'
 import { AGREEMENTS_MAX_CHARS, COGNITION_MAX_CHARS, KnowledgeError, MemoryNotes, addEntry, agreementNotesBlock, agreementsSection, cognitionSection, normalizeAgreements, normalizeCognition, policyAsAgreements, removeEntry } from './memory.ts'
-import { deliverPeer, PeerLedger, refreshChildSeals, sealChildSession, type PeerSendInput } from './peer.ts'
+import { deliverPeer, guardRunWriteTool, PeerLedger, refreshChildSeals, sealChildSession, type PeerSendInput } from './peer.ts'
 import { PendingHub, type PendingAnswer } from './pending.ts'
 import { personaSection } from './persona.ts'
 import { ReflectionRunner } from './reflection.ts'
@@ -213,10 +213,16 @@ export class DotService {
     return sessionId !== undefined && sessionId === this.store.dotSessionId
   }
 
-  /** Deny child-session tools on one agent and register dot_peer. A repeat is a no-op. */
+  /** Deny child-session tools on one agent, enforce run write-scopes, and register dot_peer. A repeat is a no-op. */
   sealAgent(agent: unknown): void {
-    const sealed = sealChildSession(agent, input => this.peerSend(input), this.childRefreshers)
     const id = (agent as { session?: { id?: unknown } } | null)?.session?.id
+    const guard = typeof id === 'string'
+      ? (exec: Parameters<typeof guardRunWriteTool>[1]) => {
+          const run = this.store.work.sessionRun(id)
+          return run ? guardRunWriteTool(run, exec) : { allow: true as const }
+        }
+      : undefined
+    const sealed = sealChildSession(agent, input => this.peerSend(input), this.childRefreshers, guard)
     if (sealed.applied && typeof id === 'string') {
       this.childReleases.set(id, sealed.release)
       this.emit({ event: DOT_TRACE.childSealed, message: `Sealed child-session tools on ${id}.`, sessionId: id })
@@ -268,7 +274,12 @@ export class DotService {
         try { return countRelayInserts(await this.host.readEvents(target), deliveryId, sender, text) } catch { return undefined }
       },
       relay: async (target, sender, text, deliveryId) => {
-        await this.host.relay(target, sender, text, deliveryId, () => this.peerTarget(target).ok)
+        this.store.work.claimLiveRelay(deliveryId)
+        try {
+          await this.host.relay(target, sender, text, deliveryId, () => this.peerTarget(target).ok)
+        } finally {
+          this.store.work.releaseLiveRelay(deliveryId)
+        }
       },
       hold: (target, sender, deliveryId, text) => this.store.work.holdPeer(target, sender, deliveryId, text, this.now()),
       release: (target, deliveryId, status) => this.store.work.settlePeer(target, deliveryId, status, this.now()),
@@ -341,7 +352,7 @@ export class DotService {
       // instead of becoming a separate model turn of their own.
       const notices = this.liveNotices(this.batcher.take())
       const card = cardReply && this.store.cards.find(row => row.id === cardReply.card.id)
-      const message = cardReply ? cardAnswerText(card ?? cardReply.card, cardReply.answer) : body
+      const message = cardReply ? cardAnswerText(card ?? cardReply.card, cardReply.answer, this.locale) : body
       // A pending agreement note from the reflection pass rides the same carried
       // prefix as batched updates; it reaches dot once and is cleared after delivery.
       const agreementNotes = this.store.agreementNotes.trim()
@@ -825,6 +836,9 @@ export class DotService {
         ...(typeof args.dir === 'string' ? { cwd: args.dir } : {}),
         ...(typeof args.workspace_id === 'string' ? { workspaceId: args.workspace_id } : {}),
         ...(typeof args.goal === 'string' ? { goal: args.goal } : {}),
+        ...(typeof args.acceptance === 'string' ? { acceptance: args.acceptance } : {}),
+        ...(typeof args.deliverable === 'string' ? { deliverable: args.deliverable } : {}),
+        ...(typeof args.priority === 'number' && (args.priority === 1 || args.priority === 2 || args.priority === 3) ? { priority: args.priority } : {}),
         ...(typeof args.role === 'string' ? { role: args.role as SessionRole } : {}),
         ...(typeof args.access === 'string' ? { access: args.access as TicketAccess } : {}),
         ...(typeof args.paths === 'string' ? { paths: args.paths } : Array.isArray(args.paths) ? { paths: JSON.stringify(args.paths) } : {}),
@@ -1034,15 +1048,26 @@ export class DotService {
     const limit = Math.max(1, Math.min(Math.trunc(input.limit ?? SEARCH_LIMIT_DEFAULT), SEARCH_LIMIT_MAX))
     const groups: SessionHits[] = []
     let failed = 0
-    for (const target of targets) {
-      let events
-      try { events = await this.host.readEvents(target.sessionId) } catch (error) {
-        if (only) throw new DotError('dot/unknown-session', `session ${only} could not be read: ${messageOf(error)}`)
-        failed++
-        continue
+    const batchSize = 8
+    for (let start = 0; start < targets.length; start += batchSize) {
+      const batch = targets.slice(start, start + batchSize)
+      const results = await Promise.all(batch.map(async target => {
+        try {
+          const events = await this.host.readEvents(target.sessionId)
+          return { ok: true as const, target, events }
+        } catch (error) {
+          return { ok: false as const, target, error }
+        }
+      }))
+      for (const item of results) {
+        if (!item.ok) {
+          if (only) throw new DotError('dot/unknown-session', `session ${only} could not be read: ${messageOf(item.error)}`)
+          failed++
+          continue
+        }
+        const hits = searchRows(historyRows(item.events, input.tools === true, LOOKUP_TOOLS), terms).reverse()
+        if (hits.length > 0) groups.push({ ...item.target, hits })
       }
-      const hits = searchRows(historyRows(events, input.tools === true, LOOKUP_TOOLS), terms).reverse()
-      if (hits.length > 0) groups.push({ ...target, hits })
     }
     groups.sort((a, b) => b.hits[0]!.at - a.hits[0]!.at)
     return formatSearch({ query: input.query.trim(), groups, limit, searched: targets.length - failed, skipped: candidates.length - targets.length, failed, readTool: TOOL.readHistory })
@@ -1578,6 +1603,24 @@ export class DotService {
   }
   resumeWorkCloseout(changeId: string) { return this.store.work.resumeCloseout(changeId, this.now()) }
 
+  /** Human-initiated escape hatch for a cancelled Change whose runs are wedged in settling/unknown/rejected. */
+  async forceReleaseWork(changeId: string) {
+    const runs = this.store.work.listRuns().filter(run => run.changeId === changeId && !['completed', 'failed', 'stopped'].includes(run.phase))
+    for (const run of runs) {
+      if (run.creation === 'confirmed' && run.sessionId) {
+        try { await this.runHost().stop(run.sessionId) } catch { /* best-effort before local lock release */ }
+      }
+    }
+    return this.store.work.forceReleaseChange(changeId, this.now())
+  }
+
+  private async pruneWorkArtifactsIfNeeded(): Promise<void> {
+    try {
+      const { prunedChanges, keptArtifacts } = await this.store.pruneWorkHistory()
+      if (prunedChanges.length > 0) pruneSnapshots(this.options.homeDir, keptArtifacts)
+    } catch { /* best-effort background retention cleanup */ }
+  }
+
   /**
    * Capture the run's live scope and publish it as the baseline.
    * Relative paths resolve against the run's workspace root, not the process
@@ -1608,8 +1651,8 @@ export class DotService {
     const seenExclusion = new Set<string>()
     for (const scope of scopes) {
       const absolute = this.scopeTarget(root, scope.path)
-      let captured: ReturnType<typeof captureScope>
-      try { captured = captureScope(root, absolute, scope.type) } catch (error) {
+      let captured: Awaited<ReturnType<typeof captureScopeAsync>>
+      try { captured = await captureScopeAsync(root, absolute, scope.type) } catch (error) {
         throw new DotError('dot/invalid', error instanceof Error ? error.message : 'scope could not be read')
       }
       for (const file of captured.files) {
@@ -1646,7 +1689,7 @@ export class DotService {
         const rel = relativePath(root, target)
         const cover = defaultIgnoreCover(rel, process.platform, scope.type)
         if (cover) throw new Error(`explicit ${scope.type} target ${rel} is a default-ignored path/file (${cover}) and is not supported by delivery capture`)
-        const collected = captureScope(root, target, scope.type)
+        const collected = await captureScopeAsync(root, target, scope.type)
         for (const file of collected.files) files.set(foldRel(file.path), file)
         for (const item of collected.exclusions) exclusions.set(`${foldRel(item.path)}|${item.reason}`, item)
       }
@@ -1656,7 +1699,7 @@ export class DotService {
     const captured = { files: [...files.values()], exclusions: [...exclusions.values()], empty: files.size === 0 }
     let outOfScopePaths: string[] = []
     try {
-      const outside = scanScope(root, root, 'directory')
+      const outside = await scanScopeAsync(root, root, 'directory')
       outOfScopePaths = [...outside.files, ...outside.exclusions.map(item => item.path)].filter(rel => !scopeContainsPath(writeScope, root, rel))
     } catch { /* outside observations do not decide closeout */ }
     const id = artifactName(`sub-${change.id}-${change.currentRevision}-${this.store.work.revision}`)
@@ -1744,7 +1787,7 @@ export class DotService {
     if (named.kind === 'deleted' || !named.sha256) return { ok: false, code: 'missing', message: `${ref} was deleted in ${verification.id}` }
     if (!artifactName(subject.artifactRef) || artifactName(subject.artifactRef) !== subject.artifactRef) return { ok: false, code: 'invalid', message: 'delivery snapshot is not a single relative id' }
     try {
-      const bodyBytes = readSnapshot(join(this.options.homeDir, 'artifacts', subject.artifactRef)).bodies.get(named.path)
+      const bodyBytes = readSnapshotEntry(join(this.options.homeDir, 'artifacts', subject.artifactRef), named.path)
       if (!bodyBytes || bodyBytes.byteLength === 0) return { ok: false, code: 'missing', message: `${ref} is missing from the delivery snapshot` }
       return asText(`change:${named.path}`, bodyBytes)
     } catch {
@@ -1779,7 +1822,7 @@ export class DotService {
       read: ref => {
         if (!artifactName(ref) || artifactName(ref) !== ref) return undefined
         try {
-          const manifest = readSnapshot(join(root, ref)).manifest
+          const manifest = readManifest(join(root, ref))
           return { root: manifest.root, saved: manifest.saved, deleted: manifest.deleted, exclusions: manifest.exclusions }
         } catch { return undefined }
       },
@@ -1801,7 +1844,9 @@ export class DotService {
     const title = text('title')
     const goal = text('goal')
     const dir = text('dir')
-    const requirements = requirementList(args.requirements)
+    const acceptance = text('acceptance')
+    const deliverable = text('deliverable')
+    const explicitRequirements = requirementList(args.requirements)
     const steps = args.steps === undefined ? undefined : stepList(args.steps)
     const constraints = constraintList(args.constraints)
     const behaviorNotes = text('behavior_notes')
@@ -1817,11 +1862,13 @@ export class DotService {
     }
     if (action === 'create') {
       if (!title?.trim() || !goal?.trim() || !dir || !isAbsolute(dir)) throw new DotError('dot/invalid', 'title, goal and an absolute dir are required')
+      const requirements = synthesizeRequirements(goal, explicitRequirements, acceptance, deliverable)
+        ?? [{ requirementRef: 'goal', text: goal, required: true }]
       let change: ChangeRecord
       try {
         change = await this.store.work.createChange({
           title, cwd: dir, goal,
-          requirements: requirements ?? [{ requirementRef: 'goal', text: goal, required: true }],
+          requirements,
           ...(steps ? { steps } : {}),
           ...inputFields,
           ...(maxConcurrentRuns !== undefined ? { maxConcurrentRuns } : {}),
@@ -1833,10 +1880,15 @@ export class DotService {
         throw error
       }
       if (args.human_review === true) await this.store.work.requestOversight(change.id, this.now())
+      void this.pruneWorkArtifactsIfNeeded()
       return JSON.stringify(this.store.work.workView(change.id))
     }
     const changeId = text('task_id') ?? ''
     if (!changeId) throw new DotError('dot/invalid', 'task_id is required')
+    const existingChange = this.store.work.change(changeId)
+    const existingInput = existingChange ? this.store.work.input(existingChange.currentInputRef) : undefined
+    const effectiveGoal = goal ?? existingInput?.goal ?? ''
+    const requirements = synthesizeRequirements(effectiveGoal, explicitRequirements, acceptance, deliverable)
     const revised = await this.store.work.reviseChange(changeId, {
       ...(title !== undefined ? { title } : {}),
       ...(goal !== undefined ? { goal } : {}),
@@ -2267,7 +2319,7 @@ export class DotService {
     return released.ok === true
   }
 
-  private async startWorkSession(input: { workspaceId?: string; cwd?: string; title: string; instruction: string; goal?: string; model?: string; taskId?: string; role?: SessionRole; access?: TicketAccess; preset?: string; checkOnly?: boolean; paths?: string; runId?: string; stepRefs?: readonly string[]; captureBaseline?: boolean }): Promise<string> {
+  private async startWorkSession(input: { workspaceId?: string; cwd?: string; title: string; instruction: string; goal?: string; model?: string; taskId?: string; role?: SessionRole; access?: TicketAccess; acceptance?: string; deliverable?: string; priority?: TicketPriority; preset?: string; checkOnly?: boolean; paths?: string; runId?: string; stepRefs?: readonly string[]; captureBaseline?: boolean }): Promise<string> {
     const role = input.role ?? 'work'
     if (role !== 'work' && role !== 'rework' && role !== 'review') throw new DotError('dot/invalid', 'invalid role')
     let changeId = input.taskId
@@ -2285,8 +2337,18 @@ export class DotService {
       if (!cwd || !isAbsolute(cwd)) throw new DotError('dot/invalid', 'directory must be absolute')
       const goal = input.goal?.trim() || input.instruction.trim()
       if (!goal && !input.checkOnly) throw new DotError('dot/invalid', 'instruction must be non-empty')
-      const change = await this.store.work.createChange({ title: input.title, cwd, goal: goal || input.title, at: this.now() })
+      const baseGoal = goal || input.title
+      const synthesized = synthesizeRequirements(baseGoal, undefined, input.acceptance, input.deliverable)
+      const change = await this.store.work.createChange({
+        title: input.title,
+        cwd,
+        goal: baseGoal,
+        ...(synthesized ? { requirements: synthesized } : {}),
+        ...(input.priority !== undefined ? { priority: input.priority } : {}),
+        at: this.now(),
+      })
       changeId = change.id
+      void this.pruneWorkArtifactsIfNeeded()
     }
     const change = this.store.work.change(changeId)
     if (!change) throw new DotError('dot/invalid', `unknown change ${changeId}`)
@@ -2410,7 +2472,7 @@ export class DotService {
       return { ok: false, code: 'baseline', message: `artifact ${artifactRef} is not a single relative id` }
     }
     try {
-      const manifest = readSnapshot(join(this.options.homeDir, 'artifacts', artifactRef)).manifest
+      const manifest = readManifest(join(this.options.homeDir, 'artifacts', artifactRef))
       const captured = baselineCaptures(run, manifest)
       if (!captured.ok) return { ok: false, code: 'baseline', message: captured.reason }
       return undefined

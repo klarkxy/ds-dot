@@ -428,6 +428,7 @@ const ptUi: UiText = {
   workAccept: 'Aceitar',
   workReject: 'Enviar de volta',
   workResume: 'Tentar finalizar novamente',
+  workForceRelease: 'Liberar bloqueio',
   workLookAccept: 'Parece bom',
   workLookReject: 'Enviar de volta',
   workStatusCancelled: 'Cancelado',

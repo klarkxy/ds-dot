@@ -3,9 +3,12 @@
  * session. The delivery row is written before followup, and an unknown row is
  * never followed up again.
  */
+import path from 'node:path'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { defineTool } from '@deepseek-ai/dsh-tools'
+import { scopeContainsPath } from './acceptance.ts'
 import type { PeerDelivery } from './storage.ts'
+import { scopeWithinRoot, scopeWrites, type WriteScope } from './work.ts'
 
 /** Model-facing tool on a session dot opened. Not one of dot's own preset tools. */
 export const PEER_TOOL = 'dot_peer'
@@ -208,8 +211,111 @@ const TEXT_OUTPUT = {
   render: (_args: unknown, value: string) => [{ type: 'text' as const, text: value }],
 }
 
+const FILE_MUTATION_TOOLS = new Set([
+  'write',
+  'write_file',
+  'edit',
+  'edit_file',
+  'multi_edit',
+  'create_file',
+  'delete_file',
+  'remove_file',
+  'move_file',
+  'rename_file',
+  'notebook_edit',
+  'apply_patch',
+  'patch',
+])
+
+const PATH_FIELDS = ['file_path', 'path', 'filePath', 'target_file', 'targetFile', 'notebook_path', 'source', 'destination', 'from_path', 'to_path'] as const
+const PATCH_FILE_RE = /^\*\*\*\s+(?:Add|Update|Delete)\s+File:\s*(.+)$/gm
+const PATCH_MOVE_RE = /^\*\*\*\s+Move\s+to:\s*(.+)$/gm
+
+export interface PreExecuteToolCall {
+  readonly name: string
+  readonly input?: unknown
+  readonly arguments?: unknown
+  readonly args?: unknown
+}
+
+export type ChildToolGuard = (exec: PreExecuteToolCall) => { readonly allow: true } | { readonly allow: false; readonly reason: string }
+
+function parseToolPayload(exec: PreExecuteToolCall): Record<string, unknown> | undefined {
+  for (const candidate of [exec.input, exec.args, exec.arguments]) {
+    if (candidate && typeof candidate === 'object' && !Array.isArray(candidate)) return candidate as Record<string, unknown>
+    if (typeof candidate === 'string' && candidate.trim()) {
+      try {
+        const parsed: unknown = JSON.parse(candidate)
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) return parsed as Record<string, unknown>
+      } catch {
+        return { patch: candidate }
+      }
+    }
+  }
+  return undefined
+}
+
+function extractMutationPaths(payload: Record<string, unknown> | undefined): string[] {
+  if (!payload) return []
+  const found: string[] = []
+  const push = (val: unknown) => {
+    if (typeof val === 'string' && val.trim()) found.push(val.trim())
+  }
+  for (const key of PATH_FIELDS) push(payload[key])
+  if (Array.isArray(payload.edits)) {
+    for (const edit of payload.edits) {
+      if (edit && typeof edit === 'object') {
+        for (const key of PATH_FIELDS) push((edit as Record<string, unknown>)[key])
+      }
+    }
+  }
+  for (const patchKey of ['patch', 'diff', 'input', 'content']) {
+    const raw = payload[patchKey]
+    if (typeof raw !== 'string' || !raw.includes('*** ')) continue
+    for (const match of raw.matchAll(PATCH_FILE_RE)) push(match[1])
+    for (const match of raw.matchAll(PATCH_MOVE_RE)) push(match[1])
+  }
+  return [...new Set(found)]
+}
+
+/** Enforce a run's declared read/write scope at tool pre-execution time for structured file tools. */
+export function guardRunWriteTool(
+  run: { readonly id: string; readonly cwd: string; readonly workspaceRoot: string; readonly writeScope: WriteScope; readonly access?: 'read' | 'write' },
+  exec: PreExecuteToolCall,
+  platform: NodeJS.Platform = process.platform,
+): { readonly allow: true } | { readonly allow: false; readonly reason: string } {
+  const tool = exec.name.trim().toLowerCase()
+  if (!FILE_MUTATION_TOOLS.has(tool)) return { allow: true }
+  if (run.access === 'read' || !scopeWrites(run.writeScope)) {
+    return { allow: false, reason: `Run ${run.id} is read-only and cannot execute file-modifying tool "${exec.name}".` }
+  }
+  const api = platform === 'win32' ? path.win32 : path.posix
+  const targets = extractMutationPaths(parseToolPayload(exec))
+  if (targets.length === 0) {
+    if (run.writeScope.kind === 'paths') {
+      return { allow: false, reason: `Run ${run.id} restricts writes to declared paths, and "${exec.name}" did not name a verifiable target path.` }
+    }
+    return { allow: true }
+  }
+  const root = run.workspaceRoot || run.cwd
+  for (const raw of targets) {
+    const abs = api.isAbsolute(raw) ? api.normalize(raw) : api.resolve(run.cwd, raw)
+    if (!scopeWithinRoot(root, abs, platform)) {
+      return { allow: false, reason: `Path "${raw}" is outside workspace root ${root} for run ${run.id}.` }
+    }
+    if (run.writeScope.kind === 'paths') {
+      const rel = api.relative(root, abs).replaceAll('\\', '/')
+      if (!scopeContainsPath(run.writeScope, root, rel, platform)) {
+        const allowed = run.writeScope.paths.map(item => item.path).join(', ')
+        return { allow: false, reason: `Path "${raw}" is outside run ${run.id}'s write scope (${allowed}).` }
+      }
+    }
+  }
+  return { allow: true }
+}
+
 /** Hide global child-session tools and gate scoped calls before publishing the seal. */
-export function sealChildSession(agent: unknown, send: (input: PeerSendInput) => Promise<string>, refreshers: Set<() => void>): { readonly applied: boolean; release(): void } {
+export function sealChildSession(agent: unknown, send: (input: PeerSendInput) => Promise<string>, refreshers: Set<() => void>, guardTool?: ChildToolGuard): { readonly applied: boolean; release(): void } {
   const live = agent as Agent & { [SEALED]?: boolean }
   if (live[SEALED]) return { applied: false, release() {} }
   const ctx = live.ctx
@@ -230,6 +336,8 @@ export function sealChildSession(agent: unknown, send: (input: PeerSendInput) =>
     refresh()
     disposers.push(ctx.on('tools/pre-execute', (exec, next) => {
       if (isChildSessionTool(exec.name)) return Promise.resolve({ kind: 'deny', reason: DENY_REASON })
+      const verdict = guardTool?.(exec as PreExecuteToolCall)
+      if (verdict && !verdict.allow) return Promise.resolve({ kind: 'deny', reason: verdict.reason })
       return next()
     }))
     disposers.push(ctx.systemPrompt.section({

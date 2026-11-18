@@ -37,7 +37,7 @@ export const CHILD_SESSION_TOOLS = [
 const CHILD_SESSION_TOOL_SET: ReadonlySet<string> = new Set(CHILD_SESSION_TOOLS)
 const DELIVERY_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/
 const TEXT_MAX = 8_000
-const DENY_REASON = 'This session cannot start or control another session (subagent, teammate, Team, workflow). Use dot_peer to message a peer session that dot already opened.'
+const DENY_REASON = 'This task session cannot spawn or control nested sessions (subagent, teammate, team, or workflow). Use dot_peer to message an active peer session opened by dot.'
 const SEALED = Symbol('dot.child-seal')
 
 export function isChildSessionTool(name: string): boolean {
@@ -343,15 +343,15 @@ export function sealChildSession(agent: unknown, send: (input: PeerSendInput) =>
     disposers.push(ctx.systemPrompt.section({
       name: 'dot:peer-session',
       order: 80,
-      text: 'Child sessions are disabled in this session. Do not call subagent, subagent_fork, spawn_teammate, list_subagent_models, list_agents, send_message, wait_agent, interrupt_agent, team_task_create, team_task_list, team_task_get, team_task_update, or workflow. To wake another session that dot opened, call dot_peer only when that session\'s run is still active and still holds its scope. A finished or superseded run is refused. Reuse a delivery_id only to reconcile that same message. If the result is unknown, do not send it again.',
+      text: 'Nested child sessions are disabled in this session: never call subagent, subagent_fork, spawn_teammate, list_subagent_models, list_agents, send_message, wait_agent, interrupt_agent, team_task_create, team_task_list, team_task_get, team_task_update, or workflow. To coordinate with another active session opened by dot, call dot_peer (only active runs holding their scope accept messages; finished or superseded runs are refused). Treat delivery_id as an idempotency key for one exact message: reuse the same id only to reconcile delivery status, and if the outcome is unknown, never resend under a new id.',
     }))
     disposers.push(ctx.tools.register(defineTool({
       name: PEER_TOOL,
-      description: 'Wake one other session that dot opened and deliver one message as this session. Do not pass a sender; the caller is this session. target_session_id must be a different session whose run is still active and still holds its input and scope. A finished, stopped, settling, or superseded run is refused and nothing is sent. delivery_id is the idempotency key for this exact text: the same id is never followed up twice. unknown means the send was not proved — do not retry with this id or a new one. A new id is a new message and can double-send.',
+      description: 'Send one idempotent message from this session to another active session opened by dot (caller identity is automatic; do not pass a sender). target_session_id must belong to a different active run that still holds its input and scope; finished, settling, stopped, or superseded runs are refused. delivery_id uniquely identifies this exact message: repeating the same id reconciles status without double-sending, whereas an unknown result means delivery was unconfirmed and must not be retried with a new id.',
       parameters: {
-        target_session_id: { type: 'string', required: true, description: 'Session id of the peer dot opened.' },
-        delivery_id: { type: 'string', required: true, description: 'Idempotency key, 1–64 letters, digits, or . _ : -.' },
-        text: { type: 'string', required: true, description: 'Message text, 1–8000 characters.' },
+        target_session_id: { type: 'string', required: true, description: 'Active peer session id opened by dot.' },
+        delivery_id: { type: 'string', required: true, description: 'Idempotency key (1–64 letters, digits, or . _ : -).' },
+        text: { type: 'string', required: true, description: 'Message body (1–8000 characters).' },
       },
       output: TEXT_OUTPUT,
       isConcurrencySafe: () => false,

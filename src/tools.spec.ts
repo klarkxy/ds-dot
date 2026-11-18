@@ -124,6 +124,30 @@ describe('dot tools', () => {
     for (const node of ['steps', 'math', 'flow', 'explore', 'map']) expect(view.description).toContain(node)
   })
 
+  it('does not tell the model a review is read-only or that closeout takes a settled review', () => {
+    type Tool = { description: string; parameters: { properties: Record<string, { description?: string }> } }
+    const task = load().find(row => row.name === TOOL.task) as Tool
+    const start = load().find(row => row.name === TOOL.startTask) as Tool
+    const role = task.parameters.properties.role?.description ?? ''
+    const startRole = start.parameters.properties.role?.description ?? ''
+    // Review reserves workspace-exclusive write access. Calling it read-only would hide that the session can modify files.
+    expect(role).toContain('write access')
+    expect(role).toContain('not a read-only sandbox')
+    expect(start.description).toContain('write access')
+    expect(start.description).not.toContain('for inspection')
+    expect(startRole).toContain('write access')
+    expect(startRole).toContain('not a read-only sandbox')
+    // closeoutFromTool refuses a review that is already completed, failed, or stopped, then holds an open one.
+    const review = task.parameters.properties.review_run_id?.description ?? ''
+    expect(review).toContain('open review')
+    expect(review).toContain('already completed, failed, or stopped')
+    expect(review).not.toMatch(/settled/)
+    // human_review gates acceptance. The first closeout records the verification and opens the decision.
+    const human = task.parameters.properties.human_review?.description ?? ''
+    expect(human).toContain('before acceptance')
+    expect(human).not.toContain('before closeout')
+  })
+
   it('no tool parameter schema uses oneOf / anyOf / allOf / const or a union type', () => {
     const tools = allSchemas()
     const forbidden = ['oneOf', 'anyOf', 'allOf', 'const']

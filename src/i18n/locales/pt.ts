@@ -176,7 +176,7 @@ const ptUi: UiText = {
   sApprovals_dot: 'Dorothy',
   sApprovals_human: 'Você',
   sApprovals_deny: 'Negar tudo',
-  sApprovalsDesc_dot: 'Ela julga aprovações rotineiras. Um padrão perigoso detectado no aviso força você. Não é cada exclusão, segredo ou escrita.',
+  sApprovalsDesc_dot: 'Ela decide aprovações rotineiras e reversíveis. Avisos truncados ou padrões de alto risco detectados ainda exigem sua aprovação (essa verificação foca padrões específicos, não toda exclusão, segredo ou escrita).',
   sApprovalsDesc_human: 'Cada solicitação de aprovação vai para você.',
   sApprovalsDesc_deny: 'Todas as solicitações de aprovação são rejeitadas.',
   sQuestions: 'Perguntas do modelo',
@@ -561,8 +561,8 @@ export const pt: LocalePack = {
   ui: ptUi,
   card: ptCard,
   config: {
-    homeDir: 'Pasta do espaço de trabalho próprio da Dorothy, que também guarda a própria sessão dela; vazio usa uma pasta dot no diretório inicial do DSH. As demais configurações ficam na engrenagem do painel da Dorothy',
-    approvalGraceMs: 'Período de carência de notificação de aprovação em milissegundos (padrão 10000); aprovações resolvidas na sessão original durante esse tempo não acordam a Dorothy',
+    homeDir: 'Pasta do espaço de trabalho e da sessão próprios da Dorothy; deixe vazio para usar a pasta dot no diretório inicial do DSH. As demais configurações ficam no ícone de engrenagem no painel da Dorothy.',
+    approvalGraceMs: 'Período de carência de notificação de aprovação em milissegundos (padrão 10000); aprovações resolvidas na sessão de origem durante essa janela não acordam a Dorothy.',
   },
   approvalCard: {
     title: 'Aprovação',

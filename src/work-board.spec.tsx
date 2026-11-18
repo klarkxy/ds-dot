@@ -149,7 +149,7 @@ describe('WorkBoard', () => {
     ))
     const text = document.body.textContent ?? ''
     expect(text).toContain('执行中')
-    expect(text).toContain('施工')
+    expect(text).toContain('执行')
     expect(text).toContain('进行中')
     expect(text).toContain('src/a.ts')
     expect(text).toContain('修改')
@@ -211,7 +211,7 @@ describe('WorkBoard', () => {
         await Promise.resolve()
       })
       await openDetails()
-      expect(document.body.textContent).toContain('证据不存在或是空的')
+      expect(document.body.textContent).toContain('证据不存在或内容为空')
       expect(document.body.textContent).not.toContain('已完成')
       expect(document.querySelector('[data-evidence-body]')).toBeNull()
       await act(async () => failed.unmount())

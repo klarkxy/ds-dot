@@ -14,7 +14,7 @@ Requires DSH 0.2.2-rc.3 or later. Install into the profile you use:
 dsh plugin --profile web add ds-dot
 ```
 
-Restart the profile if DSH asks. Use `ds-dot@0.1.0` to pin this version, or `github:klarkxy/ds-dot#<commit>` for a source revision. Deep View is included for cards. Optional `@klarkxy/dsh-dev-index` adds documentation and plugin search; `@klarkxy/dsh-model-picker` adds model search in settings.
+Restart the profile if DSH asks. Use `ds-dot@0.2.0` to pin this version, or `github:klarkxy/ds-dot#<commit>` for a source revision. Deep View is included for cards. Optional `@klarkxy/dsh-dev-index` adds documentation and plugin search; `@klarkxy/dsh-model-picker` adds model search in settings.
 
 For local development:
 

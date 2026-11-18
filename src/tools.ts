@@ -18,7 +18,7 @@ import { personaSection } from './persona.ts'
 import { settingsSnapshotBlock, type SelfSettings } from './self-settings.ts'
 import { DotError, messageOf, type DotService } from './service.ts'
 import { DEV_INDEX_TOOLS, installDotDevIndex } from './dev-index-scope.ts'
-import { restrictInheritedTools } from './tool-scope.ts'
+import { gateToolExecution } from './tool-scope.ts'
 import { installDotWeb } from './web-scope.ts'
 import { toolDisplay } from './chat-format.ts'
 
@@ -29,6 +29,13 @@ export const DOT_INHERITED_ALLOW = [...Object.values(TOOL), 'show_view', ...HOST
 
 export const name = 'dsh-dot-tools'
 export const inject = ['tools', 'systemPrompt', SERVICE_NAME] as const
+
+/** Resolves once the optional dsh-dev-index row has loaded, failed, or been disposed.
+ * The agent-scope restriction in host.ts awaits this, because `tools.restrict`
+ * keeps a snapshot of the allow list: names registered after the call would
+ * stay hidden even though they are on DOT_INHERITED_ALLOW. */
+let devIndexLoad: Promise<void> = Promise.resolve()
+export const dotDevIndexReady = (): Promise<void> => devIndexLoad
 
 /** Right after the fixed instructions in the persona prefix (order 0). */
 const PERSONA_ORDER = 1
@@ -91,8 +98,8 @@ export const TASK_ACTIONS = ['create', 'revise', 'dispatch', 'read', 'list', 'su
 
 export function apply(ctx: Context): void {
   installDotWeb(ctx)
-  restrictInheritedTools(ctx, DOT_INHERITED_ALLOW)
-  void installDotDevIndex(ctx)
+  gateToolExecution(ctx, DOT_INHERITED_ALLOW)
+  devIndexLoad = installDotDevIndex(ctx)
   const host = ctx as ToolHost
   const dot = () => host[SERVICE_NAME]
   // Both sections read what the segment froze when it started, so every request of a segment

@@ -63,36 +63,43 @@ export async function loadDevIndexTools(): Promise<DevIndexBundle | undefined> {
   }
 }
 
-/** Register the two tools into this preset. Resolves once the attempt finishes. */
+/** Register the two tools into this preset. Resolves when the attempt finishes, fails, or the effect is disposed. */
 export function installDotDevIndex(ctx: Context, load: () => Promise<DevIndexBundle | undefined> = loadDevIndexTools): Promise<void> {
   const host = ctx as ToolHost
   if (typeof ctx.effect !== 'function' || typeof host.tools?.register !== 'function') return Promise.resolve()
   let finished!: () => void
   const ready = new Promise<void>(resolve => { finished = resolve })
   ctx.effect(() => {
-    let stop = () => {}
     let cancelled = false
-    void load().then(bundle => {
-      if (cancelled) {
-        bundle?.dispose()
-        finished()
-        return
-      }
-      if (!bundle) {
-        finished()
-        return
-      }
-      const releases = bundle.tools.map(tool => host.tools.register({ ...tool, hostEffect: 'read-only' as const }))
-      stop = () => {
-        for (const release of [...releases].reverse()) release()
-        bundle.dispose()
-      }
-      finished()
-    }, () => { finished() })
-    return () => {
+    const releases: Array<() => void> = []
+    let bundle: DevIndexBundle | undefined
+    // Idempotent: splices whatever is registered and disposes the held bundle at most once.
+    const drop = () => {
       cancelled = true
-      stop()
+      for (const release of releases.splice(0).reverse()) {
+        try { release() } catch { /* one failed undo cannot skip the rest */ }
+      }
+      const held = bundle
+      bundle = undefined
+      try { held?.dispose() } catch { /* optional client */ }
     }
+    void (async () => {
+      try {
+        const loaded = await load()
+        // Missing and late bundles take the same idempotent release as a failed register.
+        if (cancelled || loaded === undefined) {
+          bundle = loaded
+          drop()
+          return
+        }
+        bundle = loaded
+        for (const tool of loaded.tools) {
+          releases.push(host.tools.register({ ...tool, hostEffect: 'read-only' as const }))
+        }
+        if (cancelled) drop()
+      } catch { drop() } finally { finished() }
+    })()
+    return () => { drop(); finished() }
   })
   return ready
 }

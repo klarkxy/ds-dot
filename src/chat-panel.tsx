@@ -949,16 +949,34 @@ function Composer({
   const historyDraft = useRef('')
   const dragDepth = useRef(0)
   const hydratedSession = useRef('')
+  const textRef = useRef('')
   const composerRef = useRef<HTMLDivElement>(null)
+  const slashList = useRef<HTMLDivElement>(null)
   const area = useRef<HTMLTextAreaElement>(null)
   const picker = useRef<HTMLInputElement>(null)
+  textRef.current = text
 
-  // Restore per-session unsent draft once sessionId arrives without overwriting active edits.
+  // The first id keeps text typed before the snapshot arrived. A later id is a new
+  // segment: keep the visible draft and store it there, so reload does not leave it
+  // on the segment that just ended. An empty composer loads that session's draft.
   useEffect(() => {
     if (!sessionId || hydratedSession.current === sessionId) return
+    const previous = hydratedSession.current
     hydratedSession.current = sessionId
-    const saved = readDraft(sessionId)
-    if (saved) setText(current => current || saved)
+    const visible = textRef.current
+    if (!previous) {
+      const saved = readDraft(sessionId)
+      if (!visible && saved) setText(saved)
+      else if (visible) writeDraft(sessionId, visible)
+      return
+    }
+    setHistoryCursor(-1)
+    historyDraft.current = ''
+    if (visible) writeDraft(sessionId, visible)
+    else {
+      const saved = readDraft(sessionId)
+      if (saved) setText(saved)
+    }
   }, [sessionId])
 
   const updateText = useCallback((next: string, resetHistory = true) => {
@@ -981,6 +999,14 @@ function Composer({
     const timer = setTimeout(() => setSegmentDone(false), 2200)
     return () => clearTimeout(timer)
   }, [segmentDone])
+
+  // dragenter/dragleave are continuous and often both fire before `dragging` re-renders.
+  // Counting from the ref, and clearing on dragend, keeps the drop mask from sticking.
+  useEffect(() => {
+    const end = () => { dragDepth.current = 0; setDragging(false) }
+    window.addEventListener('dragend', end)
+    return () => window.removeEventListener('dragend', end)
+  }, [])
 
   const sentHistory = useMemo(() => {
     const out: string[] = []
@@ -1146,6 +1172,24 @@ function Composer({
   const slashOpen = !disabled && filteredCommands.length > 0 && (slashPinned || (slashToken !== undefined && !slashDismissed))
 
   useEffect(() => { setSlashIndex(0) }, [slashToken, slashPinned])
+  useLayoutEffect(() => {
+    if (historyCursor < 0) return
+    const el = area.current
+    if (!el) return
+    const pos = el.value.length
+    el.setSelectionRange(pos, pos)
+  }, [historyCursor, text])
+  useEffect(() => {
+    if (!slashOpen) return
+    const list = slashList.current
+    const active = list?.querySelector<HTMLElement>('[data-active]')
+    if (!list || !active) return
+    const listRect = list.getBoundingClientRect()
+    const activeRect = active.getBoundingClientRect()
+    if (listRect.height === 0 || activeRect.height === 0) return
+    if (activeRect.top < listRect.top) list.scrollTop -= listRect.top - activeRect.top
+    else if (activeRect.bottom > listRect.bottom) list.scrollTop += activeRect.bottom - listRect.bottom
+  }, [slashOpen, slashIndex, filteredCommands])
   useDismissOnOutsidePointer(composerRef, slashOpen, open => {
     if (!open) {
       setSlashPinned(false)
@@ -1174,49 +1218,50 @@ function Composer({
       }
       if ((event.key === 'Enter' && !event.shiftKey) || event.key === 'Tab') {
         const picked = filteredCommands[slashIndex] ?? filteredCommands[0]
-        if (picked && !picked.disabled) {
+        if (picked) {
           event.preventDefault()
-          picked.run()
+          if (!picked.disabled) picked.run()
           return
         }
       }
     }
 
-    // Recall recent sent prompts with ArrowUp / ArrowDown when empty or browsing history.
+    // Recall recent sent prompts with ArrowUp / ArrowDown. Once browsing, the
+    // arrows walk history even after the caret moves to the end of the recall.
+    const recall = (value: string, cursor: number) => {
+      setHistoryCursor(cursor)
+      setText(value)
+      writeDraft(sessionId, value)
+    }
     if (event.key === 'ArrowUp' && !event.shiftKey && !event.altKey && !event.metaKey && sentHistory.length > 0) {
       const el = event.currentTarget
       const atStart = el.selectionStart === 0 && el.selectionEnd === 0
-      if ((text === '' || historyCursor >= 0) && atStart) {
+      if (text === '' ? atStart : historyCursor >= 0) {
         event.preventDefault()
         if (historyCursor === -1) historyDraft.current = text
         const nextIdx = historyCursor === -1 ? sentHistory.length - 1 : Math.max(0, historyCursor - 1)
-        const recalled = sentHistory[nextIdx] ?? ''
-        setHistoryCursor(nextIdx)
-        setText(recalled)
+        recall(sentHistory[nextIdx] ?? '', nextIdx)
         return
       }
     }
     if (event.key === 'ArrowDown' && !event.shiftKey && !event.altKey && !event.metaKey && historyCursor >= 0) {
-      const el = event.currentTarget
-      const atEnd = el.selectionStart === text.length && el.selectionEnd === text.length
-      if (atEnd) {
-        event.preventDefault()
-        if (historyCursor >= sentHistory.length - 1) {
-          setHistoryCursor(-1)
-          setText(historyDraft.current)
-        } else {
-          const nextIdx = historyCursor + 1
-          setHistoryCursor(nextIdx)
-          setText(sentHistory[nextIdx] ?? '')
-        }
-        return
+      event.preventDefault()
+      if (historyCursor >= sentHistory.length - 1) {
+        const restored = historyDraft.current
+        setHistoryCursor(-1)
+        setText(restored)
+        writeDraft(sessionId, restored)
+      } else {
+        const nextIdx = historyCursor + 1
+        recall(sentHistory[nextIdx] ?? '', nextIdx)
       }
+      return
     }
 
     if (event.key !== 'Enter' || event.shiftKey) return
     event.preventDefault()
     submit()
-  }, [slashOpen, filteredCommands, slashIndex, sentHistory, text, historyCursor, submit])
+  }, [slashOpen, filteredCommands, slashIndex, sentHistory, text, historyCursor, submit, sessionId])
 
   const onPaste = useCallback((event: ClipboardEvent<HTMLTextAreaElement>) => {
     const files = [...event.clipboardData.files]
@@ -1244,11 +1289,11 @@ function Composer({
     event.dataTransfer.dropEffect = 'copy'
   }, [disabled])
   const onDragLeave = useCallback((event: DragEvent<HTMLDivElement>) => {
-    if (!dragging) return
+    if (dragDepth.current === 0) return
     event.preventDefault()
-    dragDepth.current = Math.max(0, dragDepth.current - 1)
+    dragDepth.current -= 1
     if (dragDepth.current === 0) setDragging(false)
-  }, [dragging])
+  }, [])
   const onDrop = useCallback((event: DragEvent<HTMLDivElement>) => {
     if (disabled) return
     event.preventDefault()
@@ -1297,7 +1342,7 @@ function Composer({
             <span>{t(locale, 'quickActions')}</span>
             <span className="dsh-dot-slash-kbd">↑↓ · Enter</span>
           </div>
-          <div className="dsh-dot-slash-list">
+          <div className="dsh-dot-slash-list" ref={slashList}>
             {filteredCommands.map((item, idx) => (
               <button
                 key={item.id}
@@ -1432,8 +1477,13 @@ function Composer({
                 aria-expanded={slashOpen}
                 aria-pressed={slashOpen}
                 onClick={() => {
+                  if (slashOpen) {
+                    setSlashPinned(false)
+                    setSlashDismissed(true)
+                    return
+                  }
                   setSlashDismissed(false)
-                  setSlashPinned(open => !open)
+                  setSlashPinned(true)
                 }}
               >
                 <SlashCommandGlyph />

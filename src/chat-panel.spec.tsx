@@ -10,10 +10,11 @@ const dom = new JSDOM('<div id="root"></div>', { url: 'https://local.test' })
 vi.stubGlobal('window', dom.window)
 vi.stubGlobal('document', dom.window.document)
 vi.stubGlobal('navigator', dom.window.navigator)
+vi.stubGlobal('localStorage', dom.window.localStorage)
 vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
 let createRoot: typeof import('react-dom/client').createRoot
 beforeAll(async () => { createRoot = (await import('react-dom/client')).createRoot })
-afterEach(() => { document.body.innerHTML = '<div id="root"></div>' })
+afterEach(() => { dom.window.localStorage.clear(); document.body.innerHTML = '<div id="root"></div>' })
 
 const NOTICE_TEXT = [
   '[dot notice] Updates from other sessions:',
@@ -824,6 +825,126 @@ describe('Composer images', () => {
     await act(async () => { settingsOption.click(); await Promise.resolve() })
     expect(document.querySelector('aside.dsh-dot-drawer')?.getAttribute('data-kind')).toBe('settings')
 
+    await act(async () => root.unmount())
+  })
+
+  // jsdom loads before React marks the input event supported, so onChange follows the
+  // keyup polyfill: focus the field, set the value underneath the tracker, then keyup.
+  function typeInto(input: HTMLTextAreaElement, value: string) {
+    const setter = Object.getOwnPropertyDescriptor(dom.window.HTMLTextAreaElement.prototype, 'value')?.set
+    input.dispatchEvent(new dom.window.FocusEvent('focusin', { bubbles: true }))
+    setter?.call(input, value)
+    input.dispatchEvent(new dom.window.KeyboardEvent('keyup', { bubbles: true }))
+  }
+
+  function key(input: HTMLTextAreaElement, name: string) {
+    input.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: name, bubbles: true }))
+  }
+
+  it('walks older prompts with ArrowUp after the caret moves to the end of a recall', async () => {
+    const snapshot: ChatSnapshot = {
+      sessionId: 'dot-history',
+      running: false,
+      streaming: '',
+      rev: 1,
+      itemsRev: 1,
+      items: [
+        { kind: 'user', key: 'u1', text: 'older prompt', at: 1 },
+        { kind: 'bot', key: 'b1', text: 'ok', at: 2 },
+        { kind: 'user', key: 'u2', text: 'newer prompt', at: 3 },
+      ],
+    }
+    const root = createRoot(document.getElementById('root')!)
+    await act(async () => { root.render(<ChatPanel locale="en" api={makeApi(snapshot)} onOpenSession={() => {}} />) })
+    await act(async () => { await Promise.resolve() })
+    const input = document.querySelector<HTMLTextAreaElement>('textarea.dsh-dot-input')!
+    await act(async () => { input.setSelectionRange(0, 0); key(input, 'ArrowUp') })
+    expect(input.value).toBe('newer prompt')
+    await act(async () => { key(input, 'ArrowUp') })
+    expect(input.value).toBe('older prompt')
+    await act(async () => { key(input, 'ArrowDown') })
+    expect(input.value).toBe('newer prompt')
+    await act(async () => { key(input, 'ArrowDown') })
+    expect(input.value).toBe('')
+    await act(async () => root.unmount())
+  })
+
+  it('runs a slash command from Enter and does not send when the highlighted command is disabled', async () => {
+    const snapshot: ChatSnapshot = { sessionId: 'dot-slash', running: true, streaming: '', rev: 1, itemsRev: 1, items: [] }
+    const api = makeApi(snapshot)
+    api.say = vi.fn(async () => {})
+    api.newSegment = vi.fn(async () => 'dot-2')
+    const root = createRoot(document.getElementById('root')!)
+    await act(async () => { root.render(<ChatPanel locale="en" api={api} onOpenSession={() => {}} />) })
+    await act(async () => { await Promise.resolve() })
+    const input = document.querySelector<HTMLTextAreaElement>('textarea.dsh-dot-input')!
+
+    await act(async () => { typeInto(input, '/task') })
+    await act(async () => { key(input, 'Enter') })
+    expect(input.value).toContain('Please start a new task:')
+    expect(api.say).not.toHaveBeenCalled()
+
+    await act(async () => { typeInto(input, '/segment') })
+    await act(async () => { key(input, 'Enter') })
+    expect(api.say).not.toHaveBeenCalled()
+    expect(input.value).toBe('/segment')
+    expect(api.newSegment).not.toHaveBeenCalled()
+
+    const quickBtn = document.querySelector<HTMLButtonElement>('button[aria-label="Quick actions"]')!
+    expect(document.querySelector('.dsh-dot-slash-menu')).not.toBeNull()
+    await act(async () => { quickBtn.click() })
+    expect(document.querySelector('.dsh-dot-slash-menu')).toBeNull()
+    await act(async () => root.unmount())
+  })
+
+  it('carries an unsent draft onto a new segment and restores it after remount', async () => {
+    const first: ChatSnapshot = { sessionId: 'seg-a', running: false, streaming: '', rev: 1, itemsRev: 1, items: [] }
+    let release: (snapshot: ChatSnapshot | undefined) => void = () => {}
+    let waits = 0
+    const api = makeApi(first)
+    api.wait = () => {
+      waits += 1
+      if (waits === 1) return new Promise(resolve => { release = resolve })
+      return new Promise(() => {})
+    }
+    const root = createRoot(document.getElementById('root')!)
+    await act(async () => { root.render(<ChatPanel locale="en" api={api} onOpenSession={() => {}} />) })
+    await act(async () => { await Promise.resolve(); await Promise.resolve() })
+    expect(waits).toBe(1)
+    const input = document.querySelector<HTMLTextAreaElement>('textarea.dsh-dot-input')!
+    await act(async () => { typeInto(input, 'hold this') })
+    expect(dom.window.localStorage.getItem('dsh-dot:draft:seg-a')).toBe('hold this')
+    await act(async () => {
+      release({ sessionId: 'seg-b', running: false, streaming: '', rev: 2, itemsRev: 2, items: [] })
+      await Promise.resolve()
+    })
+    expect(input.value).toBe('hold this')
+    expect(dom.window.localStorage.getItem('dsh-dot:draft:seg-b')).toBe('hold this')
+    await act(async () => root.unmount())
+
+    const again = createRoot(document.getElementById('root')!)
+    await act(async () => { again.render(<ChatPanel locale="en" api={makeApi({ sessionId: 'seg-b', running: false, streaming: '', rev: 3, itemsRev: 3, items: [] })} onOpenSession={() => {}} />) })
+    await act(async () => { await Promise.resolve(); await Promise.resolve() })
+    expect(document.querySelector<HTMLTextAreaElement>('textarea.dsh-dot-input')!.value).toBe('hold this')
+    await act(async () => again.unmount())
+  })
+
+  it('drops the drag mask when the pointer leaves before the next paint', async () => {
+    const snapshot: ChatSnapshot = { sessionId: 'dot-drag', running: false, streaming: '', rev: 1, itemsRev: 1, items: [] }
+    const root = createRoot(document.getElementById('root')!)
+    await act(async () => { root.render(<ChatPanel locale="en" api={makeApi(snapshot)} onOpenSession={() => {}} />) })
+    await act(async () => { await Promise.resolve() })
+    const card = document.querySelector<HTMLDivElement>('.dsh-dot-composer-card')!
+    const drag = (type: string) => {
+      const event = new dom.window.Event(type, { bubbles: true, cancelable: true })
+      Object.defineProperty(event, 'dataTransfer', { value: { types: ['Files'], dropEffect: 'none', files: [] } })
+      return event
+    }
+    await act(async () => {
+      card.dispatchEvent(drag('dragenter'))
+      card.dispatchEvent(drag('dragleave'))
+    })
+    expect(card.hasAttribute('data-dragging')).toBe(false)
     await act(async () => root.unmount())
   })
 })

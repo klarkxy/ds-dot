@@ -3,7 +3,7 @@
  * Isolated DeepSeek Harness (dsh web) QA, screenshot, and GIF runner.
  *
  * Cross-platform (Windows / macOS / Linux, Node >= 22).
- * Uses a temporary DSH_HOME and DSH_AGENTS_HOME, binds a free loopback port,
+ * Uses a temporary HOME, USERPROFILE, DSH_HOME, and DSH_AGENTS_HOME, binds a free loopback port,
  * accepts only a loopback launch URL, exchanges its token for an HttpOnly
  * dsh-auth-* cookie, and drops every other cookie and web storage before
  * recording. The dsh process tree is killed and confirmed exited before
@@ -21,6 +21,87 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 const SENSITIVE_ENV_PATTERN = /KEY|PASSWORD|SECRET|TOKEN|COOKIE/i
 const COLOR_SCHEMES = new Set(['light', 'dark', 'no-preference'])
 const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '::1'])
+
+// Profile and config locations. --allow-env cannot put any of these back.
+// NPM_CONFIG_* and GIT_CONFIG_* are blocked by prefix below, then the git
+// files we own are written inside the temporary home.
+const PROFILE_ENV_NAMES = new Set([
+  'HOME',
+  'USERPROFILE',
+  'HOMEDRIVE',
+  'HOMEPATH',
+  'APPDATA',
+  'LOCALAPPDATA',
+  'XDG_CONFIG_HOME',
+  'XDG_DATA_HOME',
+  'XDG_CACHE_HOME',
+  'XDG_STATE_HOME',
+  'XDG_RUNTIME_DIR',
+  'TMP',
+  'TEMP',
+  'TMPDIR',
+  'SSH_AUTH_SOCK',
+  'GIT_SSH_COMMAND',
+  'GNUPGHOME',
+  'DOCKER_CONFIG',
+  'GH_CONFIG_DIR',
+  'KUBECONFIG',
+  'AWS_CONFIG_FILE',
+  'AWS_SHARED_CREDENTIALS_FILE',
+  'NETRC',
+  'CURL_HOME',
+  'COMPOSER_HOME',
+  'CARGO_HOME',
+  'RUSTUP_HOME',
+  'BUNDLE_USER_HOME',
+  'BUNDLE_USER_CONFIG',
+  'GEM_HOME',
+  'GEM_SPEC_CACHE',
+  'PIP_CONFIG_FILE',
+  'CONDARC',
+  'JUPYTER_CONFIG_DIR',
+  'IPYTHONDIR',
+  'NODE_REPL_HISTORY',
+  'HISTFILE',
+  'LESSHISTFILE',
+  'INPUTRC',
+  'XAUTHORITY',
+  'PYTHONSTARTUP',
+  'PYTHONUSERBASE',
+  'PNPM_HOME',
+  'COREPACK_HOME',
+  'GRADLE_USER_HOME',
+  'NUGET_PACKAGES',
+  'DOTNET_CLI_HOME',
+])
+
+// Needed to find dsh, node, and cmd. These stay even when an entry lives
+// under the caller's home directory.
+const STARTUP_ENV_NAMES = new Set([
+  'PATH',
+  'PATHEXT',
+  'SYSTEMROOT',
+  'SYSTEMDRIVE',
+  'WINDIR',
+  'COMSPEC',
+  'OS',
+  'PROCESSOR_ARCHITECTURE',
+  'PROCESSOR_ARCHITEW6432',
+  'PROGRAMFILES',
+  'PROGRAMFILES(X86)',
+  'PROGRAMW6432',
+  'COMMONPROGRAMFILES',
+  'COMMONPROGRAMFILES(X86)',
+  'PROGRAMDATA',
+  'ALLUSERSPROFILE',
+  'PUBLIC',
+  'DRIVERDATA',
+  'NUMBER_OF_PROCESSORS',
+  'LANG',
+  'LC_ALL',
+  'LC_CTYPE',
+  'TZ',
+])
 
 export function redactTokens(input) {
   if (typeof input !== 'string') return ''
@@ -113,7 +194,11 @@ export function parseArgs(argv) {
     else if (arg === '--click') opts.clickSelectors.push(next())
     else if (arg === '--settle-ms') opts.settleMs = requireInteger('--settle-ms', next(), { min: 0, max: 120_000 })
     else if (arg === '--boot-timeout-ms') opts.bootTimeoutMs = requireInteger('--boot-timeout-ms', next(), { min: 1, max: 600_000 })
-    else if (arg === '--allow-env') opts.allowEnv.push(next())
+    else if (arg === '--allow-env') {
+      const name = next()
+      assertAllowEnvName(name)
+      opts.allowEnv.push(name)
+    }
     else if (arg === '--keep-temp-home') opts.keepTempHome = true
     else throw new Error(`Unknown option: ${arg}`)
   }
@@ -147,10 +232,11 @@ export function validateOpts(opts) {
 function printHelp() {
   console.log(`Usage: node dsh-qa-harness.js [options]
 
-Spins up an isolated DeepSeek Harness Web instance (temporary DSH_HOME,
-temporary DSH_AGENTS_HOME, free loopback port), mounts local plugins via
-link:, runs Playwright acceptance, captures screenshots and GIFs outside
-the git checkout, and tears down the process tree before removing DSH_HOME.
+Spins up an isolated DeepSeek Harness Web instance (temporary HOME,
+USERPROFILE, DSH_HOME, and DSH_AGENTS_HOME, free loopback port), mounts
+local plugins via link:, runs Playwright acceptance, captures screenshots
+and GIFs outside the git checkout, and tears down the process tree before
+removing the temporary home.
 
 Options:
   --plugin <dir>            Link built local plugin checkout (repeatable)
@@ -170,7 +256,9 @@ Options:
   --settle-ms <ms>          Final hold time in ms before ending recording (1200)
   --dsh-cmd <cmd>           Command to launch dsh (default: "dsh", or "pnpm dsh")
   --cwd <dir>               Working directory for dsh workspace (default: cwd)
-  --allow-env <VAR>         Reintroduce one scrubbed non-DSH env var (repeatable)
+  --allow-env <VAR>         Reintroduce one scrubbed variable (repeatable).
+                            Cannot restore HOME, USERPROFILE, DSH_HOME,
+                            DSH_AGENTS_HOME, or other profile paths.
   --boot-timeout-ms <ms>    Startup readiness timeout (default: 45000)
   --keep-temp-home          Retain temporary DSH_HOME on disk for debugging
   -h, --help                Show this help text
@@ -193,29 +281,161 @@ export async function pickFreePort(host = '127.0.0.1') {
   })
 }
 
+function isBlockedProfileName(upper) {
+  return upper.startsWith('DSH_')
+    || upper.startsWith('NPM_CONFIG_')
+    || upper.startsWith('GIT_CONFIG_')
+    || PROFILE_ENV_NAMES.has(upper)
+}
+
+function assertAllowEnvName(name) {
+  if (typeof name !== 'string' || name.trim() === '') {
+    throw new Error('--allow-env requires an environment variable name.')
+  }
+  if (isBlockedProfileName(name.toUpperCase())) {
+    throw new Error(`--allow-env cannot keep ${name}; isolated home and profile paths are mandatory.`)
+  }
+}
+
+function slashPath(value) {
+  return String(value).replaceAll('\\', '/')
+}
+
+function usableProfileRoot(value) {
+  if (typeof value !== 'string') return null
+  const norm = slashPath(value).replace(/\/+$/, '')
+  if (norm.length < 2 || norm === '/' || /^[A-Za-z]:$/.test(norm)) return null
+  return norm
+}
+
+function profileRootsFrom(source) {
+  const roots = []
+  const add = value => {
+    const root = usableProfileRoot(value)
+    if (root && !roots.some(item => item.toLowerCase() === root.toLowerCase())) roots.push(root)
+  }
+  let drive = null
+  let homePath = null
+  for (const [key, value] of Object.entries(source)) {
+    if (typeof value !== 'string') continue
+    const upper = key.toUpperCase()
+    if (upper === 'HOME' || upper === 'USERPROFILE' || upper === 'APPDATA' || upper === 'LOCALAPPDATA'
+      || upper === 'XDG_CONFIG_HOME' || upper === 'XDG_DATA_HOME' || upper === 'XDG_CACHE_HOME'
+      || upper === 'XDG_STATE_HOME' || upper === 'XDG_RUNTIME_DIR') {
+      add(value)
+    } else if (upper === 'HOMEDRIVE') drive = value
+    else if (upper === 'HOMEPATH') homePath = value
+  }
+  if (drive && homePath) add(`${drive}${homePath}`)
+  return roots
+}
+
+function isUnderProfileRoot(root, value) {
+  const child = slashPath(value).replace(/\/+$/, '')
+  if (!child) return false
+  const parent = root.toLowerCase()
+  const current = child.toLowerCase()
+  return current === parent || current.startsWith(`${parent}/`)
+}
+
+function valueInsideRealProfile(value, roots) {
+  const raw = slashPath(value).trim()
+  if (raw === '~' || raw.startsWith('~/')) return true
+  for (const root of roots) {
+    if (isUnderProfileRoot(root, raw)) return true
+    for (const part of raw.split(';')) {
+      const piece = part.trim()
+      if (piece && isUnderProfileRoot(root, piece)) return true
+    }
+  }
+  return false
+}
+
+function joinHome(home, ...parts) {
+  const windows = /^[A-Za-z]:[\\/]/.test(home) || (home.includes('\\') && !home.startsWith('/'))
+  if (!windows) return path.join(home, ...parts)
+  const base = home.replace(/[\\/]+$/, '').replaceAll('/', '\\')
+  return [base, ...parts].join('\\')
+}
+
+export function windowsHomeParts(homeDir) {
+  const slashed = String(homeDir).replaceAll('/', '\\')
+  const match = /^([A-Za-z]:)(.*)$/.exec(slashed)
+  if (!match) return { HOMEDRIVE: '', HOMEPATH: homeDir }
+  let rest = match[2]
+  if (!rest.startsWith('\\')) rest = `\\${rest}`
+  return { HOMEDRIVE: match[1].toUpperCase(), HOMEPATH: rest }
+}
+
+export function isolatedProfileAssignments(tempHome) {
+  const windows = windowsHomeParts(tempHome)
+  return {
+    HOME: tempHome,
+    USERPROFILE: tempHome,
+    HOMEDRIVE: windows.HOMEDRIVE,
+    HOMEPATH: windows.HOMEPATH,
+    APPDATA: joinHome(tempHome, 'AppData', 'Roaming'),
+    LOCALAPPDATA: joinHome(tempHome, 'AppData', 'Local'),
+    XDG_CONFIG_HOME: joinHome(tempHome, '.config'),
+    XDG_DATA_HOME: joinHome(tempHome, '.local', 'share'),
+    XDG_CACHE_HOME: joinHome(tempHome, '.cache'),
+    XDG_STATE_HOME: joinHome(tempHome, '.local', 'state'),
+    XDG_RUNTIME_DIR: joinHome(tempHome, '.runtime'),
+    TMP: joinHome(tempHome, 'tmp'),
+    TEMP: joinHome(tempHome, 'tmp'),
+    TMPDIR: joinHome(tempHome, 'tmp'),
+    GIT_CONFIG_NOSYSTEM: '1',
+    GIT_CONFIG_GLOBAL: joinHome(tempHome, '.gitconfig'),
+    GIT_CONFIG_SYSTEM: joinHome(tempHome, '.gitconfig-system'),
+    DSH_HOME: tempHome,
+    DSH_AGENTS_HOME: joinHome(tempHome, 'agents-home'),
+  }
+}
+
+export async function ensureIsolatedHome(tempHome) {
+  const profile = isolatedProfileAssignments(tempHome)
+  const dirs = [
+    tempHome,
+    profile.DSH_AGENTS_HOME,
+    profile.APPDATA,
+    profile.LOCALAPPDATA,
+    profile.XDG_CONFIG_HOME,
+    profile.XDG_DATA_HOME,
+    profile.XDG_CACHE_HOME,
+    profile.XDG_STATE_HOME,
+    profile.XDG_RUNTIME_DIR,
+    profile.TMP,
+  ]
+  for (const dir of dirs) await fs.mkdir(dir, { recursive: true })
+  await fs.chmod(profile.XDG_RUNTIME_DIR, 0o700).catch(() => {})
+  await fs.writeFile(profile.GIT_CONFIG_GLOBAL, '', { flag: 'a' })
+  await fs.writeFile(profile.GIT_CONFIG_SYSTEM, '', { flag: 'a' })
+}
+
 export function buildIsolatedEnv(tempHome, allowEnv = [], source = process.env) {
   const allow = new Set()
   for (const name of allowEnv) {
-    if (typeof name !== 'string' || name.trim() === '') {
-      throw new Error('--allow-env requires an environment variable name.')
-    }
-    if (name.toUpperCase().startsWith('DSH_')) {
-      throw new Error(`--allow-env cannot keep ${name}; isolated DSH homes are mandatory.`)
-    }
+    assertAllowEnvName(name)
     allow.add(name.toUpperCase())
   }
 
+  const roots = profileRootsFrom(source)
   const env = {}
   for (const [key, value] of Object.entries(source)) {
     if (typeof value !== 'string') continue
     const upper = key.toUpperCase()
-    if (upper.startsWith('DSH_')) continue
+    if (isBlockedProfileName(upper)) continue
     if (SENSITIVE_ENV_PATTERN.test(key) && !allow.has(upper)) continue
+    if (!STARTUP_ENV_NAMES.has(upper) && valueInsideRealProfile(value, roots)) {
+      if (allow.has(upper)) {
+        throw new Error(`--allow-env cannot keep ${key}; its value is inside a real profile.`)
+      }
+      continue
+    }
     env[key] = value
   }
 
-  env.DSH_HOME = tempHome
-  env.DSH_AGENTS_HOME = path.join(tempHome, 'agents-home')
+  Object.assign(env, isolatedProfileAssignments(tempHome))
   env.DSH_TELEMETRY_DISABLED = '1'
   env.DSH_TELEMETRY_MODE = 'DISABLED'
   env.NO_COLOR = '1'
@@ -782,8 +1002,8 @@ export async function runIsolatedAcceptance(opts) {
     try {
       const rawVideoDir = path.join(tempHome, 'raw-video')
       const framesDir = path.join(tempHome, 'frames')
+      await ensureIsolatedHome(tempHome)
       await fs.mkdir(rawVideoDir, { recursive: true })
-      await fs.mkdir(path.join(tempHome, 'agents-home'), { recursive: true })
       await fs.mkdir(framesDir, { recursive: true })
       const env = buildIsolatedEnv(tempHome, opts.allowEnv)
 

@@ -11,6 +11,7 @@ import {
   assertOutsideCheckouts,
   buildIsolatedEnv,
   cleanBaseUrl,
+  ensureIsolatedHome,
   gitToplevel,
   isInsideDir,
   isPluginOrApiUrl,
@@ -106,11 +107,39 @@ test('parseArgs defaults, repeats, and rejects unsafe values', () => {
   assert.throws(() => parseArgs(['--profile', '--help']), /profile/)
 })
 
-test('buildIsolatedEnv drops real homes and secret-shaped variables', () => {
+function envWithoutStartupPath(env) {
+  const copy = { ...env }
+  delete copy.PATH
+  delete copy.Path
+  return JSON.stringify(copy)
+}
+
+test('buildIsolatedEnv points HOME and profile paths at the temporary home', () => {
   const temp = path.join(os.tmpdir(), 'dsh-qa-isolated-home')
   const source = {
-    PATH: '/usr/bin',
+    PATH: '/usr/bin:/home/maintainer/.local/bin',
+    Path: 'C:\\Windows\\System32;C:\\Users\\maintainer\\bin',
     HOME: '/home/maintainer',
+    UserProfile: 'C:\\Users\\maintainer',
+    HOMEDRIVE: 'C:',
+    HOMEPATH: '\\Users\\maintainer',
+    APPDATA: 'C:\\Users\\maintainer\\AppData\\Roaming',
+    LOCALAPPDATA: 'C:\\Users\\maintainer\\AppData\\Local',
+    XDG_CONFIG_HOME: '/home/maintainer/.config',
+    XDG_DATA_HOME: '/home/maintainer/.local/share',
+    XDG_CACHE_HOME: '/home/maintainer/.cache',
+    XDG_STATE_HOME: '/home/maintainer/.local/state',
+    XDG_RUNTIME_DIR: '/run/user/1000',
+    TMPDIR: '/home/maintainer/tmp',
+    TEMP: 'C:\\Users\\maintainer\\AppData\\Local\\Temp',
+    TMP: 'C:\\Users\\maintainer\\AppData\\Local\\Temp',
+    GIT_CONFIG_GLOBAL: '/home/maintainer/.gitconfig',
+    GIT_CONFIG_KEY_0: 'url.https://example.invalid/.insteadof',
+    npm_config_userconfig: '/home/maintainer/.npmrc',
+    SSH_AUTH_SOCK: '/tmp/ssh-agent.sock',
+    KUBECONFIG: '/home/maintainer/.kube/config',
+    PNPM_HOME: '/home/maintainer/Library/pnpm',
+    MY_DOTFILE: '/home/maintainer/.secret-config',
     DEEPSEEK_API_KEY: 'sk-real',
     AZURE_OPENAI_API_KEY: 'azure-secret',
     AWS_SECRET_ACCESS_KEY: 'aws-secret',
@@ -120,18 +149,39 @@ test('buildIsolatedEnv drops real homes and secret-shaped variables', () => {
     DSH_HOME: '/home/maintainer/.dsh',
     dsh_agents_home: '/home/maintainer/.agents',
     DSH_WEB_URL: 'http://127.0.0.1:3080/',
+    SYSTEMROOT: 'C:\\Windows',
+    COMSPEC: 'C:\\Windows\\System32\\cmd.exe',
+    PATHEXT: '.EXE',
     HARMLESS: 'ok',
   }
   const env = buildIsolatedEnv(temp, ['AZURE_OPENAI_API_KEY'], source)
+  assert.equal(env.HOME, temp)
+  assert.equal(env.USERPROFILE, temp)
   assert.equal(env.DSH_HOME, temp)
   assert.equal(env.DSH_AGENTS_HOME, path.join(temp, 'agents-home'))
   assert.equal(isInsideDir(temp, env.DSH_AGENTS_HOME), true)
+  assert.equal(env.APPDATA, path.join(temp, 'AppData', 'Roaming'))
+  assert.equal(env.LOCALAPPDATA, path.join(temp, 'AppData', 'Local'))
+  assert.equal(env.XDG_CONFIG_HOME, path.join(temp, '.config'))
+  assert.equal(env.XDG_DATA_HOME, path.join(temp, '.local', 'share'))
+  assert.equal(env.XDG_CACHE_HOME, path.join(temp, '.cache'))
+  assert.equal(env.XDG_STATE_HOME, path.join(temp, '.local', 'state'))
+  assert.equal(env.XDG_RUNTIME_DIR, path.join(temp, '.runtime'))
+  assert.equal(env.TMP, path.join(temp, 'tmp'))
+  assert.equal(env.TEMP, path.join(temp, 'tmp'))
+  assert.equal(env.TMPDIR, path.join(temp, 'tmp'))
+  assert.equal(env.GIT_CONFIG_NOSYSTEM, '1')
+  assert.equal(env.GIT_CONFIG_GLOBAL, path.join(temp, '.gitconfig'))
+  assert.equal(env.GIT_CONFIG_SYSTEM, path.join(temp, '.gitconfig-system'))
   assert.equal(env.DSH_TELEMETRY_DISABLED, '1')
   assert.equal(env.DSH_TELEMETRY_MODE, 'DISABLED')
   assert.equal(env.AZURE_OPENAI_API_KEY, 'azure-secret')
   assert.equal(env.HARMLESS, 'ok')
-  assert.equal(env.PATH, '/usr/bin')
-  assert.equal(env.HOME, '/home/maintainer')
+  assert.equal(env.PATH, '/usr/bin:/home/maintainer/.local/bin')
+  assert.equal(env.Path, 'C:\\Windows\\System32;C:\\Users\\maintainer\\bin')
+  assert.equal(env.SYSTEMROOT, 'C:\\Windows')
+  assert.equal(env.COMSPEC, 'C:\\Windows\\System32\\cmd.exe')
+  assert.equal(env.PATHEXT, '.EXE')
   for (const key of [
     'DEEPSEEK_API_KEY',
     'AWS_SECRET_ACCESS_KEY',
@@ -140,17 +190,109 @@ test('buildIsolatedEnv drops real homes and secret-shaped variables', () => {
     'SESSION_COOKIE',
     'DSH_WEB_URL',
     'dsh_agents_home',
+    'UserProfile',
+    'SSH_AUTH_SOCK',
+    'KUBECONFIG',
+    'PNPM_HOME',
+    'MY_DOTFILE',
+    'GIT_CONFIG_KEY_0',
+    'npm_config_userconfig',
   ]) {
     assert.equal(Object.hasOwn(env, key), false, key)
   }
-  const serialized = JSON.stringify(env)
+  const serialized = envWithoutStartupPath(env)
   assert.equal(serialized.includes('sk-real'), false)
   assert.equal(serialized.includes('aws-secret'), false)
   assert.equal(serialized.includes('npm-secret'), false)
   assert.equal(serialized.includes('gh-secret'), false)
   assert.equal(serialized.includes('cookie-secret'), false)
-  assert.equal(serialized.includes('/home/maintainer/.dsh'), false)
-  assert.throws(() => buildIsolatedEnv(temp, ['DSH_HOME'], source), /isolated DSH homes/)
+  assert.equal(serialized.includes('/home/maintainer'), false)
+  assert.equal(serialized.toLowerCase().includes('c:\\users\\maintainer'), false)
+  assert.equal(serialized.toLowerCase().includes('c:/users/maintainer'), false)
+  assert.equal(serialized.includes('insteadof'), false)
+  assert.equal(serialized.includes('/run/user/1000'), false)
+})
+
+test('buildIsolatedEnv redirects a Windows profile home on any host', () => {
+  const temp = 'C:\\qa\\isolated-home'
+  const env = buildIsolatedEnv(temp, [], {
+    HOME: '/home/maintainer',
+    USERPROFILE: 'C:\\Users\\maintainer',
+    HOMEDRIVE: 'C:',
+    HOMEPATH: '\\Users\\maintainer',
+    APPDATA: 'C:\\Users\\maintainer\\AppData\\Roaming',
+    LOCALAPPDATA: 'C:\\Users\\maintainer\\AppData\\Local',
+    TEMP: 'C:\\Users\\maintainer\\AppData\\Local\\Temp',
+    TMP: 'C:\\Users\\maintainer\\AppData\\Local\\Temp',
+    PATH: 'C:\\Windows\\System32',
+    SYSTEMROOT: 'C:\\Windows',
+    COMSPEC: 'C:\\Windows\\System32\\cmd.exe',
+    SSH_AUTH_SOCK: '\\\\.\\pipe\\openssh-ssh-agent',
+    npm_config_userconfig: 'C:\\Users\\maintainer\\.npmrc',
+    GIT_CONFIG_GLOBAL: 'C:\\Users\\maintainer\\.gitconfig',
+  })
+  assert.equal(env.HOME, temp)
+  assert.equal(env.USERPROFILE, temp)
+  assert.equal(env.HOMEDRIVE, 'C:')
+  assert.equal(env.HOMEPATH, '\\qa\\isolated-home')
+  assert.equal(env.APPDATA, 'C:\\qa\\isolated-home\\AppData\\Roaming')
+  assert.equal(env.LOCALAPPDATA, 'C:\\qa\\isolated-home\\AppData\\Local')
+  assert.equal(env.TEMP, 'C:\\qa\\isolated-home\\tmp')
+  assert.equal(env.TMP, 'C:\\qa\\isolated-home\\tmp')
+  assert.equal(env.DSH_HOME, temp)
+  assert.equal(env.DSH_AGENTS_HOME, 'C:\\qa\\isolated-home\\agents-home')
+  assert.equal(env.XDG_CONFIG_HOME, 'C:\\qa\\isolated-home\\.config')
+  assert.equal(env.PATH, 'C:\\Windows\\System32')
+  assert.equal(env.SYSTEMROOT, 'C:\\Windows')
+  assert.equal(env.COMSPEC, 'C:\\Windows\\System32\\cmd.exe')
+  assert.equal(Object.hasOwn(env, 'SSH_AUTH_SOCK'), false)
+  assert.equal(Object.hasOwn(env, 'npm_config_userconfig'), false)
+  const serialized = envWithoutStartupPath(env)
+  assert.equal(serialized.toLowerCase().includes('users\\maintainer'), false)
+  assert.equal(serialized.toLowerCase().includes('users/maintainer'), false)
+})
+
+test('buildIsolatedEnv rejects allow-env overrides of home and profile variables', () => {
+  const temp = path.join(os.tmpdir(), 'dsh-qa-isolated-home')
+  const source = {
+    HOME: '/home/maintainer',
+    USERPROFILE: 'C:\\Users\\maintainer',
+    MY_DOTFILE: '/home/maintainer/.secret-config',
+    AZURE_OPENAI_API_KEY: 'azure-secret',
+  }
+  for (const name of [
+    'HOME',
+    'home',
+    'USERPROFILE',
+    'UserProfile',
+    'APPDATA',
+    'LOCALAPPDATA',
+    'HOMEDRIVE',
+    'HOMEPATH',
+    'XDG_CONFIG_HOME',
+    'XDG_CACHE_HOME',
+    'TMP',
+    'TEMP',
+    'TMPDIR',
+    'DSH_HOME',
+    'DSH_AGENTS_HOME',
+    'dsh_agents_home',
+    'npm_config_userconfig',
+    'GIT_CONFIG_GLOBAL',
+    'SSH_AUTH_SOCK',
+    'PNPM_HOME',
+  ]) {
+    assert.throws(() => buildIsolatedEnv(temp, [name], source), /isolated home and profile paths/, name)
+    assert.throws(() => parseArgs(['--allow-env', name]), /isolated home and profile paths/, name)
+  }
+  assert.throws(
+    () => buildIsolatedEnv(temp, ['MY_DOTFILE'], source),
+    /inside a real profile/,
+  )
+  const allowed = buildIsolatedEnv(temp, ['AZURE_OPENAI_API_KEY'], source)
+  assert.equal(allowed.AZURE_OPENAI_API_KEY, 'azure-secret')
+  assert.equal(allowed.HOME, temp)
+  assert.equal(allowed.USERPROFILE, temp)
 })
 
 test('redactForLog hides launch tokens, auth cookies, and a home directory', () => {
@@ -462,19 +604,25 @@ test('published package files do not include the agent skill', async () => {
 
   const npmHome = await fs.mkdtemp(path.join(os.tmpdir(), 'dsh-qa-npm-'))
   const npmrc = path.join(npmHome, 'npmrc')
+  const globalNpmrc = path.join(npmHome, 'npmrc-global')
   await fs.writeFile(npmrc, 'fund=false\naudit=false\n')
+  await fs.writeFile(globalNpmrc, 'fund=false\naudit=false\n')
+  await ensureIsolatedHome(npmHome)
   try {
+    const isolated = buildIsolatedEnv(npmHome, [])
+    assert.equal(isolated.HOME, npmHome)
+    assert.equal(isolated.USERPROFILE, npmHome)
     const res = spawnSync('npm', ['pack', '--dry-run', '--ignore-scripts', '--json'], {
       cwd: repoRoot,
       encoding: 'utf8',
       timeout: 60_000,
       env: {
-        ...buildIsolatedEnv(npmHome, []),
-        HOME: npmHome,
-        USERPROFILE: npmHome,
+        ...isolated,
         npm_config_cache: path.join(npmHome, 'cache'),
         npm_config_userconfig: npmrc,
         NPM_CONFIG_USERCONFIG: npmrc,
+        npm_config_globalconfig: globalNpmrc,
+        NPM_CONFIG_GLOBALCONFIG: globalNpmrc,
         npm_config_fund: 'false',
         npm_config_audit: 'false',
       },

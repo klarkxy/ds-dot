@@ -4,7 +4,7 @@ description: "指引 Agent 启动完全隔离的 DeepSeek Harness (dsh web) 实�
 ---
 # dsh-web-acceptance
 
-启动与宿主环境完全隔离的临时 `dsh web` 实例（独立 `DSH_HOME`、随机空闲回环端口、脱敏环境变量与免泄露 Cookie 鉴权），通过 Playwright 完成自动化 UI 验收、高清截图与双通道调色板 GIF 录制，并在销毁目录前安全回收进程树。
+启动与宿主环境完全隔离的临时 `dsh web` 实例（临时 `HOME` / `USERPROFILE` / `DSH_HOME` / `DSH_AGENTS_HOME`、随机空闲回环端口、脱敏环境变量与免泄露 Cookie 鉴权），通过 Playwright 完成自动化 UI 验收、高清截图与双通道调色板 GIF 录制，并在销毁目录前安全回收进程树。
 
 ## When to Use
 
@@ -71,13 +71,13 @@ export async function run({
 
 若因特殊需求自行编写控制代码而非直接调用 `scripts/dsh-qa-harness.js`，遵守以下五项底层契约：
 
-#### 3.1 隔离 `DSH_HOME` 与遥测/密钥脱敏
+#### 3.1 隔离临时家目录与遥测/密钥脱敏
 
-创建独立临时目录作为 `DSH_HOME`，并把 `DSH_AGENTS_HOME` 指到该目录下的子目录。`DSH_HOME` 只覆盖 Harness 家目录；共享代理配置默认仍在 `~/.agents`，不单独覆盖就会读到维护者的日常配置。设置 `DSH_TELEMETRY_DISABLED=1` 与 `DSH_TELEMETRY_MODE=DISABLED`。子进程先丢掉全部 `DSH_*`，再只写回上述隔离变量；名称里含 `KEY`、`PASSWORD`、`SECRET`、`TOKEN` 或 `COOKIE` 的变量一并剔除。只有验收确实要发起在线模型对话时，才用显式允许名单加回某一个非 `DSH_*` 密钥，并且不能借此改回 `DSH_HOME` 或 `DSH_AGENTS_HOME`。日志里的 `token=`、`dsh-auth-*` Cookie 和本机家目录路径要脱敏。
+创建一个临时目录，把操作系统 `HOME` 和 Windows `USERPROFILE` 都指到它。`HOMEDRIVE`、`HOMEPATH`、`APPDATA`、`LOCALAPPDATA`、`XDG_CONFIG_HOME`、`XDG_DATA_HOME`、`XDG_CACHE_HOME`、`XDG_STATE_HOME`、`XDG_RUNTIME_DIR` 以及 `TMP` / `TEMP` / `TMPDIR` 都落在这个目录里面。`DSH_HOME` 就是该目录，`DSH_AGENTS_HOME` 是它下面的 `agents-home`。Git 配置、npm 用户配置、SSH agent 和其他指向维护者配置文件的变量不从父进程继承。`PATH`、`PATHEXT`、`SYSTEMROOT`、`COMSPEC` 这类启动程序所需的变量保留。设置 `DSH_TELEMETRY_DISABLED=1` 与 `DSH_TELEMETRY_MODE=DISABLED`。名称里含 `KEY`、`PASSWORD`、`SECRET`、`TOKEN` 或 `COOKIE` 的变量默认剔除。只有验收确实要发起在线模型对话时，才用 `--allow-env` 加回某一个非家目录、非 `DSH_*`、非 profile 变量。`--allow-env` 不能恢复 `HOME`、`USERPROFILE`、`DSH_HOME`、`DSH_AGENTS_HOME` 或其他 profile 路径。日志里的 `token=`、`dsh-auth-*` Cookie 和本机家目录路径要脱敏。
 
 #### 3.2 通过 `link:` 挂载本地插件而非裸写 `--patch`
 
-执行 `DSH_HOME="<temp>" DSH_AGENTS_HOME="<temp>/agents-home" dsh plugin --profile web add "link:<plugin-dir>"`。`dsh plugin add` 会自动初始化 `web` profile 并同步 `dsh.profile.bundles`，让宿主层 `cordis.patch.yml` 与前端模块表 `dsh.client` 同时生效；`link:` 直接复用插件自身的 `node_modules`，既无需联网下载，也不会在 profile 下重复安装 `@deepseek-ai/*` 触发版本遮蔽（shadowing）或 `pnpm` `allowBuilds` 阻塞。
+执行 `HOME="<temp>" USERPROFILE="<temp>" DSH_HOME="<temp>" DSH_AGENTS_HOME="<temp>/agents-home" dsh plugin --profile web add "link:<plugin-dir>"`。`dsh plugin add` 会自动初始化 `web` profile 并同步 `dsh.profile.bundles`，让宿主层 `cordis.patch.yml` 与前端模块表 `dsh.client` 同时生效；`link:` 直接复用插件自身的 `node_modules`，既无需联网下载，也不会在 profile 下重复安装 `@deepseek-ai/*` 触发版本遮蔽（shadowing）或 `pnpm` `allowBuilds` 阻塞。
 
 #### 3.3 绑定 `127.0.0.1` 空闲端口并声明 `localhost` Authority
 

@@ -63,6 +63,13 @@ describe('renderBrief', () => {
     expect(text).not.toContain('- s1: done | skipped')
     expect(text).toContain('Writable (everything else is read-only):')
     expect(text).toContain('- note.txt (file)')
+    expect(text).toContain('choose routine reversible details yourself')
+    expect(text).toContain('Do not ask to re-approve work this order already authorizes.')
+    expect(text).toContain('one recommended next step')
+    expect(text).toContain('Do not invent a requirement to get past it.')
+    expect(text).toContain('An intermediate finding or a patch is not delivery.')
+    expect(text).toContain('without a new hypothesis')
+    expect(text).toContain('do not declare PASS or FAIL on the work order.')
   })
 
   it('turns a legacy behaviorNotes JSON string into C1..Cn and keeps plain text as one constraint', () => {
@@ -119,6 +126,9 @@ describe('renderBrief', () => {
       run: run({ kind: 'review', access: 'write', writeScope: { kind: 'workspace-exclusive' }, stepRefs: ['s1', 's2'] }),
     })
     expect(review).toContain('You are the independent reviewer')
+    expect(review).toContain('Do not guess a missing fact into a finding.')
+    expect(review).not.toContain('choose routine reversible details yourself')
+    expect(whole).toContain('without a new hypothesis')
     expect(review).toContain('Access: the whole workspace is held for this review.')
     expect(review).not.toContain('## Your tasks')
     expect(review).not.toContain('done | skipped')

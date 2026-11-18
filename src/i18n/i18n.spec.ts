@@ -9,6 +9,7 @@ import type { RawEvent } from '../chat.ts'
 import { DEFAULT_SETTINGS, type DotContextView, type DotSettings, type ScheduleTiming } from '../contracts.ts'
 import type { DotHost, SessionRow, WorkspaceRow } from '../host.ts'
 import { ADDRESS_MAX_CHARS, PERSONA_MAX_CHARS, defaultAddress, defaultPersona, personaSection } from '../persona.ts'
+import { patchSettings } from '../settings.ts'
 import { PersonaPanel, type KnowledgeApi } from '../persona-panel.tsx'
 import { DotService } from '../service.ts'
 import type { SettingsApi, SettingsPatch } from '../settings-panel.tsx'
@@ -29,6 +30,27 @@ import {
 
 const REPO_ROOT = resolve(import.meta.dirname, '..', '..')
 const BANNED_PERSONA_TERMS = /姐姐|妹妹|鲸鱼娘|大肥鱼|粉色虎鲸|粉毛小狗|大小姐|sister|At work|Off duty|the human/i
+/** Default voice must not license hesitation. A saved custom persona is a different string and is not rewritten. */
+const DITHERING: Record<CopyLocale, RegExp> = {
+  zh: /呆萌|迷糊/,
+  en: /scatterbrained/i,
+  ja: /おっちょこちょい/,
+  de: /verträumt/,
+  es: /despistad/,
+  fr: /étourdi/,
+  pt: /distraíd/,
+  ru: /рассеянн/,
+}
+const STEADY: Record<CopyLocale, RegExp> = {
+  zh: /做事稳妥/,
+  en: /\bsteady\b/,
+  ja: /落ち着いて/,
+  de: /ruhig entschlossen/,
+  es: /firme/,
+  pt: /firme/,
+  fr: /posée/,
+  ru: /собранная/,
+}
 
 const human = (text: string, time: number): RawEvent => ({
   type: 'user/message',
@@ -392,6 +414,10 @@ describe('i18n locale resolution and pack completeness', () => {
       expect(pers.length).toBeLessThanOrEqual(PERSONA_MAX_CHARS)
       expect(pers.split(/\n\s*\n/).filter(Boolean), `${loc} 4-section persona`).toHaveLength(4)
       expect(pers, `${loc} banned terms`).not.toMatch(BANNED_PERSONA_TERMS)
+      expect(pers, `${loc} dithering`).not.toMatch(DITHERING[loc])
+      expect(pers, `${loc} steady judgment`).toMatch(STEADY[loc])
+      const kept = patchSettings({ ...DEFAULT_SETTINGS, persona: 'Custom voice kept' }, {}, loc)
+      expect(kept.persona, `${loc} custom persona`).toBe('Custom voice kept')
 
       const defaultBuilt = personaSection({}, loc)
       expect(defaultBuilt.startsWith(pack.sectionLead)).toBe(true)

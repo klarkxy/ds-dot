@@ -38,11 +38,14 @@ Create a workspace at D:\work\site and fix the broken links on the docs page. Te
   requirements, pause, or cancel, or ask to review the result yourself before she closes it
   out.
 
-- **Handle approvals and questions:** Watch only her dispatched tasks or all DSH sessions. By
-  default, routine requests pass automatically while high-risk actions (deleting outside the
-  workspace, pushing, spending, or touching credentials) and scope or direction questions
-  arrive as interactive cards. When question handling is left to you or the session, answer in
-  the original session.
+- **Handle approvals and questions:** Watch only her dispatched tasks or all DSH sessions. With
+  the defaults (`approvals=dot`, `questions=dot`) she decides routine reversible approvals and
+  questions herself, after checking agreements, history, and what she can look up. High-risk or
+  truncated approvals (deleting outside the workspace, pushing, spending, credentials, or an
+  incomplete request) are forced to you, and she cannot override that gate. Set either control
+  to you to relay every item, or leave questions on the session. A question she still asks
+  includes one recommendation; silence is not treated as consent. When questions are left to
+  you or the session, answer in the original session.
 
 - **Watch sessions and recall history:** Ask her to watch a session you started yourself,
   check on everything running, or search earlier conversations and sessions.

@@ -110,6 +110,18 @@ function roleLine(run: BriefRun): string {
   return 'You are carrying out this work order.'
 }
 
+/** How a run chooses reversible details and how it reports a real blocker. */
+function conductLines(kind: BriefRun['kind']): string[] {
+  if (kind === 'review') {
+    return ['Read what this order and the workspace already show before you report a gap. If a check cannot be made, report the situation, what you inspected, the evidence, and one recommended next step. Do not guess a missing fact into a finding. Do not change the delivery.']
+  }
+  return [
+    'Use this work order and the workspace you can read. Constraints and context in the order are given. If a needed fact is missing, look it up there before you choose. You do not have dot\'s private memory. Inside this goal, choose routine reversible details yourself and record the assumption in the report when it matters. Do not ask to re-approve work this order already authorizes, including an external or costly action it already allows.',
+    'Stop only the dependent part when a wrong guess would materially change the result, requirements conflict, only the requester knows the intent, authority is missing, or the effect would be irreversible, externally unauthorized, or costly. A confident guess is not authorization. Report the situation, what you tried, the evidence, and one recommended next step. Silence is not consent. Do not invent a requirement to get past it.',
+    'An intermediate finding or a patch is not delivery. Do not repeat the same failed approach without a new hypothesis.',
+  ]
+}
+
 /** The first prompt of a run. `notes` is dot's free text; it never overrides the contract. */
 export function renderBrief(input: {
   readonly changeId: string
@@ -126,6 +138,7 @@ export function renderBrief(input: {
   out.push('')
   out.push(roleLine(run))
   out.push('dot verifies the delivery. Report evidence; do not declare PASS or FAIL on the work order.')
+  for (const line of conductLines(run.kind)) out.push(line)
   out.push('')
   out.push('## Goal')
   out.push(material.goal.trim())

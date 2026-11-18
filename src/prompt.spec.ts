@@ -31,6 +31,33 @@ describe('coordinator prompt contract', () => {
     expect(language).toBeDefined()
     for (const phrase of ['is written in English', 'user_request', 'verbatim', 'never translate them', 'deliverable_language', "in the human's language"]) expect(language).toContain(phrase)
   })
+  it('locks decision wording as a string contract, not a model-behavior evaluation', () => {
+    // These asserts pin the instructions the model is given. They do not run a model
+    // and do not show that a live Dorothy turn will choose the default or ask.
+    for (const phrase of [
+      'When questions=dot',
+      'choose a reasonable default',
+      'Uncertainty alone is not a reason to ask',
+      'one recommended option',
+      'Silence is not consent',
+      'Pause only the action that depends on that decision',
+      'without a new hypothesis',
+      'After three unsuccessful verification rounds',
+      'The service does not count those rounds',
+      'cannot override it',
+      'A missing match is not permission',
+      'when approvalNotice marks the request',
+      'A confident guess is not authorization',
+      'Every other case follows the decision principles above',
+      'When approvals=human',
+      'When questions=human',
+      'When questions=off',
+      'Do not ask again for work already authorized',
+    ]) expect(DOT_INSTRUCTIONS, phrase).toContain(phrase)
+    expect(DOT_INSTRUCTIONS).not.toMatch(/clarify when scope is uncertain/)
+    expect(DOT_INSTRUCTIONS).not.toMatch(/Proactively clarify when a decision significantly alters/)
+    expect(DOT_INSTRUCTIONS).not.toMatch(/Ask only when a wrong guess/)
+  })
   it('specifies requirements by scenario and leaves the contract to the rendered brief', () => {
     for (const phrase of ['scenarios', 'scenarioRef', 'constraintRef', 'covers', 'Write each fact once', "The service renders the run's first prompt from the stored input", 'Do not restate requirements or scope there', 'is not checked, so revise the input instead', 'Report section', 'a claim, not a verdict', 'every one of its scenarios is backed by evidence']) {
       expect(DOT_INSTRUCTIONS).toContain(phrase)

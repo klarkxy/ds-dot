@@ -38,11 +38,19 @@ Create a workspace at D:\work\site and fix the broken links on the docs page. Te
   requirements, pause, or cancel, or ask to review the result yourself before she closes it
   out.
 
-- **Handle approvals and questions:** Watch only her dispatched tasks or all DSH sessions. By
-  default, routine requests pass automatically while high-risk actions (deleting outside the
-  workspace, pushing, spending, or touching credentials) and scope or direction questions
-  arrive as interactive cards. When question handling is left to you or the session, answer in
-  the original session.
+- **Handle approvals and questions:** Watch only her dispatched tasks or all DSH sessions. With
+  the defaults (`approvals=dot`, `questions=dot`) she decides routine reversible choices inside
+  the goal after checking agreements, history, and what she can look up. Work already authorized
+  is not asked again. A confident guess does not replace missing authority, and an irreversible,
+  external, or costly effect still follows that authorization. `questions=human` relays every
+  question; `questions=off` leaves it on the session. Code forces a human decision, and she
+  cannot override it, when `approvalNotice` in `src/approval-risk.ts` marks the request: the
+  shown text was truncated, or `assessApprovalRisk` detected a dangerous pattern (sandbox
+  escalation, publish commands, a recursive-delete form, a PEM private key, a subagent shell,
+  or some write forms on a read-only run). That is not every deletion, every secret, every
+  write, or spending. She judges the rest from the authorization and the consequence. A question
+  she asks includes one recommendation; silence is not consent. Set either control to you to
+  relay every item. When questions are left to you or the session, answer in the original session.
 
 - **Watch sessions and recall history:** Ask her to watch a session you started yourself,
   check on everything running, or search earlier conversations and sessions.

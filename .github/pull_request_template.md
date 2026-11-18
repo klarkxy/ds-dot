@@ -12,9 +12,22 @@ Closes #
 - [ ] `pnpm build`
 - [ ] Tried it in DeepSeek Harness (describe below, or explain why not needed)
 
+## Frontend demo
+
+<!-- See CONTRIBUTING.md, "Frontend changes".
+Interface change: delete the line below and embed a GIF recorded in DeepSeek
+Harness from this pull request's code. It shows the changed interaction and
+the on-screen result, including a fix, and names the commit that was recorded.
+A still screenshot, a mockup, or a written claim does not meet the rule. Keep
+keys, tokens, and personal data out of the recording. CI does not check the GIF.
+No interface change: leave the line below.
+-->
+
+No frontend changes.
+
 ## Notes for reviewers
 
-<!-- Risky areas, follow-ups, screenshots for UI changes. Delete if empty. -->
+<!-- Risky areas and follow-ups. Delete if empty. -->
 
 <!--
 Target branch:

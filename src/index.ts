@@ -449,7 +449,7 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
           await ensureDot()
           return { ok: true, value: await service.contextView() }
         }
-        case 'context.clearUsage': {
+        case 'context.clear': {
           await ensureDot()
           return { ok: true, value: await service.clearUsage() }
         }
@@ -510,7 +510,7 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
           if (result && 'ok' in result && result.ok === false) return { ok: false, error: { code: result.code, message: result.message } }
           return { ok: true, value: true }
         }
-        case 'work.forceRelease': {
+        case 'work.release': {
           const result = await service.forceReleaseWork(str(payload, 'id'))
           if (result && 'ok' in result && result.ok === false) return { ok: false, error: { code: result.code, message: result.message } }
           return { ok: true, value: true }

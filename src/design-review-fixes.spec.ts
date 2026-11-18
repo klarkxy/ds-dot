@@ -10,7 +10,7 @@
  * 7. CJK-aware queryTerms segmentation & concurrent multi-session searchHistory.
  * 8. Locale-aware cardAnswerText, boardRev watermark on ChatFeed, and forceReleasePayload on WorkBoard.
  */
-import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
@@ -528,5 +528,19 @@ describe('8. Localized cardAnswerText, 8-locale parity, and ChatFeed boardRev wa
     } finally {
       h.cleanup()
     }
+  })
+})
+
+describe('9. Board RPC names reach the host transport', () => {
+  const source = (file: string) => readFileSync(new URL(file, import.meta.url), 'utf8')
+  const clientEndpoints = [...source('./client.tsx').matchAll(/\bcall(?:<[^>]*>)?\('([A-Za-z][\w.]*)'/g)].map(match => match[1])
+  const serverEndpoints = [...source('./index.ts').matchAll(/case '([A-Za-z][\w.]*)':/g)].map(match => match[1])
+
+  it('sends every client call under a name the host RPC transport routes', () => {
+    expect(clientEndpoints.length).toBeGreaterThan(10)
+    // registerHostRpcTransport routes only /^[a-z.]+$/ and answers 404 for the rest,
+    // so a camelCase endpoint reaches the client but never the service.
+    expect(clientEndpoints.filter(name => !/^[a-z.]+$/.test(name))).toEqual([])
+    expect([...new Set(clientEndpoints)].filter(name => !serverEndpoints.includes(name))).toEqual([])
   })
 })

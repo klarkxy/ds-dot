@@ -83,11 +83,15 @@ These live in GitHub, not in the code. Configure them once:
 1. **Rulesets** — *Settings → Rules → Rulesets → New ruleset → Import a
    ruleset*, and import [`.github/rulesets/main.json`](../.github/rulesets/main.json)
    and [`.github/rulesets/dev.json`](../.github/rulesets/dev.json). They block
-   direct pushes, force pushes and deletion, require one approval, require the
-   checks `CI result` and `PR title` (plus `Release guard` on `main`), and allow
-   only merge commits on `main` and squash or merge on `dev`. Repository admins
-   may bypass them through a pull request, which lets a solo maintainer merge
-   their own PRs; remove that bypass once there are regular reviewers.
+   direct pushes, force pushes and deletion, require a pull request with every
+   review thread resolved, require the checks `CI result` and `PR title` (plus
+   `Release guard` on `main`), and allow only merge commits on `main` and squash
+   or merge on `dev`. No approval count is required, because a single
+   maintainer cannot approve their own PRs and review bots usually comment
+   rather than approve. When regular human reviewers join, raise
+   `required_approving_review_count` to 1 (and consider
+   `require_code_owner_review` on `main`). Repository admins may still bypass
+   the rules through a pull request for emergencies.
 2. **General → Pull Requests** — enable *Allow squash merging* with default
    message *Pull request title*, enable *Allow merge commits*, disable *Allow
    rebase merging*, and enable *Automatically delete head branches*.

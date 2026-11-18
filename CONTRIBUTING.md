@@ -42,8 +42,10 @@ flowchart LR
    - Put `Closes #123` in the description so the issue closes on merge.
    - Keep it focused; prefer several small PRs to one large one.
 5. **Pass checks and review.** `CI result` (typecheck, test, build and pack on
-   Linux and Windows) and `PR title` must be green, and one reviewer must
-   approve. Resolve all review threads.
+   Linux and Windows) and `PR title` must be green. Get a review (a teammate,
+   Dorothy or a review bot) and resolve every review thread; unresolved
+   threads block the merge. No approval count is enforced while the project
+   has a single maintainer.
 6. **Squash and merge**, then delete the branch.
 
 If `dev` moved on while you worked, update your branch with

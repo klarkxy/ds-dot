@@ -36,6 +36,7 @@ export interface WorkRunView {
   readonly kind: string
   readonly phase: string
   readonly cwd: string
+  readonly sessionId?: string
   readonly writeScope?: WorkScopeView
   readonly deliveries?: readonly WorkDeliveryView[]
 }
@@ -127,6 +128,7 @@ export interface WorkRejectPayload {
   readonly id: string
   readonly reviewRunId: string
   readonly expectedInputRevision: number
+  readonly note?: string
 }
 
 export interface WorkLookRequest {

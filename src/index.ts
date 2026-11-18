@@ -38,6 +38,7 @@ import { patchSettings } from './settings.ts'
 import { dotDomain, parsePeerDelivery, parseTask, restoreTaskTimestamps } from './storage.ts'
 import { DotStore, type DotDomainHandle } from './store.ts'
 import { reviewPayload } from './task-rpc.ts'
+import { copyLocale, fillText, t } from './ui-copy.ts'
 
 export const name = PLUGIN_NAME
 export const inject = ['storageDomain', 'sessions', 'sessionController', 'workspaceRegistry', 'sessionQuery', 'agentPresets', 'agents', 'agentDefaultModel', 'webServer', 'connection'] as const
@@ -74,6 +75,15 @@ interface SessionLike {
   eventAt?(seq: number): RawEvent | undefined
 }
 interface AgentLike { readonly id?: string; readonly session?: SessionLike }
+
+/** Tell Dorothy, in the chat, why a review was rejected. The decision is already committed, so the
+ *  note is best effort: it must never fail the RPC or hold its acknowledgment while the chat queues. */
+function notifyRejected(service: DotService, title: string, note: string): void {
+  try {
+    const msg = fillText(t(copyLocale(service.locale), 'workRejectPrefix'), { title, note })
+    void service.say(msg.slice(0, 4_000)).catch(() => undefined)
+  } catch { /* a missing note is not a failed decision */ }
+}
 
 /** Ledger events come from top-level sessions only; subagents report to their parent session. */
 function sessionIdOf(agent: AgentLike | undefined): string | undefined {
@@ -493,13 +503,31 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
           return { ok: true, value: true }
         }
         case 'work.reject': {
-          const result = await service.rejectWork(str(payload, 'id'), str(payload, 'reviewRunId'), num(payload, 'expectedInputRevision'))
+          const id = str(payload, 'id')
+          const result = await service.rejectWork(id, str(payload, 'reviewRunId'), num(payload, 'expectedInputRevision'))
           if (result && 'ok' in result && result.ok === false) return { ok: false, error: { code: result.code, message: result.message } }
+          const note = str(payload, 'note').trim()
+          if (note) {
+            const title = service.workBoard(id)?.title ?? id
+            notifyRejected(service, title, note)
+          }
           return { ok: true, value: true }
         }
         case 'work.answer': {
           try {
-            await service.answerWorkReview(str(payload, 'id'), field(payload, 'allow') === true)
+            const reqId = str(payload, 'id')
+            const allow = field(payload, 'allow') === true
+            const pendingRow = !allow ? service.pending.list().find(row => row.id === reqId) : undefined
+            await service.answerWorkReview(reqId, allow)
+            const note = !allow ? str(payload, 'note').trim() : ''
+            if (note) {
+              let title = reqId
+              try {
+                const parsed = pendingRow?.detail ? JSON.parse(pendingRow.detail) as { changeId?: unknown } : undefined
+                if (typeof parsed?.changeId === 'string') title = service.workBoard(parsed.changeId)?.title ?? parsed.changeId
+              } catch { /* fallback to request id */ }
+              notifyRejected(service, title, note)
+            }
             return { ok: true, value: true }
           } catch (error) {
             return { ok: false, error: { code: error instanceof DotError ? error.code : 'dot/failed', message: messageOf(error) } }

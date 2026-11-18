@@ -27,7 +27,12 @@ export type BoardFilter = 'all' | 'waiting' | 'active' | 'watch'
 export function boardCounts(view: BoardView | undefined): Record<Exclude<BoardFilter, 'all'>, number> {
   if (!view) return { waiting: 0, active: 0, watch: 0 }
   const groups = groupBoard(view)
-  return { waiting: headerBoardCounts(view).waitingCount, active: groupWork(view.work ?? [], view.pending).active.length, watch: groups.watched.length + view.schedules.length }
+  const activeWatched = groups.watched.filter(task => task.status === 'running').length
+  return {
+    waiting: headerBoardCounts(view).waitingCount,
+    active: groupWork(view.work ?? [], view.pending).active.length + activeWatched,
+    watch: groups.watched.length + view.schedules.length,
+  }
 }
 
 export interface BoardProps {
@@ -186,10 +191,10 @@ export function Board({ locale, view, error, filter = 'all', onOpen, onRetry, on
             )) : null}
           </section>
         ) : null}
-        {shows('watch') && (groups.watched.length > 0 || groups.watchedArchived > 0) ? (
+        {((shows('watch') && (groups.watched.length > 0 || groups.watchedArchived > 0)) || (filter === 'active' && groups.watched.some(task => task.status === 'running'))) ? (
           <section className="dsh-ui-stack" aria-label={t(locale, 'boardWatched')}>
-            <GroupTitle title={t(locale, 'boardWatched')} count={groups.watched.length} />
-            {groups.watched.map(task => (
+            <GroupTitle title={t(locale, 'boardWatched')} count={filter === 'active' ? groups.watched.filter(task => task.status === 'running').length : groups.watched.length} />
+            {(filter === 'active' ? groups.watched.filter(task => task.status === 'running') : groups.watched).map(task => (
               <button key={task.sessionId} type="button" className="dsh-dot-row" onClick={() => onOpen(task.sessionId)}>
                 <StateDot state={DOT[task.status]} />
                 <span className="dsh-dot-main">
@@ -201,7 +206,7 @@ export function Board({ locale, view, error, filter = 'all', onOpen, onRetry, on
                 <Tag tone="outline">{t(locale, task.status)}</Tag>
               </button>
             ))}
-            {groups.watchedArchived > 0 ? <span className="dsh-ui-hint">{t(locale, 'archived')} · {groups.watchedArchived}</span> : null}
+            {shows('watch') && groups.watchedArchived > 0 ? <span className="dsh-ui-hint">{t(locale, 'archived')} · {groups.watchedArchived}</span> : null}
           </section>
         ) : null}
         {shows('watch') && view.schedules.length > 0 ? (
@@ -305,4 +310,20 @@ export const boardCss = `
   font: 11px/17px var(--ds-font-family-code); color: var(--dsw-alias-label-secondary); white-space: pre; tab-size: 2;
 }
 .dsh-dot-board .dsh-dot-work-source-note { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
-.dsh-dot-board .dsh-dot-work-source-note > p { margin: 0; color: var(--dsw-alias-label-error); }`
+.dsh-dot-board .dsh-dot-work-source-note > p { margin: 0; color: var(--dsw-alias-label-error); }
+.dsh-dot-board .dsh-dot-work-open { margin-left: auto; }
+.dsh-dot-board .dsh-dot-work-reject-box {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 6px; padding: 2px 12px 10px 28px;
+}
+.dsh-dot-board .dsh-dot-work-reject-input { flex: 1 1 180px; min-width: 140px; }
+.dsh-dot-board .dsh-dot-work-pane-bar {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap;
+}
+.dsh-dot-board .dsh-dot-work-chevron { flex-shrink: 0; width: 10px; color: var(--dsw-alias-label-tertiary); }
+.dsh-dot-board .dsh-dot-work-source-body { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.dsh-dot-board .dsh-dot-work-source-body[data-collapsed] { display: none; }
+.dsh-dot-board .dsh-dot-work-session-link {
+  padding: 0 4px; border: 0; border-radius: var(--dsw-radius-sm); background: transparent;
+  color: var(--dsw-alias-state-business-primary); font: inherit; font-size: 11px; cursor: pointer;
+}
+.dsh-dot-board .dsh-dot-work-session-link:hover { background: var(--dsw-alias-interactive-bg-hover); text-decoration: underline; }`

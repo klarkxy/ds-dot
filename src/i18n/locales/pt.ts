@@ -488,6 +488,21 @@ const ptUi: UiText = {
   workExcludeDir: 'Diretório ignorado',
   workExcludeFile: 'Arquivo ignorado',
   workExcludeLink: 'Link simbólico',
+  scrollBottom: 'Ir para o fim',
+  scrollNew: 'Novidades · Ir para o fim',
+  unsavedChanges: 'Há alterações não salvas nesta página',
+  unsavedKeepEditing: 'Continuar editando',
+  unsavedDiscard: 'Descartar',
+  reminderRemoved: 'Lembrete "{title}" removido',
+  undoAction: 'Desfazer',
+  imagePreview: 'Visualizar imagem',
+  workRejectPlaceholder: 'Motivo da devolução (opcional, Enter para enviar)…',
+  workRejectConfirm: 'Confirmar devolução',
+  workRejectCancel: 'Cancelar',
+  workRejectPrefix: '"{title}" devolvido: {note}',
+  workOpenSession: 'Abrir sessão',
+  workSourceExpandAll: 'Expandir tudo',
+  workSourceCollapseAll: 'Recolher tudo',
 }
 
 const ptCard: CardCopy = {

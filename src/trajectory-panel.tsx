@@ -4,11 +4,11 @@
  * and tokens, and every input, reasoning, reply, tool call and compaction in
  * log order. It refreshes when dot's chat moves and while a turn runs.
  */
-import { Button, Checkbox, IconSearchOutlineRegular, Input } from '@deepseek-ai/dsh-client-ui-primitives'
+import { Button, Checkbox, IconCheckOutlineRegular, IconCopyOutlineRegular, IconSearchOutlineRegular, Input } from '@deepseek-ai/dsh-client-ui-primitives'
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react'
 import type { ReflectionRun, TrajectoryView, TrajRecord, TrajStep, TrajTurn } from './contracts.ts'
 import { turnTotals } from './trajectory.ts'
-import { formatDuration, formatTokens, formatWhen, intlLocale, t, toolLabel, type CopyLocale, type TextKey } from './ui-copy.ts'
+import { cardCopy, formatDuration, formatTokens, formatWhen, intlLocale, t, toolLabel, type CopyLocale, type TextKey } from './ui-copy.ts'
 
 const RUNNING_POLL_MS = 3_000
 
@@ -72,6 +72,34 @@ function prettyJson(raw: string): string {
   try { return JSON.stringify(JSON.parse(raw), null, 2) } catch { return raw }
 }
 
+function CopyCodeBlock({ locale, text }: { locale: CopyLocale; text: string }) {
+  const [copied, setCopied] = useState(false)
+  const copyText = cardCopy(locale)
+  useEffect(() => {
+    if (!copied) return
+    const timer = setTimeout(() => setCopied(false), 1600)
+    return () => clearTimeout(timer)
+  }, [copied])
+  const onCopy = () => {
+    void Promise.resolve(globalThis.navigator?.clipboard?.writeText?.(text)).then(() => setCopied(true), () => {})
+  }
+  return (
+    <div className="dsh-dot-tr-codewrap">
+      <button
+        type="button"
+        className="dsh-dot-tr-copy"
+        aria-label={copied ? copyText.copied : copyText.copy}
+        title={copied ? copyText.copied : copyText.copy}
+        onClick={onCopy}
+      >
+        {copied ? <IconCheckOutlineRegular size={12} /> : <IconCopyOutlineRegular size={12} />}
+        <span>{copied ? copyText.copied : copyText.copy}</span>
+      </button>
+      <pre className="dsh-dot-tr-pre">{text}</pre>
+    </div>
+  )
+}
+
 function Record({ locale, record, open, onToggle }: { locale: CopyLocale; record: TrajRecord; open: boolean; onToggle: () => void }) {
   const status = record.kind === 'call' ? record.status : undefined
   const preview = recordText(locale, record).replace(/\s+/g, ' ')
@@ -92,15 +120,15 @@ function Record({ locale, record, open, onToggle }: { locale: CopyLocale; record
           {record.kind === 'call' ? (
             <>
               <span className="dsh-dot-tr-sub">{t(locale, 'trArgs')}</span>
-              <pre className="dsh-dot-tr-pre">{prettyJson(record.args)}{record.argsClipped ? '\n…' : ''}</pre>
+              <CopyCodeBlock locale={locale} text={`${prettyJson(record.args)}${record.argsClipped ? '\n…' : ''}`} />
               {record.result !== undefined ? (
                 <>
                   <span className="dsh-dot-tr-sub">{t(locale, 'trResult')}</span>
-                  <pre className="dsh-dot-tr-pre">{record.result || t(locale, 'trEmpty')}{record.resultClipped ? '\n…' : ''}</pre>
+                  <CopyCodeBlock locale={locale} text={`${record.result || t(locale, 'trEmpty')}${record.resultClipped ? '\n…' : ''}`} />
                 </>
               ) : null}
             </>
-          ) : <pre className="dsh-dot-tr-pre">{record.text}{record.clipped ? '\n…' : ''}</pre>}
+          ) : <CopyCodeBlock locale={locale} text={`${record.text}${record.clipped ? '\n…' : ''}`} />}
           {(record.kind === 'call' ? record.argsClipped || record.resultClipped : record.clipped) ? <span className="dsh-dot-tr-sub">{t(locale, 'trClipped')}</span> : null}
         </div>
       ) : null}
@@ -323,11 +351,11 @@ export const trajectoryCss = `
 .dsh-dot-chat .dsh-dot-tr > .dsh-ui-error { margin: 20px 24px; }
 .dsh-dot-chat .dsh-dot-tr-toolbar {
   position: sticky; top: 0; z-index: 2;
-  display: flex; align-items: center; flex-wrap: wrap; gap: 10px; padding: 10px 20px;
+  display: flex; align-items: center; flex-wrap: wrap; gap: 6px 8px; padding: 8px 14px;
   background: var(--dsw-alias-bg-base); border-bottom: 0.5px solid var(--dsw-alias-border-l2);
   font-size: 12px; color: var(--dsw-alias-label-secondary);
 }
-.dsh-dot-chat .dsh-dot-tr-search { width: 220px; max-width: 50%; height: 28px; }
+.dsh-dot-chat .dsh-dot-tr-search { flex: 1 1 132px; min-width: 108px; max-width: 240px; height: 28px; }
 .dsh-dot-chat .dsh-dot-tr-check { display: inline-flex; align-items: center; gap: 4px; flex-shrink: 0; white-space: nowrap; cursor: pointer; }
 .dsh-dot-chat .dsh-dot-tr-toolbar > button { flex-shrink: 0; white-space: nowrap; }
 .dsh-dot-chat .dsh-dot-tr-list { flex: 1; min-height: 0; overflow-y: auto; padding: 4px 20px 28px; display: flex; flex-direction: column; }
@@ -373,8 +401,17 @@ export const trajectoryCss = `
 .dsh-dot-chat .dsh-dot-tr-bad { color: var(--dsw-alias-label-error); }
 .dsh-dot-chat .dsh-dot-tr-body { margin: 2px 0 6px 6px; display: flex; flex-direction: column; gap: 4px; }
 .dsh-dot-chat .dsh-dot-tr-sub { font-size: 11px; color: var(--dsw-alias-label-tertiary); }
+.dsh-dot-chat .dsh-dot-tr-codewrap { position: relative; min-width: 0; }
+.dsh-dot-chat .dsh-dot-tr-copy {
+  position: absolute; top: 6px; right: 6px; z-index: 1;
+  display: inline-flex; align-items: center; gap: 4px; padding: 2px 7px;
+  border: 0; border-radius: var(--dsw-radius-sm); background: var(--dsw-alias-bg-layer-1);
+  box-shadow: var(--dsw-elevation-stroke); color: var(--dsw-alias-label-secondary);
+  font: inherit; font-size: 11px; line-height: 16px; cursor: pointer; opacity: 0.85;
+}
+.dsh-dot-chat .dsh-dot-tr-copy:hover { opacity: 1; color: var(--dsw-alias-label-primary); background: var(--dsw-alias-interactive-bg-hover); }
 .dsh-dot-chat .dsh-dot-tr-pre {
-  margin: 0; padding: 8px 10px; max-height: 360px; overflow: auto; border-radius: var(--dsw-radius-sm);
+  margin: 0; padding: 8px 72px 8px 10px; max-height: 360px; overflow: auto; border-radius: var(--dsw-radius-sm);
   background: var(--dsw-alias-bg-base); color: var(--dsw-alias-label-secondary);
   font: 12px/18px var(--ds-font-family-code); white-space: pre-wrap; overflow-wrap: anywhere;
 }

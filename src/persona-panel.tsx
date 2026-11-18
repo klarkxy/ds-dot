@@ -28,6 +28,8 @@ function TextBlock({
   maxChars,
   rows,
   empty,
+  discardSignal,
+  onChanged,
   onSave,
   onUndo,
 }: {
@@ -38,12 +40,16 @@ function TextBlock({
   maxChars: number
   rows: number
   empty?: string
+  discardSignal?: number
+  onChanged?: (changed: boolean) => void
   onSave: (text: string) => void
   onUndo?: (() => void) | undefined
 }) {
   const [draft, setDraft] = useState(value)
-  useEffect(() => { setDraft(value) }, [value])
+  useEffect(() => { setDraft(value) }, [value, discardSignal])
   const changed = draft !== value
+  useEffect(() => { onChanged?.(changed) }, [changed, onChanged])
+  useEffect(() => () => { onChanged?.(false) }, [onChanged])
   const over = draft.trim().length > maxChars
   return (
     <>
@@ -104,15 +110,21 @@ function CognitionHistory({ locale, knowledge, onRestore }: {
  * Dorothy's knowledge: the agreements you set and her own cognition. The
  * agreements keep one step of undo; the cognition keeps its last versions.
  */
-function KnowledgeSection({ locale, api, onStatus, locked, onLock }: {
+function KnowledgeSection({ locale, api, onStatus, locked, onLock, discardSignal, onDirtyChange }: {
   locale: CopyLocale
   api: KnowledgeApi
   onStatus: (status: SaveNotice | undefined) => void
   locked: boolean
   onLock: (field: SettingField, locked: boolean) => void
+  discardSignal?: number
+  onDirtyChange?: (dirty: boolean) => void
 }) {
   const [knowledge, setKnowledge] = useState<KnowledgeView>()
   const [failed, setFailed] = useState<string>()
+  const [agreementsDirty, setAgreementsDirty] = useState(false)
+  const [cognitionDirty, setCognitionDirty] = useState(false)
+  useEffect(() => { onDirtyChange?.(agreementsDirty || cognitionDirty) }, [agreementsDirty, cognitionDirty, onDirtyChange])
+  useEffect(() => () => { onDirtyChange?.(false) }, [onDirtyChange])
   useEffect(() => {
     const lifetime = new AbortController()
     api.knowledge(lifetime.signal).then(
@@ -163,6 +175,8 @@ function KnowledgeSection({ locale, api, onStatus, locked, onLock }: {
               maxChars={agreements.maxChars}
               rows={7}
               empty={t(locale, 'pAgreementsEmpty')}
+              {...discardSignal === undefined ? {} : { discardSignal }}
+              onChanged={setAgreementsDirty}
               onSave={text => run(api.setAgreements(text))}
               {...agreements.canUndo ? { onUndo: () => run(api.undoAgreements()) } : {}}
             />
@@ -184,6 +198,8 @@ function KnowledgeSection({ locale, api, onStatus, locked, onLock }: {
               maxChars={cognition.maxChars}
               rows={7}
               empty={t(locale, 'pCognitionEmpty')}
+              {...discardSignal === undefined ? {} : { discardSignal }}
+              onChanged={setCognitionDirty}
               onSave={text => run(api.setCognition(text))}
             />
             <div className="dsh-dot-setting-head dsh-dot-versions-head">
@@ -197,22 +213,30 @@ function KnowledgeSection({ locale, api, onStatus, locked, onLock }: {
   )
 }
 
-export function PersonaPanel({ locale, api, settings, onSaved, onStatusChange }: {
+export function PersonaPanel({ locale, api, settings, onSaved, onStatusChange, discardSignal, onDirtyChange }: {
   locale: CopyLocale
   api: SettingsApi & KnowledgeApi
   settings?: DotSettings
   onSaved: (next: DotSettings) => void
   onStatusChange?: (status: SaveNotice | undefined) => void
+  discardSignal?: number
+  onDirtyChange?: (dirty: boolean) => void
 }) {
   const [status, setStatus] = useState<SaveNotice>()
+  const [knowledgeDirty, setKnowledgeDirty] = useState(false)
   const defaultAddr = defaultAddress(locale)
   const defaultPers = defaultPersona(locale)
   const savedAddress = settings?.address ?? defaultAddr
   const savedPersona = settings?.persona ?? defaultPers
   const [address, setAddress] = useState(savedAddress)
   const [persona, setPersona] = useState(savedPersona)
-  useEffect(() => { setAddress(savedAddress) }, [savedAddress])
-  useEffect(() => { setPersona(savedPersona) }, [savedPersona])
+  useEffect(() => { setAddress(savedAddress) }, [savedAddress, discardSignal])
+  useEffect(() => { setPersona(savedPersona) }, [savedPersona, discardSignal])
+  const addressDirty = Boolean(settings) && address.trim() !== '' && address.trim() !== savedAddress
+  const personaDirty = Boolean(settings) && persona !== savedPersona
+  const anyDirty = addressDirty || personaDirty || knowledgeDirty
+  useEffect(() => { onDirtyChange?.(anyDirty) }, [anyDirty, onDirtyChange])
+  useEffect(() => () => { onDirtyChange?.(false) }, [onDirtyChange])
   const reportStatus = useCallback((next: SaveNotice | undefined) => {
     setStatus(next)
     onStatusChange?.(next)
@@ -279,7 +303,7 @@ export function PersonaPanel({ locale, api, settings, onSaved, onStatusChange }:
         </div>
         </div>
       </div>
-      <KnowledgeSection locale={locale} api={api} onStatus={reportStatus} locked={settings.locks?.memory === true} onLock={onLock} />
+      <KnowledgeSection locale={locale} api={api} onStatus={reportStatus} locked={settings.locks?.memory === true} onLock={onLock} {...discardSignal === undefined ? {} : { discardSignal }} onDirtyChange={setKnowledgeDirty} />
       <p className="dsh-ui-hint dsh-dot-settings-note">{t(locale, 'pNote')}</p>
     </div>
   )

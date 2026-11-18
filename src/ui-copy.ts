@@ -33,6 +33,12 @@ export const APPROVAL_CARD_COPY = {
   session: '会话 / Session', request: '请求 / Request',
 } as const
 
+/** Fill `{name}` slots in one pass: an inserted title or note is never re-scanned for a slot,
+ *  and it is not read as a `$` replacement pattern the way `String.replace` would. */
+export function fillText(template: string, values: Readonly<Record<string, string>>): string {
+  return template.replace(/\{([a-zA-Z]+)\}/g, (slot: string, name: string) => values[name] ?? slot)
+}
+
 /** Compact token count: 860, 12.4K, 512K, 1.05M. */
 export function formatTokens(n: number): string {
   if (n < 1000) return String(Math.round(n))

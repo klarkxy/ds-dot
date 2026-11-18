@@ -488,6 +488,21 @@ const frUi: UiText = {
   workExcludeDir: 'Répertoire ignoré',
   workExcludeFile: 'Fichier ignoré',
   workExcludeLink: 'Lien symbolique',
+  scrollBottom: 'Aller en bas',
+  scrollNew: 'Nouveautés · Aller en bas',
+  unsavedChanges: 'Modifications non enregistrées sur cette page',
+  unsavedKeepEditing: 'Continuer',
+  unsavedDiscard: 'Abandonner',
+  reminderRemoved: 'Rappel « {title} » supprimé',
+  undoAction: 'Annuler',
+  imagePreview: 'Aperçu de l’image',
+  workRejectPlaceholder: 'Motif du refus (facultatif, Entrée pour envoyer)…',
+  workRejectConfirm: 'Confirmer le refus',
+  workRejectCancel: 'Annuler',
+  workRejectPrefix: '« {title} » refusé : {note}',
+  workOpenSession: 'Ouvrir la session',
+  workSourceExpandAll: 'Tout déplier',
+  workSourceCollapseAll: 'Tout replier',
 }
 
 const frCard: CardCopy = {

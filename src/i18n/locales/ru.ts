@@ -488,6 +488,21 @@ const ruUi: UiText = {
   workExcludeDir: 'Игнорируемый каталог',
   workExcludeFile: 'Игнорируемый файл',
   workExcludeLink: 'Символическая ссылка',
+  scrollBottom: 'Вниз',
+  scrollNew: 'Новые сообщения · Вниз',
+  unsavedChanges: 'На странице есть несохранённые изменения',
+  unsavedKeepEditing: 'Продолжить',
+  unsavedDiscard: 'Сбросить',
+  reminderRemoved: 'Напоминание «{title}» удалено',
+  undoAction: 'Отменить',
+  imagePreview: 'Просмотр изображения',
+  workRejectPlaceholder: 'Причина возврата (необязательно, Enter для отправки)…',
+  workRejectConfirm: 'Подтвердить возврат',
+  workRejectCancel: 'Отмена',
+  workRejectPrefix: 'Возвращено «{title}»: {note}',
+  workOpenSession: 'Открыть сессию',
+  workSourceExpandAll: 'Развернуть всё',
+  workSourceCollapseAll: 'Свернуть всё',
 }
 
 const ruCard: CardCopy = {

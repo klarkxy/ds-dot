@@ -129,7 +129,7 @@ function groupBlocks(items: readonly ChatItem[]): ExchangeBlock[] {
 
 export function filterVisibleChat(
   items: readonly ChatItem[],
-  options?: { readonly streaming?: boolean; readonly running?: boolean },
+  options?: { readonly streaming?: boolean; readonly running?: boolean; readonly preparingCard?: boolean },
 ): FilteredChat {
   const blocks = groupBlocks(items)
   const out: ChatItem[] = []
@@ -244,7 +244,7 @@ export function filterVisibleChat(
       out.push(input)
     }
     for (const reply of block.replies) {
-      if (reply.kind === 'bot' && (hasVisibleView || isLast && options?.running === true)) continue
+      if (reply.kind === 'bot' && (hasVisibleView || (isLast && options?.preparingCard === true))) continue
       if (reply.kind === 'view' && (reply.failed || !reply.presentation) && !(isRoutineOnly && hasInvalidView)) continue
       if (reply.kind === 'tool' && droppedTools.has(reply)) continue
       out.push(reply)

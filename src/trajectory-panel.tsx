@@ -8,7 +8,7 @@ import { Button, Checkbox, IconSearchOutlineRegular, Input } from '@deepseek-ai/
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react'
 import type { ReflectionRun, TrajectoryView, TrajRecord, TrajStep, TrajTurn } from './contracts.ts'
 import { turnTotals } from './trajectory.ts'
-import { formatDuration, formatTokens, formatWhen, t, toolLabel, type CopyLocale, type TextKey } from './ui-copy.ts'
+import { formatDuration, formatTokens, formatWhen, intlLocale, t, toolLabel, type CopyLocale, type TextKey } from './ui-copy.ts'
 
 const RUNNING_POLL_MS = 3_000
 
@@ -37,7 +37,7 @@ function useTrajectory(api: TrajectoryApi, rev: number | undefined, running: boo
   return state
 }
 
-const clock = (locale: CopyLocale, at: number) => new Date(at).toLocaleTimeString(locale === 'zh' ? 'zh-CN' : 'en-US', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false })
+const clock = (locale: CopyLocale, at: number) => new Date(at).toLocaleTimeString(intlLocale(locale), { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false })
 
 const INPUT_LABEL: Record<Extract<TrajRecord, { kind: 'input' }>['source'], TextKey> = {
   user: 'trUser', answer: 'trAnswer', relay: 'trRelay', context: 'trContext', notice: 'trNotice',

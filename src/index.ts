@@ -33,6 +33,7 @@ import { DOT_INSTRUCTIONS } from './prompt.ts'
 import { installPresetVisibility } from './preset-visibility.ts'
 import { REFLECTION_INSTRUCTIONS, REFLECTION_PRESET_ID } from './reflection.ts'
 import { APPROVAL_GRACE_MS, DotError, DotService, messageOf } from './service.ts'
+import { configI18n } from './i18n/index.ts'
 import { patchSettings } from './settings.ts'
 import { dotDomain, parsePeerDelivery, parseTask, restoreTaskTimestamps } from './storage.ts'
 import { DotStore, type DotDomainHandle } from './store.ts'
@@ -64,10 +65,7 @@ export interface Config {
 export const Config: Schema<Config> = Schema.object({
   homeDir: Schema.string().default(''),
   approvalGraceMs: Schema.number().min(0).max(60_000).default(APPROVAL_GRACE_MS),
-}).i18n({
-  zh: { homeDir: '桃乐丝自己的工作区所在的目录，她自己的会话也在这里；留空使用 DSH 主目录下的 dot 文件夹。其余设置在桃乐丝面板右上角的齿轮里', approvalGraceMs: '审批通知宽限期（毫秒），默认 10000；期间在原会话结算的审批不会唤醒桃乐丝' },
-  en: { homeDir: "Folder of Dorothy's own workspace, which also holds her own session; empty uses a dot folder in the DSH home. Other settings live behind the gear in Dorothy's panel", approvalGraceMs: 'Approval notice grace period in milliseconds (default 10000); approvals settled in the original session during this time do not wake Dorothy' },
-})
+}).i18n(configI18n())
 
 interface SessionLike {
   readonly id?: string
@@ -112,6 +110,18 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
   })
   sealOwned = agent => service.sealAgent(agent)
   void service.sealExisting()
+  const syncHostLocale = () => {
+    try {
+      const forms = ctx.get('settings' as never) as { describe?(): readonly { readonly ns?: unknown; readonly value?: unknown }[] } | undefined
+      const entry = forms?.describe?.()?.find(row => String(row?.ns) === 'locale')
+      const pref = entry?.value && typeof entry.value === 'object' ? (entry.value as { preference?: unknown }).preference : undefined
+      if (typeof pref === 'string' && pref.trim()) void service.syncLocale(pref).catch(() => {})
+    } catch { /* optional host settings reader */ }
+  }
+  syncHostLocale()
+  ctx.effect(() => (ctx as unknown as { on(name: string, listener: (ns: unknown) => void): () => void }).on('settings/document-updated', ns => {
+    if (String(ns) === 'locale') syncHostLocale()
+  }), 'dot.locale-settings')
   const feed = new ChatFeed(host, store)
   // The chat follows dot into every new segment and keeps the earlier ones above it.
   const follow = () => { if (store.dotSessionId) feed.attach(store.dotSessionId, store.pastSegments); feed.cardsChanged() }
@@ -365,7 +375,10 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
   // 51 KB does not fit after base64; the cap below fits the advertised images.
   ctx.effect(() => registerHostRpc(ctx as unknown as HostRpcContext, RPC_CHANNEL, async (endpoint, payload, signal) => {
     try {
+      const reqLocale = field(payload, 'uiLocale')
+      if (typeof reqLocale === 'string' && reqLocale.trim()) await service.syncLocale(reqLocale)
       switch (endpoint) {
+        case 'locale.sync': return { ok: true, value: await service.syncLocale(str(payload, 'locale') || str(payload, 'uiLocale')) }
         case 'board': return { ok: true, value: service.board() }
         case 'ensure': return { ok: true, value: { sessionId: await ensureDot() } }
         case 'chat': {
@@ -505,7 +518,7 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
           return { ok: true, value: await service.restoreCognition(typeof at === 'number' ? at : Number.NaN) }
         }
         case 'settings.set': {
-          const next = patchSettings(store.settings, field(payload, 'patch'))
+          const next = patchSettings(store.settings, field(payload, 'patch'), service.locale)
           await store.setSettings(next)
           await service.settingsChanged()
           logger.info('settings.updated', 'Updated Dot settings via RPC.')

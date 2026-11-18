@@ -1,0 +1,56 @@
+{
+  "meta": {
+    "title": "Дороти (dot)",
+    "description": "Постоянный координатор: общайтесь с Дороти на её панели — она открывает рабочие области, запускает сеансы, отслеживает их ход, решает вопросы и утверждения за вас и отчитывается о результате."
+  },
+  "panel": {
+    "cardPreparing": "Подготовка карточки…",
+    "cardExpired": "Срок истёк",
+    "cardsHint": "Срок действия этой карточки истёк; создайте новый запрос.",
+    "personaTitle": "Персона и договорённости",
+    "agreements": "Договорённости",
+    "agreementsHint": "Правила, заданные вашими словами. Они важнее её представлений.",
+    "agreementsPlaceholder": "- напр.: Отправлять изменения в мои личные репозитории можно без спроса",
+    "agreementsEmpty": "Договорённостей пока нет.",
+    "saveAgreements": "Сохранить договорённости",
+    "undoAgreements": "Вернуть прошлое сохранение",
+    "cognition": "Представления",
+    "cognitionHint": "То, что Дороти отметила о вас. Можно редактировать.",
+    "cognitionPlaceholder": "То, что она заметила о ваших предпочтениях и ритме работы…",
+    "cognitionEmpty": "Представлений пока нет.",
+    "saveCognition": "Сохранить представления",
+    "cognitionHistory": "Версии",
+    "cognitionHistoryEmpty": "Предыдущих версий пока нет.",
+    "restoreCognition": "Восстановить эту версию",
+    "charCount": "{n} / {max} символов"
+  },
+  "settings": {
+    "taskPermission": "Разрешения задач",
+    "taskPermission_workspace-write": "Запись в рабочую область",
+    "taskPermission_danger-full-access": "Полный доступ",
+    "taskPermission_default": "Как у хоста",
+    "taskPermissionDesc": "Применяется к новым задачам независимо от маршрутизации утверждений.",
+    "approvals_dot": "Дороти",
+    "approvals_human": "Вы",
+    "approvals_deny": "Отклонять все",
+    "reflection": "Фоновая рефлексия",
+    "reflectionDesc": "Просматривает недавнюю работу в простое и обновляет свои представления; отмечает устаревшие или противоречивые договорённости при вашем следующем сообщении, чтобы вы решили.",
+    "reflection_on": "Вкл.",
+    "reflection_off": "Выкл."
+  },
+  "context": {
+    "promptSections": "Разделы промпта",
+    "promptSectionsHint": "Что именно этот сегмент несёт в своём промпте.",
+    "sectionPersona": "Персона",
+    "sectionAgreements": "Договорённости",
+    "sectionCognition": "Представления",
+    "sectionHandoff": "Передача",
+    "sectionEmpty": "(пусто)"
+  },
+  "tools": {
+    "dot_agreement": "Договорённость",
+    "dot_cognition": "Представления",
+    "agreementAdded": "Добавлена договорённость",
+    "agreementRemoved": "Удалена договорённость"
+  }
+}

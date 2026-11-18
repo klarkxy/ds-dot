@@ -1,14 +1,15 @@
 import { DotError, messageOf, type DotService } from './service.ts'
 import { AGREEMENTS_MAX_CHARS, SETTING_FIELDS, TOOL, type DotSettings, type SettingField, type SettingProposal } from './contracts.ts'
+import { type CopyLocale } from './i18n/index.ts'
 import { lockedField, patchSettings } from './settings.ts'
-import { DEFAULT_ADDRESS, DEFAULT_PERSONA } from './persona.ts'
+import { defaultAddress, defaultPersona } from './persona.ts'
 import { normalizeAgreements } from './memory.ts'
 
 /** A proposal for the old "memory" field now rewrites the agreements, which replaced the notes. */
-function valueOf(settings: DotSettings, field: SettingField, agreementsText: string): unknown {
+function valueOf(settings: DotSettings, field: SettingField, agreementsText: string, locale: CopyLocale = 'zh'): unknown {
   if (field === 'memory') return agreementsText || null
-  if (field === 'persona') return settings.persona ?? DEFAULT_PERSONA
-  if (field === 'address') return settings.address ?? DEFAULT_ADDRESS
+  if (field === 'persona') return settings.persona ?? defaultPersona(locale)
+  if (field === 'address') return settings.address ?? defaultAddress(locale)
   return settings[field] ?? null
 }
 
@@ -45,8 +46,9 @@ export class SelfSettings {
 
   async read(): Promise<string> {
     const knowledge = await this.dot.knowledgeView()
+    const locale = this.dot.locale ?? 'zh'
     const locks = this.dot.store.settings.locks ?? {}
-    const fields = SETTING_FIELDS.map(field => `${field}${locks[field] ? ' [locked by the human]' : ''}: ${textOf(valueOf(this.dot.store.settings, field, knowledge.agreements.text))}`)
+    const fields = SETTING_FIELDS.map(field => `${field}${locks[field] ? ' [locked by the human]' : ''}: ${textOf(valueOf(this.dot.store.settings, field, knowledge.agreements.text, locale))}`)
     const pending = this.dot.store.settingProposals.map(proposal => `${proposal.id} · ${proposal.field}: ${proposal.reason}`).join('\n')
     return `${fields.join('\n')}\n\nOnly propose an unlocked field with ${TOOL.settings} (action=propose); the human must approve it. Locks and homeDir are human-only.${pending ? `\n\nWaiting proposals:\n${pending}` : ''}`
   }
@@ -58,6 +60,7 @@ export class SelfSettings {
   private async proposeNow(input: { field: string; value: unknown; reason: string }): Promise<string> {
     const field = lockedField(this.dot.store.settings, input.field)!
     if (!input.reason.trim()) throw new DotError('dot/invalid', 'reason must explain why the change helps')
+    const locale = this.dot.locale ?? 'zh'
     let before: unknown
     let after: unknown
     if (field === 'memory') {
@@ -69,8 +72,8 @@ export class SelfSettings {
       after = normalized || null
     } else {
       const patch = { [field]: input.value }
-      before = valueOf(this.dot.store.settings, field, '')
-      after = valueOf(patchSettings(this.dot.store.settings, patch), field, '')
+      before = valueOf(this.dot.store.settings, field, '', locale)
+      after = valueOf(patchSettings(this.dot.store.settings, patch, locale), field, '', locale)
     }
     if (this.dot.store.settingProposals.some(proposal => proposal.field === field)) throw new DotError('dot/proposal-exists', `a change to ${field} already waits for the human; ask them to review it before proposing another`)
     if (equal(before, after)) throw new DotError('dot/invalid', `${field} already has this value`)
@@ -100,19 +103,20 @@ export class SelfSettings {
       await this.dot.store.deleteSettingProposal(id)
       return `Declined ${id}; no settings changed.`
     }
+    const locale = this.dot.locale ?? 'zh'
     const knowledge = await this.dot.knowledgeView()
-    const current = field === 'memory' ? normalizeAgreements(knowledge.agreements.text) || null : valueOf(this.dot.store.settings, field, '')
+    const current = field === 'memory' ? normalizeAgreements(knowledge.agreements.text) || null : valueOf(this.dot.store.settings, field, '', locale)
     if (!equal(current, proposal.before)) throw new DotError('dot/proposal-stale', `${field} changed after this proposal. Decline it and ask Dorothy to propose the change again from the current value.`)
     try {
       if (field === 'memory') await this.dot.setAgreements(proposal.after === null ? '' : String(proposal.after), 'human')
-      else await this.dot.store.setSettings(patchSettings(this.dot.store.settings, { [field]: proposal.after }))
+      else await this.dot.store.setSettings(patchSettings(this.dot.store.settings, { [field]: proposal.after }, locale))
     } catch (error) {
       throw new DotError('dot/proposal-failed', messageOf(error))
     }
     await this.dot.store.deleteSettingProposal(id)
     // Agreements already reach dot before the next message; other settings keep the live-apply path.
     if (field !== 'memory') await this.dot.settingsChanged()
-    const now = field === 'memory' ? (await this.dot.knowledgeView()).agreements.text || null : valueOf(this.dot.store.settings, field, '')
+    const now = field === 'memory' ? (await this.dot.knowledgeView()).agreements.text || null : valueOf(this.dot.store.settings, field, '', locale)
     return `Approved ${id}; ${field} is now ${textOf(now)}.`
   }
 }

@@ -1,0 +1,56 @@
+{
+  "meta": {
+    "title": "Dorothy (dot)",
+    "description": "Una coordinadora siempre disponible: habla con Dorothy en su propio panel y ella abrirá espacios de trabajo, iniciará sesiones, seguirá su progreso, resolverá aprobaciones y preguntas por ti y te informará de vuelta."
+  },
+  "panel": {
+    "cardPreparing": "Preparando tarjeta…",
+    "cardExpired": "Caducada",
+    "cardsHint": "Esta tarjeta ha caducado; inicia una nueva solicitud.",
+    "personaTitle": "Personalidad y acuerdos",
+    "agreements": "Acuerdos",
+    "agreementsHint": "Las reglas que estableces, con tus propias palabras. Prevalecen sobre su cognición.",
+    "agreementsPlaceholder": "- p. ej., Hacer push a mis repos personales está bien",
+    "agreementsEmpty": "Aún no hay acuerdos.",
+    "saveAgreements": "Guardar acuerdos",
+    "undoAgreements": "Revertir último guardado",
+    "cognition": "Cognición",
+    "cognitionHint": "Lo que Dorothy ha anotado sobre ti. Editable.",
+    "cognitionPlaceholder": "Lo que ha observado sobre tus preferencias y ritmo de trabajo…",
+    "cognitionEmpty": "Aún no hay cognición.",
+    "saveCognition": "Guardar cognición",
+    "cognitionHistory": "Versiones",
+    "cognitionHistoryEmpty": "Aún no hay versiones anteriores.",
+    "restoreCognition": "Restaurar esta versión",
+    "charCount": "{n} / {max} caracteres"
+  },
+  "settings": {
+    "taskPermission": "Permisos de tareas",
+    "taskPermission_workspace-write": "Escritura en espacio de trabajo",
+    "taskPermission_danger-full-access": "Acceso total",
+    "taskPermission_default": "Seguir al anfitrión",
+    "taskPermissionDesc": "Se aplica a tareas nuevas, con independencia del enrutamiento de aprobaciones.",
+    "approvals_dot": "Dorothy",
+    "approvals_human": "Tú",
+    "approvals_deny": "Denegar todo",
+    "reflection": "Reflexión en segundo plano",
+    "reflectionDesc": "Revisa el trabajo reciente cuando está inactiva y actualiza su cognición; señala acuerdos obsoletos o en conflicto la próxima vez que le escribas, para que decidas.",
+    "reflection_on": "Activada",
+    "reflection_off": "Desactivada"
+  },
+  "context": {
+    "promptSections": "Secciones del prompt",
+    "promptSectionsHint": "Lo que este segmento lleva realmente en su prompt.",
+    "sectionPersona": "Personalidad",
+    "sectionAgreements": "Acuerdos",
+    "sectionCognition": "Cognición",
+    "sectionHandoff": "Relevo",
+    "sectionEmpty": "(vacío)"
+  },
+  "tools": {
+    "dot_agreement": "Acuerdo",
+    "dot_cognition": "Cognición",
+    "agreementAdded": "Acuerdo añadido",
+    "agreementRemoved": "Acuerdo eliminado"
+  }
+}

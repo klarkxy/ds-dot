@@ -6,7 +6,7 @@
 import { Button, Input, Tag } from '@deepseek-ai/dsh-client-ui-primitives'
 import { useCallback, useEffect, useState } from 'react'
 import type { DotSettings, KnowledgeView, SettingField } from './contracts.ts'
-import { ADDRESS_MAX_CHARS, DEFAULT_ADDRESS, DEFAULT_PERSONA, PERSONA_MAX_CHARS } from './persona.ts'
+import { ADDRESS_MAX_CHARS, PERSONA_MAX_CHARS, defaultAddress, defaultPersona } from './persona.ts'
 import { LockToggle, PaneSkeleton, type SaveNotice, type SettingsApi, type SettingsPatch } from './settings-panel.tsx'
 import { formatWhen, t, type CopyLocale } from './ui-copy.ts'
 
@@ -205,8 +205,10 @@ export function PersonaPanel({ locale, api, settings, onSaved, onStatusChange }:
   onStatusChange?: (status: SaveNotice | undefined) => void
 }) {
   const [status, setStatus] = useState<SaveNotice>()
-  const savedAddress = settings?.address ?? DEFAULT_ADDRESS
-  const savedPersona = settings?.persona ?? DEFAULT_PERSONA
+  const defaultAddr = defaultAddress(locale)
+  const defaultPers = defaultPersona(locale)
+  const savedAddress = settings?.address ?? defaultAddr
+  const savedPersona = settings?.persona ?? defaultPers
   const [address, setAddress] = useState(savedAddress)
   const [persona, setPersona] = useState(savedPersona)
   useEffect(() => { setAddress(savedAddress) }, [savedAddress])
@@ -249,7 +251,7 @@ export function PersonaPanel({ locale, api, settings, onSaved, onStatusChange }:
             </div>
           </div>
           <div className="dsh-dot-persona-row">
-            <Input aria-label={t(locale, 'pAddress')} maxLength={ADDRESS_MAX_CHARS} placeholder={DEFAULT_ADDRESS} value={address}
+            <Input aria-label={t(locale, 'pAddress')} maxLength={ADDRESS_MAX_CHARS} placeholder={defaultAddr} value={address}
               onChange={event => setAddress(event.target.value)} onBlur={commitAddress}
               onKeyDown={event => { if (event.key === 'Enter' && !event.nativeEvent.isComposing) commitAddress() }} />
             <Button variant="ghost" size="sm" disabled={!addressCustom} onClick={() => save({ address: null })}>{t(locale, 'pRestore')}</Button>
@@ -272,7 +274,7 @@ export function PersonaPanel({ locale, api, settings, onSaved, onStatusChange }:
             <Button variant="primary" size="sm" disabled={!personaChanged} onClick={() => save({ persona })}>{t(locale, 'pSave')}</Button>
             <Button variant="ghost" size="sm" disabled={!personaChanged} onClick={() => setPersona(savedPersona)}>{t(locale, 'pDiscard')}</Button>
             <span className="dsh-ui-spacer" />
-            <Button variant="outline" size="sm" disabled={!personaCustom && !personaChanged} onClick={() => { setPersona(DEFAULT_PERSONA); save({ persona: null }) }}>{t(locale, 'pRestore')}</Button>
+            <Button variant="outline" size="sm" disabled={!personaCustom && !personaChanged} onClick={() => { setPersona(defaultPers); save({ persona: null }) }}>{t(locale, 'pRestore')}</Button>
           </div>
         </div>
         </div>

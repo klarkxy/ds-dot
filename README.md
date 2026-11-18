@@ -1,6 +1,6 @@
 # Dorothy (dot)
 
-[简体中文](docs/README.zh-CN.md)
+[简体中文](docs/README.zh-CN.md) · [日本語](docs/README.ja.md)
 
 ![Dorothy arrives with her suitcase and umbrella, ready to coordinate your projects](docs/images/dot-arrival.png)
 
@@ -79,8 +79,8 @@ reminders, or memory.
   new segment manually; search turn-by-turn steps, tool calls, and reflection logs.
 
 - **Factory reset:** Previews and clears Dorothy's work history, sessions she opened,
-  reminders, agreements, cognition, and settings while leaving your own sessions and project
-  files untouched.
+  reminders, agreements, cognition, and settings while leaving your own sessions, project
+  files, and the host persona untouched.
 
 ## Good to know
 

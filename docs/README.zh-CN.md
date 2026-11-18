@@ -1,6 +1,6 @@
 # 桃乐丝（dot）
 
-[English](../README.md)
+[English](../README.md) · [日本語](README.ja.md)
 
 ![桃乐丝带着行李和雨伞抵达，准备帮你协调项目](images/dot-arrival.png)
 

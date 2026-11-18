@@ -121,7 +121,9 @@ function formatProposalValue(locale: CopyLocale, field: SettingProposal['field']
       if (rule.mode === 'allow' || rule.mode === 'deny') {
         const names = (rule.list ?? []).map(key => choices.find(item => taskModelKey(item) === key)?.label ?? key)
         const prefix = t(locale, `sTaskModels_${rule.mode}`)
-        const joined = names.length > 0 ? `${prefix}：${names.join(', ')}` : `${prefix}（${t(locale, 'sProposalDefault')}）`
+        const joined = names.length > 0
+          ? t(locale, 'sTaskModelsList').replace('{mode}', prefix).replace('{models}', names.join(', '))
+          : t(locale, 'sTaskModelsNone').replace('{mode}', prefix).replace('{empty}', t(locale, 'sProposalDefault'))
         return { text: joined, block: joined.length > 56 }
       }
       break
@@ -414,6 +416,10 @@ export function SettingsPanel({ locale, api, settings, onSaved, onStatusChange, 
             onPickLeading: () => save({ model: null }),
             triggerLabel: chosen ? (choices.find(item => item.provider === chosen.provider && item.model === chosen.model)?.label ?? `${chosen.provider} / ${chosen.model}`) : t(locale, 'sModelFollow'),
             modelLabel: t(locale, 'sModel'),
+            searchPlaceholder: t(locale, 'sTaskModelsFilter'),
+            emptyLabel: t(locale, 'sTaskModelsNoMatch'),
+            clearSearchLabel: t(locale, 'sTaskModelsClear'),
+            retryLabel: t(locale, 'retry'),
             listClassName: 'dsh-dot-chat',
           }, {
             fallback: (

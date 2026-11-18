@@ -230,9 +230,14 @@ export function PersonaPanel({ locale, api, settings, onSaved, onStatusChange, d
   const savedPersona = settings?.persona ?? defaultPers
   const [address, setAddress] = useState(savedAddress)
   const [persona, setPersona] = useState(savedPersona)
+  // The address field commits on blur. Once that save is submitted, the drawer
+  // guard must not treat the same text as an unsaved draft: blur runs before the
+  // click that leaves the page, and Discard cannot undo a save already in flight.
+  const [addressSubmitted, setAddressSubmitted] = useState<string | undefined>()
   useEffect(() => { setAddress(savedAddress) }, [savedAddress, discardSignal])
   useEffect(() => { setPersona(savedPersona) }, [savedPersona, discardSignal])
-  const addressDirty = Boolean(settings) && address.trim() !== '' && address.trim() !== savedAddress
+  useEffect(() => { setAddressSubmitted(undefined) }, [discardSignal])
+  const addressDirty = Boolean(settings) && address.trim() !== '' && address.trim() !== savedAddress && address.trim() !== addressSubmitted
   const personaDirty = Boolean(settings) && persona !== savedPersona
   const anyDirty = addressDirty || personaDirty || knowledgeDirty
   useEffect(() => { onDirtyChange?.(anyDirty) }, [anyDirty, onDirtyChange])
@@ -242,17 +247,22 @@ export function PersonaPanel({ locale, api, settings, onSaved, onStatusChange, d
     onStatusChange?.(next)
   }, [onStatusChange])
 
-  const save = (patch: SettingsPatch) => {
+  const save = (patch: SettingsPatch, onError?: () => void) => {
     reportStatus(undefined)
     api.setSettings(patch).then(
       next => { onSaved(next); reportStatus({ kind: 'saved' }) },
-      failure => reportStatus({ kind: 'error', message: failure instanceof Error ? failure.message : String(failure) }),
+      failure => {
+        onError?.()
+        reportStatus({ kind: 'error', message: failure instanceof Error ? failure.message : String(failure) })
+      },
     )
   }
   const commitAddress = () => {
     const text = address.trim()
-    if (!text) { setAddress(savedAddress); return }
-    if (text !== savedAddress) save({ address: text })
+    if (!text) { setAddress(savedAddress); setAddressSubmitted(undefined); return }
+    if (text === savedAddress) return
+    setAddressSubmitted(text)
+    save({ address: text }, () => setAddressSubmitted(current => current === text ? undefined : current))
   }
 
   if (!settings) return <PaneSkeleton label={t(locale, 'settingsLoading')} rows={3} />

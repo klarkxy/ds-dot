@@ -665,4 +665,41 @@ describe('WorkBoard', () => {
 
     await act(async () => root.unmount())
   })
+
+  it('opens a folded changed file on the first click while its preview is still pending', async () => {
+    const pending: Array<(error: Error) => void> = []
+    const onRead = (request: WorkReadRequest) => {
+      if (request.ref !== 'src/second.ts') return Promise.resolve({ source: request.ref, body: `FILE_${request.ref}` })
+      return new Promise<never>((_resolve, reject) => { pending.push(reject) })
+    }
+    const multi: WorkBoardItem = {
+      ...item,
+      verification: {
+        id: 'v-3', verdict: 'accept', subjectKey: 'subject-key-long', inputRef: 'in-4', inputRevision: 4,
+        changes: [
+          { path: 'src/first.ts', kind: 'modified' },
+          { path: 'src/second.ts', kind: 'added' },
+        ],
+      },
+    }
+    const root = createRoot(document.getElementById('root')!)
+    await act(async () => {
+      root.render(<WorkBoard locale="zh" items={[multi]} pending={[]} onAccept={vi.fn()} onReject={vi.fn()} onAnswer={vi.fn()} onResume={vi.fn()} onRead={onRead} />)
+    })
+    await openDetails()
+    const head = document.querySelector<HTMLAnchorElement>('a[data-change-path="src/second.ts"]')!
+    const body = head.parentElement!.querySelector<HTMLElement>('.dsh-dot-work-source-body')!
+    expect(body.hasAttribute('data-collapsed')).toBe(true)
+    expect(pending.length).toBeGreaterThan(0)
+    await act(async () => { head.click() })
+    expect(body.hasAttribute('data-collapsed')).toBe(false)
+    await act(async () => {
+      for (const reject of [...pending]) reject(new Error('preview unavailable'))
+      await Promise.resolve()
+    })
+    expect(body.hasAttribute('data-collapsed')).toBe(false)
+    expect(body.textContent).toContain('没有读出来')
+    expect(body.textContent).toContain('preview unavailable')
+    await act(async () => root.unmount())
+  })
 })

@@ -1,5 +1,5 @@
 import { Button, Input, SegmentedTabs, StateDot, Tag, type SegmentedTab, type StateDotState, type TagTone } from '@deepseek-ai/dsh-client-ui-primitives'
-import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useId, useMemo, useRef, useState, type MouseEvent } from 'react'
 import { BOARD_ROOT } from './board.tsx'
 import { FINISHED_SHOWN } from './board-groups.ts'
 import { t, type CopyLocale, type TextKey } from './ui-copy.ts'
@@ -165,6 +165,15 @@ function WorkFacts({ locale, item, onRead, onOpenSession }: {
       setSlot(current => current.identity === token ? { ...current, loaded: { ...current.loaded, [key]: { ok: false, message } } } : current)
     })
   }, [onRead, item.id, verificationId, inputRef, inputRevision])
+  // A folded row has to open on the first click. Treating "not loaded yet" as
+  // "only retry the read" leaves a slow or failed preview inside display:none,
+  // so the chevron never expands and the error stays unreachable.
+  const onSourceHeadClick = (event: MouseEvent<HTMLAnchorElement>, kind: 'evidence' | 'change', ref: string, key: string, isCollapsed: boolean) => {
+    event.preventDefault()
+    const needsLoad = Boolean(identity) && loaded[key]?.ok !== true
+    if (needsLoad) loadPreview(kind, ref, identity)
+    if (isCollapsed || !needsLoad) toggleSource(key)
+  }
   const loadFull = useCallback((kind: 'evidence' | 'change', ref: string, token: string) => {
     if (!onRead || !verificationId || !token) return
     const key = `${kind}:${ref}`
@@ -259,7 +268,7 @@ function WorkFacts({ locale, item, onRead, onOpenSession }: {
     const isCollapsed = collapsed.has(key)
     return (
       <div key={ref} className="dsh-dot-work-source">
-        <a className="dsh-dot-work-source-head" href={`#evidence-${encodeURIComponent(ref)}`} data-evidence-ref={ref} aria-expanded={!isCollapsed} onClick={event => { event.preventDefault(); if (identity && loaded[key]?.ok !== true) loadPreview('evidence', ref, identity); else toggleSource(key) }}>
+        <a className="dsh-dot-work-source-head" href={`#evidence-${encodeURIComponent(ref)}`} data-evidence-ref={ref} aria-expanded={!isCollapsed} onClick={event => onSourceHeadClick(event, 'evidence', ref, key, isCollapsed)}>
           <span className="dsh-dot-work-chevron" aria-hidden="true">{isCollapsed ? '▸' : '▾'}</span>
           <FileGlyph />
           <span>{t(locale, 'workEvidence')} {ref}</span>
@@ -276,7 +285,7 @@ function WorkFacts({ locale, item, onRead, onOpenSession }: {
         {change.kind === 'deleted'
           ? <span className="dsh-dot-work-source-head"><FileGlyph /><span>{change.path}</span><Tag tone="danger">{factLabel(locale, 'change', change.kind)}</Tag></span>
           : (
-            <a className="dsh-dot-work-source-head" href={`#change-${encodeURIComponent(change.path)}`} data-change-path={change.path} aria-expanded={!isCollapsed} onClick={event => { event.preventDefault(); if (identity && loaded[key]?.ok !== true) loadPreview('change', change.path, identity); else toggleSource(key) }}>
+            <a className="dsh-dot-work-source-head" href={`#change-${encodeURIComponent(change.path)}`} data-change-path={change.path} aria-expanded={!isCollapsed} onClick={event => onSourceHeadClick(event, 'change', change.path, key, isCollapsed)}>
               <span className="dsh-dot-work-chevron" aria-hidden="true">{isCollapsed ? '▸' : '▾'}</span>
               <FileGlyph />
               <span>{change.path}</span>

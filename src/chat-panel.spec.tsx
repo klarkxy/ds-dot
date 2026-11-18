@@ -505,6 +505,52 @@ describe('ChatPanel activity and notice cards', () => {
       vi.useRealTimers()
     }
   })
+
+  it('lets a blurred address save leave the persona page, and still guards an address edit that has not blurred', async () => {
+    const snapshot: ChatSnapshot = { sessionId: 'dot-1', running: false, streaming: '', rev: 1, itemsRev: 1, items: [] }
+    const saved: unknown[] = []
+    const api: ChatApi = {
+      ...makeApi(snapshot),
+      setSettings: async patch => { saved.push(patch); return { ...DEFAULT_SETTINGS, ...patch } },
+    }
+    const root = createRoot(document.getElementById('root')!)
+    await act(async () => { root.render(<ChatPanel locale="zh" api={api} onOpenSession={() => {}} />) })
+    await act(async () => { await Promise.resolve(); await Promise.resolve() })
+
+    const gear = document.querySelector<HTMLButtonElement>('button[aria-label="设置"]')!
+    await act(async () => { gear.click() })
+    const personaTab = () => [...document.querySelectorAll<HTMLButtonElement>('.dsh-dot-drawer-tabs button')][1]!
+    await act(async () => { personaTab().click() })
+    await act(async () => { await Promise.resolve(); await Promise.resolve() })
+
+    const address = () => document.querySelector<HTMLInputElement>('input[aria-label="对你的称呼"]')!
+    await act(async () => { Simulate.change(address(), { target: { value: '朋友' } } as never) })
+    expect(document.querySelector('.dsh-dot-dirty-dot')).not.toBeNull()
+    // Blur commits the address before the click that leaves, so the guard must not
+    // raise a bar Discard cannot undo.
+    await act(async () => { Simulate.blur(address()) })
+    const contextTab = [...document.querySelectorAll<HTMLButtonElement>('.dsh-dot-drawer-tabs button')][2]!
+    await act(async () => { contextTab.click() })
+    expect(document.querySelector('.dsh-dot-unsaved-bar')).toBeNull()
+    expect(document.querySelector('aside.dsh-dot-drawer [role="region"]')?.getAttribute('aria-label')).toBe('上下文用量')
+    expect(saved).toEqual([{ address: '朋友' }])
+
+    await act(async () => { personaTab().click() })
+    await act(async () => { Simulate.change(address(), { target: { value: '伙伴' } } as never) })
+    expect(document.querySelector('.dsh-dot-dirty-dot')).not.toBeNull()
+    await act(async () => {
+      document.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+    })
+    expect(document.querySelector('.dsh-dot-unsaved-bar')?.textContent).toContain('当前页有未保存的修改')
+    expect(document.querySelector('aside.dsh-dot-drawer [role="region"]')?.getAttribute('aria-label')).toBe('人设与约定')
+    expect(saved).toEqual([{ address: '朋友' }])
+    const discard = [...document.querySelectorAll<HTMLButtonElement>('.dsh-dot-unsaved-bar button')].find(b => b.textContent === '放弃改动')!
+    await act(async () => { discard.click() })
+    expect(document.querySelector('aside.dsh-dot-drawer')).toBeNull()
+    expect(saved).toEqual([{ address: '朋友' }])
+
+    await act(async () => { root.unmount() })
+  })
   it('silences background/already-handled requests while showing structured cards for requests needing the human', async () => {
     const opened: string[] = []
     const snapshot: ChatSnapshot = {

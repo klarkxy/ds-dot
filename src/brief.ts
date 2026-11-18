@@ -116,8 +116,8 @@ function conductLines(kind: BriefRun['kind']): string[] {
     return ['Read what this order and the workspace already show before you report a gap. If a check cannot be made, report the situation, what you inspected, the evidence, and one recommended next step. Do not guess a missing fact into a finding. Do not change the delivery.']
   }
   return [
-    'Read the original request, the requirements, and the workspace before you choose. Inside this goal, choose routine reversible details yourself and record the assumption in the report when it matters. Do not ask to re-approve work this order already authorizes.',
-    'Stop only the dependent part when a wrong guess would materially change the result, requirements conflict, only the requester knows the intent, authority is missing, or the effect would be irreversible, externally unauthorized, or costly. Report the situation, what you tried, the evidence, and one recommended next step. Silence is not consent. Do not invent a requirement to get past it.',
+    'Use this work order and the workspace you can read. Constraints and context in the order are given. If a needed fact is missing, look it up there before you choose. You do not have dot\'s private memory. Inside this goal, choose routine reversible details yourself and record the assumption in the report when it matters. Do not ask to re-approve work this order already authorizes.',
+    'Stop only the dependent part when a wrong guess would materially change the result, requirements conflict, only the requester knows the intent, authority is missing, or the effect would be irreversible, externally unauthorized, or costly. A confident guess is not authorization. Report the situation, what you tried, the evidence, and one recommended next step. Silence is not consent. Do not invent a requirement to get past it.',
     'An intermediate finding or a patch is not delivery. Do not repeat the same failed approach without a new hypothesis.',
   ]
 }

@@ -63,14 +63,14 @@ const SILENCE: Record<CopyLocale, string> = {
   ru: 'не принимай молчание за согласие',
 }
 const QUESTION_POLICY: Record<CopyLocale, { readonly label: string; readonly help: string }> = {
-  zh: { label: '可逆的自己定', help: '只有猜错会改变结果时才问你' },
-  en: { label: 'Choose reversible defaults', help: 'only when a wrong guess would change the result' },
-  ja: { label: '可逆なものは自分で決める', help: '誤りが結果を変えるときだけ' },
-  de: { label: 'Umkehrbares selbst entscheiden', help: 'wenn ein Fehlgriff das Ergebnis ändern würde' },
-  es: { label: 'Decidir lo reversible', help: 'solo si un error cambiaría el resultado' },
-  fr: { label: 'Décider le réversible', help: 'seulement si une erreur changerait le résultat' },
-  pt: { label: 'Decidir o reversível', help: 'só se um erro mudaria o resultado' },
-  ru: { label: 'Решать обратимое', help: 'только если ошибка изменила бы результат' },
+  zh: { label: '可逆的自己定', help: '缺授权，或不可逆、外部、费用后果' },
+  en: { label: 'Choose reversible defaults', help: 'Missing authority, or an irreversible, external, or costly effect' },
+  ja: { label: '可逆なものは自分で決める', help: '認可がないとき、または不可逆・外部・費用の影響' },
+  de: { label: 'Umkehrbares selbst entscheiden', help: 'Fehlende Befugnis oder eine unumkehrbare, externe oder teure Folge' },
+  es: { label: 'Decidir lo reversible', help: 'Si falta autorización, o el efecto es irreversible, externo o costoso' },
+  fr: { label: 'Décider le réversible', help: 'Sans autorisation, ou si l’effet est irréversible, externe ou coûteux' },
+  pt: { label: 'Decidir o reversível', help: 'Sem autorização, ou se o efeito for irreversível, externo ou custoso' },
+  ru: { label: 'Решать обратимое', help: 'Нет разрешения, или эффект необратим, внешний или платный' },
 }
 
 const human = (text: string, time: number): RawEvent => ({
@@ -442,6 +442,7 @@ describe('i18n locale resolution and pack completeness', () => {
       expect(t(loc, 'sQuestions_dot'), `${loc} questions label`).toBe(QUESTION_POLICY[loc].label)
       expect(t(loc, 'sQuestionsDesc_dot'), `${loc} questions help`).toContain(QUESTION_POLICY[loc].help)
       expect(t(loc, 'sQuestionsDesc_dot'), `${loc} old scope question`).not.toMatch(/scope or direction|方向或范围|範囲や方針|Umfang oder Richtung|alcance o el rumbo|portée ou l’orientation|escopo ou a direção|границы или направление/)
+      expect(t(loc, 'sQuestionsDesc_dot'), `${loc} exclusive guess`).not.toMatch(/只有猜错|only when a wrong guess|ときだけ|nur, wenn ein Fehlgriff|solo si un error|seulement si une erreur|só se um erro|только если ошибка/)
       expect(t(loc, 'sApprovalsDesc_dot'), `${loc} approvals not a blanket gate`).not.toMatch(/spending or credentials|付费或涉及凭据|課金・認証情報|Ausgaben oder Zugangsdaten|gastos o credenciales|dépenses ou identifiants|gastos ou credenciais|расходы или учётные данные/)
       const kept = patchSettings({ ...DEFAULT_SETTINGS, persona: 'Custom voice kept', address: 'Kept name' }, { approvals: 'human' }, loc)
       expect(kept.persona, `${loc} custom persona survives another setting`).toBe('Custom voice kept')

@@ -46,7 +46,9 @@ describe('coordinator prompt contract', () => {
       'The service does not count those rounds',
       'cannot override it',
       'A missing match is not permission',
-      'only when the approval text is truncated',
+      'when approvalNotice marks the request',
+      'A confident guess is not authorization',
+      'That default does not apply when questions=human or questions=off',
       'When approvals=human',
       'When questions=human',
       'When questions=off',
@@ -54,6 +56,7 @@ describe('coordinator prompt contract', () => {
     ]) expect(DOT_INSTRUCTIONS, phrase).toContain(phrase)
     expect(DOT_INSTRUCTIONS).not.toMatch(/clarify when scope is uncertain/)
     expect(DOT_INSTRUCTIONS).not.toMatch(/Proactively clarify when a decision significantly alters/)
+    expect(DOT_INSTRUCTIONS).not.toMatch(/Ask only when a wrong guess/)
   })
   it('specifies requirements by scenario and leaves the contract to the rendered brief', () => {
     for (const phrase of ['scenarios', 'scenarioRef', 'constraintRef', 'covers', 'Write each fact once', "The service renders the run's first prompt from the stored input", 'Do not restate requirements or scope there', 'is not checked, so revise the input instead', 'Report section', 'a claim, not a verdict', 'every one of its scenarios is backed by evidence']) {

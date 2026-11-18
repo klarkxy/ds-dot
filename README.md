@@ -39,17 +39,18 @@ Create a workspace at D:\work\site and fix the broken links on the docs page. Te
   out.
 
 - **Handle approvals and questions:** Watch only her dispatched tasks or all DSH sessions. With
-  the defaults (`approvals=dot`, `questions=dot`) she decides routine reversible approvals and
-  questions herself, after checking agreements, history, and what she can look up. Work that is
-  already authorized is not asked again. Code forces a human decision, and she cannot override
-  it, only for the patterns in `assessApprovalRisk` (`src/approval-risk.ts`): truncated approval
-  text, sandbox escalation, publish commands (`npm`/`pnpm`/`yarn publish`, `git push`,
-  `gh release`), recursive delete, a PEM private key, a subagent shell, or a write from a
-  read-only run. That list is the pattern match, not every deletion outside the workspace,
-  every secret, or every act of spending. She still judges those from the authorization and the
-  consequence. A question she asks includes one recommendation; silence is not consent. Set
-  either control to you to relay every item, or leave questions on the session. When questions
-  are left to you or the session, answer in the original session.
+  the defaults (`approvals=dot`, `questions=dot`) she decides routine reversible choices inside
+  the goal after checking agreements, history, and what she can look up. Work already authorized
+  is not asked again. A confident guess does not replace missing authority, and an irreversible,
+  external, or costly effect still follows that authorization. `questions=human` relays every
+  question; `questions=off` leaves it on the session. Code forces a human decision, and she
+  cannot override it, when `approvalNotice` in `src/approval-risk.ts` marks the request: the
+  shown text was truncated, or `assessApprovalRisk` detected a dangerous pattern (sandbox
+  escalation, publish commands, a recursive-delete form, a PEM private key, a subagent shell,
+  or some write forms on a read-only run). That is not every deletion, every secret, every
+  write, or spending. She judges the rest from the authorization and the consequence. A question
+  she asks includes one recommendation; silence is not consent. Set either control to you to
+  relay every item. When questions are left to you or the session, answer in the original session.
 
 - **Watch sessions and recall history:** Ask her to watch a session you started yourself,
   check on everything running, or search earlier conversations and sessions.

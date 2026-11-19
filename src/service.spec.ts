@@ -488,7 +488,7 @@ describe('DotService history', () => {
 
   it('tells a new segment where the conversation before it can be read', async () => {
     const { h, first } = await threeSessions()
-    expect(h.store.segment!.opening).toContain(`the session just before this one is ${first}`)
+    expect(h.store.segment!.opening).toContain(`the immediately preceding session is ${first}`)
     expect(h.store.segment!.opening).toContain('dot_search_history')
   })
 
@@ -1096,7 +1096,7 @@ describe('idle delivery and reconciliation', () => {
     await h.service.flushNotices()
     const text = h.relayed.map(row => row.text).join('\n')
     expect(text).toContain('Routine check:')
-    expect(text).toContain('Do not write that you are waiting')
+    expect(text).toContain('Do not announce that you are waiting')
     expect(text).toContain('not even a note declaring that you are silent')
     expect(text).not.toContain('consecutive unsuccessful')
   })

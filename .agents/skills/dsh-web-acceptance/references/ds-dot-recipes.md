@@ -4,7 +4,7 @@ This reference provides concrete Playwright scenario templates (`--scenario`) fo
 
 ## 1. Plugin Sidebar Panel & Composer Acceptance (`ds-dot` / Dorothy)
 
-Save a temporary scenario file outside the git branch (for example `/tmp/qa-dot.mjs` on POSIX or `$env:TEMP\qa-dot.mjs` on Windows) and pass `--scenario <file> --gif`:
+Save a temporary scenario file outside the git branch (for example `<temp-dir>/qa-dot.mjs`) and pass `--scenario <file> --gif`:
 
 ```js
 export async function run({ page, screenshot, captureFrame, assertClean }) {
@@ -47,11 +47,11 @@ Run from the plugin checkout after `pnpm build`:
 ```sh
 node <skill-dir>/scripts/dsh-qa-harness.js \
   --plugin . \
-  --scenario /tmp/qa-dot.mjs \
+  --scenario <temp-dir>/qa-dot.mjs \
   --viewport 1440x900 \
   --locale zh-CN \
   --gif-name dot-ui-check.gif \
-  --out-dir /tmp/dsh-dot-qa
+  --out-dir <temp-dir>/dsh-dot-qa
 ```
 
 ## 2. Multi-Locale & Theme Sweep (`zh`, `en`, `ja` + `light` / `dark`)
@@ -66,7 +66,7 @@ for loc in zh-CN en-US ja-JP; do
     --wait-selector ".dsh-dot-chat" \
     --click "button:has-text('Dorothy'), button:has-text('桃乐丝'), button:has-text('ドロシー')" \
     --screenshot-name "dot-${loc}-light.png" \
-    --out-dir "/tmp/dsh-dot-qa/${loc}"
+    --out-dir "<temp-dir>/${loc}"
 done
 ```
 

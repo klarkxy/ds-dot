@@ -1,41 +1,140 @@
 #!/usr/bin/env node
 /**
- * Isolated DeepSeek Harness (dsh web) QA, Screenshot & GIF Runner
+ * Isolated DeepSeek Harness (dsh web) QA, screenshot, and GIF runner.
  *
  * Cross-platform (Windows / macOS / Linux, Node >= 22).
- * Isolates DSH_HOME, binds a free loopback port with localhost authority,
- * exchanges the ephemeral ?token= launch URL for an HttpOnly cookie, verifies
- * zero token leakage in page URLs/logs, runs Playwright UI assertions, exports
- * PNG screenshots + two-pass palette GIFs (with Pillow / pure-JS fallbacks),
- * and tears down the process tree BEFORE deleting DSH_HOME (avoiding dsh-hmr
- * Chokidar busy-loop when profile directories vanish mid-run).
+ * Uses a temporary HOME, USERPROFILE, DSH_HOME, and DSH_AGENTS_HOME, binds a free loopback port,
+ * accepts only a loopback launch URL, exchanges its token for an HttpOnly
+ * dsh-auth-* cookie, and drops every other cookie and web storage before
+ * recording. The dsh process tree is killed and confirmed exited before
+ * DSH_HOME is removed. Screenshots and GIFs are refused inside a git checkout.
  */
 
 import { spawn, spawnSync } from 'node:child_process'
-import { existsSync } from 'node:fs'
+import { existsSync, realpathSync } from 'node:fs'
 import * as fs from 'node:fs/promises'
 import * as net from 'node:net'
 import * as os from 'node:os'
 import * as path from 'node:path'
-import { pathToFileURL } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 
-const DEFAULT_SENSITIVE_ENV_PATTERNS = [
-  /^DEEPSEEK_API_KEY$/i,
-  /^OPENAI_API_KEY$/i,
-  /^ANTHROPIC_API_KEY$/i,
-  /^GEMINI_API_KEY$/i,
-  /^GOOGLE_API_KEY$/i,
-  /^NPM_TOKEN$/i,
-  /^GITHUB_TOKEN$/i,
-  /^GH_TOKEN$/i,
-]
+const SENSITIVE_ENV_PATTERN = /KEY|PASSWORD|SECRET|TOKEN|COOKIE/i
+const COLOR_SCHEMES = new Set(['light', 'dark', 'no-preference'])
+const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '::1'])
 
-function redactTokens(input) {
+// Profile and config locations. --allow-env cannot put any of these back.
+// NPM_CONFIG_* and GIT_CONFIG_* are blocked by prefix below, then the git
+// files we own are written inside the temporary home.
+const PROFILE_ENV_NAMES = new Set([
+  'HOME',
+  'USERPROFILE',
+  'HOMEDRIVE',
+  'HOMEPATH',
+  'APPDATA',
+  'LOCALAPPDATA',
+  'XDG_CONFIG_HOME',
+  'XDG_DATA_HOME',
+  'XDG_CACHE_HOME',
+  'XDG_STATE_HOME',
+  'XDG_RUNTIME_DIR',
+  'TMP',
+  'TEMP',
+  'TMPDIR',
+  'SSH_AUTH_SOCK',
+  'GIT_SSH_COMMAND',
+  'GNUPGHOME',
+  'DOCKER_CONFIG',
+  'GH_CONFIG_DIR',
+  'KUBECONFIG',
+  'AWS_CONFIG_FILE',
+  'AWS_SHARED_CREDENTIALS_FILE',
+  'NETRC',
+  'CURL_HOME',
+  'COMPOSER_HOME',
+  'CARGO_HOME',
+  'RUSTUP_HOME',
+  'BUNDLE_USER_HOME',
+  'BUNDLE_USER_CONFIG',
+  'GEM_HOME',
+  'GEM_SPEC_CACHE',
+  'PIP_CONFIG_FILE',
+  'CONDARC',
+  'JUPYTER_CONFIG_DIR',
+  'IPYTHONDIR',
+  'NODE_REPL_HISTORY',
+  'HISTFILE',
+  'LESSHISTFILE',
+  'INPUTRC',
+  'XAUTHORITY',
+  'PYTHONSTARTUP',
+  'PYTHONUSERBASE',
+  'PNPM_HOME',
+  'COREPACK_HOME',
+  'GRADLE_USER_HOME',
+  'NUGET_PACKAGES',
+  'DOTNET_CLI_HOME',
+])
+
+// Needed to find dsh, node, and cmd. These stay even when an entry lives
+// under the caller's home directory.
+const STARTUP_ENV_NAMES = new Set([
+  'PATH',
+  'PATHEXT',
+  'SYSTEMROOT',
+  'SYSTEMDRIVE',
+  'WINDIR',
+  'COMSPEC',
+  'OS',
+  'PROCESSOR_ARCHITECTURE',
+  'PROCESSOR_ARCHITEW6432',
+  'PROGRAMFILES',
+  'PROGRAMFILES(X86)',
+  'PROGRAMW6432',
+  'COMMONPROGRAMFILES',
+  'COMMONPROGRAMFILES(X86)',
+  'PROGRAMDATA',
+  'ALLUSERSPROFILE',
+  'PUBLIC',
+  'DRIVERDATA',
+  'NUMBER_OF_PROCESSORS',
+  'LANG',
+  'LC_ALL',
+  'LC_CTYPE',
+  'TZ',
+])
+
+export function redactTokens(input) {
   if (typeof input !== 'string') return ''
-  return input.replace(/([?&]token=)[^&\s#]+/gi, '$1<REDACTED>')
+  return input
+    .replace(/((?:token|access_token|id_token)=)[^&\s#]+/gi, '$1<REDACTED>')
+    .replace(/(dsh-auth-[A-Za-z0-9_-]+=)[^;\s]+/gi, '$1<REDACTED>')
+    .replace(/((?:authorization|bearer)["']?\s*[:=]\s*["']?)[^\s&,"']+/gi, '$1<REDACTED>')
 }
 
-function parseArgs(argv) {
+export function redactForLog(input, homeDir = os.homedir()) {
+  let text = redactTokens(typeof input === 'string' ? input : String(input ?? ''))
+  if (typeof homeDir === 'string' && homeDir.length > 1) {
+    text = text.split(homeDir).join('<HOME>')
+  }
+  return text
+}
+
+function requireInteger(flag, raw, { min, max }) {
+  if (typeof raw === 'number' && Number.isInteger(raw)) {
+    if (raw < min || raw > max) throw new Error(`${flag} must be an integer from ${min} to ${max}.`)
+    return raw
+  }
+  if (typeof raw !== 'string' || !/^\d+$/.test(raw)) {
+    throw new Error(`${flag} expects an integer from ${min} to ${max}.`)
+  }
+  const value = Number(raw)
+  if (!Number.isSafeInteger(value) || value < min || value > max) {
+    throw new Error(`${flag} must be an integer from ${min} to ${max}.`)
+  }
+  return value
+}
+
+export function parseArgs(argv) {
   const opts = {
     pluginDirs: [],
     patches: [],
@@ -80,44 +179,73 @@ function parseArgs(argv) {
     else if (arg === '--viewport') {
       const m = /^(\d+)x(\d+)$/i.exec(next())
       if (!m) throw new Error('Expected --viewport <WIDTHxHEIGHT>, e.g. 1440x900')
-      opts.viewportWidth = Number(m[1])
-      opts.viewportHeight = Number(m[2])
+      opts.viewportWidth = requireInteger('--viewport width', m[1], { min: 1, max: 8192 })
+      opts.viewportHeight = requireInteger('--viewport height', m[2], { min: 1, max: 8192 })
     } else if (arg === '--gif') opts.recordGif = true
     else if (arg === '--gif-name') {
       opts.recordGif = true
       opts.gifName = next()
-    } else if (arg === '--gif-width') opts.gifWidth = Number(next())
-    else if (arg === '--gif-fps') opts.gifFps = Number(next())
+    } else if (arg === '--gif-width') opts.gifWidth = requireInteger('--gif-width', next(), { min: 1, max: 4096 })
+    else if (arg === '--gif-fps') opts.gifFps = requireInteger('--gif-fps', next(), { min: 1, max: 60 })
     else if (arg === '--screenshot-name') opts.screenshotName = next()
     else if (arg === '--locale') opts.locale = next()
     else if (arg === '--color-scheme') opts.colorScheme = next()
     else if (arg === '--wait-selector') opts.waitSelector = next()
     else if (arg === '--click') opts.clickSelectors.push(next())
-    else if (arg === '--settle-ms') opts.settleMs = Number(next())
-    else if (arg === '--boot-timeout-ms') opts.bootTimeoutMs = Number(next())
-    else if (arg === '--allow-env') opts.allowEnv.push(next())
+    else if (arg === '--settle-ms') opts.settleMs = requireInteger('--settle-ms', next(), { min: 0, max: 120_000 })
+    else if (arg === '--boot-timeout-ms') opts.bootTimeoutMs = requireInteger('--boot-timeout-ms', next(), { min: 1, max: 600_000 })
+    else if (arg === '--allow-env') {
+      const name = next()
+      assertAllowEnvName(name)
+      opts.allowEnv.push(name)
+    }
     else if (arg === '--keep-temp-home') opts.keepTempHome = true
     else throw new Error(`Unknown option: ${arg}`)
   }
+  if (!opts.help) validateOpts(opts)
   return opts
+}
+
+export function validateOpts(opts) {
+  requireInteger('viewport width', opts.viewportWidth, { min: 1, max: 8192 })
+  requireInteger('viewport height', opts.viewportHeight, { min: 1, max: 8192 })
+  requireInteger('gif width', opts.gifWidth, { min: 1, max: 4096 })
+  requireInteger('gif fps', opts.gifFps, { min: 1, max: 60 })
+  requireInteger('settle ms', opts.settleMs, { min: 0, max: 120_000 })
+  requireInteger('boot timeout', opts.bootTimeoutMs, { min: 1, max: 600_000 })
+  if (!COLOR_SCHEMES.has(opts.colorScheme)) {
+    throw new Error('Expected --color-scheme light, dark, or no-preference.')
+  }
+  if (!opts.profile || opts.profile.startsWith('-') || /[\0\r\n]/.test(opts.profile)) {
+    throw new Error('Invalid --profile value.')
+  }
+  if (typeof opts.dshCmd !== 'string' || opts.dshCmd.trim() === '') {
+    throw new Error('Invalid --dsh-cmd value.')
+  }
+  if (typeof opts.locale !== 'string' || opts.locale.trim() === '' || /[\0\r\n]/.test(opts.locale)) {
+    throw new Error('Invalid --locale value.')
+  }
+  if (!opts.gifName || !opts.screenshotName) throw new Error('Output filename is empty.')
+  if (!opts.outDir) throw new Error('Output directory is empty.')
 }
 
 function printHelp() {
   console.log(`Usage: node dsh-qa-harness.js [options]
 
-Spins up an isolated DeepSeek Harness Web instance (temporary DSH_HOME + free
-loopback port), mounts local plugins via link:, runs Playwright acceptance,
-captures screenshots and high-DPI GIFs, and cleanly tears down processes before
-removing DSH_HOME.
+Spins up an isolated DeepSeek Harness Web instance (temporary HOME,
+USERPROFILE, DSH_HOME, and DSH_AGENTS_HOME, free loopback port), mounts
+local plugins via link:, runs Playwright acceptance, captures screenshots
+and GIFs outside the git checkout, and tears down the process tree before
+removing the temporary home.
 
 Options:
   --plugin <dir>            Link built local plugin checkout (repeatable)
   --patch <yml>             Apply extra Cordis --patch overlay (repeatable)
   --scenario <file.mjs>     Custom Playwright scenario module exporting run(ctx)
-  --out-dir <dir>           Output folder (keep outside git branch!)
+  --out-dir <dir>           Output folder outside the git checkout
   --viewport <WxH>          Browser viewport, default 1440x900
   --locale <bcp47>          Browser locale, default zh-CN
-  --color-scheme <scheme>   light or dark, default light
+  --color-scheme <scheme>   light, dark, or no-preference (default light)
   --wait-selector <css>     CSS selector to await before default capture
   --click <css>             Click selector in sequence during default run (repeatable)
   --screenshot-name <name>  Default screenshot filename (default: acceptance.png)
@@ -128,7 +256,9 @@ Options:
   --settle-ms <ms>          Final hold time in ms before ending recording (1200)
   --dsh-cmd <cmd>           Command to launch dsh (default: "dsh", or "pnpm dsh")
   --cwd <dir>               Working directory for dsh workspace (default: cwd)
-  --allow-env <VAR>         Keep specific API key env var in child env (repeatable)
+  --allow-env <VAR>         Reintroduce one scrubbed variable (repeatable).
+                            Cannot restore HOME, USERPROFILE, DSH_HOME,
+                            DSH_AGENTS_HOME, or other profile paths.
   --boot-timeout-ms <ms>    Startup readiness timeout (default: 45000)
   --keep-temp-home          Retain temporary DSH_HOME on disk for debugging
   -h, --help                Show this help text
@@ -138,43 +268,258 @@ Options:
 export async function pickFreePort(host = '127.0.0.1') {
   return new Promise((resolve, reject) => {
     const srv = net.createServer()
-    srv.unref()
     srv.on('error', reject)
     srv.listen(0, host, () => {
       const addr = srv.address()
       const port = typeof addr === 'object' && addr ? addr.port : 0
-      srv.close(err => (err ? reject(err) : resolve(port)))
+      srv.close(err => {
+        if (err) reject(err)
+        else if (!port) reject(new Error('Failed to allocate a loopback port.'))
+        else resolve(port)
+      })
     })
   })
 }
 
-function buildIsolatedEnv(tempHome, allowEnv = []) {
-  const allowSet = new Set(allowEnv.map(k => k.toUpperCase()))
+function isBlockedProfileName(upper) {
+  return upper.startsWith('DSH_')
+    || upper.startsWith('NPM_CONFIG_')
+    || upper.startsWith('GIT_CONFIG_')
+    || PROFILE_ENV_NAMES.has(upper)
+}
+
+function assertAllowEnvName(name) {
+  if (typeof name !== 'string' || name.trim() === '') {
+    throw new Error('--allow-env requires an environment variable name.')
+  }
+  if (isBlockedProfileName(name.toUpperCase())) {
+    throw new Error(`--allow-env cannot keep ${name}; isolated home and profile paths are mandatory.`)
+  }
+}
+
+function slashPath(value) {
+  return String(value).replaceAll('\\', '/')
+}
+
+function usableProfileRoot(value) {
+  if (typeof value !== 'string') return null
+  const norm = slashPath(value).replace(/\/+$/, '')
+  if (norm.length < 2 || norm === '/' || /^[A-Za-z]:$/.test(norm)) return null
+  return norm
+}
+
+function profileRootsFrom(source) {
+  const roots = []
+  const add = value => {
+    const root = usableProfileRoot(value)
+    if (root && !roots.some(item => item.toLowerCase() === root.toLowerCase())) roots.push(root)
+  }
+  let drive = null
+  let homePath = null
+  for (const [key, value] of Object.entries(source)) {
+    if (typeof value !== 'string') continue
+    const upper = key.toUpperCase()
+    if (upper === 'HOME' || upper === 'USERPROFILE' || upper === 'APPDATA' || upper === 'LOCALAPPDATA'
+      || upper === 'XDG_CONFIG_HOME' || upper === 'XDG_DATA_HOME' || upper === 'XDG_CACHE_HOME'
+      || upper === 'XDG_STATE_HOME' || upper === 'XDG_RUNTIME_DIR') {
+      add(value)
+    } else if (upper === 'HOMEDRIVE') drive = value
+    else if (upper === 'HOMEPATH') homePath = value
+  }
+  if (drive && homePath) add(`${drive}${homePath}`)
+  return roots
+}
+
+function isUnderProfileRoot(root, value) {
+  const child = slashPath(value).replace(/\/+$/, '')
+  if (!child) return false
+  const parent = root.toLowerCase()
+  const current = child.toLowerCase()
+  return current === parent || current.startsWith(`${parent}/`)
+}
+
+function valueInsideRealProfile(value, roots) {
+  const raw = slashPath(value).trim()
+  if (raw === '~' || raw.startsWith('~/')) return true
+  for (const root of roots) {
+    if (isUnderProfileRoot(root, raw)) return true
+    for (const part of raw.split(';')) {
+      const piece = part.trim()
+      if (piece && isUnderProfileRoot(root, piece)) return true
+    }
+  }
+  return false
+}
+
+function joinHome(home, ...parts) {
+  const windows = /^[A-Za-z]:[\\/]/.test(home) || (home.includes('\\') && !home.startsWith('/'))
+  if (!windows) return path.join(home, ...parts)
+  const base = home.replace(/[\\/]+$/, '').replaceAll('/', '\\')
+  return [base, ...parts].join('\\')
+}
+
+export function windowsHomeParts(homeDir) {
+  const slashed = String(homeDir).replaceAll('/', '\\')
+  const match = /^([A-Za-z]:)(.*)$/.exec(slashed)
+  if (!match) return { HOMEDRIVE: '', HOMEPATH: homeDir }
+  let rest = match[2]
+  if (!rest.startsWith('\\')) rest = `\\${rest}`
+  return { HOMEDRIVE: match[1].toUpperCase(), HOMEPATH: rest }
+}
+
+export function isolatedProfileAssignments(tempHome) {
+  const windows = windowsHomeParts(tempHome)
+  return {
+    HOME: tempHome,
+    USERPROFILE: tempHome,
+    HOMEDRIVE: windows.HOMEDRIVE,
+    HOMEPATH: windows.HOMEPATH,
+    APPDATA: joinHome(tempHome, 'AppData', 'Roaming'),
+    LOCALAPPDATA: joinHome(tempHome, 'AppData', 'Local'),
+    XDG_CONFIG_HOME: joinHome(tempHome, '.config'),
+    XDG_DATA_HOME: joinHome(tempHome, '.local', 'share'),
+    XDG_CACHE_HOME: joinHome(tempHome, '.cache'),
+    XDG_STATE_HOME: joinHome(tempHome, '.local', 'state'),
+    XDG_RUNTIME_DIR: joinHome(tempHome, '.runtime'),
+    TMP: joinHome(tempHome, 'tmp'),
+    TEMP: joinHome(tempHome, 'tmp'),
+    TMPDIR: joinHome(tempHome, 'tmp'),
+    GIT_CONFIG_NOSYSTEM: '1',
+    GIT_CONFIG_GLOBAL: joinHome(tempHome, '.gitconfig'),
+    GIT_CONFIG_SYSTEM: joinHome(tempHome, '.gitconfig-system'),
+    DSH_HOME: tempHome,
+    DSH_AGENTS_HOME: joinHome(tempHome, 'agents-home'),
+  }
+}
+
+export async function ensureIsolatedHome(tempHome) {
+  const profile = isolatedProfileAssignments(tempHome)
+  const dirs = [
+    tempHome,
+    profile.DSH_AGENTS_HOME,
+    profile.APPDATA,
+    profile.LOCALAPPDATA,
+    profile.XDG_CONFIG_HOME,
+    profile.XDG_DATA_HOME,
+    profile.XDG_CACHE_HOME,
+    profile.XDG_STATE_HOME,
+    profile.XDG_RUNTIME_DIR,
+    profile.TMP,
+  ]
+  for (const dir of dirs) await fs.mkdir(dir, { recursive: true })
+  await fs.chmod(profile.XDG_RUNTIME_DIR, 0o700).catch(() => {})
+  await fs.writeFile(profile.GIT_CONFIG_GLOBAL, '', { flag: 'a' })
+  await fs.writeFile(profile.GIT_CONFIG_SYSTEM, '', { flag: 'a' })
+}
+
+export function buildIsolatedEnv(tempHome, allowEnv = [], source = process.env) {
+  const allow = new Set()
+  for (const name of allowEnv) {
+    assertAllowEnvName(name)
+    allow.add(name.toUpperCase())
+  }
+
+  const roots = profileRootsFrom(source)
   const env = {}
-  for (const [k, v] of Object.entries(process.env)) {
-    if (v === undefined) continue
-    if (allowSet.has(k.toUpperCase())) {
-      env[k] = v
+  for (const [key, value] of Object.entries(source)) {
+    if (typeof value !== 'string') continue
+    const upper = key.toUpperCase()
+    if (isBlockedProfileName(upper)) continue
+    if (SENSITIVE_ENV_PATTERN.test(key) && !allow.has(upper)) continue
+    if (!STARTUP_ENV_NAMES.has(upper) && valueInsideRealProfile(value, roots)) {
+      if (allow.has(upper)) {
+        throw new Error(`--allow-env cannot keep ${key}; its value is inside a real profile.`)
+      }
       continue
     }
-    if (DEFAULT_SENSITIVE_ENV_PATTERNS.some(rx => rx.test(k))) continue
-    env[k] = v
+    env[key] = value
   }
-  env.DSH_HOME = tempHome
+
+  Object.assign(env, isolatedProfileAssignments(tempHome))
   env.DSH_TELEMETRY_DISABLED = '1'
   env.DSH_TELEMETRY_MODE = 'DISABLED'
   env.NO_COLOR = '1'
   return env
 }
 
+export function quoteWindowsCmdArg(arg) {
+  const value = String(arg)
+  if (/[\0\r\n]/.test(value)) {
+    throw new Error('Windows command arguments cannot contain newlines or NUL.')
+  }
+  if (value.length === 0) return '""'
+  // ( ) and ! are cmd metacharacters. Quoting them keeps one argument intact
+  // when the line is handed to cmd.exe /c. % is doubled because cmd expands
+  // %VAR% even inside quotes.
+  if (!/[\s"%&|<>^()!]/.test(value)) return value
+  return `"${value.replace(/%/g, '%%').replace(/"/g, '""')}"`
+}
+
+function comSpecFrom(env) {
+  if (env) {
+    const value = env.ComSpec || env.COMSPEC || env.comspec
+    if (typeof value === 'string' && value.trim()) return value
+  }
+  return 'cmd.exe'
+}
+
+// Node 24 does not apply PATHEXT when shell is false, so spawn('npm') is
+// ENOENT. spawn('npm.cmd') is EINVAL (CVE-2024-27980) unless shell is set.
+// shell:true concatenates arguments without quoting. Build one cmd.exe /c
+// argument instead, with each argv element already quoted.
+export function windowsCmdInvocation(bin, args, env = process.env) {
+  const argv = [bin, ...args].map(part => String(part))
+  const inner = argv.map(quoteWindowsCmdArg).join(' ')
+  return {
+    file: comSpecFrom(env),
+    args: ['/d', '/v:off', '/s', '/c', `"${inner}"`],
+    windowsVerbatimArguments: true,
+    windowsHide: true,
+  }
+}
+
+export function commandSpawnInvocation(bin, args, env = process.env) {
+  if (process.platform === 'win32') return windowsCmdInvocation(bin, args, env)
+  return { file: String(bin), args: [...args].map(part => String(part)) }
+}
+
+export function formatSpawnFailure(res) {
+  const error = res && res.error
+  const lines = [
+    `status=${res == null || res.status == null ? 'null' : res.status}`,
+    `signal=${res && res.signal ? res.signal : ''}`,
+  ]
+  if (error) {
+    const bits = [error.code, error.syscall, error.path, error.message].filter(Boolean)
+    lines.push(`error=${bits.join(' ')}`)
+  }
+  const stderr = res && typeof res.stderr === 'string' ? res.stderr.trim() : ''
+  const stdout = res && typeof res.stdout === 'string' ? res.stdout.trim() : ''
+  if (stderr) lines.push(`stderr=${stderr}`)
+  if (stdout) lines.push(`stdout=${stdout}`)
+  return lines.join('\n')
+}
+
 function splitCommand(cmdString) {
   const parts = cmdString.trim().split(/\s+/).filter(Boolean)
+  if (!parts[0]) throw new Error('Invalid --dsh-cmd value.')
   return { bin: parts[0], prefixArgs: parts.slice(1) }
 }
 
 function spawnCrossPlatform(bin, args, options) {
   if (process.platform === 'win32') {
-    return spawn(bin, args, { ...options, shell: true, windowsHide: true })
+    const childEnv = options.env || process.env
+    const lookup = { ...childEnv }
+    if (!(lookup.ComSpec || lookup.COMSPEC || lookup.comspec)) {
+      const parent = process.env.ComSpec || process.env.COMSPEC || process.env.comspec
+      if (parent) lookup.COMSPEC = parent
+    }
+    const spec = windowsCmdInvocation(bin, args, lookup)
+    return spawn(spec.file, spec.args, {
+      ...options,
+      windowsHide: true,
+      windowsVerbatimArguments: true,
+    })
   }
   return spawn(bin, args, { ...options, detached: true })
 }
@@ -196,33 +541,52 @@ async function runForegroundCommand(cmdString, args, options) {
       else {
         reject(new Error(
           `Command failed (exit ${code}): ${bin} ${[...prefixArgs, ...args].join(' ')}\n` +
-          `STDOUT:\n${redactTokens(stdout)}\nSTDERR:\n${redactTokens(stderr)}`
+          `STDOUT:\n${redactForLog(stdout)}\nSTDERR:\n${redactForLog(stderr)}`,
         ))
       }
     })
   })
 }
 
+function hasExited(child) {
+  return !child || child.exitCode !== null || child.signalCode !== null
+}
+
 export async function terminateProcessTree(child, graceMs = 5000) {
-  if (!child || child.exitCode !== null) return
+  if (!child) return true
   const pid = child.pid
+  if (!Number.isInteger(pid) || pid <= 0) return true
+
+  const signalGroup = signal => {
+    if (process.platform === 'win32') return
+    try {
+      process.kill(-pid, signal)
+    } catch {
+      try { child.kill(signal) } catch { /* already gone */ }
+    }
+  }
+
+  if (hasExited(child)) {
+    signalGroup('SIGKILL')
+    return true
+  }
+
   const exited = new Promise(resolve => {
-    child.once('close', () => resolve())
+    if (hasExited(child)) {
+      resolve()
+      return
+    }
     child.once('exit', () => resolve())
   })
 
   try {
-    if (process.platform === 'win32' && pid) {
+    if (process.platform === 'win32') {
       spawnSync('taskkill', ['/PID', String(pid), '/T'], { stdio: 'ignore', windowsHide: true })
-    } else if (pid) {
-      try {
-        process.kill(-pid, 'SIGTERM')
-      } catch {
-        child.kill('SIGTERM')
-      }
+    } else {
+      signalGroup('SIGTERM')
     }
   } catch {
-    // Ignore if already exited
+    // The process can exit between the liveness check and the signal.
   }
 
   const graceful = await Promise.race([
@@ -230,22 +594,35 @@ export async function terminateProcessTree(child, graceMs = 5000) {
     new Promise(resolve => setTimeout(() => resolve(false), graceMs)),
   ])
 
-  if (!graceful && child.exitCode === null && pid) {
+  if (!graceful && !hasExited(child)) {
     try {
       if (process.platform === 'win32') {
         spawnSync('taskkill', ['/PID', String(pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true })
       } else {
-        try {
-          process.kill(-pid, 'SIGKILL')
-        } catch {
-          child.kill('SIGKILL')
-        }
+        signalGroup('SIGKILL')
       }
     } catch {
-      // Ignore
+      // Ignore a process that disappeared while we were signalling it.
     }
-    await Promise.race([exited, new Promise(resolve => setTimeout(resolve, 2000))])
+    await Promise.race([
+      exited,
+      new Promise(resolve => setTimeout(resolve, 2000)),
+    ])
   }
+
+  return hasExited(child)
+}
+
+export async function removeIsolatedHome(tempHome, { exited, keep = false } = {}) {
+  if (keep || !exited) return false
+  await fs.rm(tempHome, { recursive: true, force: true }).catch(() => {})
+  return !existsSync(tempHome)
+}
+
+export async function releaseIsolatedHome(tempHome, child, { keep = false, graceMs = 5000 } = {}) {
+  const exited = await terminateProcessTree(child, graceMs)
+  const removed = await removeIsolatedHome(tempHome, { exited, keep })
+  return { exited, removed, tempHome }
 }
 
 async function readStartupLogs(tempHome) {
@@ -256,13 +633,98 @@ async function readStartupLogs(tempHome) {
     if (files.length === 0) return ''
     const latest = path.join(logsDir, files[files.length - 1])
     const body = await fs.readFile(latest, 'utf8')
-    return `\n--- Startup Diagnostic (${latest}) ---\n${redactTokens(body.slice(0, 4000))}`
+    return `\n--- Startup diagnostic ---\n${redactForLog(body.slice(0, 4000))}`
   } catch {
     return ''
   }
 }
 
-async function bootDshWeb({ dshCmd, dshCwd, profile, port, patches, env, bootTimeoutMs }) {
+function cleanPrintedUrl(raw) {
+  return String(raw).trim().replace(/[)\].,;>'"]+$/u, '')
+}
+
+export function launchUrlForCookieExchange(raw, expectedPort) {
+  let url
+  try {
+    url = new URL(cleanPrintedUrl(raw))
+  } catch {
+    throw new Error('Refusing dsh web launch URL: not a URL.')
+  }
+  if (url.username || url.password) {
+    throw new Error('Refusing dsh web launch URL: embedded credentials.')
+  }
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+    throw new Error('Refusing dsh web launch URL: protocol must be http or https.')
+  }
+  const host = url.hostname.replace(/^\[|\]$/g, '')
+  if (!LOOPBACK_HOSTS.has(host)) {
+    throw new Error('Refusing dsh web launch URL: host is not a loopback address.')
+  }
+  const port = url.port || (url.protocol === 'https:' ? '443' : '80')
+  if (port !== String(expectedPort)) {
+    throw new Error('Refusing dsh web launch URL: port does not match the isolated listener.')
+  }
+  if (!url.searchParams.get('token')) {
+    throw new Error('Refusing dsh web launch URL: missing token query parameter.')
+  }
+  url.hostname = 'localhost'
+  return url.toString()
+}
+
+export function selectLaunchUrl(output, expectedPort) {
+  const re = /dsh web:\s+(https?:\/\/\S+)/gi
+  for (const match of String(output).matchAll(re)) {
+    try {
+      return launchUrlForCookieExchange(match[1], expectedPort)
+    } catch {
+      // A later line may be the real loopback launch URL.
+    }
+  }
+  return null
+}
+
+export function cleanBaseUrl(launchUrl) {
+  const url = new URL(launchUrl)
+  url.search = ''
+  url.hash = ''
+  url.pathname = '/'
+  return url.toString()
+}
+
+export function recordingStorageState(storageState) {
+  const cookies = (storageState?.cookies ?? []).filter(cookie =>
+    cookie
+    && typeof cookie.name === 'string'
+    && cookie.name.startsWith('dsh-auth-')
+    && cookie.httpOnly === true
+    && typeof cookie.value === 'string'
+    && cookie.value.length > 0,
+  )
+  if (cookies.length === 0) {
+    throw new Error('Auth exchange did not set an HttpOnly dsh-auth-* cookie. Refusing to record.')
+  }
+  return { cookies, origins: [] }
+}
+
+export function isPluginOrApiUrl(raw) {
+  try {
+    const pathname = new URL(raw).pathname
+    return pathname === '/api' || pathname.startsWith('/api/')
+      || pathname === '/plugins' || pathname.startsWith('/plugins/')
+  } catch {
+    return false
+  }
+}
+
+export function urlHasLaunchToken(raw) {
+  try {
+    return new URL(raw).searchParams.has('token')
+  } catch {
+    return /[?&#]token=/i.test(String(raw))
+  }
+}
+
+function spawnDshWeb({ dshCmd, dshCwd, profile, port, patches, env }) {
   const { bin, prefixArgs } = splitCommand(dshCmd)
   const publicUrl = `http://localhost:${port}/`
   const args = [
@@ -276,49 +738,74 @@ async function bootDshWeb({ dshCmd, dshCwd, profile, port, patches, env, bootTim
     '--trusted-host', `localhost:${port}`,
     '--trusted-host', 'localhost',
   ]
-
-  const child = spawnCrossPlatform(bin, args, {
+  return spawnCrossPlatform(bin, args, {
     cwd: dshCwd,
     env,
     stdio: ['ignore', 'pipe', 'pipe'],
   })
+}
 
-  let combinedOut = ''
-  const entryUrl = await new Promise((resolve, reject) => {
-    const timer = setTimeout(async () => {
-      const diag = await readStartupLogs(env.DSH_HOME)
-      reject(new Error(
-        `Timed out after ${bootTimeoutMs}ms waiting for "dsh web:" readiness URL.\n` +
-        `Output so far:\n${redactTokens(combinedOut)}${diag}`
-      ))
-    }, bootTimeoutMs)
+export function waitForDshReady(child, { port, bootTimeoutMs, tempHome }) {
+  return new Promise((resolve, reject) => {
+    let combined = ''
+    let settled = false
+    let timer
 
-    const onChunk = chunk => {
-      combinedOut += chunk.toString()
-      const match = /dsh web:\s+(https?:\/\/\S+)/i.exec(combinedOut)
-      if (match) {
-        clearTimeout(timer)
-        resolve(match[1].trim())
-      }
+    function finish(error, value) {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      child.stdout?.off('data', onChunk)
+      child.stderr?.off('data', onChunk)
+      child.off('error', onError)
+      child.off('close', onClose)
+      // Drop the raw launch log once the redacted error or selected URL is built.
+      combined = ''
+      if (error) reject(error)
+      else resolve(value)
     }
 
+    function onChunk(chunk) {
+      if (settled) return
+      combined += chunk.toString()
+      const selected = selectLaunchUrl(combined, port)
+      if (selected) {
+        finish(null, selected)
+        return
+      }
+      if (combined.length > 200_000) combined = combined.slice(-200_000)
+    }
+
+    function onError(err) {
+      finish(err)
+    }
+
+    async function onClose(code) {
+      const diag = tempHome ? await readStartupLogs(tempHome) : ''
+      finish(new Error(
+        `dsh web exited prematurely with code ${code}.\nOutput:\n${redactForLog(combined)}${diag}`,
+      ))
+    }
+
+    timer = setTimeout(() => {
+      void (async () => {
+        const diag = tempHome ? await readStartupLogs(tempHome) : ''
+        finish(new Error(
+          `Timed out after ${bootTimeoutMs}ms waiting for a loopback "dsh web:" launch URL.\n` +
+          `Output so far:\n${redactForLog(combined)}${diag}`,
+        ))
+      })()
+    }, bootTimeoutMs)
+
+    if (!child.stdout || !child.stderr) {
+      finish(new Error('dsh web was started without pipes, so its launch URL cannot be read.'))
+      return
+    }
     child.stdout.on('data', onChunk)
     child.stderr.on('data', onChunk)
-    child.once('error', err => {
-      clearTimeout(timer)
-      reject(err)
-    })
-    child.once('close', async code => {
-      clearTimeout(timer)
-      const diag = await readStartupLogs(env.DSH_HOME)
-      reject(new Error(
-        `dsh web exited prematurely with code ${code}.\n` +
-        `Output:\n${redactTokens(combinedOut)}${diag}`
-      ))
-    })
+    child.once('error', onError)
+    child.once('close', onClose)
   })
-
-  return { child, entryUrl, baseUrl: publicUrl }
 }
 
 async function loadPlaywrightChromium() {
@@ -327,7 +814,7 @@ async function loadPlaywrightChromium() {
       const mod = await import(specifier)
       if (mod.chromium) return mod.chromium
     } catch {
-      // Try next
+      // Try the next installed package.
     }
   }
   const cwdRequirePaths = [
@@ -341,7 +828,7 @@ async function loadPlaywrightChromium() {
     }
   }
   throw new Error(
-    'Playwright was not found. Install playwright (e.g. `pnpm dlx playwright --version` or add playwright as a devDependency / global tool) before running UI capture.'
+    'Playwright was not found. Install playwright before running UI capture.',
   )
 }
 
@@ -357,10 +844,15 @@ async function launchBrowserWithFallback(chromium) {
       const browser = await chromium.launch(attempt.opts)
       return { browser, channelUsed: attempt.label }
     } catch (err) {
-      errors.push(`${attempt.label}: ${err.message.split('\n')[0]}`)
+      errors.push(`${attempt.label}: ${String(err.message || err).split('\n')[0]}`)
     }
   }
   throw new Error(`Unable to launch any Chromium browser:\n${errors.join('\n')}`)
+}
+
+export function prepareBrowserEnv() {
+  delete process.env.PWDEBUG
+  if (process.env.DEBUG && /playwright|pw:/i.test(process.env.DEBUG)) delete process.env.DEBUG
 }
 
 function hasCommand(cmd, checkArgs = ['-version']) {
@@ -369,18 +861,23 @@ function hasCommand(cmd, checkArgs = ['-version']) {
 }
 
 export async function convertVideoToGifWithFfmpeg(inputVideo, outputGif, { fps = 12, width = 1280, trimStartSec = 0 } = {}) {
+  const safeFps = requireInteger('gif fps', fps, { min: 1, max: 60 })
+  const safeWidth = requireInteger('gif width', width, { min: 1, max: 4096 })
+  if (!Number.isFinite(trimStartSec) || trimStartSec < 0) {
+    throw new Error('GIF trim start must be a non-negative number.')
+  }
   const palettePath = `${outputGif}.palette.png`
   const trimArgs = trimStartSec > 0 ? ['-ss', trimStartSec.toFixed(2)] : []
-  const scaleFilter = `fps=${fps},scale='min(${width},iw)':-1:flags=lanczos`
+  const scaleFilter = `fps=${safeFps},scale='min(${safeWidth},iw)':-1:flags=lanczos`
 
   try {
     const pass1 = spawnSync(
       'ffmpeg',
       ['-y', ...trimArgs, '-i', inputVideo, '-vf', `${scaleFilter},palettegen=stats_mode=diff:max_colors=256`, palettePath],
-      { encoding: 'utf8', windowsHide: true }
+      { encoding: 'utf8', windowsHide: true },
     )
     if (pass1.status !== 0) {
-      throw new Error(`ffmpeg palettegen failed: ${pass1.stderr}`)
+      throw new Error(`ffmpeg palettegen failed: ${redactForLog(pass1.stderr || '')}`)
     }
     const pass2 = spawnSync(
       'ffmpeg',
@@ -393,10 +890,10 @@ export async function convertVideoToGifWithFfmpeg(inputVideo, outputGif, { fps =
         '-loop', '0',
         outputGif,
       ],
-      { encoding: 'utf8', windowsHide: true }
+      { encoding: 'utf8', windowsHide: true },
     )
     if (pass2.status !== 0) {
-      throw new Error(`ffmpeg paletteuse failed: ${pass2.stderr}`)
+      throw new Error(`ffmpeg paletteuse failed: ${redactForLog(pass2.stderr || '')}`)
     }
   } finally {
     await fs.rm(palettePath, { force: true }).catch(() => {})
@@ -407,8 +904,9 @@ export async function convertFramesToGifFallback(frames, outputGif, { width = 12
   if (!frames || frames.length === 0) {
     throw new Error('No frames captured for fallback GIF generation.')
   }
+  const safeWidth = requireInteger('gif width', width, { min: 1, max: 4096 })
   const manifestPath = `${outputGif}.frames.json`
-  await fs.writeFile(manifestPath, JSON.stringify({ frames, outputGif, width }), 'utf8')
+  await fs.writeFile(manifestPath, JSON.stringify({ frames, outputGif, width: safeWidth }), 'utf8')
 
   const pyScript = `
 import json, sys
@@ -445,7 +943,7 @@ pil_frames[0].save(
       if (res.status === 0 && existsSync(outputGif)) return { encoder: `${pyBin}:Pillow` }
     }
     throw new Error(
-      'Neither `ffmpeg` nor Python `Pillow` is available on PATH to encode GIF. Install ffmpeg (recommended) or `pip install pillow`.'
+      'Neither ffmpeg nor Python Pillow is available on PATH to encode GIF. Install ffmpeg (recommended) or pip install pillow.',
     )
   } finally {
     await fs.rm(manifestPath, { force: true }).catch(() => {})
@@ -453,24 +951,98 @@ pil_frames[0].save(
 }
 
 function getGitHeadCommit(cwd) {
-  const res = spawnSync('git', ['rev-parse', '--short', 'HEAD'], { cwd, encoding: 'utf8', windowsHide: true })
+  const res = spawnSync('git', ['rev-parse', '--short', 'HEAD'], {
+    cwd,
+    encoding: 'utf8',
+    windowsHide: true,
+  })
   return res.status === 0 ? res.stdout.trim() : null
 }
 
+export function gitToplevel(cwd) {
+  if (!cwd || !existsSync(cwd)) return null
+  const res = spawnSync('git', ['rev-parse', '--show-toplevel'], {
+    cwd,
+    encoding: 'utf8',
+    windowsHide: true,
+  })
+  if (res.status !== 0) return null
+  const root = res.stdout.trim()
+  return root || null
+}
+
+export function isInsideDir(parent, target) {
+  const root = path.resolve(parent)
+  const resolved = path.resolve(target)
+  const rel = path.relative(root, resolved)
+  if (rel === '') return true
+  if (rel === '..' || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel)) return false
+  return true
+}
+
+export function checkoutRootsFor(opts) {
+  const roots = []
+  for (const cwd of [opts.dshCwd, ...(opts.pluginDirs || [])]) {
+    const top = gitToplevel(cwd)
+    if (top && !roots.includes(top)) roots.push(top)
+  }
+  return roots
+}
+
+export function assertOutsideCheckouts(target, roots) {
+  for (const root of roots) {
+    if (root && isInsideDir(root, target)) {
+      throw new Error(`Refusing to write QA output inside the git checkout (${root}). Pass --out-dir outside the repository.`)
+    }
+  }
+}
+
+export function resolveArtifactPath(outDir, name, checkoutRoots = []) {
+  const outRoot = path.resolve(outDir)
+  const resolved = path.isAbsolute(name) ? path.resolve(name) : path.resolve(outRoot, name)
+  if (!path.isAbsolute(name)) {
+    const rel = path.relative(outRoot, resolved)
+    if (rel === '..' || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel)) {
+      throw new Error('Refusing an output filename that escapes the output directory.')
+    }
+  }
+  assertOutsideCheckouts(resolved, checkoutRoots)
+  return resolved
+}
+
 function getGitTrackedDirtyFiles(cwd) {
-  const res = spawnSync('git', ['status', '--porcelain'], { cwd, encoding: 'utf8', windowsHide: true })
+  const res = spawnSync('git', ['status', '--porcelain'], {
+    cwd,
+    encoding: 'utf8',
+    windowsHide: true,
+  })
   return res.status === 0 ? res.stdout.trim().split('\n').filter(Boolean) : []
 }
 
+function clientBundleRelative(pkg) {
+  const client = pkg.exports?.['./client']
+  if (typeof client === 'string') return client
+  if (client && typeof client === 'object') {
+    if (typeof client.default === 'string') return client.default
+    if (typeof client.import === 'string') return client.import
+  }
+  return null
+}
+
+async function closeQuietly(closable) {
+  if (!closable) return
+  await Promise.race([
+    closable.close().catch(() => {}),
+    new Promise(resolve => setTimeout(resolve, 10_000)),
+  ])
+}
+
 export async function runIsolatedAcceptance(opts) {
+  validateOpts(opts)
+  const checkoutRoots = checkoutRootsFor(opts)
+  assertOutsideCheckouts(opts.outDir, checkoutRoots)
   await fs.mkdir(opts.outDir, { recursive: true })
   const tempHome = await fs.mkdtemp(path.join(os.tmpdir(), 'dsh-qa-home-'))
-  const rawVideoDir = path.join(tempHome, 'raw-video')
-  const framesDir = path.join(tempHome, 'frames')
-  await fs.mkdir(rawVideoDir, { recursive: true })
-  await fs.mkdir(framesDir, { recursive: true })
-
-  const env = buildIsolatedEnv(tempHome, opts.allowEnv)
   let dshChild = null
   let browser = null
   let context = null
@@ -484,244 +1056,263 @@ export async function runIsolatedAcceptance(opts) {
   const screenshots = []
 
   try {
-    // 1. Validate & link any local plugin checkouts into isolated DSH_HOME
-    for (const pluginDir of opts.pluginDirs) {
-      const pkgJsonPath = path.join(pluginDir, 'package.json')
-      if (!existsSync(pkgJsonPath)) {
-        throw new Error(`Plugin directory missing package.json: ${pluginDir}`)
-      }
-      const pkg = JSON.parse(await fs.readFile(pkgJsonPath, 'utf8'))
-      if (pkg.main && !existsSync(path.join(pluginDir, pkg.main))) {
-        throw new Error(
-          `Built entry "${pkg.main}" missing in ${pluginDir}. Run \`pnpm build\` in the plugin checkout first.`
+    try {
+      const rawVideoDir = path.join(tempHome, 'raw-video')
+      const framesDir = path.join(tempHome, 'frames')
+      await ensureIsolatedHome(tempHome)
+      await fs.mkdir(rawVideoDir, { recursive: true })
+      await fs.mkdir(framesDir, { recursive: true })
+      const env = buildIsolatedEnv(tempHome, opts.allowEnv)
+
+      for (const pluginDir of opts.pluginDirs) {
+        const pkgJsonPath = path.join(pluginDir, 'package.json')
+        if (!existsSync(pkgJsonPath)) {
+          throw new Error(`Plugin directory missing package.json: ${pluginDir}`)
+        }
+        const pkg = JSON.parse(await fs.readFile(pkgJsonPath, 'utf8'))
+        if (typeof pkg.main === 'string' && !existsSync(path.join(pluginDir, pkg.main))) {
+          throw new Error(
+            `Built entry "${pkg.main}" missing in ${pluginDir}. Run \`pnpm build\` in the plugin checkout first.`,
+          )
+        }
+        const clientEntry = clientBundleRelative(pkg)
+        if (clientEntry && !existsSync(path.join(pluginDir, clientEntry))) {
+          throw new Error(
+            `Built client bundle "${clientEntry}" missing in ${pluginDir}. Run \`pnpm build\` first.`,
+          )
+        }
+        console.log(`[dsh-qa] Linking plugin ${pkg.name} into isolated profile "${opts.profile}".`)
+        await runForegroundCommand(
+          opts.dshCmd,
+          ['plugin', '--profile', opts.profile, 'add', `link:${pluginDir}`],
+          { cwd: opts.dshCwd, env },
         )
       }
-      if (pkg.exports?.['./client']?.default && !existsSync(path.join(pluginDir, pkg.exports['./client'].default))) {
-        throw new Error(
-          `Built client bundle "${pkg.exports['./client'].default}" missing in ${pluginDir}. Run \`pnpm build\` first.`
-        )
-      }
-      console.log(`[dsh-qa] Linking plugin ${pkg.name} (${pluginDir}) into isolated profile "${opts.profile}"...`)
-      await runForegroundCommand(
-        opts.dshCmd,
-        ['plugin', '--profile', opts.profile, 'add', `link:${pluginDir}`],
-        { cwd: opts.dshCwd, env }
-      )
-    }
 
-    // 2. Allocate free loopback port & boot isolated dsh web
-    const port = await pickFreePort('127.0.0.1')
-    console.log(`[dsh-qa] Booting isolated dsh web on localhost:${port} (DSH_HOME=${tempHome})...`)
-    const booted = await bootDshWeb({
-      dshCmd: opts.dshCmd,
-      dshCwd: opts.dshCwd,
-      profile: opts.profile,
-      port,
-      patches: opts.patches,
-      env,
-      bootTimeoutMs: opts.bootTimeoutMs,
-    })
-    dshChild = booted.child
-    console.log(`[dsh-qa] Ready: ${redactTokens(booted.entryUrl)}`)
-
-    // 3. Launch headless Chromium & exchange token before recording
-    const chromium = await loadPlaywrightChromium()
-    const launched = await launchBrowserWithFallback(chromium)
-    browser = launched.browser
-
-    const ffmpegAvailable = hasCommand('ffmpeg', ['-version'])
-    const authProbeCtx = await browser.newContext({
-      viewport: { width: opts.viewportWidth, height: opts.viewportHeight },
-      deviceScaleFactor: 2,
-      locale: opts.locale,
-      colorScheme: opts.colorScheme,
-    })
-    const authPage = await authProbeCtx.newPage()
-    await authPage.goto(booted.entryUrl, { waitUntil: 'domcontentloaded' })
-    await authPage.waitForURL(url => !url.searchParams.has('token'), { timeout: 15_000 })
-    const storageState = await authProbeCtx.storageState()
-    await authProbeCtx.close()
-
-    // Create fresh recording context pre-authenticated via HttpOnly session cookie
-    // so ?token=... NEVER appears in any recorded frame!
-    const videoWidth = Math.min(opts.viewportWidth, opts.gifWidth)
-    const videoHeight = Math.round(opts.viewportHeight * (videoWidth / opts.viewportWidth))
-    context = await browser.newContext({
-      storageState,
-      viewport: { width: opts.viewportWidth, height: opts.viewportHeight },
-      deviceScaleFactor: 2,
-      locale: opts.locale,
-      colorScheme: opts.colorScheme,
-      ...(opts.recordGif && ffmpegAvailable
-        ? { recordVideo: { dir: rawVideoDir, size: { width: videoWidth, height: videoHeight } } }
-        : {}),
-    })
-
-    const page = await context.newPage()
-    const recordStartMs = Date.now()
-
-    page.on('pageerror', err => {
-      diagnostics.pageErrors.push(redactTokens(err.stack || err.message || String(err)))
-    })
-    page.on('console', msg => {
-      if (msg.type() === 'error') {
-        diagnostics.consoleErrors.push(redactTokens(msg.text()))
-      }
-    })
-    page.on('response', res => {
-      const status = res.status()
-      const url = res.url()
-      if (status >= 400 && (url.includes('/api/') || url.includes('/plugins'))) {
-        diagnostics.httpErrors.push({ status, url: redactTokens(url) })
-      }
-    })
-
-    await page.goto(booted.baseUrl, { waitUntil: 'networkidle', timeout: 30_000 }).catch(async () => {
-      await page.goto(booted.baseUrl, { waitUntil: 'domcontentloaded', timeout: 30_000 })
-    })
-
-    if (new URL(page.url()).searchParams.has('token')) {
-      throw new Error('Security check failed: token query parameter is still visible in page URL.')
-    }
-
-    // Wait for DSH boot placeholder ("Loading plugins") to clear
-    await page.waitForFunction(
-      () => !document.body || !/loading plugins/i.test(document.body.innerText || ''),
-      { timeout: 20_000 }
-    ).catch(() => {})
-
-    const uiReadyElapsedSec = Math.max(0, (Date.now() - recordStartMs) / 1000 - 0.15)
-
-    const captureFrame = async (durationMs = 500) => {
-      const framePath = path.join(framesDir, `frame-${String(capturedFrames.length).padStart(4, '0')}.png`)
-      await page.screenshot({ path: framePath, fullPage: false })
-      capturedFrames.push({ path: framePath, durationMs })
-      return framePath
-    }
-
-    const screenshot = async (name = opts.screenshotName, screenshotOpts = {}) => {
-      const outPath = path.isAbsolute(name) ? name : path.join(opts.outDir, name)
-      await fs.mkdir(path.dirname(outPath), { recursive: true })
-      await page.screenshot({ path: outPath, fullPage: false, ...screenshotOpts })
-      screenshots.push(outPath)
-      return outPath
-    }
-
-    const assertClean = () => {
-      if (new URL(page.url()).searchParams.has('token')) {
-        throw new Error('Token leak detected in current URL.')
-      }
-      if (diagnostics.pageErrors.length > 0) {
-        throw new Error(`Uncaught pageerror(s):\n${diagnostics.pageErrors.join('\n')}`)
-      }
-      if (diagnostics.httpErrors.length > 0) {
-        throw new Error(
-          `HTTP error(s) on /api or /plugins:\n` +
-          diagnostics.httpErrors.map(e => `${e.status} ${e.url}`).join('\n')
-        )
-      }
-    }
-
-    // 4. Execute custom scenario or built-in selector steps
-    if (opts.scenarioPath) {
-      const scenarioMod = await import(pathToFileURL(opts.scenarioPath).href)
-      const fn = scenarioMod.run || scenarioMod.default
-      if (typeof fn !== 'function') {
-        throw new Error(`Scenario file ${opts.scenarioPath} must export an async \`run(ctx)\` function.`)
-      }
-      if (opts.recordGif && !ffmpegAvailable) await captureFrame(500)
-      await fn({
-        page,
-        context,
-        baseUrl: booted.baseUrl,
-        outDir: opts.outDir,
-        screenshot,
-        captureFrame,
-        assertClean,
-        diagnostics,
+      const port = await pickFreePort('127.0.0.1')
+      console.log(`[dsh-qa] Booting isolated dsh web on localhost:${port}.`)
+      dshChild = spawnDshWeb({
+        dshCmd: opts.dshCmd,
+        dshCwd: opts.dshCwd,
+        profile: opts.profile,
+        port,
+        patches: opts.patches,
+        env,
       })
-      if (opts.recordGif && !ffmpegAvailable) await captureFrame(opts.settleMs)
-    } else {
-      if (opts.waitSelector) {
-        await page.locator(opts.waitSelector).first().waitFor({ state: 'visible', timeout: 15_000 })
-      }
-      if (opts.recordGif && !ffmpegAvailable) await captureFrame(600)
-      for (const sel of opts.clickSelectors) {
-        await page.locator(sel).first().click()
-        await page.waitForTimeout(550)
-        if (opts.recordGif && !ffmpegAvailable) await captureFrame(600)
-      }
-      await page.waitForTimeout(opts.settleMs)
-      await screenshot(opts.screenshotName)
-      if (opts.recordGif && !ffmpegAvailable) await captureFrame(opts.settleMs)
-      assertClean()
-    }
+      const launchUrl = await waitForDshReady(dshChild, {
+        port,
+        bootTimeoutMs: opts.bootTimeoutMs,
+        tempHome,
+      })
+      const baseUrl = cleanBaseUrl(launchUrl)
+      console.log(`[dsh-qa] Ready: ${redactTokens(launchUrl)}`)
 
-    await page.waitForTimeout(opts.settleMs)
-    const video = page.video()
-    await context.close()
-    context = null
+      prepareBrowserEnv()
+      const chromium = await loadPlaywrightChromium()
+      const launched = await launchBrowserWithFallback(chromium)
+      browser = launched.browser
 
-    // 5. Encode GIF if requested
-    let gifPath = null
-    let gifEncoder = null
-    if (opts.recordGif) {
-      gifPath = path.isAbsolute(opts.gifName) ? opts.gifName : path.join(opts.outDir, opts.gifName)
-      await fs.mkdir(path.dirname(gifPath), { recursive: true })
-      if (ffmpegAvailable && video) {
-        const webmPath = await video.path()
-        await convertVideoToGifWithFfmpeg(webmPath, gifPath, {
-          fps: opts.gifFps,
-          width: opts.gifWidth,
-          trimStartSec: uiReadyElapsedSec,
+      const ffmpegAvailable = hasCommand('ffmpeg', ['-version'])
+      const authProbeCtx = await browser.newContext({
+        viewport: { width: opts.viewportWidth, height: opts.viewportHeight },
+        deviceScaleFactor: 2,
+        locale: opts.locale,
+        colorScheme: opts.colorScheme,
+      })
+      try {
+        const authPage = await authProbeCtx.newPage()
+        await authPage.goto(launchUrl, { waitUntil: 'domcontentloaded' })
+        await authPage.waitForURL(url => !url.searchParams.has('token'), { timeout: 15_000 })
+        if (urlHasLaunchToken(authPage.url())) {
+          throw new Error('Security check failed: token query parameter is still visible after auth exchange.')
+        }
+        const storageState = recordingStorageState(await authProbeCtx.storageState())
+        await authProbeCtx.close()
+
+        const videoWidth = Math.min(opts.viewportWidth, opts.gifWidth)
+        const videoHeight = Math.max(1, Math.round(opts.viewportHeight * (videoWidth / opts.viewportWidth)))
+        context = await browser.newContext({
+          storageState,
+          viewport: { width: opts.viewportWidth, height: opts.viewportHeight },
+          deviceScaleFactor: 2,
+          locale: opts.locale,
+          colorScheme: opts.colorScheme,
+          ...(opts.recordGif && ffmpegAvailable
+            ? { recordVideo: { dir: rawVideoDir, size: { width: videoWidth, height: videoHeight } } }
+            : {}),
         })
-        gifEncoder = 'ffmpeg:palettegen+paletteuse'
-      } else {
-        const fb = await convertFramesToGifFallback(capturedFrames, gifPath, { width: opts.gifWidth })
-        gifEncoder = fb.encoder
-      }
-    }
 
-    const gitCommit = getGitHeadCommit(opts.dshCwd)
-    const report = {
-      ok: true,
-      commit: gitCommit,
-      browserChannel: launched.channelUsed,
-      viewport: `${opts.viewportWidth}x${opts.viewportHeight}`,
-      locale: opts.locale,
-      colorScheme: opts.colorScheme,
-      outDir: opts.outDir,
-      screenshots,
-      gifPath,
-      gifEncoder,
-      diagnostics,
-      gitDirtyEntries: getGitTrackedDirtyFiles(opts.dshCwd),
+        const page = await context.newPage()
+        const recordStartMs = Date.now()
+
+        page.on('pageerror', err => {
+          diagnostics.pageErrors.push(redactForLog(err.stack || err.message || String(err)))
+        })
+        page.on('console', msg => {
+          if (msg.type() === 'error') diagnostics.consoleErrors.push(redactForLog(msg.text()))
+        })
+        page.on('response', res => {
+          const status = res.status()
+          const url = res.url()
+          if (status >= 400 && isPluginOrApiUrl(url)) {
+            diagnostics.httpErrors.push({ status, url: redactForLog(url) })
+          }
+        })
+
+        await page.goto(baseUrl, { waitUntil: 'networkidle', timeout: 30_000 }).catch(async () => {
+          await page.goto(baseUrl, { waitUntil: 'domcontentloaded', timeout: 30_000 })
+        })
+
+        if (urlHasLaunchToken(page.url())) {
+          throw new Error('Security check failed: token query parameter is still visible in page URL.')
+        }
+
+        await page.waitForFunction(
+          () => !document.body || !/loading plugins/i.test(document.body.innerText || ''),
+          { timeout: 20_000 },
+        ).catch(() => {})
+
+        const uiReadyElapsedSec = Math.max(0, (Date.now() - recordStartMs) / 1000 - 0.15)
+
+        const captureFrame = async (durationMs = 500) => {
+          const framePath = path.join(framesDir, `frame-${String(capturedFrames.length).padStart(4, '0')}.png`)
+          await page.screenshot({ path: framePath, fullPage: false })
+          capturedFrames.push({ path: framePath, durationMs })
+          return framePath
+        }
+
+        const screenshot = async (name = opts.screenshotName, screenshotOpts = {}) => {
+          const outPath = resolveArtifactPath(opts.outDir, name, checkoutRoots)
+          await fs.mkdir(path.dirname(outPath), { recursive: true })
+          await page.screenshot({ path: outPath, fullPage: false, ...screenshotOpts })
+          screenshots.push(outPath)
+          return outPath
+        }
+
+        const assertClean = () => {
+          if (urlHasLaunchToken(page.url())) throw new Error('Token leak detected in current URL.')
+          if (diagnostics.pageErrors.length > 0) {
+            throw new Error(`Uncaught pageerror(s):\n${diagnostics.pageErrors.join('\n')}`)
+          }
+          if (diagnostics.httpErrors.length > 0) {
+            throw new Error(
+              `HTTP error(s) on /api or /plugins:\n` +
+              diagnostics.httpErrors.map(e => `${e.status} ${e.url}`).join('\n'),
+            )
+          }
+        }
+
+        if (opts.scenarioPath) {
+          const scenarioMod = await import(pathToFileURL(opts.scenarioPath).href)
+          const fn = scenarioMod.run || scenarioMod.default
+          if (typeof fn !== 'function') {
+            throw new Error(`Scenario file ${opts.scenarioPath} must export an async run(ctx) function.`)
+          }
+          if (opts.recordGif && !ffmpegAvailable) await captureFrame(500)
+          await fn({
+            page,
+            context,
+            baseUrl,
+            outDir: opts.outDir,
+            screenshot,
+            captureFrame,
+            assertClean,
+            diagnostics,
+          })
+          if (opts.recordGif && !ffmpegAvailable) await captureFrame(opts.settleMs)
+          assertClean()
+        } else {
+          if (opts.waitSelector) {
+            await page.locator(opts.waitSelector).first().waitFor({ state: 'visible', timeout: 15_000 })
+          }
+          if (opts.recordGif && !ffmpegAvailable) await captureFrame(600)
+          for (const sel of opts.clickSelectors) {
+            await page.locator(sel).first().click()
+            await page.waitForTimeout(550)
+            if (opts.recordGif && !ffmpegAvailable) await captureFrame(600)
+          }
+          await page.waitForTimeout(opts.settleMs)
+          await screenshot(opts.screenshotName)
+          if (opts.recordGif && !ffmpegAvailable) await captureFrame(opts.settleMs)
+          assertClean()
+        }
+
+        await page.waitForTimeout(opts.settleMs)
+        const video = page.video()
+        await context.close()
+        context = null
+
+        let gifPath = null
+        let gifEncoder = null
+        if (opts.recordGif) {
+          gifPath = resolveArtifactPath(opts.outDir, opts.gifName, checkoutRoots)
+          await fs.mkdir(path.dirname(gifPath), { recursive: true })
+          if (ffmpegAvailable && video) {
+            const webmPath = await video.path()
+            await convertVideoToGifWithFfmpeg(webmPath, gifPath, {
+              fps: opts.gifFps,
+              width: opts.gifWidth,
+              trimStartSec: uiReadyElapsedSec,
+            })
+            gifEncoder = 'ffmpeg:palettegen+paletteuse'
+          } else {
+            const fb = await convertFramesToGifFallback(capturedFrames, gifPath, { width: opts.gifWidth })
+            gifEncoder = fb.encoder
+          }
+        }
+
+        const report = {
+          ok: true,
+          commit: getGitHeadCommit(opts.dshCwd),
+          browserChannel: launched.channelUsed,
+          viewport: `${opts.viewportWidth}x${opts.viewportHeight}`,
+          locale: opts.locale,
+          colorScheme: opts.colorScheme,
+          outDir: opts.outDir,
+          screenshots,
+          gifPath,
+          gifEncoder,
+          diagnostics,
+          gitDirtyEntries: getGitTrackedDirtyFiles(opts.dshCwd),
+        }
+        const reportPath = path.join(opts.outDir, 'qa-report.json')
+        await fs.writeFile(reportPath, JSON.stringify(report, null, 2), 'utf8')
+        console.log(`[dsh-qa] Completed. Report written to ${reportPath}`)
+        if (gifPath) console.log(`[dsh-qa] GIF saved to ${gifPath} (${gifEncoder})`)
+        return report
+      } finally {
+        await authProbeCtx.close().catch(() => {})
+      }
+    } catch (err) {
+      throw new Error(redactForLog(err?.stack || err?.message || String(err)))
     }
-    const reportPath = path.join(opts.outDir, 'qa-report.json')
-    await fs.writeFile(reportPath, JSON.stringify(report, null, 2), 'utf8')
-    console.log(`[dsh-qa] Completed! Report written to ${reportPath}`)
-    if (gifPath) console.log(`[dsh-qa] GIF saved to ${gifPath} (${gifEncoder})`)
-    return report
   } finally {
-    // STRICT TEARDOWN ORDER:
-    // 1. Close browser context & browser
-    if (context) await context.close().catch(() => {})
-    if (browser) await browser.close().catch(() => {})
-    // 2. Terminate dsh web process tree FIRST and wait for full exit
-    if (dshChild) {
-      await terminateProcessTree(dshChild)
-    }
-    // 3. ONLY THEN remove temporary DSH_HOME (prevents dsh-hmr Chokidar CPU spin)
-    if (!opts.keepTempHome) {
-      await fs.rm(tempHome, { recursive: true, force: true }).catch(() => {})
-    } else {
+    await closeQuietly(context)
+    context = null
+    await closeQuietly(browser)
+    browser = null
+    const released = await releaseIsolatedHome(tempHome, dshChild, { keep: opts.keepTempHome })
+    if (!released.exited) {
+      console.error(`[dsh-qa] Left temporary DSH_HOME in place because dsh is still running: ${tempHome}`)
+    } else if (opts.keepTempHome) {
       console.log(`[dsh-qa] Retained temporary DSH_HOME at ${tempHome}`)
+    } else if (!released.removed) {
+      console.error(`[dsh-qa] Could not delete temporary DSH_HOME at ${tempHome}`)
     }
   }
 }
 
-const isMain = process.argv[1] && path.resolve(process.argv[1]) === path.resolve(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1'))
-if (isMain) {
+function invokedAsCli() {
+  const entry = process.argv[1]
+  if (!entry) return false
+  try {
+    return realpathSync(entry) === realpathSync(fileURLToPath(import.meta.url))
+  } catch {
+    return path.resolve(entry) === path.resolve(fileURLToPath(import.meta.url))
+  }
+}
+
+if (invokedAsCli()) {
   try {
     const opts = parseArgs(process.argv.slice(2))
     if (opts.help) {
@@ -730,7 +1321,7 @@ if (isMain) {
     }
     await runIsolatedAcceptance(opts)
   } catch (err) {
-    console.error(`[dsh-qa] ERROR: ${redactTokens(err?.stack || err?.message || String(err))}`)
+    console.error(`[dsh-qa] ERROR: ${redactForLog(err?.stack || err?.message || String(err))}`)
     process.exit(1)
   }
 }

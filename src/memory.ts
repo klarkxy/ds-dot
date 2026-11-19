@@ -54,12 +54,12 @@ export function policyAsAgreements(policy: string): string {
 export function addEntry(text: string, entry: string, maxChars = AGREEMENTS_MAX_CHARS, entryMaxChars = AGREEMENT_ENTRY_MAX_CHARS): string {
   const note = normalizeEntry(entry)
   if (!note) throw new KnowledgeError('dot/invalid', 'text must be non-empty')
-  if (note.length > entryMaxChars) throw new KnowledgeError('dot/invalid', `one agreement is at most ${entryMaxChars} characters; this one has ${note.length}. Keep the point and drop the detail.`)
+  if (note.length > entryMaxChars) throw new KnowledgeError('dot/invalid', `one agreement is at most ${entryMaxChars} characters; this one has ${note.length}. Keep the rule concise and omit extra detail.`)
   if (entriesOf(text).some(existing => existing.toLowerCase() === note.toLowerCase())) return text
   const body = text.replace(/\s+$/, '')
   const next = `${body}${body ? '\n' : ''}- ${note}\n`
   if (next.trim().length > maxChars) {
-    throw new KnowledgeError('dot/agreements-full', `your agreements are full (${text.trim().length} of ${maxChars} characters). Remove or merge one with ${TOOL.agreement} (action=remove) first, then add this one.`)
+    throw new KnowledgeError('dot/agreements-full', `your agreements are full (${text.trim().length} of ${maxChars} characters). Remove or consolidate one with ${TOOL.agreement} (action=remove) first, then add this one.`)
   }
   return next
 }
@@ -73,10 +73,10 @@ export function removeEntry(text: string, needle: string): { readonly text: stri
   const exact = items.filter(item => item.note.toLowerCase() === wanted)
   const matches = exact.length > 0 ? exact : items.filter(item => item.note.toLowerCase().includes(wanted))
   if (matches.length === 0) {
-    throw new KnowledgeError('dot/unknown-agreement', items.length === 0 ? 'there is no agreement to remove' : `no agreement holds "${normalizeEntry(needle)}". They are:\n${items.map(item => `- ${item.note}`).join('\n')}`)
+    throw new KnowledgeError('dot/unknown-agreement', items.length === 0 ? 'there is no agreement to remove' : `no agreement matches "${normalizeEntry(needle)}". Current agreements:\n${items.map(item => `- ${item.note}`).join('\n')}`)
   }
   if (matches.length > 1) {
-    throw new KnowledgeError('dot/ambiguous-agreement', `"${normalizeEntry(needle)}" fits ${matches.length} agreements; give more of the one you mean:\n${matches.map(item => `- ${item.note}`).join('\n')}`)
+    throw new KnowledgeError('dot/ambiguous-agreement', `"${normalizeEntry(needle)}" matches ${matches.length} agreements; quote more of the specific entry:\n${matches.map(item => `- ${item.note}`).join('\n')}`)
   }
   const hit = matches[0]!
   lines.splice(hit.index, 1)
@@ -104,7 +104,7 @@ export function agreementsSection(text: string): string {
   if (!body) return ''
   return [
     '[agreements]',
-    `The human's own standing requirements, in their words. They take precedence over your cognition: when the two conflict, follow the agreements. The human can read and edit them directly; you add one with ${TOOL.agreement} (action=add) only when they explicitly ask you to remember something, and remove one only when they say to drop it.`,
+    `The human's standing rules, kept in their own words. They take precedence over your cognition: whenever the two conflict, follow the agreements. The human can view and edit them directly; add an entry with ${TOOL.agreement} (action=add) only when explicitly asked to remember a rule, and remove one only when asked to drop it.`,
     '',
     body,
   ].join('\n')
@@ -119,7 +119,7 @@ export function cognitionSection(text: string): string {
   if (!body) return ''
   return [
     '[cognition]',
-    `Your understanding in two parts: what you know about the human and how best to work with them, and what you know about yourself — preferences formed here, jokes you share and what you have accomplished together. Read it as what you know, not as a message to answer; keep it current by rewriting the whole text with ${TOOL.cognition}. The human can read it and roll it back. Whenever it conflicts with the agreements above, the agreements win.`,
+    `Your evolving understanding in two parts: what you know about the human and how best to work with them, and what you know about yourself — preferences formed here, jokes you share, and what you have accomplished together. Treat this as background knowledge rather than a message to answer; rewrite the entire block with ${TOOL.cognition} to keep it current. The human can inspect and restore earlier versions. Whenever cognition conflicts with [agreements], the agreements win.`,
     '',
     body,
   ].join('\n')
@@ -136,7 +136,7 @@ export function agreementNotesBlock(notes: string): string {
   if (!body) return ''
   return [
     '[dot agreement notes]',
-    `Your background reflection pass noticed something about the [agreements] that may be out of date or in conflict with each other. Do not change the agreements yourself. Mention this briefly in your reply to the human and ask them to decide:`,
+    'Your background reflection pass flagged [agreements] entries that may be outdated or mutually conflicting. Do not edit [agreements] yourself; mention this briefly in your reply so the human can decide:',
     '',
     body,
   ].join('\n')

@@ -3,7 +3,7 @@ import { Simulate } from 'react-dom/test-utils'
 import { JSDOM } from 'jsdom'
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 import { DEFAULT_SETTINGS, type ChatItem, type ChatSnapshot } from './contracts.ts'
-import { ChatPanel, rowsOf, type ChatApi } from './chat-panel.tsx'
+import { ChatPanel, chatCss, rowsOf, type ChatApi } from './chat-panel.tsx'
 import { filterVisibleChat } from './chat-filter.ts'
 import { createDotCards } from './client.tsx'
 
@@ -11,10 +11,16 @@ const dom = new JSDOM('<div id="root"></div>', { url: 'https://local.test' })
 vi.stubGlobal('window', dom.window)
 vi.stubGlobal('document', dom.window.document)
 vi.stubGlobal('navigator', dom.window.navigator)
+vi.stubGlobal('localStorage', dom.window.localStorage)
 vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
+dom.window.requestAnimationFrame = (callback: FrameRequestCallback) => {
+  callback(0)
+  return 0
+}
+vi.stubGlobal('requestAnimationFrame', dom.window.requestAnimationFrame)
 let createRoot: typeof import('react-dom/client').createRoot
 beforeAll(async () => { createRoot = (await import('react-dom/client')).createRoot })
-afterEach(() => { document.body.innerHTML = '<div id="root"></div>' })
+afterEach(() => { dom.window.localStorage.clear(); document.body.innerHTML = '<div id="root"></div>' })
 
 const NOTICE_TEXT = [
   '[dot notice] Updates from other sessions:',
@@ -473,6 +479,15 @@ describe('ChatPanel activity and notice cards', () => {
       })
       expect(document.querySelector('.dsh-dot-dirty-dot')).not.toBeNull()
 
+      // The composer /settings shortcut is another drawer entrance: it must pass the
+      // same guard instead of swapping tabs underneath the dirty draft.
+      const quickBtn = document.querySelector<HTMLButtonElement>('button[aria-label="快捷指令"]')!
+      await act(async () => { quickBtn.click() })
+      const settingsOption = [...document.querySelectorAll<HTMLButtonElement>('.dsh-dot-slash-item')].find(b => b.textContent?.includes('/settings'))!
+      await act(async () => { settingsOption.click(); await Promise.resolve() })
+      expect(document.querySelector('.dsh-dot-unsaved-bar')?.textContent).toContain('当前页有未保存的修改')
+      expect(document.querySelector('aside.dsh-dot-drawer [role="region"]')?.getAttribute('aria-label')).toBe('人设与约定')
+
       await act(async () => { navButtons[2]!.click() })
       expect(document.querySelector('.dsh-dot-unsaved-bar')?.textContent).toContain('当前页有未保存的修改')
       expect(document.querySelector('aside.dsh-dot-drawer [role="region"]')?.getAttribute('aria-label')).toBe('人设与约定')
@@ -880,6 +895,324 @@ describe('Composer images', () => {
     await pick(new File([Uint8Array.from([1, 2, 3, 4])], 'note.txt', { type: 'text/plain' }))
     expect(document.body.textContent).toContain('Only PNG, JPEG, WebP and GIF')
     expect(document.body.textContent).not.toContain('note.txt')
+    await act(async () => root.unmount())
+  })
+
+  it('keeps the toolbar minimal while supporting slash quick-actions, low-frequency /segment and /settings entries, history recall, expand, and clear', async () => {
+    const snapshot: ChatSnapshot = {
+      sessionId: 'dot-composer-streamlined',
+      running: false,
+      streaming: '',
+      rev: 1,
+      itemsRev: 1,
+      items: [
+        { kind: 'user', key: 'u1', text: 'check nightly build', at: 1 },
+        { kind: 'bot', key: 'b1', text: 'All green.', at: 2 },
+      ],
+    }
+    const api = makeApi(snapshot)
+    api.newSegment = vi.fn(async () => 'dot-seg-2')
+
+    const root = createRoot(document.getElementById('root')!)
+    await act(async () => { root.render(<ChatPanel locale="en" api={api} onOpenSession={() => {}} />) })
+    await act(async () => { await Promise.resolve(); await Promise.resolve() })
+
+    // No persistent model pill or segment button in the bottom composer bar.
+    expect(document.querySelector('.dsh-dot-composer-bar .dsh-dot-model-pill')).toBeNull()
+    expect(document.querySelector('.dsh-dot-composer-bar button[aria-label="Start new segment"]')).toBeNull()
+
+    const input = document.querySelector<HTMLTextAreaElement>('textarea.dsh-dot-input')!
+
+    // ArrowUp on empty input recalls the last sent user prompt; ArrowDown restores empty draft.
+    await act(async () => {
+      input.setSelectionRange(0, 0)
+      input.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'ArrowUp', bubbles: true }))
+    })
+    expect(input.value).toBe('check nightly build')
+    await act(async () => {
+      input.setSelectionRange(input.value.length, input.value.length)
+      input.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }))
+    })
+    expect(input.value).toBe('')
+
+    // Quick actions button opens the slash menu and inserts the structured task template.
+    const quickBtn = document.querySelector<HTMLButtonElement>('button[aria-label="Quick actions"]')!
+    await act(async () => { quickBtn.click() })
+    const taskOption = [...document.querySelectorAll<HTMLButtonElement>('.dsh-dot-slash-item')].find(btn => btn.textContent?.includes('/task'))!
+    expect(taskOption).toBeDefined()
+    await act(async () => { taskOption.click() })
+    expect(input.value).toContain('Please start a new task:')
+    expect(document.querySelector('.dsh-dot-slash-menu')).toBeNull()
+
+    // Expand toggle appears for multi-line template and Clear resets both text and expanded state.
+    const expandBtn = document.querySelector<HTMLButtonElement>('button[aria-label="Expand editor"]')!
+    await act(async () => { expandBtn.click() })
+    expect(document.querySelector('.dsh-dot-composer-card')?.hasAttribute('data-expanded')).toBe(true)
+    const clearBtn = document.querySelector<HTMLButtonElement>('button[aria-label="Clear input"]')!
+    await act(async () => { clearBtn.click() })
+    expect(input.value).toBe('')
+    expect(document.querySelector('.dsh-dot-composer-card')?.hasAttribute('data-expanded')).toBe(false)
+
+    // Low-frequency /segment and /settings entries remain reachable via the / menu.
+    await act(async () => { quickBtn.click() })
+    const segOption = [...document.querySelectorAll<HTMLButtonElement>('.dsh-dot-slash-item')].find(btn => btn.textContent?.includes('/segment'))!
+    await act(async () => { segOption.click(); await Promise.resolve() })
+    expect(api.newSegment).toHaveBeenCalledOnce()
+    expect(document.querySelector('.dsh-dot-seg-feedback')?.textContent).toContain('Started a new segment')
+
+    await act(async () => { quickBtn.click() })
+    const settingsOption = [...document.querySelectorAll<HTMLButtonElement>('.dsh-dot-slash-item')].find(btn => btn.textContent?.includes('/settings'))!
+    await act(async () => { settingsOption.click(); await Promise.resolve() })
+    expect(document.querySelector('aside.dsh-dot-drawer')?.getAttribute('data-kind')).toBe('settings')
+
+    await act(async () => root.unmount())
+  })
+
+  // jsdom loads before React marks the input event supported, so onChange follows the
+  // keyup polyfill: focus the field, set the value underneath the tracker, then keyup.
+  function typeInto(input: HTMLTextAreaElement, value: string) {
+    const setter = Object.getOwnPropertyDescriptor(dom.window.HTMLTextAreaElement.prototype, 'value')?.set
+    input.dispatchEvent(new dom.window.FocusEvent('focusin', { bubbles: true }))
+    setter?.call(input, value)
+    input.dispatchEvent(new dom.window.KeyboardEvent('keyup', { bubbles: true }))
+  }
+
+  function key(input: HTMLTextAreaElement, name: string) {
+    input.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: name, bubbles: true }))
+  }
+
+  it('walks older prompts with ArrowUp after the caret moves to the end of a recall', async () => {
+    const snapshot: ChatSnapshot = {
+      sessionId: 'dot-history',
+      running: false,
+      streaming: '',
+      rev: 1,
+      itemsRev: 1,
+      items: [
+        { kind: 'user', key: 'u1', text: 'older prompt', at: 1 },
+        { kind: 'bot', key: 'b1', text: 'ok', at: 2 },
+        { kind: 'user', key: 'u2', text: 'newer prompt', at: 3 },
+      ],
+    }
+    const root = createRoot(document.getElementById('root')!)
+    await act(async () => { root.render(<ChatPanel locale="en" api={makeApi(snapshot)} onOpenSession={() => {}} />) })
+    await act(async () => { await Promise.resolve() })
+    const input = document.querySelector<HTMLTextAreaElement>('textarea.dsh-dot-input')!
+    await act(async () => { input.setSelectionRange(0, 0); key(input, 'ArrowUp') })
+    expect(input.value).toBe('newer prompt')
+    await act(async () => { key(input, 'ArrowUp') })
+    expect(input.value).toBe('older prompt')
+    await act(async () => { key(input, 'ArrowDown') })
+    expect(input.value).toBe('newer prompt')
+    await act(async () => { key(input, 'ArrowDown') })
+    expect(input.value).toBe('')
+    await act(async () => root.unmount())
+  })
+
+  it('runs a slash command from Enter and does not send when the highlighted command is disabled', async () => {
+    const snapshot: ChatSnapshot = { sessionId: 'dot-slash', running: true, streaming: '', rev: 1, itemsRev: 1, items: [] }
+    const api = makeApi(snapshot)
+    api.say = vi.fn(async () => {})
+    api.newSegment = vi.fn(async () => 'dot-2')
+    const root = createRoot(document.getElementById('root')!)
+    await act(async () => { root.render(<ChatPanel locale="en" api={api} onOpenSession={() => {}} />) })
+    await act(async () => { await Promise.resolve() })
+    const input = document.querySelector<HTMLTextAreaElement>('textarea.dsh-dot-input')!
+    const activeCmd = () => document.querySelector('.dsh-dot-slash-item[data-active] code')?.textContent
+
+    // Typing "/" opens the menu on the first command; arrows move that highlight,
+    // and Enter runs the highlighted command instead of sending the slash text.
+    await act(async () => { typeInto(input, '/') })
+    expect(document.querySelector('.dsh-dot-slash-menu')).not.toBeNull()
+    expect(activeCmd()).toBe('/overview')
+    await act(async () => { key(input, 'ArrowDown') })
+    expect(activeCmd()).toBe('/pending')
+    await act(async () => { key(input, 'Enter') })
+    expect(input.value).toBe('Is anything waiting on my call?')
+    expect(api.say).not.toHaveBeenCalled()
+
+    await act(async () => { typeInto(input, '/task') })
+    await act(async () => { key(input, 'Enter') })
+    expect(input.value).toContain('Please start a new task:')
+    expect(api.say).not.toHaveBeenCalled()
+
+    await act(async () => { typeInto(input, '/segment') })
+    await act(async () => { key(input, 'Enter') })
+    expect(api.say).not.toHaveBeenCalled()
+    expect(input.value).toBe('/segment')
+    expect(api.newSegment).not.toHaveBeenCalled()
+
+    const quickBtn = document.querySelector<HTMLButtonElement>('button[aria-label="Quick actions"]')!
+    expect(document.querySelector('.dsh-dot-slash-menu')).not.toBeNull()
+    await act(async () => { quickBtn.click() })
+    expect(document.querySelector('.dsh-dot-slash-menu')).toBeNull()
+    await act(async () => { quickBtn.click() })
+    expect(document.querySelector('.dsh-dot-slash-menu')).not.toBeNull()
+    expect(activeCmd()).toBe('/segment')
+    await act(async () => root.unmount())
+  })
+
+  it('carries an unsent draft onto a new segment and restores it after remount', async () => {
+    const first: ChatSnapshot = { sessionId: 'seg-a', running: false, streaming: '', rev: 1, itemsRev: 1, items: [] }
+    let release: (snapshot: ChatSnapshot | undefined) => void = () => {}
+    let waits = 0
+    const api = makeApi(first)
+    api.wait = () => {
+      waits += 1
+      if (waits === 1) return new Promise(resolve => { release = resolve })
+      return new Promise(() => {})
+    }
+    const root = createRoot(document.getElementById('root')!)
+    await act(async () => { root.render(<ChatPanel locale="en" api={api} onOpenSession={() => {}} />) })
+    await act(async () => { await Promise.resolve(); await Promise.resolve() })
+    expect(waits).toBe(1)
+    const input = document.querySelector<HTMLTextAreaElement>('textarea.dsh-dot-input')!
+    await act(async () => { typeInto(input, 'hold this') })
+    expect(dom.window.localStorage.getItem('dsh-dot:draft:seg-a')).toBe('hold this')
+    await act(async () => {
+      release({ sessionId: 'seg-b', running: false, streaming: '', rev: 2, itemsRev: 2, items: [] })
+      await Promise.resolve()
+    })
+    expect(input.value).toBe('hold this')
+    expect(dom.window.localStorage.getItem('dsh-dot:draft:seg-b')).toBe('hold this')
+    await act(async () => root.unmount())
+
+    const again = createRoot(document.getElementById('root')!)
+    await act(async () => { again.render(<ChatPanel locale="en" api={makeApi({ sessionId: 'seg-b', running: false, streaming: '', rev: 3, itemsRev: 3, items: [] })} onOpenSession={() => {}} />) })
+    await act(async () => { await Promise.resolve(); await Promise.resolve() })
+    expect(document.querySelector<HTMLTextAreaElement>('textarea.dsh-dot-input')!.value).toBe('hold this')
+    await act(async () => again.unmount())
+  })
+
+  it('prefers a command-id prefix over description text and still runs a complete id', async () => {
+    const snapshot: ChatSnapshot = { sessionId: 'dot-prefix', running: false, streaming: '', rev: 1, itemsRev: 1, items: [] }
+    const api = makeApi(snapshot)
+    api.say = vi.fn(async () => {})
+    const root = createRoot(document.getElementById('root')!)
+    await act(async () => { root.render(<ChatPanel locale="en" api={api} onOpenSession={() => {}} />) })
+    await act(async () => { await Promise.resolve() })
+    const input = document.querySelector<HTMLTextAreaElement>('textarea.dsh-dot-input')!
+    const activeCmd = () => document.querySelector('.dsh-dot-slash-item[data-active] code')?.textContent
+    const drawerKind = () => document.querySelector('aside.dsh-dot-drawer')?.getAttribute('data-kind')
+
+    await act(async () => { typeInto(input, '/se') })
+    expect(activeCmd()).toBe('/settings')
+    await act(async () => { key(input, 'Enter') })
+    expect(api.say).not.toHaveBeenCalled()
+    expect(drawerKind()).toBe('settings')
+    expect(input.value).toBe('')
+
+    await act(async () => { typeInto(input, '/re') })
+    expect(activeCmd()).toBe('/remind')
+    await act(async () => { key(input, 'Enter') })
+    expect(api.say).not.toHaveBeenCalled()
+    expect(input.value).toContain('Remind me every day at 09:00')
+
+    await act(async () => { typeInto(input, '/set') })
+    expect(activeCmd()).toBe('/settings')
+    await act(async () => { key(input, 'Enter') })
+    expect(api.say).not.toHaveBeenCalled()
+    expect(drawerKind()).toBe('settings')
+
+    await act(async () => { typeInto(input, '/task') })
+    expect(activeCmd()).toBe('/task')
+    await act(async () => { key(input, 'Enter') })
+    expect(api.say).not.toHaveBeenCalled()
+    expect(input.value).toContain('Please start a new task:')
+
+    await act(async () => { typeInto(input, '/model') })
+    expect(activeCmd()).toBe('/settings')
+    await act(async () => root.unmount())
+  })
+
+  it('shows a visible selection on a disabled slash row and does not send', async () => {
+    const style = document.createElement('style')
+    style.textContent = chatCss
+    document.head.appendChild(style)
+    const snapshot: ChatSnapshot = { sessionId: 'dot-disabled-highlight', running: true, streaming: '', rev: 1, itemsRev: 1, items: [] }
+    const api = makeApi(snapshot)
+    api.say = vi.fn(async () => {})
+    api.newSegment = vi.fn(async () => 'dot-2')
+    const root = createRoot(document.getElementById('root')!)
+    await act(async () => { root.render(<ChatPanel locale="en" api={api} onOpenSession={() => {}} />) })
+    await act(async () => { await Promise.resolve() })
+    const input = document.querySelector<HTMLTextAreaElement>('textarea.dsh-dot-input')!
+    const row = (cmd: string) => [...document.querySelectorAll<HTMLButtonElement>('.dsh-dot-slash-item')].find(button => button.querySelector('code')?.textContent === cmd)
+    const paint = (cmd: string) => dom.window.getComputedStyle(row(cmd)!).backgroundColor
+    await act(async () => { typeInto(input, '/se') })
+    expect(row('/settings')?.hasAttribute('data-active')).toBe(true)
+    await act(async () => { key(input, 'ArrowDown') })
+    const segment = row('/segment')!
+    const segmentPaint = paint('/segment')
+    const settingsPaint = paint('/settings')
+    expect(segment.hasAttribute('data-active')).toBe(true)
+    expect(row('/settings')?.hasAttribute('data-active')).toBe(false)
+    expect(segment.disabled).toBe(true)
+    expect({ segmentPaint, settingsPaint }).toEqual({
+      segmentPaint: 'rgba(128, 128, 128, 0.22)',
+      settingsPaint: 'rgba(0, 0, 0, 0)',
+    })
+    await act(async () => { key(input, 'Enter') })
+    expect(api.say).not.toHaveBeenCalled()
+    expect(api.newSegment).not.toHaveBeenCalled()
+    expect(input.value).toBe('/se')
+    await act(async () => root.unmount())
+    style.remove()
+  })
+
+  it('writes a recalled prompt to the draft and puts the empty draft back on ArrowDown', async () => {
+    const snapshot: ChatSnapshot = {
+      sessionId: 'dot-history-draft',
+      running: false,
+      streaming: '',
+      rev: 1,
+      itemsRev: 1,
+      items: [{ kind: 'user', key: 'u1', text: 'sent one', at: 1 }],
+    }
+    const root = createRoot(document.getElementById('root')!)
+    await act(async () => { root.render(<ChatPanel locale="en" api={makeApi(snapshot)} onOpenSession={() => {}} />) })
+    await act(async () => { await Promise.resolve() })
+    const input = document.querySelector<HTMLTextAreaElement>('textarea.dsh-dot-input')!
+    const keyName = 'dsh-dot:draft:dot-history-draft'
+    expect(dom.window.localStorage.getItem(keyName)).toBeNull()
+    await act(async () => { input.setSelectionRange(0, 0); key(input, 'ArrowUp') })
+    expect(input.value).toBe('sent one')
+    expect(dom.window.localStorage.getItem(keyName)).toBe('sent one')
+    await act(async () => { key(input, 'ArrowDown') })
+    expect(input.value).toBe('')
+    expect(dom.window.localStorage.getItem(keyName)).toBeNull()
+    await act(async () => root.unmount())
+
+    const again = createRoot(document.getElementById('root')!)
+    await act(async () => { again.render(<ChatPanel locale="en" api={makeApi(snapshot)} onOpenSession={() => {}} />) })
+    await act(async () => { await Promise.resolve(); await Promise.resolve() })
+    expect(document.querySelector<HTMLTextAreaElement>('textarea.dsh-dot-input')!.value).toBe('')
+    await act(async () => again.unmount())
+  })
+
+  it('shows the drop mask on drag enter and clears it when the pointer leaves', async () => {
+    const snapshot: ChatSnapshot = { sessionId: 'dot-drag', running: false, streaming: '', rev: 1, itemsRev: 1, items: [] }
+    const root = createRoot(document.getElementById('root')!)
+    await act(async () => { root.render(<ChatPanel locale="en" api={makeApi(snapshot)} onOpenSession={() => {}} />) })
+    await act(async () => { await Promise.resolve() })
+    const card = document.querySelector<HTMLDivElement>('.dsh-dot-composer-card')!
+    const drag = (type: string) => {
+      const event = new dom.window.Event(type, { bubbles: true, cancelable: true })
+      Object.defineProperty(event, 'dataTransfer', { value: { types: ['Files'], dropEffect: 'none', files: [] } })
+      return event
+    }
+    await act(async () => { card.dispatchEvent(drag('dragenter')) })
+    expect(card.hasAttribute('data-dragging')).toBe(true)
+    expect(card.querySelector('.dsh-dot-drop-mask')).not.toBeNull()
+    await act(async () => { card.dispatchEvent(drag('dragleave')) })
+    expect(card.hasAttribute('data-dragging')).toBe(false)
+    expect(card.querySelector('.dsh-dot-drop-mask')).toBeNull()
+    await act(async () => {
+      card.dispatchEvent(drag('dragenter'))
+      card.dispatchEvent(drag('dragleave'))
+    })
+    expect(card.hasAttribute('data-dragging')).toBe(false)
+    expect(card.querySelector('.dsh-dot-drop-mask')).toBeNull()
     await act(async () => root.unmount())
   })
 })

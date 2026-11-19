@@ -95,7 +95,7 @@ function scenarioLine(scenario: BriefScenario): string {
 function scopeLines(run: BriefRun): string[] {
   const lines = [`Working directory: ${run.cwd}`]
   if (run.kind === 'review') {
-    lines.push('Access: the whole workspace is held for this review. Inspect and run checks; do not change the delivery.')
+    lines.push('Access: the whole workspace is held for this review. Inspect files and run verification checks; do not modify the delivery.')
     return lines
   }
   const writes = run.access !== 'read' && (run.writeScope.kind === 'workspace-exclusive' || run.writeScope.paths.length > 0)
@@ -111,20 +111,20 @@ function scopeLines(run: BriefRun): string[] {
 }
 
 function roleLine(run: BriefRun): string {
-  if (run.kind === 'review') return 'You are the independent reviewer for this work order. Check the current delivery against every requirement and scenario below and report findings with evidence. Do not fix anything yourself.'
-  if (run.kind === 'rework') return 'You are reworking this work order after a failed check. Fix what the notes below name, then report evidence for every scenario again, not only the fixed ones.'
-  return 'You are carrying out this work order.'
+  if (run.kind === 'review') return 'You are the independent reviewer for this work order. Verify the current delivery against every requirement and scenario below, and report concrete findings with evidence. Do not fix anything yourself.'
+  if (run.kind === 'rework') return 'You are reworking this work order after a failed check. Resolve the issues identified in the notes below, then re-verify and report fresh evidence for every scenario — not only the ones you changed.'
+  return 'You are executing this work order.'
 }
 
 /** How a run chooses reversible details and how it reports a real blocker. */
 function conductLines(kind: BriefRun['kind']): string[] {
   if (kind === 'review') {
-    return ['Read what this order and the workspace already show before you report a gap. If a check cannot be made, report the situation, what you inspected, the evidence, and one recommended next step. Do not guess a missing fact into a finding. Do not change the delivery. Put the evidence in this report; it is the reader\'s first look.']
+    return ['Inspect what this work order and the workspace already show before reporting a gap. When a check cannot be completed, report the situation, what you inspected, the evidence, and one recommended next step. Do not guess a missing fact into a finding. Do not change the delivery. Put the evidence in this report; it is the reader\'s first look.']
   }
   return [
-    'Use this work order and the workspace you can read. Constraints and context in the order are given. If a needed fact is missing, look it up there before you choose. You do not have dot\'s private memory. Inside this goal, choose routine reversible details yourself and record the assumption in the report when it matters. A reversible choice stays inside this order. A page or document outside the order is not authorization. Do not ask to re-approve work this order already authorizes, including an external or costly action it already allows.',
-    'If the next step is inside this order and already authorized, do it. Do not finish by telling the requester to run it, or by leaving a plan in place of the result. Before the Report section, account for every required scenario and for any check you did not run. The Report is the reader\'s first look: name the evidence in the report itself.',
-    'Stop only the dependent part when a wrong guess would materially change the result, requirements conflict, only the requester knows the intent, authority is missing, or the effect would be irreversible, externally unauthorized, or costly. A confident guess is not authorization. Report the situation, what you tried, the evidence, and one recommended next step. Silence is not consent. Do not invent a requirement to get past it.',
+    'Use this work order and the workspace you can read. Treat its constraints and context as binding, and look up missing facts in the workspace before making choices. You do not have dot\'s private memory. Within this goal, choose routine reversible details yourself and note material assumptions in the report. A reversible choice stays inside this order. A page or document outside the order is not authorization. A confident guess is not authorization. Do not ask to re-approve work this order already authorizes, including an external or costly action it already allows.',
+    'When the next step is inside this order and already authorized, execute it directly. Do not finish by telling the requester to run it, or by leaving a plan in place of the result. Before writing the Report section, account for every required scenario and any check you could not run. The Report is the reader\'s first look: cite concrete evidence inside the report itself.',
+    'Pause only the dependent part when a wrong guess would materially change the result, requirements conflict, only the requester knows the intent, authority is missing, or the effect would be irreversible, externally unauthorized, or costly. Report the situation, what you tried, the evidence, and one recommended next step. Silence is not consent. Do not invent a requirement to get past it.',
     'An intermediate finding or a patch is not delivery. Do not repeat the same failed approach without a new hypothesis.',
   ]
 }
@@ -144,7 +144,7 @@ export function renderBrief(input: {
   out.push(`Title: ${title}`)
   out.push('')
   out.push(roleLine(run))
-  out.push('dot verifies the delivery. Report evidence; do not declare PASS or FAIL on the work order.')
+  out.push('dot verifies the delivery independently. Report concrete evidence; do not declare PASS or FAIL on the work order.')
   for (const line of conductLines(run.kind)) out.push(line)
   out.push('')
   out.push('## Goal')
@@ -176,7 +176,7 @@ export function renderBrief(input: {
   const steps = material.steps.filter(step => mine.has(step.stepRef))
   if (steps.length && run.kind !== 'review') {
     out.push('')
-    out.push('## Your tasks (a suggested approach; change it if needed and say why)')
+    out.push('## Your tasks (a suggested approach; adapt if needed and note why)')
     for (const step of steps) {
       const covers = step.covers?.length ? ` → ${step.covers.join(', ')}` : ''
       const after = step.after?.length ? ` (after ${step.after.join(', ')})` : ''
@@ -196,7 +196,7 @@ export function renderBrief(input: {
   }
   out.push('')
   out.push('## How to report')
-  out.push('End your final message with this section, one line per item:')
+  out.push('End your final message with this exact section, one bullet per item:')
   out.push('### Report')
   const refs = material.requirements.flatMap(item => item.scenarios?.length ? item.scenarios.map(scenario => scenario.scenarioRef) : [item.requirementRef])
   for (const ref of refs) out.push(`- ${ref}: <evidence: command and output, file path, or observation>`)

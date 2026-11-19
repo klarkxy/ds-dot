@@ -29,7 +29,7 @@ export interface Segment {
   readonly agreements?: string
   /**
    * Agreements block as this segment's conversation last accounted for it: set when dot itself changes
-   * the agreements here, since it then knows the change. A block that differs from this were edited
+   * the agreements here, since it then knows the change. A block that differs from this was edited
    * by the human (or the reflection pass), which starts a new segment before the next message.
    */
   readonly agreementsSeen?: string
@@ -92,7 +92,7 @@ const WHY: Record<RolloverReason, string> = {
   'context-full': 'the previous session had grown long',
   'idle-expired': 'the previous session had been idle for a long time',
   'model-switch': 'your model was changed',
-  'prompt-changed': 'the human changed your persona settings, your agreements or your cognition, and what is above is current',
+  'prompt-changed': 'your persona, agreements, or cognition updated, and the sections above now reflect the current text',
   'lost': 'the previous session could not be reopened',
   'manual': 'the human started a new segment from the context page',
   'dot-requested': 'you chose to start a new segment',
@@ -103,13 +103,13 @@ export function openingText(input: { readonly handoff?: Handoff; readonly reason
   const body = input.handoff ? handoffText(input.handoff) : ''
   const parts = [
     '[conversation handoff]',
-    `You are continuing an ongoing conversation with the same human in a fresh session, because ${WHY[input.reason]}. They see one unbroken chat: carry on naturally and do not bring up the handoff unless they ask. What follows is all you carry over from before; the earlier messages themselves are no longer in front of you.`,
+    `You are continuing an ongoing conversation with the same human in a fresh session, because ${WHY[input.reason]}. The human sees one seamless chat: continue naturally and do not mention the handoff unless asked. What follows is the context carried into this segment; earlier messages are no longer inline.`,
   ]
   parts.push(body || 'Nothing was carried over from the earlier conversation.')
-  parts.push('Earlier unanswered cards may be answered late. Their numbered reply arrives in the active segment with an expired-card prefix; use the history tools when you need the original card or its context.')
+  parts.push('Earlier unanswered cards may be answered late. Their numbered reply arrives in the active segment with an expired-card prefix; use the history tools if you need the original card or its context.')
   // The log of every earlier segment stays readable, so what a note left out is not lost.
-  parts.push(`The earlier conversation itself stays on record. When you need its exact words or a detail that is not above, find it with ${TOOL.searchHistory} and read around a hit with ${TOOL.readHistory}${input.previous ? `; the session just before this one is ${input.previous}` : ''}. Do that before you ask the human to repeat themselves.`)
-  if (input.ledger?.trim()) parts.push(`Task ledger at the handoff (${stamp(input.at)}); it may have moved since, and ${TOOL.overview} shows the current state:\n${input.ledger.trim()}`)
-  if (input.reminders?.trim()) parts.push(`Reminders you had set at the handoff; they stay yours and still come due, and ${TOOL.schedule} (action=list) shows the current ones:\n${input.reminders.trim()}`)
+  parts.push(`Full transcripts of earlier segments remain searchable. Whenever you need exact wording or a detail omitted above, look it up with ${TOOL.searchHistory} and read surrounding context with ${TOOL.readHistory}${input.previous ? ` (the immediately preceding session is ${input.previous})` : ''} before asking the human to repeat themselves.`)
+  if (input.ledger?.trim()) parts.push(`Task ledger at handoff (${stamp(input.at)}); state may have advanced since, and ${TOOL.overview} shows the current state:\n${input.ledger.trim()}`)
+  if (input.reminders?.trim()) parts.push(`Reminders set at handoff; they remain active, and ${TOOL.schedule} (action=list) shows the current list:\n${input.reminders.trim()}`)
   return parts.join('\n\n')
 }

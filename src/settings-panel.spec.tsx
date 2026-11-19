@@ -42,7 +42,7 @@ describe('routine check setting', () => {
     const input = () => document.querySelector<HTMLInputElement>('input[aria-label="Routine check"]')!
     expect(input().value).toBe('10')
     expect(input().type).toBe('number')
-    expect(document.body.textContent).toContain('0 turns the check off')
+    expect(document.body.textContent).toContain('0 turns it off')
 
     await act(async () => { type(input(), '30') })
     await act(async () => { blur(input()) })
@@ -121,7 +121,7 @@ describe('factory reset', () => {
     const previewBtn = [...document.querySelectorAll('button')].find(button => button.textContent === 'Preview what will be cleared')!
     await act(async () => previewBtn.click())
     await act(async () => { await Promise.resolve() })
-    expect(document.body.textContent).toContain('2 task(s)')
+    expect(document.body.textContent).toContain('2 tracked session(s)')
     expect(document.body.textContent).toContain('Agreements will be cleared')
     expect(document.body.textContent).toContain('Your own sessions, project files and the host persona')
     const confirm = [...document.querySelectorAll('button')].find(button => button.textContent === 'Restore factory settings')!

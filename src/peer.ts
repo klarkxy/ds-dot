@@ -48,7 +48,6 @@ export interface OwnedSessionInput {
   readonly dotSessionId?: string
   readonly runs: readonly { readonly sessionId?: string; readonly requestedSessionId: string; readonly creation: string }[]
   readonly tasks: readonly { readonly sessionId: string; readonly origin: string }[]
-  readonly tickets: readonly { readonly sessions: readonly { readonly sessionId: string }[] }[]
 }
 
 /** Sessions dot opened. A reserved id that was never sent to the host is not one of them. */
@@ -59,7 +58,6 @@ export function ownedSessionIds(input: OwnedSessionInput): string[] {
     if (run.requestedSessionId && run.creation !== 'intent') ids.add(run.requestedSessionId)
   }
   for (const task of input.tasks) if (task.origin === 'started') ids.add(task.sessionId)
-  for (const ticket of input.tickets) for (const session of ticket.sessions) ids.add(session.sessionId)
   if (input.dotSessionId) ids.delete(input.dotSessionId)
   return [...ids]
 }

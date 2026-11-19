@@ -97,15 +97,54 @@ export interface SubjectLook {
   boundaries?(workspaceRoot: string, scope?: WriteScope): readonly SubjectExclusion[] | undefined
 }
 
-/** References identify an event or test output rather than only a snapshot or session. */
-function isForeignEvidenceId(ref: string): boolean {
-  return /^(?:sub|base|session)-/.test(ref)
+/**
+ * One resolvable evidence reference: `run:<runId>` is the captured final Report
+ * of a run of this change, `run:<runId>#<scenarioRef>` additionally requires a
+ * matching bullet inside its `### Report` section, and `file:<relative path>` is
+ * a file in the closeout's delivery subject (deletions count).
+ */
+export type EvidenceRef =
+  | { readonly kind: 'run'; readonly runId: string; readonly scenario?: string }
+  | { readonly kind: 'file'; readonly path: string }
+
+export function parseEvidenceRef(ref: string): EvidenceRef | undefined {
+  const run = /^run:([A-Za-z0-9_-]+)(?:#([^\s#]+))?$/.exec(ref)
+  if (run) return { kind: 'run', runId: run[1]!, ...(run[2] !== undefined ? { scenario: run[2] } : {}) }
+  const file = /^file:(.+)$/.exec(ref)
+  if (file) {
+    const path = file[1]!.trim()
+    if (!path || path.split(/[\\/]/).includes('..') || /^[A-Za-z]:[\\/]|^[\\/]/.test(path)) return undefined
+    return { kind: 'file', path }
+  }
+  return undefined
 }
 
-/** Evidence names a session event or test output; review notes live on the check itself. */
+/**
+ * The `- <scenarioRef>: <text>` line inside the report's `### Report` section.
+ * Undefined when the bullet is missing, empty, or still the unfilled
+ * `<evidence: …>` placeholder.
+ */
+export function reportBullet(report: string, scenarioRef: string): string | undefined {
+  let inReport = false
+  for (const line of report.split('\n')) {
+    if (/^#{1,6}\s/.test(line)) {
+      inReport = /^#{1,6}\s+Report\s*$/i.test(line.trim())
+      continue
+    }
+    if (!inReport) continue
+    const bullet = new RegExp(`^\\s*[-*]\\s+${scenarioRef.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}:\\s*(.*)$`).exec(line)
+    if (!bullet) continue
+    const text = bullet[1]!.trim()
+    if (!text || /^<evidence\s*:/i.test(text)) return undefined
+    return line.trim()
+  }
+  return undefined
+}
+
+/** Evidence must resolve to a run report or a delivered file; notes live on the check itself. */
 export function evidenceRefGap(ref: string): string | undefined {
   if (!ref.trim()) return 'evidence reference is empty'
-  if (isForeignEvidenceId(ref)) return `evidence ${ref} is a snapshot, baseline, or session id; name a session event or test output instead`
+  if (!parseEvidenceRef(ref)) return `evidence ${ref} is not resolvable; use run:<runId>, run:<runId>#<scenarioRef>, or file:<relative path>`
   return undefined
 }
 

@@ -7,13 +7,28 @@
 import { randomUUID } from 'node:crypto'
 import { realTimer, type Timer } from './batcher.ts'
 import type { ScheduleRecord } from './contracts.ts'
-import { MAX_SCHEDULES, ScheduleInputError, formatReminders, nextOccurrence, onceDelivered, parseSchedule, type ScheduleInput } from './schedule.ts'
+import { MAX_SCHEDULES, ScheduleInputError, describeTiming, formatReminders, nextOccurrence, onceDelivered, parseSchedule, type ScheduleInput } from './schedule.ts'
+import type { ScheduleTiming } from './contracts.ts'
 import type { DotStore } from './store.ts'
 
 /** The timer never sleeps longer than this, so a suspended host or a changed clock is noticed. */
 const MAX_SLEEP_MS = 30 * 60_000
 /** A delivery that failed is tried again after this long. */
 const RETRY_MS = 60_000
+
+const fold = (text: string) => text.replace(/\s+/g, ' ').trim().toLowerCase()
+
+/** The same schedule rule: `anchor` is just when an every-reminder was added, so it does not count. */
+function sameTiming(a: ScheduleTiming, b: ScheduleTiming): boolean {
+  if (a.kind !== b.kind) return false
+  if (a.kind === 'once' && b.kind === 'once') return a.at === b.at
+  if (a.kind === 'every' && b.kind === 'every') return a.minutes === b.minutes
+  if (a.kind === 'daily' && b.kind === 'daily') {
+    const days = (row: readonly number[] | undefined) => [...(row ?? [])].sort((x, y) => x - y).join(',')
+    return a.time === b.time && days(a.weekdays) === days(b.weekdays)
+  }
+  return false
+}
 
 export interface ReminderClockOptions {
   readonly store: DotStore
@@ -53,6 +68,8 @@ export class ReminderClock {
     if (active.length >= MAX_SCHEDULES) throw new ScheduleInputError(`${MAX_SCHEDULES} reminders are set already; remove one first`)
     const now = this.options.now()
     const parsed = parseSchedule(input, now)
+    const duplicate = active.find(record => fold(record.title) === fold(parsed.title) || (sameTiming(record.timing, parsed.timing) && fold(record.prompt) === fold(parsed.prompt)))
+    if (duplicate) throw new ScheduleInputError(`reminder ${duplicate.id} "${duplicate.title}" (${describeTiming(duplicate.timing)}) is set already; remove it first to change it`)
     let id = ''
     do { id = `sch-${randomUUID().slice(0, 6)}` } while (store.schedule(id))
     const record: ScheduleRecord = { id, ...parsed, createdAt: now }

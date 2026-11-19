@@ -5,7 +5,7 @@
  * 2. Unknown-creation & dead-relay recovery on absent/stopped sessions + human forceReleaseChange.
  * 3. Hardened approval-risk gate (reordered rm flags, git -C push, credentials, read-only tool writes).
  * 4. Runtime tools/pre-execute WriteScope enforcement on sealed child sessions.
- * 5. Synthesis of legacy acceptance/deliverable/priority parameters in dot_task & dot_start_task.
+ * 5. Synthesis of legacy acceptance/deliverable/priority parameters in dot_task.
  * 6. Bounded state.cards cap, durable task-table deletion on prune, and WorkBook history pruning.
  * 7. CJK-aware queryTerms segmentation & concurrent multi-session searchHistory.
  * 8. Locale-aware cardAnswerText, boardRev watermark on ChatFeed, and forceReleasePayload on WorkBoard.
@@ -118,9 +118,8 @@ function makeServiceHarness() {
     effect(fn: () => unknown) { fn() },
   } as never)
   const taskTool = registered.find(row => row.name === TOOL.task) as { execute(args: Record<string, unknown>): Promise<string> }
-  const startTool = registered.find(row => row.name === TOOL.startTask) as { execute(args: Record<string, unknown>, exec?: unknown): Promise<string> }
   return {
-    home, project, store, service, host, events, tables, deletes, taskTool, startTool,
+    home, project, store, service, host, events, tables, deletes, taskTool,
     cleanup: () => {
       rmSync(project, { recursive: true, force: true })
       rmSync(home, { recursive: true, force: true })
@@ -400,45 +399,6 @@ describe('4. Unknown creation/delivery recovery and human forceReleaseChange', (
   })
 })
 
-describe('5. Legacy acceptance, deliverable, and priority parameter synthesis', () => {
-  it('preserves acceptance, deliverable, and priority across dot_task create/revise and dot_start_task', async () => {
-    const h = makeServiceHarness()
-    try {
-      const created = JSON.parse(await h.taskTool.execute({
-        action: 'create',
-        title: 'Build CLI',
-        goal: 'Implement CLI help output',
-        dir: h.project,
-        acceptance: 'Running cli --help exits 0 and prints usage',
-        deliverable: 'bin/cli.mjs',
-        priority: 3,
-      })) as { id: string; priority: number }
-      expect(created.priority).toBe(3)
-      const detail = JSON.parse(await h.taskTool.execute({ action: 'read', task_id: created.id })) as {
-        requirements: Array<{ requirementRef: string; text: string; scenarios?: Array<{ scenarioRef: string; then: string }> }>
-      }
-      expect(detail.requirements[0]?.requirementRef).toBe('goal')
-      expect(detail.requirements[0]?.text).toContain('bin/cli.mjs')
-      expect(detail.requirements[0]?.scenarios?.[0]).toMatchObject({ scenarioRef: 'goal.1', then: 'Running cli --help exits 0 and prints usage' })
-
-      const started = await h.startTool.execute({
-        cwd: h.project,
-        title: 'Quick check',
-        instruction: 'Inspect files',
-        goal: 'Audit README',
-        acceptance: 'All links resolve',
-        priority: 1,
-        access: 'read',
-      }, { signal: new AbortController().signal })
-      expect(started).toContain('started run-')
-      const secondChange = h.store.work.listChanges().find(c => c.id !== created.id)!
-      expect(secondChange.priority).toBe(1)
-      expect(h.store.work.input(secondChange.currentInputRef)?.requirements[0]?.scenarios?.[0]?.then).toBe('All links resolve')
-    } finally {
-      h.cleanup()
-    }
-  })
-})
 
 describe('6. Bounded state.cards, durable task-table deletes, and WorkBook history pruning', () => {
   it('caps stored cards while preserving monotonic cardSequence, and deletes pruned tasks and old changes from durable tables', async () => {

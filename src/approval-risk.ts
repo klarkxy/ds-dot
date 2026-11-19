@@ -15,6 +15,7 @@ export type ApprovalRiskCode =
   | 'publish'
   | 'destroy'
   | 'credential'
+  | 'remote-exec'
   | 'subagent-shell'
   | 'read-only-write'
 
@@ -37,9 +38,15 @@ const WRITE_TOOLS = new Set([
 
 const SANDBOX = /danger-full-access|sandbox_permissions/i
 const PUBLISH = /\b(?:npm|pnpm|yarn|bun|cargo)(?:\s+--?[A-Za-z0-9-]+(?:=\S+|\s+(?!publish\b)[^-\s]\S*)?)*\s+publish\b|\bgit(?:\s+(?:-[Cc]\s+\S+|--?[A-Za-z0-9-]+(?:=\S+|\s+(?!push\b)[^-\s]\S*)?))*\s+push\b|\bgh(?:\s+--?[A-Za-z0-9-]+(?:=\S+|\s+(?!release\b|pr\b)[^-\s]\S*)?)*\s+(?:release\b|pr\s+merge\b)|\btwine\s+upload\b/i
-const DESTROY = /\brm\b[^;&|\n]{0,200}?(?:\s|^)(?:-[A-Za-z]*r[A-Za-z]*|--recursive)(?=\s|$|["'\\])|\bRemove-Item\b[\s\S]{0,160}\b-(?:Recurse|Force)\b|\b(?:del|rmdir)\b[^;&|\n]{0,120}\/s\b|\bgit(?:\s+(?:-[Cc]\s+\S+|--?[A-Za-z0-9-]+(?:=\S+)?))*\s+(?:reset\s+--hard|clean\s+-[A-Za-z]*f[A-Za-z]*)\b|\bshutil\.rmtree\s*\(|\bfs\.(?:rmSync|rm|rmdirSync)\s*\([\s\S]{0,160}\brecursive\s*:\s*true\b|\brimraf\b/i
-const CREDENTIAL = /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----|\b(?:AKIA[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9_]{36,}|github_pat_[A-Za-z0-9_]{22,}|sk-(?:live|proj)-[A-Za-z0-9_-]{20,}|npm_[A-Za-z0-9]{36})\b|(?:^|[\s"'=:/\\])(?:\.ssh[/\\]+id_(?:rsa|ed25519|ecdsa|dsa)|\.aws[/\\]+credentials|\.npmrc|\.pypirc|\.netrc)(?=$|[\s"'&;|/\\])/i
+const DESTROY = /\brm\b[^;&|\n]{0,200}?(?:\s|^)(?:-[A-Za-z]*r[A-Za-z]*|--recursive)(?=\s|$|["'\\])|\bRemove-Item\b[\s\S]{0,160}?(?:\s|^)-(?:Recurse|Force|r)\b|\b(?:del|rmdir)\b[^;&|\n]{0,120}\/s\b|\bgit(?:\s+(?:-[Cc]\s+\S+|--?[A-Za-z0-9-]+(?:=\S+)?))*\s+(?:reset\s+--hard|clean\s+-[A-Za-z]*f[A-Za-z]*)\b|\bshutil\.rmtree\s*\(|\bfs\.(?:rmSync|rm|rmdirSync)\s*\([\s\S]{0,160}\brecursive\s*:\s*true\b|\brimraf\b|\bfind\b[^;&|\n]{0,200}?(?:\s|^)-delete\b|\bkubectl\b[^;&|\n]{0,80}\bdelete\b|\bdocker\s+system\s+prune\b|\bdocker\s+rm\b[^;&|\n]{0,120}(?:\s|^)(?:-[A-Za-z]*f[A-Za-z]*|--force)\b|\bdocker\s+volume\s+(?:rm|prune)\b|\bterraform\s+destroy\b|\bDROP\s+(?:TABLE|DATABASE|SCHEMA)\b|\bTRUNCATE\s+(?:TABLE\s+)?[A-Za-z_"]/i
+const CREDENTIAL = /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----|\b(?:AKIA[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9_]{36,}|github_pat_[A-Za-z0-9_]{22,}|sk-(?:live|proj)-[A-Za-z0-9_-]{20,}|npm_[A-Za-z0-9]{36})\b|(?:^|[\s"'=:/\\])(?:\.ssh[/\\]+id_(?:rsa|ed25519|ecdsa|dsa)|\.aws[/\\]+credentials|\.npmrc|\.pypirc|\.netrc|\.env(?:\.(?!example\b|sample\b|template\b|dist\b)[\w-]+)*)(?=$|[\s"'&;|/\\])/i
+const REMOTE_EXEC = /\b(?:curl|wget)\b[^;&|\n]{0,300}?\|\s*(?:sudo\s+)?(?:sh|bash|zsh|fish|python[0-9.]*|node|iex|pwsh|powershell)\b|\b(?:iwr|irm|Invoke-WebRequest|Invoke-RestMethod)\b[^;&|\n]{0,300}?\|\s*(?:iex|Invoke-Expression)\b/i
 const WRITE = /\b(?:Set-Content|Add-Content|Out-File|New-Item|Copy-Item|Move-Item|Remove-Item|mkdir|touch|cp|mv|rm|truncate|tee)\b|\b(?:sed|perl)\s+-[A-Za-z]*i\b|\bdd\b[^;&|\n]*\bof=|\bfs\.(?:writeFileSync|writeFile|appendFileSync|appendFile|unlinkSync|unlink|renameSync)\s*\(|\bshutil\.(?:copy|move)\s*\(|(?:^|[\s;|&])>{1,2}\s*\S/m
+
+/** A filesystem path that would expose credentials when read. Same rules as the credential gate. */
+export function credentialLikePath(path: string): boolean {
+  return CREDENTIAL.test(path)
+}
 
 export function assessApprovalRisk(input: {
   readonly toolName: string
@@ -58,6 +65,7 @@ export function assessApprovalRisk(input: {
   if (publish) reasons.push('publish')
   if (destroy) reasons.push('destroy')
   if (CREDENTIAL.test(haystack)) reasons.push('credential')
+  if (REMOTE_EXEC.test(haystack)) reasons.push('remote-exec')
   if (input.viaSubagent === true && SHELLS.has(normalizedTool)) reasons.push('subagent-shell')
   if (input.readOnly === true && (sandbox || destroy || publish || WRITE_TOOLS.has(normalizedTool) || WRITE.test(haystack))) {
     reasons.push('read-only-write')

@@ -3,7 +3,6 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { readSnapshot, saveSnapshot, sha256, baselineCaptures } from './artifacts.ts'
-import { inputConstraints } from './brief.ts'
 import { WorkBook, judgeVerification, occupantsConflict, parseInput, workspaceIdentity, type ExternalOccupant, type WorkPersist } from './work.ts'
 
 function memoryPersist(fail?: () => boolean): { persist: WorkPersist; rows: Map<string, unknown> } {
@@ -543,7 +542,8 @@ const legacyInput = {
 describe('work input contract', () => {
   it('reads a stored input that has no scenarios, constraints or step links', () => {
     const parsed = parseInput(legacyInput)
-    expect(parsed?.behaviorNotes).toBe(legacyInput.behaviorNotes)
+    // A retired free-text field of old rows is dropped on read.
+    expect(parsed && 'behaviorNotes' in parsed).toBe(false)
     expect(parsed?.constraints).toBeUndefined()
     expect(parsed?.requirements[0]?.scenarios).toBeUndefined()
     expect(parsed?.steps[0]?.covers).toBeUndefined()
@@ -551,11 +551,7 @@ describe('work input contract', () => {
     const restored = WorkBook.restore({ inputs: [legacyInput] }, stored.persist, 'win32')
     expect(restored.recoveryError).toBeUndefined()
     expect(restored.input('input-2')?.goal).toContain('site/r10.txt')
-    expect(inputConstraints(restored.input('input-2')!)).toEqual([
-      { constraintRef: 'C1', text: '写入必须发生在后台作业运行期间' },
-      { constraintRef: 'C2', text: '不得写入交付目录以外的任何路径' },
-      { constraintRef: 'C3', text: '第二行尾注必须精确为「R10 confirmed」' },
-    ])
+    expect(restored.input('input-2')?.constraints).toBeUndefined()
   })
 
   it('stores scenarios, constraints and step links, and carries unspecified fields into the next input', async () => {
@@ -595,14 +591,10 @@ describe('work input contract', () => {
       constraints: [{ constraintRef: 'k1', text: 'do not add files' }],
       supersedes: change.currentInputRef,
     })
-    const before = book.change(change.id)?.currentInputRef
-    const ignored = await book.reviseChange(change.id, { behaviorNotes: 'would be ignored', at: 4 })
-    expect('id' in ignored).toBe(false)
-    expect(book.change(change.id)?.currentInputRef).toBe(before)
     const cleared = await book.reviseChange(change.id, { constraints: [], at: 5 })
     if (!('id' in cleared)) throw new Error(cleared.message)
     expect(book.input(cleared.currentInputRef)?.constraints).toEqual([])
-    expect(book.input(cleared.currentInputRef)?.behaviorNotes).toBeUndefined()
+    expect('behaviorNotes' in book.input(cleared.currentInputRef)!).toBe(false)
   })
 
   it('refuses duplicate refs, unknown links and step cycles without storing them', async () => {

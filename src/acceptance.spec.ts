@@ -7,7 +7,7 @@ import { subjectKey, type DeliverySubject, type SubjectLook } from './acceptance
 import { WorkBook, type WorkPersist } from './work.ts'
 
 const evidence = { queueCleared: true, agentIdle: true, jobsSettled: true }
-const pass = [{ requirementRef: 'r1', applicability: 'applicable' as const, verdict: 'pass' as const, evidenceRefs: ['log'] }]
+const pass = [{ requirementRef: 'r1', applicability: 'applicable' as const, verdict: 'pass' as const, evidenceRefs: ['run:run-1'] }]
 
 function bind(dir: string): SubjectLook {
   return {
@@ -64,7 +64,7 @@ async function ready(persist?: WorkPersist) {
   const after = new TextEncoder().encode('after')
   writeFileSync(join(project, 'a.ts'), after)
   saveSnapshot(join(artifacts, 'delivery-1'), [{ path: 'a.ts', body: after }], undefined, { root })
-  writeFileSync(join(artifacts, 'evidence', 'log'), 'passed')
+  writeFileSync(join(artifacts, 'evidence', 'run-1.md'), 'passed')
   const held = book.run(review.run.id)!
   const subject: DeliverySubject = {
     workspaceRoot: root, cwd: held.cwd, baselineRefs: book.change(change.id)!.baselineRefs,
@@ -112,7 +112,7 @@ describe('shared delivery and closeout', () => {
     missing.cleanup()
 
     const unread = await ready()
-    rmSync(join(unread.artifacts, 'evidence', 'log'), { force: true })
+    rmSync(join(unread.artifacts, 'evidence', 'run-1.md'), { force: true })
     // Historical registry files do not determine the immutable checks.
     expect(await unread.book.accept(unread.change.id, unread.verification.id, unread.change.currentInputRef, unread.verification.subjectKey!, 'user', 12, {
       expectedInputRevision: unread.change.currentRevision, expectedVerificationId: unread.verification.id,
@@ -322,7 +322,7 @@ describe('shared delivery and closeout', () => {
     expect((await book.settleDelivery(review.run.id, initial.id, 'accepted', undefined, 8)).ok).toBe(true)
     expect('id' in await book.holdReview(review.run.id, evidence, 9)).toBe(true)
     saveSnapshot(join(artifacts, 'delivery-gone'), [{ path: 'a.ts', body: before }, { path: 'gone.ts', deleted: true }], undefined, { root: workspace })
-    writeFileSync(join(artifacts, 'evidence', 'log'), 'passed')
+    writeFileSync(join(artifacts, 'evidence', 'run-1.md'), 'passed')
     const subject: DeliverySubject = {
       workspaceRoot: workspace, cwd: book.run(review.run.id)!.cwd, baselineRefs: book.change(change.id)!.baselineRefs,
       artifactRef: 'delivery-gone', changes: [{ path: 'gone.ts', kind: 'deleted' }], protectedDirty: ['a.ts'], exclusions: [],

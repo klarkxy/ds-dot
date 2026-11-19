@@ -1,6 +1,6 @@
 import { act } from 'react'
 import { Simulate } from 'react-dom/test-utils'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { JSDOM } from 'jsdom'
@@ -63,6 +63,45 @@ describe('WorkBoard', () => {
     await act(async () => root.render(<WorkBoard {...props} />))
     expect(sections()).toEqual(['Needs you', 'In progress'])
     await act(async () => root.unmount())
+  })
+
+  it('labels the dispatch message status, hides it once accepted, and asks twice before releasing', async () => {
+    vi.useFakeTimers()
+    try {
+      const onForceRelease = vi.fn()
+      const cancelled: WorkBoardItem = {
+        ...item, id: 'c-9', title: 'Gone', status: 'cancelled', blockers: ['run-9'], verification: undefined, oversight: undefined, humanAction: undefined,
+        runs: [{ id: 'run-9', kind: 'work', phase: 'stopped', cwd: 'H:/repo', deliveries: [{ id: 'd-1', kind: 'dispatch', status: 'unknown', contentRef: 'r-1' }] }],
+      }
+      const root = createRoot(document.getElementById('root')!)
+      await act(async () => root.render(
+        <WorkBoard locale="en" items={[cancelled]} pending={[]} onAccept={vi.fn()} onReject={vi.fn()} onAnswer={vi.fn()} onResume={vi.fn()} onForceRelease={onForceRelease} />,
+      ))
+      await click('Finished · 1')
+      expect(document.body.textContent).toContain('Dispatch: unknown')
+      expect(document.body.textContent).not.toContain('Delivery Unknown')
+      await click('Release lock')
+      expect(onForceRelease).not.toHaveBeenCalled()
+      expect(buttonIncluding('Confirm release')).toBeTruthy()
+      await act(async () => { vi.advanceTimersByTime(6_000) })
+      expect(buttonIncluding('Confirm release')).toBeUndefined()
+      await click('Release lock')
+      await click('Confirm release')
+      expect(onForceRelease).toHaveBeenCalledWith({ id: 'c-9' })
+
+      const delivered: WorkBoardItem = {
+        ...cancelled, id: 'c-10', blockers: [],
+        runs: [{ id: 'run-10', kind: 'work', phase: 'completed', cwd: 'H:/repo', deliveries: [{ id: 'd-2', kind: 'dispatch', status: 'accepted', contentRef: 'r-2' }] }],
+      }
+      await act(async () => root.render(
+        <WorkBoard locale="en" items={[delivered]} pending={[]} onAccept={vi.fn()} onReject={vi.fn()} onAnswer={vi.fn()} onResume={vi.fn()} onForceRelease={onForceRelease} />,
+      ))
+      await click('Finished · 1')
+      expect(document.body.textContent).not.toContain('Dispatch:')
+      await act(async () => root.unmount())
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
 
@@ -160,7 +199,7 @@ describe('WorkBoard', () => {
     expect(text).toContain('log-1')
     expect(text).toContain('build failed')
     expect(text).toContain('未通过')
-    expect(text).toContain('未证实')
+    expect(text).toContain('未验证')
     expect(text).not.toContain('已完成')
     expect(text).toContain('已拒绝')
     await act(async () => root.unmount())
@@ -182,8 +221,10 @@ describe('WorkBoard', () => {
     try {
       const change = await service.createWorkChange({ title: 'Ship', cwd: project, goal: 'land it', requirements: [{ requirementRef: 'r1', text: 'edits', required: true }], at: 1 })
       const current = store.work.change(change.id)!
+      mkdirSync(join(home, 'artifacts', 'evidence'), { recursive: true })
+      writeFileSync(join(home, 'artifacts', 'evidence', 'run-1.md'), marker)
       const recorded = await service.recordWorkVerification(change.id, [
-        { requirementRef: 'r1', applicability: 'applicable', verdict: 'pass', evidenceRefs: ['final-c-log'], note: marker },
+        { requirementRef: 'r1', applicability: 'applicable', verdict: 'pass', evidenceRefs: ['run:run-1'], note: marker },
       ], [], { inputRef: current.currentInputRef, inputRevision: current.currentRevision })
       if (!('id' in recorded)) throw new Error(recorded.message)
       const view = service.workBoard(change.id)
@@ -201,13 +242,13 @@ describe('WorkBoard', () => {
       const text = document.body.textContent ?? ''
       expect(document.querySelectorAll('a[data-evidence-ref]')).toHaveLength(1)
       expect(text).toContain(marker)
-      expect(service.readWorkSource(change.id, 'evidence', 'old-log', {
+      expect(service.readWorkSource(change.id, 'evidence', 'run:run-9', {
         verificationId: view.verification?.id ?? '', inputRef: view.verification?.inputRef ?? '', inputRevision: view.verification?.inputRevision ?? 0,
       })).toMatchObject({ ok: false, code: 'stale' })
       await act(async () => root.unmount())
       const failed = createRoot(document.getElementById('root')!)
       await act(async () => {
-        failed.render(<WorkBoard locale="zh" items={[view]} pending={[]} onAccept={vi.fn()} onReject={vi.fn()} onAnswer={vi.fn()} onResume={vi.fn()} onRead={() => Promise.reject(new Error('evidence final-c-log is missing'))} />)
+        failed.render(<WorkBoard locale="zh" items={[view]} pending={[]} onAccept={vi.fn()} onReject={vi.fn()} onAnswer={vi.fn()} onResume={vi.fn()} onRead={() => Promise.reject(new Error('run report run-1 is missing'))} />)
         await Promise.resolve()
         await Promise.resolve()
       })
@@ -340,8 +381,10 @@ describe('WorkBoard', () => {
     try {
       const change = await service.createWorkChange({ title: 'Ship', cwd: project, goal: 'land it', requirements: [{ requirementRef: 'r1', text: 'edits', required: true }], at: 1 })
       const current = store.work.change(change.id)!
+      mkdirSync(join(home, 'artifacts', 'evidence'), { recursive: true })
+      writeFileSync(join(home, 'artifacts', 'evidence', 'run-1.md'), body)
       const recorded = await service.recordWorkVerification(change.id, [
-        { requirementRef: 'r1', applicability: 'applicable', verdict: 'pass', evidenceRefs: ['big-log'], note: body },
+        { requirementRef: 'r1', applicability: 'applicable', verdict: 'pass', evidenceRefs: ['run:run-1'], note: 'long report' },
       ], [], { inputRef: current.currentInputRef, inputRevision: current.currentRevision })
       if (!('id' in recorded)) throw new Error(recorded.message)
       const view = service.workBoard(change.id)
@@ -356,12 +399,12 @@ describe('WorkBoard', () => {
       const root = createRoot(document.getElementById('root')!)
       await act(async () => { root.render(<WorkBoard locale="en" items={[view]} pending={[]} onAccept={vi.fn()} onReject={vi.fn()} onAnswer={vi.fn()} onResume={vi.fn()} onRead={read} />); await Promise.resolve(); await Promise.resolve() })
       await openDetails()
-      const preview = document.querySelector('[data-evidence-body="evidence:big-log"]')?.textContent ?? ''
+      const preview = document.querySelector('[data-evidence-body="evidence:run:run-1"]')?.textContent ?? ''
       expect(preview).not.toContain(tail)
       expect(preview.length).toBeLessThan(70_000)
       expect(preview).toContain('[truncated]')
       await act(async () => { buttonIncluding('View full content')?.click(); await Promise.resolve(); await Promise.resolve() })
-      const shown = document.querySelector('[data-evidence-body="evidence:big-log"]')?.textContent ?? ''
+      const shown = document.querySelector('[data-evidence-body="evidence:run:run-1"]')?.textContent ?? ''
       expect(shown.endsWith(tail)).toBe(true)
       expect(buttonIncluding('View full content')).toBeUndefined()
       await act(async () => root.unmount())

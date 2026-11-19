@@ -1,15 +1,13 @@
-import type { BoardView, PendingView, TaskRecord, TicketView } from './contracts.ts'
+import type { BoardView, PendingView, TaskRecord } from './contracts.ts'
 import { acceptPayload, lookRequest, parseWorkLook } from './work-board.ts'
 
 /** How many finished tasks the collapsed group lists once opened. */
 export const FINISHED_SHOWN = 50
 
 export interface BoardGroups {
-  /** Group 1: waiting requests. Legacy tickets never ask for the human; they are history. */
+  /** Group 1: waiting requests. */
   readonly requests: readonly PendingView[]
-  /** Legacy tickets, read-only history, newest first. */
-  readonly legacy: readonly TicketView[]
-  /** Group 5: sessions the human asked dot to watch. */
+  /** Sessions the human asked dot to watch. */
   readonly watched: readonly TaskRecord[]
   readonly watchedArchived: number
   /** Watched sessions that are not archived. */
@@ -18,11 +16,9 @@ export interface BoardGroups {
 
 /** Split a board snapshot into the groups the board draws, in display order. */
 export function groupBoard(view: BoardView): BoardGroups {
-  const legacy = [...view.tickets].sort((a, b) => b.updatedAt - a.updatedAt)
   const watched = view.tasks.filter(task => task.status !== 'archived')
   return {
     requests: view.pending,
-    legacy,
     watched,
     watchedArchived: view.tasks.length - watched.length,
     liveCount: watched.length,
@@ -65,7 +61,6 @@ export function headerBoardCounts(view: BoardView | undefined): { readonly liveC
 /** Title and directory of every session the board knows, for the notices and tool rows in the chat. */
 export function sessionLookup(view: BoardView | undefined): Map<string, { title: string; cwd?: string }> {
   const map = new Map<string, { title: string; cwd?: string }>()
-  for (const ticket of view?.tickets ?? []) for (const session of ticket.sessions) map.set(session.sessionId, { title: ticket.title, ...ticket.dir ? { cwd: ticket.dir } : {} })
   for (const task of view?.startedTasks ?? []) map.set(task.sessionId, { title: task.title, ...task.cwd ? { cwd: task.cwd } : {} })
   for (const task of view?.tasks ?? []) map.set(task.sessionId, { title: task.title, ...task.cwd ? { cwd: task.cwd } : {} })
   return map

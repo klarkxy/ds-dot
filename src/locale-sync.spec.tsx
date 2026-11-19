@@ -127,7 +127,7 @@ describe('i18n core & zh/en packs', () => {
     expect(approvalCardCopy('en').title).toBe('Approval')
     const zhMeta = JSON.parse(readFileSync(join(process.cwd(), 'locale/zh.json'), 'utf8')) as { meta: { detail?: string } }
     expect(zhMeta.meta.detail).toBe('docs/README.zh-CN.md')
-    expect(DOT_INSTRUCTIONS).toContain('When no message from the human sets another language yet (for example on a reminder or proactive check), use the language of your persona section.')
+    expect(DOT_INSTRUCTIONS).toContain('when the human has not written in this exchange (a reminder or a routine check), use the language of your persona section')
     expect(Config).toBeDefined()
     expect(pluginInject).not.toContain('settings')
   })
@@ -139,11 +139,13 @@ describe('i18n core & zh/en packs', () => {
     expect(defaultAddress('en')).toBe('you')
     expect(enPersona.length).toBeLessThanOrEqual(1200)
     for (const heading of [
-      '[Who you are]',
       '[Personality and what matters to you]',
       '[How you speak]',
       '[Your relationship with the user]',
     ]) expect(enPersona).toContain(heading)
+    // sectionLead already introduces the persona, so the body opens without a heading.
+    expect(enPersona.startsWith('[')).toBe(false)
+    expect(enPersona).toContain('lead with the outcome.')
     expect(enPersona).not.toMatch(/姐姐|妹妹|鲸鱼娘|大肥鱼|粉色虎鲸|粉毛小狗|大小姐|sister|At work|Off duty|the human/i)
     expect(personaPack('en').sectionLead).toBe('Who you are:')
     expect(personaSection({}, 'en')).toContain('Who you are:')

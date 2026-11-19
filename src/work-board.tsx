@@ -1,5 +1,6 @@
 import { Button, Input, SegmentedTabs, StateDot, Tag, type SegmentedTab, type StateDotState, type TagTone } from '@deepseek-ai/dsh-client-ui-primitives'
 import { useCallback, useEffect, useId, useMemo, useRef, useState, type MouseEvent } from 'react'
+import { parseEvidenceRef } from './acceptance.ts'
 import { BOARD_ROOT } from './board.tsx'
 import { FINISHED_SHOWN } from './board-groups.ts'
 import { t, type CopyLocale, type TextKey } from './ui-copy.ts'
@@ -49,7 +50,7 @@ export function WorkBoard({ locale, items, pending, notice, filter = 'all', onAc
   readonly onOpenSession?: (sessionId: string) => void
 }) {
   const groups = useMemo(() => groupWork(items, pending), [items, pending])
-  // Finished work folds away like finished tickets; it would otherwise grow without end.
+  // Finished work folds away like finished changes; it would otherwise grow without end.
   const [showDone, setShowDone] = useState(false)
   const section = (title: TextKey, rows: readonly WorkBoardItem[]) => rows.length === 0 ? null : (
     <section className="dsh-ui-stack" aria-label={t(locale, title)}>
@@ -77,7 +78,7 @@ export function WorkBoard({ locale, items, pending, notice, filter = 'all', onAc
   )
 }
 
-function factLabel(locale: CopyLocale, group: 'kind' | 'phase' | 'verdict' | 'check' | 'delivery' | 'change', value: string): string {
+function factLabel(locale: CopyLocale, group: 'kind' | 'phase' | 'verdict' | 'check' | 'delivery' | 'dispatch' | 'change', value: string): string {
   const key = workFactKey(group, value)
   return key ? t(locale, key) : value
 }
@@ -154,13 +155,13 @@ function WorkFacts({ locale, item, onRead, onOpenSession }: {
   const loadPreview = useCallback((kind: 'evidence' | 'change', ref: string, token: string, isCancelled?: () => boolean) => {
     if (!onRead || !verificationId) return
     const key = `${kind}:${ref}`
-    const ticket = life.current
+    const snapshot = life.current
     void onRead({ id: item.id, kind, ref, verificationId, inputRef, inputRevision }).then(result => {
-      if (isCancelled?.() || life.current !== ticket) return
+      if (isCancelled?.() || life.current !== snapshot) return
       const row = previewFrom(result)
       setSlot(current => current.identity === token ? { ...current, loaded: { ...current.loaded, [key]: row } } : current)
     }, failure => {
-      if (isCancelled?.() || life.current !== ticket) return
+      if (isCancelled?.() || life.current !== snapshot) return
       const message = failure instanceof Error ? failure.message : String(failure)
       setSlot(current => current.identity === token ? { ...current, loaded: { ...current.loaded, [key]: { ok: false, message } } } : current)
     })
@@ -180,15 +181,15 @@ function WorkFacts({ locale, item, onRead, onOpenSession }: {
     const flight = `${token}\0${key}`
     if (fullFlights.current.has(flight)) return
     fullFlights.current.add(flight)
-    const ticket = life.current
+    const snapshot = life.current
     setSlot(current => current.identity === token ? { ...current, full: { ...current.full, [key]: { phase: 'loading' } } } : current)
     void onRead({ id: item.id, kind, ref, verificationId, inputRef, inputRevision, forceFull: true }).then(result => {
       fullFlights.current.delete(flight)
-      if (life.current !== ticket) return
+      if (life.current !== snapshot) return
       setSlot(current => current.identity === token ? { ...current, full: { ...current.full, [key]: { phase: 'ready', body: result.body } } } : current)
     }, failure => {
       fullFlights.current.delete(flight)
-      if (life.current !== ticket) return
+      if (life.current !== snapshot) return
       const message = failure instanceof Error ? failure.message : String(failure)
       setSlot(current => current.identity === token ? { ...current, full: { ...current.full, [key]: { phase: 'error', message } } } : current)
     })
@@ -209,15 +210,15 @@ function WorkFacts({ locale, item, onRead, onOpenSession }: {
         const job = pendingJobs[cursor++]!
         await new Promise<void>(resolve => {
           const key = `${job.kind}:${job.ref}`
-          const ticket = life.current
+          const snapshot = life.current
           onRead({ id: item.id, kind: job.kind, ref: job.ref, verificationId, inputRef, inputRevision }).then(result => {
-            if (!cancel && life.current === ticket) {
+            if (!cancel && life.current === snapshot) {
               const row = previewFrom(result)
               setSlot(current => current.identity === token ? { ...current, loaded: { ...current.loaded, [key]: row } } : current)
             }
             resolve()
           }, failure => {
-            if (!cancel && life.current === ticket) {
+            if (!cancel && life.current === snapshot) {
               const message = failure instanceof Error ? failure.message : String(failure)
               setSlot(current => current.identity === token ? { ...current, loaded: { ...current.loaded, [key]: { ok: false, message } } } : current)
             }
@@ -263,6 +264,12 @@ function WorkFacts({ locale, item, onRead, onOpenSession }: {
   }
   const evidenceKeys = evidence.map(ref => `evidence:${ref}`)
   const fileKeys = changes.filter(c => c.kind !== 'deleted').map(c => `change:${c.path}`)
+  const evidenceLabel = (ref: string) => {
+    const parsed = parseEvidenceRef(ref)
+    if (parsed?.kind === 'run') return parsed.scenario ? `${parsed.runId} report · ${parsed.scenario}` : `${parsed.runId} report`
+    if (parsed?.kind === 'file') return parsed.path
+    return ref
+  }
   const evidencePane = evidence.length === 0 ? null : evidence.map(ref => {
     const key = `evidence:${ref}`
     const isCollapsed = collapsed.has(key)
@@ -271,7 +278,7 @@ function WorkFacts({ locale, item, onRead, onOpenSession }: {
         <a className="dsh-dot-work-source-head" href={`#evidence-${encodeURIComponent(ref)}`} data-evidence-ref={ref} aria-expanded={!isCollapsed} onClick={event => onSourceHeadClick(event, 'evidence', ref, key, isCollapsed)}>
           <span className="dsh-dot-work-chevron" aria-hidden="true">{isCollapsed ? '▸' : '▾'}</span>
           <FileGlyph />
-          <span>{t(locale, 'workEvidence')} {ref}</span>
+          <span>{t(locale, 'workEvidence')} {evidenceLabel(ref)}</span>
         </a>
         <div className="dsh-dot-work-source-body" data-collapsed={isCollapsed ? '' : undefined}>{outcome('evidence', ref)}</div>
       </div>
@@ -431,6 +438,8 @@ function WorkRow({ locale, item, pending, onAccept, onReject, onAnswer, onResume
 }) {
   const [rejectMode, setRejectMode] = useState<'reject' | 'look' | undefined>()
   const [rejectNote, setRejectNote] = useState('')
+  const [releaseArmed, setReleaseArmed] = useState(false)
+  const releaseTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
   const accept = acceptPayload(item)
   const reject = rejectPayload(item)
   const resume = resumePayload(item)
@@ -444,6 +453,20 @@ function WorkRow({ locale, item, pending, onAccept, onReject, onAnswer, onResume
     if (rejectMode === 'reject' && !reject) { setRejectMode(undefined); setRejectNote('') }
     if (rejectMode === 'look' && !lookOpen) { setRejectMode(undefined); setRejectNote('') }
   }, [rejectMode, reject, lookOpen])
+  // The force-release arm clears itself on unmount or when the item changes.
+  useEffect(() => {
+    setReleaseArmed(false)
+    return () => { if (releaseTimer.current !== undefined) clearTimeout(releaseTimer.current) }
+  }, [item.id])
+  const disarmRelease = () => {
+    if (releaseTimer.current !== undefined) { clearTimeout(releaseTimer.current); releaseTimer.current = undefined }
+    setReleaseArmed(false)
+  }
+  const armRelease = () => {
+    setReleaseArmed(true)
+    if (releaseTimer.current !== undefined) clearTimeout(releaseTimer.current)
+    releaseTimer.current = setTimeout(() => { releaseTimer.current = undefined; setReleaseArmed(false) }, 5000)
+  }
   const submitReject = () => {
     const note = rejectNote.trim()
     if (rejectMode === 'look' && lookOpen && typeof look === 'object' && look) {
@@ -464,7 +487,7 @@ function WorkRow({ locale, item, pending, onAccept, onReject, onAnswer, onResume
             <Tag tone={STATUS_TONE[item.status]}>{t(locale, STATUS_KEY[item.status])}</Tag>
             {item.priority === 3 ? <Tag tone="warning">{t(locale, 'priorityHigh')}</Tag> : null}
             {item.verification ? <Tag tone={workFactTone(item.verification.verdict)}>{t(locale, 'workVerification')} {factLabel(locale, 'verdict', item.verification.verdict)}</Tag> : null}
-            {delivery ? <Tag tone={workFactTone(delivery.status)}>{t(locale, 'workSubject')} {factLabel(locale, 'delivery', delivery.status)}</Tag> : null}
+            {delivery && delivery.status !== 'accepted' ? <Tag tone={workFactTone(delivery.status)}>{t(locale, 'workDispatch')}{locale === 'zh' || locale === 'ja' ? '：' : ': '}{factLabel(locale, 'dispatch', delivery.status)}</Tag> : null}
           </span>
         </div>
       </div>
@@ -475,7 +498,14 @@ function WorkRow({ locale, item, pending, onAccept, onReject, onAnswer, onResume
           {accept ? <Button variant="primary" size="sm" onClick={() => onAccept(accept)}>{t(locale, 'workAccept')}</Button> : null}
           {reject ? <Button variant="ghost" size="sm" aria-expanded={rejectMode === 'reject'} onClick={() => setRejectMode(m => m === 'reject' ? undefined : 'reject')}>{t(locale, 'workReject')}</Button> : null}
           {resume ? <Button variant="ghost" size="sm" onClick={() => onResume(resume)}>{t(locale, 'workResume')}</Button> : null}
-          {forceRelease && onForceRelease ? <Button variant="ghost" size="sm" onClick={() => onForceRelease(forceRelease)}>{t(locale, 'workForceRelease')}</Button> : null}
+          {forceRelease && onForceRelease ? (
+            releaseArmed
+              ? <>
+                  <Button variant="primary" size="sm" className="dsh-dot-danger" onClick={() => { disarmRelease(); onForceRelease(forceRelease) }}>{t(locale, 'workForceReleaseConfirm')}</Button>
+                  <Button variant="ghost" size="sm" onClick={disarmRelease}>{t(locale, 'workRejectCancel')}</Button>
+                </>
+              : <Button variant="ghost" size="sm" onClick={armRelease}>{t(locale, 'workForceRelease')}</Button>
+          ) : null}
           {latestSessionId && onOpenSession ? (
             <Button variant="ghost" size="sm" className="dsh-dot-work-open" onClick={() => onOpenSession(latestSessionId)}>
               {t(locale, 'workOpenSession')} ↗

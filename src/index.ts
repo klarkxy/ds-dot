@@ -35,9 +35,8 @@ import { REFLECTION_INSTRUCTIONS, REFLECTION_PRESET_ID } from './reflection.ts'
 import { APPROVAL_GRACE_MS, DotError, DotService, messageOf } from './service.ts'
 import { configI18n } from './i18n/index.ts'
 import { patchSettings } from './settings.ts'
-import { dotDomain, parsePeerDelivery, parseTask, restoreTaskTimestamps } from './storage.ts'
+import { dotDomain, parsePeerDelivery, parseTask } from './storage.ts'
 import { DotStore, type DotDomainHandle } from './store.ts'
-import { reviewPayload } from './task-rpc.ts'
 import { copyLocale, fillText, t } from './ui-copy.ts'
 
 export const name = PLUGIN_NAME
@@ -104,8 +103,6 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
     dotDomain,
     { logger, domainName: 'dsh_dot' },
   )
-  const query = ctx.get('sessionQuery' as never) as unknown as { readSession(sessionId: string): Promise<{ events: readonly { time?: unknown }[] }> }
-  await restoreTaskTimestamps(domain, async sessionId => (await query.readSession(sessionId)).events.map(event => event.time).filter((time): time is number => typeof time === 'number'), log)
   const store = new DotStore(domain, [...domain.table('tasks').entries()].map(([, value]) => parseTask(value)).filter((task): task is TaskRecord => task !== undefined))
   let sealOwned: ((agent: unknown) => void) | undefined
   const host = bindHost(name => ctx.get(name as never), log, () => store.settings.model, agent => { sealOwned?.(agent) })
@@ -466,21 +463,6 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
         case 'schedule.remove': {
           const id = field(payload, 'id')
           return { ok: true, value: typeof id === 'string' ? await service.removeSchedule(id) : false }
-        }
-        case 'task.confirm': { await service.confirmTask(str(payload, 'id')); return { ok: true, value: true } }
-        case 'task.delete': return { ok: true, value: await service.deleteDraft(str(payload, 'id')) }
-        case 'task.cancel': { await service.cancelTask(str(payload, 'id')); return { ok: true, value: true } }
-        case 'task.review': {
-          const parsed = reviewPayload(payload)
-          if (typeof parsed === 'string') return { ok: false, error: { code: 'dot/invalid', message: parsed } }
-          await service.reviewTask(str(payload, 'id'), parsed.pass, parsed.note)
-          return { ok: true, value: true }
-        }
-        case 'task.priority': {
-          const priority = field(payload, 'priority')
-          if (priority !== 1 && priority !== 2 && priority !== 3) return { ok: false, error: { code: 'dot/invalid', message: 'invalid priority' } }
-          await service.setTaskPriority(str(payload, 'id'), priority)
-          return { ok: true, value: true }
         }
         case 'work.list': {
           const rows = service.store.work.listChanges().map(change => service.workBoard(change.id)).filter(row => row !== undefined)

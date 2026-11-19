@@ -6,10 +6,7 @@ const SCREENSHOT_NOTICE = [
   '[dot notice] Updates from other sessions:',
   '- approval · session-f922364c-9f84-4ca4-af18-38f650070997: ap-23 · approval from untracked session in H:\\Code\\dsh-plugins · "pwsh"',
   '  detail: reason: escalate sandbox to danger-full-access: 需要读取 npm 发布步骤的真实日志，核实匿名下载与完整性匹配。 arguments: {"description":"Read actual npm publication verification lines","command":"gh run view --job 130514884834 --log --step \'Publish changed packages and verify archives\'","justification":"需要读取 npm 发布步骤的真实日志，核实匿名下载与完整性匹配。","sandbox_permissions":"danger-full-access","workdir":"H:\\\\Code\\\\dsh-plugins"}',
-  '  Decide it yourself with dot_answer: approve when the action fits the session\'s goal, stays inside its project, and can be undone. Ask the human first (a show_view confirm card) when it deletes data outside the project, publishes or pushes anything, spends money, touches credentials, or you cannot tell what it does; then relay their decision with dot_answer.',
-  '  The human\'s own rules, which take precedence over the defaults above:',
-  '  > Never delete anything outside the repo.',
-  'Report what matters to the human, handle waiting requests by your rules, and keep quiet about routine progress.',
+  '  human-required: remote-exec; do not use dot_answer.',
 ].join('\n')
 
 const EMPTY_TASKS: TaskLookup = new Map()
@@ -20,10 +17,10 @@ describe('chat-format', () => {
     expect(parsed.entries[0]).toMatchObject({ kind: 'approval', requestId: 'ap-4', taskTitle: 'Build', subject: 'pwsh' })
   })
   it('parses new notice kinds without treating block headings or ready rows as notices', () => {
-    const parsed = parseNotice('[dot notice] Updates:\nTasks:\n- lock-free · s: released\n- task-human · s: confirmed\n- idle-check · dot: Routine check: ready\nReady to start (highest priority first):\n- t-1 P3 read /x "X"')
-    expect(parsed.entries.map(entry => entry.kind)).toEqual(['lock-free', 'task-human', 'idle-check'])
+    const parsed = parseNotice('[dot notice] Updates:\nTasks:\n- task-human · s: confirmed\n- idle-check · dot: Routine check: ready\nReady to start (highest priority first):\n- t-1 P3 read /x "X"')
+    expect(parsed.entries.map(entry => entry.kind)).toEqual(['task-human', 'idle-check'])
     expect(parsed.fallback).toBeUndefined()
-    expect(summarizeNotice(parsed, 'en', EMPTY_TASKS)).toContain('Directory released')
+    expect(summarizeNotice(parsed, 'en', EMPTY_TASKS)).toContain('Human action')
   })
   it('parses an approval notice without leaking model instructions or duplicate fields', () => {
     const parsed = parseNotice(SCREENSHOT_NOTICE)

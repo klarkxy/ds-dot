@@ -46,45 +46,6 @@ function unknownState(): Error {
   return error
 }
 
-describe('ticket migration', () => {
-  const task = (sessionId: string, origin: 'started' | 'watched', status: 'idle' | 'archived' = 'idle') => ({ sessionId, origin, status, title: sessionId, goal: 'goal', cwd: '/work', createdAt: 1, updatedAt: 2, unseenTurns: 0 })
-  it('migrates started sessions once and preserves watched sessions', async () => {
-    const { domain, tables } = fakeDomain({ tasks: { a: task('a', 'started'), b: task('b', 'started', 'archived'), c: task('c', 'watched') } })
-    const store = new DotStore(domain)
-    await store.migrateTickets()
-    expect(store.listTickets().map(row => row.status)).toEqual(['active', 'done'])
-    expect(store.task('a')).toMatchObject({ ticketId: 't-1', role: 'work' })
-    expect(store.task('c')).toEqual(task('c', 'watched'))
-    await new DotStore(domain).migrateTickets()
-    expect(tables.tickets!.size).toBe(2)
-  })
-  it('keeps only the newest finished tickets in the capped memory view', async () => {
-    const tickets = Object.fromEntries(Array.from({ length: 301 }, (_, index) => {
-      const id = `t-${index + 1}`
-      return [id, { id, title: String(index), goal: 'g', dir: '/work', access: 'read', priority: 2, status: 'done', sessions: [], rounds: [], history: [], createdAt: index, updatedAt: index }]
-    }))
-    const { domain } = fakeDomain({ tickets })
-    const store = new DotStore(domain)
-    expect(store.listTickets()).toHaveLength(300)
-    expect(store.ticket('t-1')).toBeUndefined()
-    expect(store.ticket('t-301')).toBeDefined()
-  })
-  it('retries safely when a session row write fails', async () => {
-    const { domain, tables } = fakeDomain({ tasks: { a: task('a', 'started') } })
-    const original = domain.table.bind(domain)
-    let fail = true
-    const failing: DotDomainHandle = { ...domain, table: name => {
-      const table = original(name)
-      return name === 'tasks' ? { ...table, put: async (key, value) => { if (fail) { fail = false; throw new Error('failed') }; await table.put(key, value) } } : table
-    } }
-    const store = new DotStore(failing)
-    await expect(store.migrateTickets()).rejects.toThrow('failed')
-    expect(tables.state!.get('current')).toBeUndefined()
-    await new DotStore(domain).migrateTickets()
-    expect(tables.tickets!.size).toBe(1)
-    expect(tables.state!.get('current')).toMatchObject({ ticketsMigrated: '1' })
-  })
-})
 
 describe('DotStore', () => {
   it('round-trips tasks and the dot identity through the domain', async () => {
@@ -132,19 +93,6 @@ describe('DotStore', () => {
     expect(store.board([]).tasks.map(task => task.sessionId)).toEqual(['w'])
   })
 
-  it('shows tasks on the board with derived flags and keeps only watched sessions in tasks', async () => {
-    const ticket = { id: 't-1', title: 'Ship it', goal: 'g', dir: '/work', access: 'write', priority: 2, status: 'active', sessions: [{ sessionId: 's', role: 'work', at: 3 }], rounds: [], history: [], createdAt: 1, updatedAt: 2 }
-    const { domain, puts } = fakeDomain({ tickets: { [ticket.id]: ticket }, tasks: {
-      s: { sessionId: 's', origin: 'started', title: 'T', goal: 'G', cwd: '/work', ticketId: ticket.id, role: 'work', status: 'idle', createdAt: 3, updatedAt: 3, unseenTurns: 0 },
-    } })
-    const store = new DotStore(domain)
-    const board = store.board([{ id: 'ap-1', kind: 'approval', sessionId: 's', createdAt: 4, subject: 'bash' }])
-    expect(puts).toEqual([])
-    expect(store.ticketForSession('s')).toEqual(ticket)
-    expect(board.tasks).toEqual([])
-    expect(board.tickets).toHaveLength(1)
-    expect(board.tickets[0]).toMatchObject({ id: ticket.id, status: 'active', waiting: true, orphaned: false })
-  })
 
   it('keeps reminders across a reload, the one due first on top, and deletes them for good', async () => {
     const { domain, tables, puts } = fakeDomain({ schedules: { broken: { id: 'broken' }, moved: { id: 'other', title: 't', prompt: 'p', timing: { kind: 'once', at: 5 }, createdAt: 1, nextAt: 5 } } })
@@ -207,6 +155,65 @@ describe('DotStore', () => {
     expect(await illegal.work.reserveRun({ changeId: 'c-1', writeScope: { kind: 'paths', paths: [] } })).toMatchObject({ code: 'recovery' })
   })
 
+
+  it('puts the first input and change, then updates the saved change', async () => {
+    const { domain, puts, tables } = fakeDomain()
+    await expect(domain.table('inputs').update!('input-1', value => value)).rejects.toMatchObject({ code: 'missing-key' })
+    const store = new DotStore(domain)
+    const change = await store.work.createChange({ title: 'Recipe', cwd: 'H:\\shared', goal: 'land it', at: 1 })
+    expect(puts.slice(0, 2)).toEqual(['inputs:input-1', 'changes:c-1'])
+    expect(puts.some(op => op.startsWith('inputs:update:') || op.startsWith('changes:update:'))).toBe(false)
+    const reserved = await store.work.reserveRun({ changeId: change.id, cwd: 'H:\\shared', writeScope: { kind: 'paths', paths: [] }, at: 2 })
+    if (!reserved.ok) throw new Error(reserved.message)
+    expect(puts).toContain(`runs:${reserved.run.id}`)
+    expect(puts).not.toContain(`runs:update:${reserved.run.id}`)
+    const paused = await store.work.setControl(change.id, 'paused', 3)
+    expect(paused).toMatchObject({ id: change.id, control: 'paused' })
+    expect(puts.at(-1)).toBe(`changes:update:${change.id}`)
+    const reloaded = new DotStore(domain)
+    expect(reloaded.work.change(change.id)?.control).toBe('paused')
+    expect(reloaded.work.input(change.currentInputRef)?.goal).toBe('land it')
+    expect(tables.inputs!.has('input-1')).toBe(true)
+    expect(tables.changes!.has(change.id)).toBe(true)
+  })
+
+  it('seals scheduling when updating an existing work row is unknown', async () => {
+    const { domain } = fakeDomain()
+    const original = domain.table.bind(domain)
+    let unknown = false
+    const wrapped: DotDomainHandle = {
+      ...domain,
+      table: name => {
+        const table = original(name)
+        return {
+          ...table,
+          update: async (key, recipe) => {
+            if (unknown && name === 'changes') throw unknownState()
+            return table.update!(key, recipe)
+          },
+        }
+      },
+    }
+    const store = new DotStore(wrapped)
+    const change = await store.work.createChange({ title: 'A', cwd: 'H:\\proj', goal: 'a', at: 1 })
+    unknown = true
+    await expect(store.work.setControl(change.id, 'paused', 2)).rejects.toMatchObject({ code: 'unknown-state' })
+    expect(store.work.change(change.id)?.control).toBe('open')
+    expect(store.work.recoveryError).toMatch(/unknown-state/)
+    expect(await store.work.reserveRun({ changeId: change.id, cwd: 'H:\\else', writeScope: { kind: 'paths', paths: [] }, at: 3 })).toMatchObject({ code: 'recovery' })
+  })
+
+  it('shows watched sessions in tasks and started sessions under startedTasks', async () => {
+    const { domain } = fakeDomain({ tasks: {
+      s: { sessionId: 's', origin: 'started', title: 'T', goal: 'G', cwd: '/work', status: 'idle', createdAt: 3, updatedAt: 3, unseenTurns: 0 },
+      w: { sessionId: 'w', origin: 'watched', title: 'W', goal: 'G', cwd: '/home', status: 'running', createdAt: 2, updatedAt: 4, unseenTurns: 2 },
+    } })
+    const store = new DotStore(domain)
+    const board = store.board([{ id: 'ap-1', kind: 'approval', sessionId: 's', createdAt: 4, subject: 'bash' }])
+    expect(board.tasks.map(task => task.sessionId)).toEqual(['w'])
+    expect(board.startedTasks?.map(task => task.sessionId)).toEqual(['s'])
+  })
+
   it('seals scheduling when a schedule delete, proposal delete, or direct state write is unknown', async () => {
     const { domain } = fakeDomain()
     const original = domain.table.bind(domain)
@@ -260,7 +267,7 @@ describe('DotStore', () => {
     mode = 'off'
     const state = new DotStore(wrapped)
     mode = 'state'
-    await expect(state.commitKnowledgeMigration({ knowledgeMigrated: '1' })).rejects.toMatchObject({ code: 'unknown-state' })
+    await expect(state.setAgreements('a rule')).rejects.toMatchObject({ code: 'unknown-state' })
     expect(state.work.dispatchAllowed(reserved.run.id)).toMatchObject({ code: 'recovery' })
     expect(await state.work.addDelivery(reserved.run.id, followUp)).toMatchObject({ code: 'recovery' })
     expect(await state.work.reserveRun({ changeId: change.id, cwd: 'D:\\else', writeScope: { kind: 'paths', paths: [] }, at: 5 })).toMatchObject({ code: 'recovery' })
@@ -271,53 +278,6 @@ describe('DotStore', () => {
     await expect(plain.deleteSchedule('sch-2')).rejects.toThrow('disk failure')
     expect(plain.work.recoveryError).toBeUndefined()
     expect(plain.work.dispatchAllowed(reserved.run.id)).toEqual({ ok: true })
-  })
-
-  it('puts the first input and change, then updates the saved change', async () => {
-    const { domain, puts, tables } = fakeDomain()
-    await expect(domain.table('inputs').update!('input-1', value => value)).rejects.toMatchObject({ code: 'missing-key' })
-    const store = new DotStore(domain)
-    const change = await store.work.createChange({ title: 'Recipe', cwd: 'H:\\shared', goal: 'land it', at: 1 })
-    expect(puts.slice(0, 2)).toEqual(['inputs:input-1', 'changes:c-1'])
-    expect(puts.some(op => op.startsWith('inputs:update:') || op.startsWith('changes:update:'))).toBe(false)
-    const reserved = await store.work.reserveRun({ changeId: change.id, cwd: 'H:\\shared', writeScope: { kind: 'paths', paths: [] }, at: 2 })
-    if (!reserved.ok) throw new Error(reserved.message)
-    expect(puts).toContain(`runs:${reserved.run.id}`)
-    expect(puts).not.toContain(`runs:update:${reserved.run.id}`)
-    const paused = await store.work.setControl(change.id, 'paused', 3)
-    expect(paused).toMatchObject({ id: change.id, control: 'paused' })
-    expect(puts.at(-1)).toBe(`changes:update:${change.id}`)
-    const reloaded = new DotStore(domain)
-    expect(reloaded.work.change(change.id)?.control).toBe('paused')
-    expect(reloaded.work.input(change.currentInputRef)?.goal).toBe('land it')
-    expect(tables.inputs!.has('input-1')).toBe(true)
-    expect(tables.changes!.has(change.id)).toBe(true)
-  })
-
-  it('seals scheduling when updating an existing work row is unknown', async () => {
-    const { domain } = fakeDomain()
-    const original = domain.table.bind(domain)
-    let unknown = false
-    const wrapped: DotDomainHandle = {
-      ...domain,
-      table: name => {
-        const table = original(name)
-        return {
-          ...table,
-          update: async (key, recipe) => {
-            if (unknown && name === 'changes') throw unknownState()
-            return table.update!(key, recipe)
-          },
-        }
-      },
-    }
-    const store = new DotStore(wrapped)
-    const change = await store.work.createChange({ title: 'A', cwd: 'H:\\proj', goal: 'a', at: 1 })
-    unknown = true
-    await expect(store.work.setControl(change.id, 'paused', 2)).rejects.toMatchObject({ code: 'unknown-state' })
-    expect(store.work.change(change.id)?.control).toBe('open')
-    expect(store.work.recoveryError).toMatch(/unknown-state/)
-    expect(await store.work.reserveRun({ changeId: change.id, cwd: 'H:\\else', writeScope: { kind: 'paths', paths: [] }, at: 3 })).toMatchObject({ code: 'recovery' })
   })
 })
 
@@ -334,15 +294,6 @@ describe('DotStore settings proposals', () => {
 })
 
 describe('DotStore agreements and cognition', () => {
-  it('preserves existing cognition history when a legacy import supplies an undo version', async () => {
-    const { domain } = fakeDomain()
-    const store = new DotStore(domain)
-    const existing = [{ text: 'an existing version', at: 10 }]
-    await store.setDot({ cognitionHistory: existing })
-    await store.commitKnowledgeMigration({ cognition: 'imported notes', cognitionHistory: [{ text: 'old undo', at: 20 }], knowledgeMigrated: '1' })
-    expect(store.cognitionHistory).toEqual(existing)
-    expect(new DotStore(domain).cognitionHistory).toEqual(existing)
-  })
 
   it('keeps agreements and one undo step across a reload', async () => {
     const { domain } = fakeDomain()
@@ -399,79 +350,11 @@ describe('DotStore agreements and cognition', () => {
     expect(store.cognition).toBe('')
   })
 
-  it('exposes the legacy fields only to migration and marks the import done', async () => {
-    const { domain } = fakeDomain({ state: { current: { memory: 'old notes', memoryUndo: 'older notes' } } })
-    const store = new DotStore(domain)
-    expect(store.legacyMemory).toBe('old notes')
-    expect(store.legacyMemoryUndo).toBe('older notes')
-    expect(store.knowledgeMigrated).toBe(false)
-    await store.commitKnowledgeMigration({ knowledgeMigrated: '1' })
-    expect(new DotStore(domain).knowledgeMigrated).toBe(true)
-  })
 })
 
-describe('DotStore knowledge migration commit', () => {
-  it('sets the marker only after the write succeeds, so a failed import retries without losing the note', async () => {
-    const tables: Record<string, Map<string, unknown>> = { state: new Map(), tasks: new Map(), tickets: new Map(), schedules: new Map(), proposals: new Map() }
-    let failStatePut = true
-    const domain: DotDomainHandle = {
-      table: name => ({
-        entries: () => tables[name]!.entries(),
-        get: key => tables[name]!.get(key),
-        put: async (key, value) => {
-          if (name === 'state' && failStatePut) { failStatePut = false; throw new Error('put down') }
-          tables[name]!.set(key, value)
-        },
-        delete: async key => tables[name]!.delete(key),
-      }),
-      close: async () => {},
-    }
-    const store = new DotStore(domain)
-    await expect(store.commitKnowledgeMigration({ agreements: '- old note\n', knowledgeMigrated: '1' })).rejects.toThrow('put down')
-    // Nothing reached memory, so the next attempt retries from the old note.
-    expect(store.agreements).toBe('')
-    expect(store.knowledgeMigrated).toBe(false)
-    await store.commitKnowledgeMigration({ agreements: '- old note\n', knowledgeMigrated: '1' })
-    expect(store.knowledgeMigrated).toBe(true)
-    expect(new DotStore(domain).agreements).toBe('- old note\n')
-  })
-
-  it('keeps concurrent settings and the migration marker when the state write is slow', async () => {
-    const tables: Record<string, Map<string, unknown>> = { state: new Map(), tasks: new Map(), tickets: new Map(), schedules: new Map(), proposals: new Map() }
-    let release!: () => void
-    const gate = new Promise<void>(resolve => { release = resolve })
-    let firstStatePut = true
-    const domain: DotDomainHandle = {
-      table: name => ({
-        entries: () => tables[name]!.entries(),
-        get: key => tables[name]!.get(key),
-        put: async (key, value) => {
-          if (name === 'state' && firstStatePut) { firstStatePut = false; await gate }
-          tables[name]!.set(key, value)
-        },
-        delete: async key => tables[name]!.delete(key),
-      }),
-      close: async () => {},
-    }
-    const store = new DotStore(domain)
-    const committing = store.commitKnowledgeMigration({ agreements: '- old note\n', knowledgeMigrated: '1' })
-    // A settings write lands while the migration's state put is still in flight (queued, not awaited yet).
-    const setting = store.setSettings({ ...DEFAULT_SETTINGS, scope: 'tracked' })
-    release()
-    await Promise.all([committing, setting])
-    await store.flush()
-    const reloaded = new DotStore(domain)
-    // Neither the concurrent setting nor the import was lost on disk or in memory.
-    expect(reloaded.knowledgeMigrated).toBe(true)
-    expect(reloaded.agreements).toBe('- old note\n')
-    expect(reloaded.settings.scope).toBe('tracked')
-    expect(store.settings.scope).toBe('tracked')
-    expect(store.knowledgeMigrated).toBe(true)
-  })
-})
 
 describe('factory reset of the store', () => {
-  it('wipes tables, restores default settings, and keeps the migration marker', async () => {
+  it('wipes tables, restores default settings, and wipes data clean', async () => {
     const { domain, tables } = fakeDomain({
       tasks: { s1: { sessionId: 's1', origin: 'started', title: 't', goal: 'g', cwd: '/w', status: 'idle', createdAt: 1, updatedAt: 1, unseenTurns: 0 } },
       schedules: { sch: { id: 'sch', title: 'ping', prompt: 'check', timing: { kind: 'once', at: 9 }, createdAt: 1, nextAt: 9 } },
@@ -489,7 +372,6 @@ describe('factory reset of the store', () => {
     expect(store.agreements).toBe('')
     expect(store.cognition).toBe('')
     expect(store.settings).toEqual(DEFAULT_SETTINGS)
-    expect(store.knowledgeMigrated).toBe(true)
     expect(store.lastFactoryResetAt).toBe(5000)
     expect(store.dotSessionId).toBeUndefined()
     expect([...tables.tasks.keys()]).toEqual([])
@@ -497,7 +379,7 @@ describe('factory reset of the store', () => {
     const reloaded = new DotStore(domain)
     expect(reloaded.settings).toEqual(DEFAULT_SETTINGS)
     expect(reloaded.lastFactoryResetAt).toBe(5000)
-    expect(reloaded.knowledgeMigrated).toBe(true)
     expect(reloaded.list()).toEqual([])
   })
+
 })

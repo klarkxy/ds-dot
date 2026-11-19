@@ -8,19 +8,12 @@
  *   rewritten whole by dot or by the reflection pass.
  *
  * Both live in DotStore, not on disk, so a task opened in dot's workspace can
- * never edit them or inject into dot's prompt. This file holds the text rules
- * plus a one-time reader for the old memory.md / cognition.md files, which are
- * read once for migration and never authoritative afterwards.
+ * never edit them or inject into dot's prompt. This file holds the text rules.
  */
-import { readFile } from 'node:fs/promises'
-import { join } from 'node:path'
 import { AGREEMENTS_MAX_CHARS, AGREEMENT_ENTRY_MAX_CHARS, COGNITION_MAX_CHARS, TOOL } from './contracts.ts'
 
 export { AGREEMENTS_MAX_CHARS, AGREEMENT_ENTRY_MAX_CHARS, COGNITION_MAX_CHARS }
 
-/** Legacy note files, read once during migration. */
-export const MEMORY_FILE = 'memory.md'
-export const COGNITION_FILE = 'cognition.md'
 export class KnowledgeError extends Error {
   constructor(readonly code: 'dot/invalid' | 'dot/agreements-full' | 'dot/unknown-agreement' | 'dot/ambiguous-agreement', message: string) { super(message); this.name = 'KnowledgeError' }
 }
@@ -34,20 +27,6 @@ export function normalizeEntry(text: string): string {
 /** The list items of the agreements, in text order. Other lines (headings, prose) are not entries. */
 export function entriesOf(text: string): string[] {
   return text.split(/\r?\n/).filter(line => BULLET.test(line)).map(line => line.replace(BULLET, '').trim()).filter(Boolean)
-}
-
-/**
- * Turn the old free-form "policy" into agreement list items so the agreements
- * tools (which work on list items) can find and remove them: one item per
- * non-empty line, keeping any existing bullet and the human's exact words.
- */
-export function policyAsAgreements(policy: string): string {
-  return policy
-    .split(/\r?\n/)
-    .map(line => line.trim())
-    .filter(Boolean)
-    .map(line => BULLET.test(line) ? line : `- ${line}`)
-    .join('\n')
 }
 
 /** The agreements with one more list item at the end. */
@@ -96,8 +75,7 @@ export function normalizeCognition(text: string): string {
 /**
  * The [agreements] block of dot's system prompt; empty when there are none.
  * The text is carried whole, even past AGREEMENTS_MAX_CHARS: the limit guards new
- * writes, while a legacy policy import may legitimately exceed it and no user rule
- * at the tail may be cut out of the prompt.
+ * writes, and no user rule at the tail may be cut out of the prompt.
  */
 export function agreementsSection(text: string): string {
   const body = text.trim()
@@ -140,22 +118,4 @@ export function agreementNotesBlock(notes: string): string {
     '',
     body,
   ].join('\n')
-}
-
-/** The legacy note files. A missing file reads as empty; only migration uses these. */
-export class MemoryNotes {
-  constructor(private readonly dir: string) {}
-
-  get path(): string { return join(this.dir, MEMORY_FILE) }
-  get cognitionPath(): string { return join(this.dir, COGNITION_FILE) }
-
-  read(): Promise<string> { return this.readFile(this.path) }
-  readCognition(): Promise<string> { return this.readFile(this.cognitionPath) }
-
-  private async readFile(path: string): Promise<string> {
-    try { return await readFile(path, 'utf8') } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return ''
-      throw error
-    }
-  }
 }

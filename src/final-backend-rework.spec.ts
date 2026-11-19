@@ -130,10 +130,10 @@ describe('C backend rework', () => {
         const filler = await h.service.recordWorkVerification(change.id, [], [], { inputRef: current.currentInputRef, inputRevision: current.currentRevision })
         if (!('id' in filler)) throw new Error(filler.message)
       }
-      const accepted = await h.service.recordWorkVerification(change.id, [{ requirementRef: 'r1', applicability: 'applicable', verdict: 'pass', evidenceRefs: ['log-1'] }], [review.id], {
+      const accepted = await h.service.recordWorkVerification(change.id, [{ requirementRef: 'r1', applicability: 'applicable', verdict: 'pass', evidenceRefs: ['run:run-1'] }], [review.id], {
         inputRef: current.currentInputRef, inputRevision: current.currentRevision, reviewRunId: review.id, reviewerSessionId: review.sessionId, subject,
       })
-      const blocked = await h.service.recordWorkVerification(change.id, [{ requirementRef: 'r1', applicability: 'applicable', verdict: 'fail', evidenceRefs: ['log-1'] }], [review.id], {
+      const blocked = await h.service.recordWorkVerification(change.id, [{ requirementRef: 'r1', applicability: 'applicable', verdict: 'fail', evidenceRefs: ['run:run-1'] }], [review.id], {
         inputRef: current.currentInputRef, inputRevision: current.currentRevision, reviewRunId: review.id, reviewerSessionId: review.sessionId, subject,
       })
       if (!('id' in accepted) || !('id' in blocked)) throw new Error('verification was not recorded')
@@ -156,7 +156,7 @@ describe('C backend rework', () => {
         const filler = await h.service.recordWorkVerification(change.id, [], [], { inputRef: current.currentInputRef, inputRevision: current.currentRevision })
         if (!('id' in filler)) throw new Error(filler.message)
       }
-      const older = await h.service.recordWorkVerification(change.id, [{ requirementRef: 'r1', applicability: 'applicable', verdict: 'pass', evidenceRefs: ['log-1'] }], [review.id], {
+      const older = await h.service.recordWorkVerification(change.id, [{ requirementRef: 'r1', applicability: 'applicable', verdict: 'pass', evidenceRefs: ['run:run-1'] }], [review.id], {
         inputRef: current.currentInputRef, inputRevision: current.currentRevision, reviewRunId: review.id, reviewerSessionId: review.sessionId, subject,
       })
       const unverified = await h.service.recordWorkVerification(change.id, [{ requirementRef: 'r1', applicability: 'applicable', verdict: 'pass', evidenceRefs: [] }], [review.id], {
@@ -198,7 +198,7 @@ describe('C backend rework', () => {
     const blocked = harness({ taskModels: { mode: 'allow', list: [] }, taskPermission: 'danger-full-access' }, { sessions })
     sessions[0]!.cwd = blocked.project
     try {
-      const looked = await blocked.service.startTask({ cwd: blocked.project, title: 'Ship', instruction: 'edit', checkOnly: true, access: 'write' }, blocked.exec.signal)
+      const looked = await blocked.service.manageTask({action: 'check',  dir: blocked.project, title: 'Ship', message: 'edit', access: 'write' })
       expect(blocked.calls.filter(call => call === 'listSessions').length).toBeGreaterThan(0)
       expect(looked).toContain('human-running')
       expect(looked).not.toBe('Directory lock is available.')
@@ -220,17 +220,17 @@ describe('C backend rework', () => {
     } finally { allowed.cleanup() }
   })
 
-  it('exposes steps, input history, behavior, concurrency and pause or cancel', async () => {
+  it('exposes steps, input history, constraints, concurrency and pause or cancel', async () => {
     const h = harness()
     try {
       const created = JSON.parse(await h.task.execute({
         action: 'create', title: 'Ship', goal: 'land it', dir: h.project,
         steps: JSON.stringify([{ stepRef: 's1', text: 'edit a.ts' }]),
-        behavior_notes: 'keep the tests', max_concurrent: 3,
+        constraints: JSON.stringify([{ constraintRef: 'k1', text: 'keep the tests' }]), max_concurrent: 3,
       })) as { id: string }
-      const read = JSON.parse(await h.task.execute({ action: 'read', task_id: created.id })) as { steps: Array<{ stepRef: string; text: string; done: boolean }>; behaviorNotes: string; maxConcurrentRuns: number; history: Array<{ id: string; revision: number }> }
+      const read = JSON.parse(await h.task.execute({ action: 'read', task_id: created.id })) as { steps: Array<{ stepRef: string; text: string; done: boolean }>; constraints: Array<{ constraintRef: string; text: string }> | undefined; maxConcurrentRuns: number; history: Array<{ id: string; revision: number }> }
       expect(read.steps).toEqual([expect.objectContaining({ stepRef: 's1', text: 'edit a.ts', done: false })])
-      expect(read.behaviorNotes).toBe('keep the tests')
+      expect(read.constraints).toEqual([expect.objectContaining({ constraintRef: 'k1', text: 'keep the tests' })])
       expect(read.maxConcurrentRuns).toBe(3)
       const revised = JSON.parse(await h.task.execute({ action: 'revise', task_id: created.id, goal: 'land it later' })) as { revision: number }
       expect(revised.revision).toBe(2)
@@ -250,9 +250,6 @@ describe('C backend rework', () => {
       expect(h.store.work.change(created.id)?.currentRevision).toBe(current.currentRevision)
       expect(await h.task.execute({ action: 'cancel', task_id: created.id })).toContain(`cancelled ${created.id}`)
       expect(h.store.work.change(created.id)?.control).toBe('cancelled')
-      await expect(h.service.manageTask({ action: 'move', task_id: created.id, to: 'done', reason: 'no' })).rejects.toMatchObject({ code: 'dot/legacy-closed' })
-      await expect(h.service.manageTask({ action: 'note', task_id: created.id, role: 'review', summary: 'no' })).rejects.toMatchObject({ code: 'dot/legacy-closed' })
-      await expect(h.service.manageTask({ action: 'delete', task_id: created.id })).rejects.toMatchObject({ code: 'dot/legacy-closed' })
       expect(h.task.description).toContain('decide')
       expect(h.task.description).not.toContain('decide: pass accepts')
     } finally { h.cleanup() }

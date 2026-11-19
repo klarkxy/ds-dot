@@ -11,14 +11,14 @@ describe('chatItems', () => {
       ev(1, 'turn/start', { turn: 1 }),
       ev(2, 'user/message', { content: [{ type: 'text', text: 'hi' }], source: { kind: 'user' } }),
       ev(3, 'assistant/message', { message: { content: [{ type: 'thinking', text: 'hmm' }, { type: 'text', text: 'On it.' }] } }),
-      ev(4, 'tool/call', { callId: 'c1', name: 'dot_start_task', arguments: '{}' }),
+      ev(4, 'tool/call', { callId: 'c1', name: 'dot_task', arguments: '{}' }),
       ev(5, 'tool/result', { message: { toolCallId: 'c1', content: [{ type: 'text', text: 'Started task s1' }] } }),
       ev(6, 'user/message', { content: [{ type: 'text', text: '[dot notice] Updates' }], source: { kind: 'agent-message', form: 'relay' } }),
       ev(7, 'turn/end', { reason: { kind: 'error', error: { message: 'rate limited' } } }),
     ])
     expect(items.map(item => item.kind)).toEqual(['user', 'bot', 'tool', 'notice', 'error'])
     expect(items[1]).toMatchObject({ text: 'On it.' })
-    expect(items[2]).toMatchObject({ name: 'dot_start_task', status: 'done', detail: 'Started task s1' })
+    expect(items[2]).toMatchObject({ name: 'dot_task', status: 'done', detail: 'Started task s1' })
     expect(items[4]).toMatchObject({ text: 'rate limited' })
   })
 

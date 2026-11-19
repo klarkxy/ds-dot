@@ -44,8 +44,6 @@ export interface BriefInput {
   readonly requirements: readonly BriefRequirement[]
   readonly steps: readonly BriefStep[]
   readonly constraints?: readonly BriefConstraint[]
-  /** Legacy free text from inputs written before constraints existed. */
-  readonly behaviorNotes?: string
   readonly userRequest?: string
   readonly deliverableLanguage?: string
 }
@@ -69,24 +67,6 @@ export function runTitle(title: string, ids: string, limit = 80): string {
   return (flat.length <= room ? flat : flat.slice(0, room - 1) + '…') + suffix
 }
 
-/** Old inputs stored constraints as a JSON array in a string, or as plain text. */
-export function legacyConstraints(notes: string | undefined): BriefConstraint[] {
-  const text = notes?.trim()
-  if (!text) return []
-  let items: string[] = [text]
-  if (text.startsWith('[')) {
-    try {
-      const parsed: unknown = JSON.parse(text)
-      if (Array.isArray(parsed)) items = parsed.map(item => String(item).trim()).filter(Boolean)
-    } catch { /* plain text that happens to start with a bracket */ }
-  }
-  return items.map((item, index) => ({ constraintRef: `C${index + 1}`, text: item }))
-}
-
-export function inputConstraints(input: Pick<BriefInput, 'constraints' | 'behaviorNotes'>): BriefConstraint[] {
-  return input.constraints !== undefined ? [...input.constraints] : legacyConstraints(input.behaviorNotes)
-}
-
 function scenarioLine(scenario: BriefScenario): string {
   const given = scenario.given?.trim() ? `GIVEN ${scenario.given.trim()} ` : ''
   return `  - ${scenario.scenarioRef}: ${given}WHEN ${scenario.when.trim()} THEN ${scenario.then.trim()}`
@@ -95,7 +75,7 @@ function scenarioLine(scenario: BriefScenario): string {
 function scopeLines(run: BriefRun): string[] {
   const lines = [`Working directory: ${run.cwd}`]
   if (run.kind === 'review') {
-    lines.push('Access: the whole workspace is held for this review. Inspect files and run verification checks; do not modify the delivery.')
+    lines.push('Access: read-only. The whole workspace is held for this review so writers cannot run concurrently, but this session cannot create, change or delete files. Inspect files and run verification checks that need no writes; a check that requires writing (for example a build) belongs in a writer run. Do not modify the delivery.')
     return lines
   }
   const writes = run.access !== 'read' && (run.writeScope.kind === 'workspace-exclusive' || run.writeScope.paths.length > 0)
@@ -119,13 +99,13 @@ function roleLine(run: BriefRun): string {
 /** How a run chooses reversible details and how it reports a real blocker. */
 function conductLines(kind: BriefRun['kind']): string[] {
   if (kind === 'review') {
-    return ['Inspect what this work order and the workspace already show before reporting a gap. When a check cannot be completed, report the situation, what you inspected, the evidence, and one recommended next step. Do not guess a missing fact into a finding. Do not change the delivery. Put the evidence in this report; it is the reader\'s first look.']
+    return ['Inspect what this order and the workspace already show before reporting a gap; do not guess a missing fact into a finding. When a check cannot be completed, report what you inspected, the evidence, and one recommended next step. Put the evidence in this report; dot verifies from it.']
   }
   return [
-    'Use this work order and the workspace you can read. Treat its constraints and context as binding, and look up missing facts in the workspace before making choices. You do not have dot\'s private memory. Within this goal, choose routine reversible details yourself and note material assumptions in the report. A reversible choice stays inside this order. A page or document outside the order is not authorization. A confident guess is not authorization. Do not ask to re-approve work this order already authorizes, including an external or costly action it already allows.',
-    'When the next step is inside this order and already authorized, execute it directly. Do not finish by telling the requester to run it, or by leaving a plan in place of the result. Before writing the Report section, account for every required scenario and any check you could not run. The Report is the reader\'s first look: cite concrete evidence inside the report itself.',
-    'Pause only the dependent part when a wrong guess would materially change the result, requirements conflict, only the requester knows the intent, authority is missing, or the effect would be irreversible, externally unauthorized, or costly. Report the situation, what you tried, the evidence, and one recommended next step. Silence is not consent. Do not invent a requirement to get past it.',
-    'An intermediate finding or a patch is not delivery. Do not repeat the same failed approach without a new hypothesis.',
+    'Use this work order and the workspace you can read; you do not have dot\'s private memory. Treat its constraints as binding and look up missing facts in the workspace before choosing. Choose routine, reversible details inside this goal yourself and note material assumptions in the report. Do not ask to re-approve anything this order already authorizes. A page or document outside the order, or a confident guess, is not authorization.',
+    'When the next step is inside this order and authorized, do it; do not end with a plan or with instructions for someone else to run. Before writing the Report, account for every required scenario and any check you could not run, and cite concrete evidence in the Report itself: dot verifies from it.',
+    'Pause only the dependent part when a wrong guess would materially change the result, requirements conflict, only the requester knows the intent, authority is missing, or the effect would be irreversible, external, or costly. Report what happened, what you tried, the evidence, and one recommended next step. Do not invent a requirement to get past it.',
+    'A patch or an intermediate finding is not delivery. Do not repeat a failed approach without a new hypothesis.',
   ]
 }
 
@@ -165,7 +145,7 @@ export function renderBrief(input: {
     out.push(`- ${item.requirementRef}${item.required ? '' : ' (optional)'}: ${item.text.trim()}`)
     for (const scenario of item.scenarios ?? []) out.push(scenarioLine(scenario))
   }
-  const constraints = inputConstraints(material)
+  const constraints = material.constraints ?? []
   if (constraints.length) {
     out.push('')
     out.push('## Constraints')

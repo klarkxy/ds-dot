@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { applyEvent, createTask, formatAge, ledgerSummary, sortTasks, withPending } from './ledger.ts'
-import type { PendingView, Ticket } from './contracts.ts'
+import { applyEvent, createTask, formatAge, ledgerSummary, sortTasks, withPending, type WorkLedgerItem } from './ledger.ts'
+import type { PendingView } from './contracts.ts'
 
 const task = (id = 's1', at = 0) => createTask({ sessionId: id, origin: 'started', title: 'Fix login', goal: 'make login work', cwd: '/w', at })
 
@@ -55,17 +55,16 @@ describe('ledger', () => {
     expect(text).toContain('q-1 question from a: Which DB?')
   })
 
-  it('sorts using only the latest session error and shows each waiting request on the task', () => {
-    const base: Ticket = { id: 't-1', title: 'old error', goal: 'g', dir: '/a', access: 'read', status: 'active', priority: 1, sessions: [{ sessionId: 'old', role: 'work', at: 1 }, { sessionId: 'new', role: 'rework', at: 2 }], rounds: [], history: [], createdAt: 1, updatedAt: 2 }
-    const high: Ticket = { ...base, id: 't-2', title: 'high', dir: '/b', priority: 3, sessions: [{ sessionId: 'high', role: 'work', at: 1 }] }
-    const rows = [{ ...task('old'), status: 'error' as const }, task('new'), task('high')]
-    const plain = ledgerSummary(rows, [], 0, [base, high])
-    expect(plain.indexOf('t-2 ACTIVE')).toBeLessThan(plain.indexOf('t-1 ACTIVE'))
-    const withWaiting = ledgerSummary(rows, [{ id: 'ap-4', kind: 'approval', sessionId: 'old', subject: 'write', createdAt: 0 }], 0, [base, high])
-    expect(withWaiting.indexOf('t-1 ACTIVE')).toBeLessThan(withWaiting.indexOf('t-2 ACTIVE'))
-    expect(withWaiting.split('\n').find(line => line.includes('t-1 ACTIVE'))).toContain('WAITING ap-4')
-    const latestError = ledgerSummary(rows.map(row => row.sessionId === 'new' ? { ...row, status: 'error' as const } : row), [], 0, [base, high])
-    expect(latestError.indexOf('t-1 ACTIVE')).toBeLessThan(latestError.indexOf('t-2 ACTIVE'))
+  it('sorts urgent and higher-priority changes first and shows each waiting request on its change', () => {
+    const base: WorkLedgerItem = { id: 'c-1', title: 'old error', cwd: '/a', status: 'active', control: 'open', priority: 1, revision: 1, sessionIds: ['old', 'new'], blockers: [], activeRuns: 0 }
+    const high: WorkLedgerItem = { ...base, id: 'c-2', title: 'high', cwd: '/b', priority: 3, sessionIds: ['high'] }
+    const plain = ledgerSummary([], [], 0, [base, high])
+    expect(plain.indexOf('c-2 ACTIVE')).toBeLessThan(plain.indexOf('c-1 ACTIVE'))
+    const withWaiting = ledgerSummary([], [{ id: 'ap-4', kind: 'approval', sessionId: 'old', subject: 'write', createdAt: 0 }], 0, [base, high])
+    expect(withWaiting.indexOf('c-1 ACTIVE')).toBeLessThan(withWaiting.indexOf('c-2 ACTIVE'))
+    expect(withWaiting.split('LINEJOIN').find(line => line.includes('c-1 ACTIVE'))).toContain('WAITING ap-4')
+    const rework = ledgerSummary([], [], 0, [{ ...base, status: 'rework' }, high])
+    expect(rework.indexOf('c-1 REWORK')).toBeLessThan(rework.indexOf('c-2 ACTIVE'))
   })
 
   it('formats ages', () => {

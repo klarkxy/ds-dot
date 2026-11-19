@@ -5,7 +5,7 @@
  * 2. Git repository & worktree `commondir` mutual-exclusion root detection.
  * 3. Unified WorkBook observability across `ledgerSummary`, `IdleChecker`,
  *    `headerBoardCounts`, `sessionLookup`, and read-only `Run` approval escalation.
- * 4. Atomic `capture_baseline` / `dispatch` and deterministic `closeout` (`acceptDirect`),
+ * 4. Atomic dispatch and deterministic `closeout` (`acceptDirect`),
  *    including human-oversight (`human_review`) gating without double-counting badges.
  */
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
@@ -182,7 +182,7 @@ describe('git worktree common-dir discovery', () => {
 })
 
 describe('WorkBook observability seams & atomic closeout pipeline', () => {
-  it('completes a single-file Change via capture_baseline + closeout and surfaces Changes in overview, idle-check, board counts, and read-only approval risk', async () => {
+  it('completes a single-file Change via dispatch + closeout and surfaces Changes in overview, idle-check, board counts, and read-only approval risk', async () => {
     const h = createHarness({ scope: 'tracked' })
     try {
       await h.store.setDot({ dotSessionId: 'dot-session' })
@@ -195,7 +195,6 @@ describe('WorkBook observability seams & atomic closeout pipeline', () => {
         instruction: 'Replace old-link with new-link in doc.md',
         access: 'write',
         paths,
-        capture_baseline: true,
       }, h.exec)
       const runId = /started (run-\d+)/.exec(started)?.[1]
       const changeId = /on (c-\d+)/.exec(started)?.[1]
@@ -236,17 +235,15 @@ describe('WorkBook observability seams & atomic closeout pipeline', () => {
       writeFileSync(join(h.project, 'doc.md'), 'new-link')
       expect(await h.taskTool.execute({ action: 'finish', task_id: changeId!, run_id: runId!, verdict: 'pass' })).toContain(`completed ${runId}`)
 
-      const idle = idleCandidates(h.store.listTickets(), h.store.list(), [], h.store.workIdle())
-      expect(idle.map(item => item.changeId)).toContain(changeId)
+      const idle = idleCandidates(h.store.list(), [], h.store.workIdle())
+      expect(idle.map(item => item.id)).toContain(changeId)
 
       const closed = await h.taskTool.execute({
         action: 'closeout',
         task_id: changeId!,
         expected_input_ref: h.store.work.change(changeId!)!.currentInputRef,
         expected_input_revision: h.store.work.change(changeId!)!.currentRevision,
-        checks: JSON.stringify([{ requirementRef: 'goal', applicability: 'applicable', verdict: 'pass', evidenceRefs: ['doc-check'] }]),
-        evidence_ref: 'doc-check',
-        summary: 'Verified doc.md updated to new-link',
+        checks: JSON.stringify([{ requirementRef: 'goal', applicability: 'applicable', verdict: 'pass', evidenceRefs: [`run:${runId}`] }]),
       })
       expect(closed).toContain(`accepted ${changeId}`)
       expect(h.store.work.workView(changeId!)?.status).toBe('done')
@@ -292,9 +289,7 @@ describe('WorkBook observability seams & atomic closeout pipeline', () => {
         task_id: created.id,
         expected_input_ref: h.store.work.change(created.id)!.currentInputRef,
         expected_input_revision: h.store.work.change(created.id)!.currentRevision,
-        checks: JSON.stringify([{ requirementRef: 'R1', applicability: 'applicable', verdict: 'pass', evidenceRefs: ['r1-log'] }]),
-        evidence_ref: 'r1-log',
-        summary: 'doc.md now contains approved-link',
+        checks: JSON.stringify([{ requirementRef: 'R1', applicability: 'applicable', verdict: 'pass', evidenceRefs: [`run:${dispatchedRunId}`] }]),
       })
       const pendingId = /pending (req-\d+|[A-Za-z0-9_-]+)/.exec(gate)?.[1] ?? h.service.pending.list()[0]?.id
       expect(pendingId).toBeTruthy()
@@ -308,9 +303,7 @@ describe('WorkBook observability seams & atomic closeout pipeline', () => {
         task_id: created.id,
         expected_input_ref: h.store.work.change(created.id)!.currentInputRef,
         expected_input_revision: h.store.work.change(created.id)!.currentRevision,
-        checks: JSON.stringify([{ requirementRef: 'R1', applicability: 'applicable', verdict: 'pass', evidenceRefs: ['r1-log'] }]),
-        evidence_ref: 'r1-log',
-        summary: 'doc.md now contains approved-link',
+        checks: JSON.stringify([{ requirementRef: 'R1', applicability: 'applicable', verdict: 'pass', evidenceRefs: [`run:${dispatchedRunId}`] }]),
       })
       expect(accepted).toContain(`accepted ${created.id}`)
       expect(h.store.work.workView(created.id)?.status).toBe('done')

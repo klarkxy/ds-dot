@@ -232,10 +232,11 @@ const RUN_PHASE = { reserved: 'workPhaseReserved', active: 'workPhaseActive', se
 const VERDICT = { accept: 'workVerdictAccept', rework: 'workVerdictRework', unverified: 'workVerdictUnverified' } as const
 const CHECK = { pass: 'workCheckPass', fail: 'workCheckFail', unverified: 'workCheckUnverified', 'not-applicable': 'workCheckNa' } as const
 const DELIVERY = { intent: 'workDeliveryIntent', accepted: 'workDeliveryAccepted', rejected: 'workDeliveryRejected', unknown: 'workDeliveryUnknown' } as const
+const DISPATCH = { intent: 'workDispatchPending', rejected: 'workDispatchRejected', unknown: 'workDispatchUnknown' } as const
 const CHANGE = { added: 'workChangeAdded', modified: 'workChangeModified', deleted: 'workChangeDeleted' } as const
 
-export function workFactKey(group: 'kind' | 'phase' | 'verdict' | 'check' | 'delivery' | 'change', value: string): TextKey | undefined {
-  const tables = { kind: RUN_KIND, phase: RUN_PHASE, verdict: VERDICT, check: CHECK, delivery: DELIVERY, change: CHANGE } as const
+export function workFactKey(group: 'kind' | 'phase' | 'verdict' | 'check' | 'delivery' | 'dispatch' | 'change', value: string): TextKey | undefined {
+  const tables = { kind: RUN_KIND, phase: RUN_PHASE, verdict: VERDICT, check: CHECK, delivery: DELIVERY, dispatch: DISPATCH, change: CHANGE } as const
   const table: Record<string, TextKey> = tables[group]
   return table[value]
 }

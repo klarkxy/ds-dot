@@ -58,10 +58,6 @@ describe('agreements text', () => {
     expect(normalizeCognition('  line one\r\nline two\r\n')).toBe('  line one\nline two')
   })
 
-  it('turns free-form policy lines into removable agreement items, keeping existing bullets', () => {
-    expect(policyAsAgreements('推送前问我\n\n- 已有项\n* 星号项')).toBe('- 推送前问我\n- 已有项\n* 星号项')
-    expect(entriesOf(policyAsAgreements('推送前问我'))).toEqual(['推送前问我'])
-  })
 })
 
 describe('cognition text', () => {
@@ -77,26 +73,5 @@ describe('cognition text', () => {
     const long = cognitionSection(`x`.repeat(COGNITION_MAX_CHARS + 500) + ' tail')
     expect(long).not.toContain('(cut here')
     expect(long).toContain('tail')
-  })
-})
-
-describe('MemoryNotes (legacy reader)', () => {
-  it('reads missing files as empty and reads only, never writes', async () => {
-    const dir = await mkdtemp(join(tmpdir(), 'dsh-dot-legacy-'))
-    try {
-      const notes = new MemoryNotes(join(dir, 'home'))
-      expect(notes.path).toBe(join(dir, 'home', MEMORY_FILE))
-      expect(notes.cognitionPath).toBe(join(dir, 'home', COGNITION_FILE))
-      expect(await notes.read()).toBe('')
-      expect(await notes.readCognition()).toBe('')
-      await mkdir(join(dir, 'home'), { recursive: true })
-      await writeFile(join(dir, 'home', MEMORY_FILE), '- old rule\n', 'utf8')
-      await writeFile(join(dir, 'home', COGNITION_FILE), 'old feeling', 'utf8')
-      expect(await notes.read()).toBe('- old rule\n')
-      expect(await notes.readCognition()).toBe('old feeling')
-      expect('write' in notes).toBe(false)
-    } finally {
-      await rm(dir, { recursive: true, force: true })
-    }
   })
 })

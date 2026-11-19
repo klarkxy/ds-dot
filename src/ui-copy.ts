@@ -98,19 +98,25 @@ export function factoryResetScope(locale: CopyLocale, preview: FactoryResetPrevi
   const n = (key: TextKey, value: number) => t(locale, key).replace('{n}', String(value))
   const rows = [
     n('sFactoryTasks', preview.tasks),
-    n('sFactoryTickets', preview.tickets),
     n('sFactoryChanges', preview.changes),
     n('sFactoryRuns', preview.runs),
     n('sFactorySchedules', preview.schedules),
     n('sFactoryProposals', preview.proposals),
     n('sFactoryCards', preview.cards),
-    n('sFactoryOwned', preview.ownedSessions),
     n('sFactorySegments', preview.pastSegments),
     n('sFactoryReflections', preview.reflections),
   ]
   if (preview.hasAgreements) rows.push(t(locale, 'sFactoryAgreements'))
   if (preview.hasCognition) rows.push(t(locale, 'sFactoryCognition'))
-  rows.push(n('sFactoryArchive', preview.archiveSessionIds.length))
+  // Archive ids are a union: sessions she opened plus her own conversation
+  // segments and background runs. Showing the owned count beside the total made
+  // "0 opened / 1 archived" look contradictory, so one row states the total and,
+  // when her own sessions add to it, says so.
+  const archiveTotal = preview.archiveSessionIds.length
+  const selfSessions = archiveTotal - preview.ownedSessions
+  rows.push(selfSessions > 0
+    ? t(locale, 'sFactoryArchiveSelf').replace('{n}', String(archiveTotal)).replace('{m}', String(selfSessions))
+    : n('sFactoryArchive', archiveTotal))
   return rows
 }
 

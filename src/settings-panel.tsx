@@ -9,8 +9,8 @@ import { createContext, useCallback, useContext, useEffect, useId, useMemo, useS
 import { type ApprovalMode, type DotSettings, type FactoryResetPreview, type FactoryResetResult, type ModelChoice, type SettingField, type SettingProposal, type TakeoverMode, type TaskModelRule, type TaskPermission } from './contracts.ts'
 import { factoryResetScope, t, type CopyLocale, type TextKey } from './ui-copy.ts'
 
-/** null on model, persona or address goes back to the default. `policy` is legacy and cannot be patched. */
-export type SettingsPatch = { readonly [K in Exclude<keyof DotSettings, 'policy'>]?: K extends 'model' ? ModelChoice | null : K extends 'persona' | 'address' ? string | null : DotSettings[K] }
+/** null on model, persona or address goes back to the default. */
+export type SettingsPatch = { readonly [K in keyof DotSettings]?: K extends 'model' ? ModelChoice | null : K extends 'persona' | 'address' ? string | null : DotSettings[K] }
 export type SaveNotice = { readonly kind: 'saved' } | { readonly kind: 'error'; readonly message: string }
 
 export interface SettingsApi {
@@ -46,7 +46,7 @@ function useModels(api: SettingsApi): { choices?: ModelMenuChoice[]; failed: boo
 
 function PadlockGlyph({ locked }: { locked: boolean }) {
   return (
-    <svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
       <rect x="3.25" y="7.25" width="9.5" height="6.5" rx="1.6" stroke="currentColor" strokeWidth="1.25" />
       {locked
         ? <path d="M5.25 7.25V5.2a2.75 2.75 0 0 1 5.5 0v2.05" stroke="currentColor" strokeWidth="1.25" strokeLinecap="round" />
@@ -245,7 +245,7 @@ function SegmentedChoice<T extends string>({ locale, label, value, options, labe
     id: `${baseId}-${option}`,
     panelId: `${baseId}-${option}-panel`,
     value: option,
-    label: t(locale, labelKeyOf(option)),
+    label: <span className="dsh-dot-seg-label">{t(locale, labelKeyOf(option))}</span>,
   })) as unknown as readonly [SegmentedTab<T>, ...SegmentedTab<T>[]], [baseId, locale, options, labelKeyOf])
   return (
     <SegmentedTabs<T>
@@ -304,7 +304,7 @@ function FactoryResetField({ locale, api, onSaved }: { locale: CopyLocale; api: 
       <div className="dsh-ui-actions">
         {preview ? (
           <>
-            <Button variant="primary" size="sm" disabled={busy} onClick={confirm}>{busy ? t(locale, 'sFactoryBusy') : t(locale, 'sFactoryConfirm')}</Button>
+            <Button variant="primary" size="sm" className="dsh-dot-danger" disabled={busy} onClick={confirm}>{busy ? t(locale, 'sFactoryBusy') : t(locale, 'sFactoryConfirm')}</Button>
             <Button variant="ghost" size="sm" disabled={busy} onClick={() => { setPreview(undefined); setError(''); setDone('') }}>{t(locale, 'sFactoryCancel')}</Button>
           </>
         ) : (
@@ -532,10 +532,22 @@ export function SettingsPanel({ locale, api, settings, onSaved, onStatusChange, 
 export const settingsCss = `
 .dsh-dot-chat .dsh-dot-setting-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 22px; }
 .dsh-dot-chat .dsh-dot-setting-tools { display: inline-flex; align-items: center; gap: 8px; flex-shrink: 0; }
+/* Settings segmented controls: release the primitive's fixed 30px height so a
+   long label can wrap to at most two lines (clamped), keeping grid-equal row
+   heights; the sliding indicator still stretches to the taller track. */
+.dsh-dot-chat .dsh-dot-settings[data-tab='settings'] [role='tablist'][data-size='sm'] [role='tab'] {
+  height: auto; min-height: 30px; padding-top: 4px; padding-bottom: 4px; line-height: 16px; white-space: normal;
+}
+.dsh-dot-chat .dsh-dot-seg-label {
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden;
+  overflow-wrap: break-word; text-align: center;
+}
+.dsh-dot-chat .dsh-dot-danger { background: var(--dsw-alias-state-error-primary); color: var(--dsw-alias-label-primary-foreground); }
+.dsh-dot-chat .dsh-dot-danger:hover:not(:disabled) { background: var(--dsw-alias-state-error-primary); filter: brightness(0.9); }
 .dsh-dot-chat .dsh-dot-lock {
   display: inline-flex; align-items: center; gap: 4px; flex-shrink: 0; white-space: nowrap; height: 22px; padding: 0 5px;
   border: 0; border-radius: var(--dsw-radius-sm); background: transparent;
-  color: var(--dsw-alias-label-tertiary); opacity: 0.55; font: inherit; font-size: 11px; line-height: 16px; cursor: pointer;
+  color: var(--dsw-alias-label-secondary); font: inherit; font-size: 11px; line-height: 16px; cursor: pointer;
   transition: opacity var(--ds-transition-duration, 0.2s) var(--ds-ease-in-out, ease-in-out), background-color var(--ds-transition-duration, 0.2s) var(--ds-ease-in-out, ease-in-out), color var(--ds-transition-duration, 0.2s) var(--ds-ease-in-out, ease-in-out);
 }
 .dsh-dot-chat .dsh-dot-lock:hover,

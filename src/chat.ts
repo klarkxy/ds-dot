@@ -214,8 +214,7 @@ export class ChatFold {
           const failed = toolResultFailed(data)
           const saved = rec(rec(data.meta)?.dshDot)?.display as ToolDisplay | undefined
           const error = rec(data.error)
-          const legacy = !saved && (typeof message?.isError !== 'boolean' || message.isError === false && ERROR_PREFIX.test(detail))
-          const display = legacy ? undefined : failed ? toolDisplay(item.name, detail, {
+          const display = failed ? toolDisplay(item.name, detail, {
             ...typeof error?.code === 'string' ? { code: error.code } : {},
             message: typeof error?.reason === 'string' ? error.reason : detail.replace(/^Error: /, ''),
           }) : saved ?? toolDisplay(item.name, detail)

@@ -53,7 +53,7 @@ describe('idle notice queue', () => {
     expect(calls).toEqual([0, 60_000])
   })
   it('orders request blocks and folds repeated task turns', () => {
-    const text = formatNotices([{ ...n('s'), ticketId: 't-1', text: 'old' }, { ...n('s'), ticketId: 't-1', text: 'new' }, { ...n('x'), kind: 'approval', text: 'request' }], ['t-2 P3'])
+    const text = formatNotices([{ ...n('s'), changeId: 't-1', text: 'old' }, { ...n('s'), changeId: 't-1', text: 'new' }, { ...n('x'), kind: 'approval', text: 'request' }], ['t-2 P3'])
     expect(text.indexOf('Requests waiting')).toBeLessThan(text.indexOf('Tasks:'))
     expect(text).not.toContain('old')
     expect(text).toContain('- turn-end · s: new')
@@ -61,7 +61,7 @@ describe('idle notice queue', () => {
   })
   it('preserves display facts directly and folds the same completed turns as model text', () => {
     const display = { kind: 'approval' as const, sessionId: 'x', requestId: 'ap-1', subject: 'pwsh', command: 'unescaped \"command\"\nnext line' }
-    const batch = [{ ...n('s'), ticketId: 't-1', text: 'old' }, { ...n('s'), ticketId: 't-1', text: 'new' }, { ...n('x'), kind: 'approval' as const, text: 'unrelated copy', display }]
+    const batch = [{ ...n('s'), changeId: 't-1', text: 'old' }, { ...n('s'), changeId: 't-1', text: 'new' }, { ...n('x'), kind: 'approval' as const, text: 'unrelated copy', display }]
     expect(formatNoticeDisplay(batch)).toEqual({ isReminder: false, entries: [{ kind: 'turn-end', sessionId: 's', summary: 'new' }, display] })
   })
 

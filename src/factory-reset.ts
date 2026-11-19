@@ -12,7 +12,6 @@ export type FactoryResetCounts = Omit<FactoryResetPreview, 'token' | 'expiresAt'
 
 export interface FactoryResetSource {
   list(): readonly { readonly origin: string }[]
-  listTickets(): readonly unknown[]
   work: { listChanges(): readonly unknown[]; listRuns(): readonly unknown[] }
   schedules: readonly unknown[]
   settingProposals: readonly unknown[]
@@ -28,7 +27,6 @@ export interface FactoryResetSource {
 export function factoryResetCounts(source: FactoryResetSource): FactoryResetCounts {
   return {
     tasks: source.list().length,
-    tickets: source.listTickets().length,
     changes: source.work.listChanges().length,
     runs: source.work.listRuns().length,
     schedules: source.schedules.length,
@@ -83,19 +81,17 @@ export function factoryResetStopGap(sessionId: string, report: FactoryResetStopE
 
 export function formatFactoryResetPreview(preview: FactoryResetPreview): string {
   const rows = [
-    `${preview.tasks} task(s)`,
-    `${preview.tickets} ticket(s)`,
+    `${preview.tasks} tracked session(s)`,
     `${preview.changes} change(s)`,
     `${preview.runs} run(s)`,
     `${preview.schedules} reminder(s)`,
     `${preview.proposals} setting proposal(s)`,
     `${preview.cards} card(s)`,
-    `${preview.ownedSessions} owned session(s)`,
     `${preview.pastSegments} past segment(s)`,
     `${preview.reflections} reflection run(s)`,
     preview.hasAgreements ? 'agreements will be cleared' : 'no agreements',
     preview.hasCognition ? 'cognition will be cleared' : 'no cognition',
-    `${preview.archiveSessionIds.length} session(s) will be archived`,
+    `${preview.archiveSessionIds.length} session(s) will be archived (${preview.archiveSessionIds.length - preview.ownedSessions} of them her own conversation or background sessions)`,
   ]
   return rows.join('\n')
 }

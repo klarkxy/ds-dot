@@ -68,26 +68,3 @@ describe('token estimate', () => {
     expect(estimateTokens(clipped)).toBeLessThanOrEqual(101)
   })
 })
-
-describe('awaitingReply', () => {
-  it('holds while the latest card waits and clears when the human speaks', () => {
-    expect(awaitingReply([human(1, 'q'), card(2, true)])).toBe(true)
-    expect(awaitingReply([human(1, 'q'), card(2, false)])).toBe(false)
-    expect(awaitingReply([card(2, true), human(3, 'picked', { deepView: { answer: { id: 'v2', action: 'submit' } } })])).toBe(false)
-    expect(awaitingReply([card(2, true), notice(3, 'update')])).toBe(true)
-  })
-})
-
-describe('openCardState', () => {
-  it('extracts an unanswered show_view card and clears once the human replies', () => {
-    const events: RawEvent[] = [
-      { seq: 1, type: 'tool/call', time: 1, data: { callId: 'c2', name: 'show_view', arguments: '{"title":"Pick environment"}' } },
-      card(2, true),
-    ]
-    expect(openCardState(events)).toEqual({
-      hadUserMessage: false,
-      openCard: 'Pick environment',
-    })
-    expect(openCardState([...events, human(3, 'staging')])).toEqual({ hadUserMessage: true })
-  })
-})

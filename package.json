@@ -43,6 +43,8 @@
     "locale/*.json",
     "lib",
     "src",
+    "!src/**/*.spec.ts",
+    "!src/**/*.spec.tsx",
     "cordis.patch.yml",
     "README.md",
     "docs/README.zh-CN.md",

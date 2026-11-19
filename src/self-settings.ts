@@ -5,9 +5,9 @@ import { lockedField, patchSettings } from './settings.ts'
 import { defaultAddress, defaultPersona } from './persona.ts'
 import { normalizeAgreements } from './memory.ts'
 
-/** A proposal for the old "memory" field now rewrites the agreements, which replaced the notes. */
+/** A proposal for the agreements field rewrites the stored agreements text. */
 function valueOf(settings: DotSettings, field: SettingField, agreementsText: string, locale: CopyLocale = 'zh'): unknown {
-  if (field === 'memory') return agreementsText || null
+  if (field === 'agreements') return agreementsText || null
   if (field === 'persona') return settings.persona ?? defaultPersona(locale)
   if (field === 'address') return settings.address ?? defaultAddress(locale)
   return settings[field] ?? null
@@ -63,8 +63,8 @@ export class SelfSettings {
     const locale = this.dot.locale ?? 'zh'
     let before: unknown
     let after: unknown
-    if (field === 'memory') {
-      if (input.value !== null && typeof input.value !== 'string') throw new DotError('dot/invalid', 'memory must be text or null')
+    if (field === 'agreements') {
+      if (input.value !== null && typeof input.value !== 'string') throw new DotError('dot/invalid', 'agreements must be text or null')
       const knowledge = await this.dot.knowledgeView()
       before = normalizeAgreements(knowledge.agreements.text) || null
       const normalized = input.value === null ? '' : normalizeAgreements(String(input.value))
@@ -89,15 +89,6 @@ export class SelfSettings {
   private async decideNow(id: string, allow: boolean): Promise<string> {
     const proposal = this.dot.store.settingProposal(id)
     if (!proposal) throw new DotError('dot/unknown-proposal', `no waiting settings proposal ${id}`)
-    // A proposal for a field that no longer exists (the old free-form rules)
-    // can only be dropped, never applied; declining it clears it.
-    if (!(SETTING_FIELDS as readonly string[]).includes(proposal.field)) {
-      if (!allow) {
-        await this.dot.store.deleteSettingProposal(id)
-        return `Declined ${id}; the setting it named no longer exists, so no settings changed.`
-      }
-      throw new DotError('dot/proposal-obsolete', `${proposal.field} is no longer a setting; decline this proposal instead`)
-    }
     const field = lockedField(this.dot.store.settings, proposal.field)!
     if (!allow) {
       await this.dot.store.deleteSettingProposal(id)
@@ -105,18 +96,18 @@ export class SelfSettings {
     }
     const locale = this.dot.locale ?? 'zh'
     const knowledge = await this.dot.knowledgeView()
-    const current = field === 'memory' ? normalizeAgreements(knowledge.agreements.text) || null : valueOf(this.dot.store.settings, field, '', locale)
+    const current = field === 'agreements' ? normalizeAgreements(knowledge.agreements.text) || null : valueOf(this.dot.store.settings, field, '', locale)
     if (!equal(current, proposal.before)) throw new DotError('dot/proposal-stale', `${field} changed after this proposal. Decline it and ask Dorothy to propose the change again from the current value.`)
     try {
-      if (field === 'memory') await this.dot.setAgreements(proposal.after === null ? '' : String(proposal.after), 'human')
+      if (field === 'agreements') await this.dot.setAgreements(proposal.after === null ? '' : String(proposal.after), 'human')
       else await this.dot.store.setSettings(patchSettings(this.dot.store.settings, { [field]: proposal.after }, locale))
     } catch (error) {
       throw new DotError('dot/proposal-failed', messageOf(error))
     }
     await this.dot.store.deleteSettingProposal(id)
     // Agreements already reach dot before the next message; other settings keep the live-apply path.
-    if (field !== 'memory') await this.dot.settingsChanged()
-    const now = field === 'memory' ? (await this.dot.knowledgeView()).agreements.text || null : valueOf(this.dot.store.settings, field, '', locale)
+    if (field !== 'agreements') await this.dot.settingsChanged()
+    const now = field === 'agreements' ? (await this.dot.knowledgeView()).agreements.text || null : valueOf(this.dot.store.settings, field, '', locale)
     return `Approved ${id}; ${field} is now ${textOf(now)}.`
   }
 }

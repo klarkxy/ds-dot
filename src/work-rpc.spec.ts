@@ -79,7 +79,9 @@ async function readyChange(h: Awaited<ReturnType<typeof setup>>, title = 'Ship',
 
   const subject = await h.service.captureWorkSubject(change.id)
   const current = h.store.work.change(change.id)!
-  const verified = await h.service.recordWorkVerification(change.id, [{ requirementRef: 'r1', applicability: 'applicable', verdict: 'pass', evidenceRefs: ['log-1'], note: reviewNote }], [run.id], {
+  mkdirSync(join(h.home, 'artifacts', 'evidence'), { recursive: true })
+  writeFileSync(join(h.home, 'artifacts', 'evidence', `${run.id}.md`), reviewNote)
+  const verified = await h.service.recordWorkVerification(change.id, [{ requirementRef: 'r1', applicability: 'applicable', verdict: 'pass', evidenceRefs: [`run:${run.id}`], note: reviewNote }], [run.id], {
     inputRef: current.currentInputRef, inputRevision: current.currentRevision,
     reviewRunId: review.run.id, reviewerSessionId: h.store.work.run(review.run.id)!.sessionId, subject,
   })
@@ -200,7 +202,7 @@ describe('work.* RPC contract', () => {
   it('reads the bound evidence body and delivery bytes, and refuses an unbound or deleted source', async () => {
     const h = await setup()
     const marker = 'FINAL_C_EVIDENCE_BODY_7C: npm check exit=0, both A and B verified'
-    const { change } = await readyChange(h, 'Ship', 'after', marker)
+    const { change, run } = await readyChange(h, 'Ship', 'after', marker)
 
 
     const view = h.service.workBoard(change.id)
@@ -209,9 +211,9 @@ describe('work.* RPC contract', () => {
       inputRef: view?.verification?.inputRef ?? '',
       inputRevision: view?.verification?.inputRevision ?? 0,
     }
-    const bound = h.service.readWorkSource(change.id, 'evidence', 'log-1', source)
-    expect(bound).toMatchObject({ ok: true, source: 'evidence:log-1', body: marker })
-    expect(h.service.readWorkSource(change.id, 'evidence', 'old-log', source)).toMatchObject({ ok: false, code: 'stale' })
+    const bound = h.service.readWorkSource(change.id, 'evidence', `run:${run.id}`, source)
+    expect(bound).toMatchObject({ ok: true, source: `evidence:run:${run.id}`, body: marker })
+    expect(h.service.readWorkSource(change.id, 'evidence', 'run:run-9', source)).toMatchObject({ ok: false, code: 'stale' })
     expect(h.service.readWorkSource(change.id, 'evidence', '../secret', source)).toMatchObject({ ok: false, code: 'invalid' })
     const delivered = view?.verification?.changes?.find(item => item.kind === 'modified')
     expect(delivered?.path).toBeTruthy()
@@ -223,21 +225,45 @@ describe('work.* RPC contract', () => {
     rmSync(h.home, { recursive: true, force: true })
   })
 
+  it('resolves a scenario ref bullet-first and a file ref to the delivered snapshot', async () => {
+    const h = await setup()
+    const report = '### Report\n- r1: a.ts now holds the edit\n- r2: pnpm test passed'
+    const { change, run, subject, current } = await readyChange(h, 'Ship', 'after', report)
+    const recorded = await h.service.recordWorkVerification(change.id, [
+      { requirementRef: 'r1', applicability: 'applicable', verdict: 'pass', evidenceRefs: [`run:${run.id}#r2`, `run:${run.id}#r9`, 'file:a.ts'] },
+    ], [], { inputRef: current.currentInputRef, inputRevision: current.currentRevision, subject })
+    if (!('id' in recorded)) throw new Error(recorded.message)
+    const bound = { verificationId: recorded.id, inputRef: current.currentInputRef, inputRevision: current.currentRevision }
+    const scenario = h.service.readWorkSource(change.id, 'evidence', `run:${run.id}#r2`, bound)
+    expect(scenario.ok).toBe(true)
+    if (scenario.ok) {
+      expect(scenario.source).toBe(`evidence:run:${run.id}#r2`)
+      expect(scenario.body.startsWith('- r2: pnpm test passed')).toBe(true)
+      expect(scenario.body).toContain('- r1: a.ts now holds the edit')
+    }
+    expect(h.service.readWorkSource(change.id, 'evidence', `run:${run.id}#r9`, bound)).toMatchObject({ ok: false, code: 'missing' })
+    const file = h.service.readWorkSource(change.id, 'evidence', 'file:a.ts', bound)
+    expect(file).toMatchObject({ ok: true, source: 'change:a.ts' })
+    if (file.ok) expect(file.body).toContain('after')
+    rmSync(h.project, { recursive: true, force: true })
+    rmSync(h.home, { recursive: true, force: true })
+  })
+
   it('previews long sources and reads the complete bound content on demand without bypassing version checks', async () => {
     const h = await setup()
     const body = `${'验收内容'.repeat(30_000)}\nEND_OF_COMPLETE_SOURCE`
     try {
-      const { change, verified, current } = await readyChange(h, 'Long delivery', body, body)
+      const { change, run, verified, current } = await readyChange(h, 'Long delivery', body, body)
 
       const bound = { verificationId: verified.id, inputRef: current.currentInputRef, inputRevision: current.currentRevision }
-      for (const [kind, ref] of [['evidence', 'log-1'], ['change', 'a.ts']] as const) {
+      for (const [kind, ref] of [['evidence', `run:${run.id}`], ['change', 'a.ts']] as const) {
         const preview = h.service.readWorkSource(change.id, kind, ref, bound)
         expect(preview).toMatchObject({ ok: true, truncated: true, totalBytes: Buffer.byteLength(body) })
         if (preview.ok) expect(preview.body).not.toContain('END_OF_COMPLETE_SOURCE')
         const full = h.service.readWorkSource(change.id, kind, ref, bound, { forceFull: true })
         expect(full).toMatchObject({ ok: true, truncated: false, body, totalBytes: Buffer.byteLength(body) })
       }
-      expect(h.service.readWorkSource(change.id, 'evidence', 'unbound-log', bound, { forceFull: true })).toMatchObject({ ok: false, code: 'stale' })
+      expect(h.service.readWorkSource(change.id, 'evidence', 'run:run-9', bound, { forceFull: true })).toMatchObject({ ok: false, code: 'stale' })
       await h.service.reviseWorkChange(change.id, { goal: 'changed goal', at: 30 })
       expect(h.service.readWorkSource(change.id, 'change', 'a.ts', bound, { forceFull: true })).toMatchObject({ ok: false, code: 'stale' })
     } finally {
@@ -247,54 +273,66 @@ describe('work.* RPC contract', () => {
     }
   })
 
-  it('reads persisted legacy evidence files without a registration write API', async () => {
+  it('reads a bound run report file without a registration write API', async () => {
     const h = await setup()
     try {
       const change = await h.service.createWorkChange({ title: 'History', cwd: h.project, goal: 'read history' })
-      const recorded = await h.service.recordWorkVerification(change.id, [{ requirementRef: 'goal', applicability: 'applicable', verdict: 'pass', evidenceRefs: ['old-log'], note: 'short legacy summary' }], [], { inputRef: change.currentInputRef, inputRevision: change.currentRevision })
+      const recorded = await h.service.recordWorkVerification(change.id, [{ requirementRef: 'goal', applicability: 'applicable', verdict: 'pass', evidenceRefs: ['run:run-1'] }], [], { inputRef: change.currentInputRef, inputRevision: change.currentRevision })
       if (!('id' in recorded)) throw new Error(recorded.message)
       mkdirSync(join(h.home, 'artifacts', 'evidence'), { recursive: true })
-      writeFileSync(join(h.home, 'artifacts', 'evidence', 'old-log'), 'persisted v5 evidence')
-      expect(h.service.readWorkSource(change.id, 'evidence', 'old-log', { verificationId: recorded.id, inputRef: change.currentInputRef, inputRevision: change.currentRevision })).toMatchObject({ ok: true, body: 'persisted v5 evidence' })
-      await expect(h.service.manageTask({ action: 'evidence', task_id: change.id, evidence_ref: 'old-log', summary: 'replace' })).rejects.toMatchObject({ code: 'dot/legacy-closed' })
-      expect(readFileSync(join(h.home, 'artifacts', 'evidence', 'old-log'), 'utf8')).toBe('persisted v5 evidence')
+      writeFileSync(join(h.home, 'artifacts', 'evidence', 'run-1.md'), 'persisted run report')
+      expect(h.service.readWorkSource(change.id, 'evidence', 'run:run-1', { verificationId: recorded.id, inputRef: change.currentInputRef, inputRevision: change.currentRevision })).toMatchObject({ ok: true, body: 'persisted run report' })
+      await expect(h.service.manageTask({ action: 'evidence', task_id: change.id, evidence_ref: 'run:run-1', summary: 'replace' })).rejects.toMatchObject({ code: 'dot/invalid' })
+      expect(readFileSync(join(h.home, 'artifacts', 'evidence', 'run-1.md'), 'utf8')).toBe('persisted run report')
     } finally { await h.service.dispose(); rmSync(h.project, { recursive: true, force: true }); rmSync(h.home, { recursive: true, force: true }) }
   })
 
-  it.each(['session:review:42', 'test-output'])('shows a new evidence reference without a note or saved file: %s', async ref => {
+  it.each(['session:review:42', 'test-output'])('refuses an unresolvable evidence reference: %s', async ref => {
     const h = await setup()
     try {
       const change = await h.service.createWorkChange({ title: 'Reference', cwd: h.project, goal: 'show reference' })
       const verification = await h.service.recordWorkVerification(change.id, [{ requirementRef: 'goal', applicability: 'applicable', verdict: 'pass', evidenceRefs: [ref] }], [], { inputRef: change.currentInputRef, inputRevision: change.currentRevision })
       if (!('id' in verification)) throw new Error(verification.message)
-      expect(h.service.readWorkSource(change.id, 'evidence', ref, { verificationId: verification.id, inputRef: change.currentInputRef, inputRevision: change.currentRevision })).toMatchObject({ ok: true, body: ref })
+      expect(h.service.readWorkSource(change.id, 'evidence', ref, { verificationId: verification.id, inputRef: change.currentInputRef, inputRevision: change.currentRevision })).toMatchObject({ ok: false, code: 'invalid' })
+      expect(h.service.readWorkSource(change.id, 'evidence', 'run:run-9', { verificationId: verification.id, inputRef: change.currentInputRef, inputRevision: change.currentRevision })).toMatchObject({ ok: false, code: 'stale' })
+    } finally { await h.service.dispose(); rmSync(h.project, { recursive: true, force: true }); rmSync(h.home, { recursive: true, force: true }) }
+  })
+
+  it('reports a bound run ref with no captured report as missing', async () => {
+    const h = await setup()
+    try {
+      const change = await h.service.createWorkChange({ title: 'Reference', cwd: h.project, goal: 'show reference' })
+      const verification = await h.service.recordWorkVerification(change.id, [{ requirementRef: 'goal', applicability: 'applicable', verdict: 'pass', evidenceRefs: ['run:run-9'] }], [], { inputRef: change.currentInputRef, inputRevision: change.currentRevision })
+      if (!('id' in verification)) throw new Error(verification.message)
+      expect(h.service.readWorkSource(change.id, 'evidence', 'run:run-9', { verificationId: verification.id, inputRef: change.currentInputRef, inputRevision: change.currentRevision })).toMatchObject({ ok: false, code: 'missing' })
     } finally { await h.service.dispose(); rmSync(h.project, { recursive: true, force: true }); rmSync(h.home, { recursive: true, force: true }) }
   })
 
   it('refuses a verification body after the input moves on, and does not switch to another verification with the same name', async () => {
     const h = await setup()
     const marker = 'FINAL_C_EVIDENCE_BODY_7C: npm check exit=0, both A and B verified'
-    const { change, verified, current } = await readyChange(h, 'Ship', 'after', marker)
+    const { change, run, verified, current } = await readyChange(h, 'Ship', 'after', marker)
 
     const bound = { verificationId: verified.id, inputRef: current.currentInputRef, inputRevision: current.currentRevision }
-    expect(h.service.readWorkSource(change.id, 'evidence', 'log-1', bound)).toMatchObject({ ok: true, body: marker })
+    expect(h.service.readWorkSource(change.id, 'evidence', `run:${run.id}`, bound)).toMatchObject({ ok: true, body: marker })
     const revised = await h.service.reviseWorkChange(change.id, { goal: 'second', at: 30 })
     if (!('id' in revised)) throw new Error(revised.message)
     expect(revised.currentRevision).toBe(current.currentRevision + 1)
     expect(h.service.workBoard(change.id)?.humanAction).toBeUndefined()
-    const stale = h.service.readWorkSource(change.id, 'evidence', 'log-1', bound)
+    const stale = h.service.readWorkSource(change.id, 'evidence', `run:${run.id}`, bound)
     expect(stale).toMatchObject({ ok: false, code: 'stale' })
     expect(stale).not.toHaveProperty('body')
     const next = h.store.work.change(change.id)!
 
+    writeFileSync(join(h.home, 'artifacts', 'evidence', 'run-9.md'), 'REV2_ONLY')
     const recorded = await h.service.recordWorkVerification(change.id, [
-      { requirementRef: 'r1', applicability: 'applicable', verdict: 'pass', evidenceRefs: ['other-log'], note: 'REV2_ONLY' },
+      { requirementRef: 'r1', applicability: 'applicable', verdict: 'pass', evidenceRefs: ['run:run-9'], note: 'REV2_ONLY' },
     ], [], { inputRef: next.currentInputRef, inputRevision: next.currentRevision })
     if (!('id' in recorded)) throw new Error(recorded.message)
     const moved = { verificationId: recorded.id, inputRef: next.currentInputRef, inputRevision: next.currentRevision }
-    expect(h.service.readWorkSource(change.id, 'evidence', 'log-1', moved)).toMatchObject({ ok: false, code: 'stale' })
-    expect(h.service.readWorkSource(change.id, 'evidence', 'other-log', bound)).toMatchObject({ ok: false, code: 'stale' })
-    expect(h.service.readWorkSource(change.id, 'evidence', 'other-log', moved)).toMatchObject({ ok: true, body: 'REV2_ONLY' })
+    expect(h.service.readWorkSource(change.id, 'evidence', `run:${run.id}`, moved)).toMatchObject({ ok: false, code: 'stale' })
+    expect(h.service.readWorkSource(change.id, 'evidence', 'run:run-9', bound)).toMatchObject({ ok: false, code: 'stale' })
+    expect(h.service.readWorkSource(change.id, 'evidence', 'run:run-9', moved)).toMatchObject({ ok: true, body: 'REV2_ONLY' })
     rmSync(h.project, { recursive: true, force: true })
     rmSync(h.home, { recursive: true, force: true })
   })

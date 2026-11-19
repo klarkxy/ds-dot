@@ -14,7 +14,6 @@ export const TOOL = {
   overview: 'dot_overview',
   read: 'dot_read',
   workspace: 'dot_workspace',
-  startTask: 'dot_start_task',
   task: 'dot_task',
   listModels: 'dot_list_models',
   sendToSession: 'dot_send',
@@ -33,23 +32,17 @@ export const TOOL = {
 
 /**
  * Settings Dorothy may propose changing; locks themselves are human-only.
- * `policy` (the old free-form custom rules) is gone: its content lives in the
- * agreements now. A stored value is still read once for that migration, but it
- * can no longer be edited or proposed.
+ * `agreements` is the human's rules text, edited as one bulk value.
  */
-export const SETTING_FIELDS = ['model', 'approvals', 'questions', 'scope', 'taskModels', 'taskPermission', 'reflection', 'idleCheckMinutes', 'persona', 'address', 'memory'] as const
+export const SETTING_FIELDS = ['model', 'approvals', 'questions', 'scope', 'taskModels', 'taskPermission', 'reflection', 'idleCheckMinutes', 'persona', 'address', 'agreements'] as const
 export type SettingField = typeof SETTING_FIELDS[number]
 export type SettingLocks = Readonly<Partial<Record<SettingField, boolean>>>
 
 /** A durable human decision; approving writes the value captured in the proposal only if it is still current. */
 export interface SettingProposal {
   readonly id: string
-  /**
-   * The setting the proposal names. `policy` is the legacy free-form rules
-   * field: such a row stays readable so the human can decline it, but it can
-   * no longer be applied.
-   */
-  readonly field: SettingField | 'policy'
+  /** The setting the proposal names; rows naming anything else are dropped on load. */
+  readonly field: SettingField
   readonly before: unknown
   readonly after: unknown
   readonly reason: string
@@ -148,34 +141,12 @@ export type TaskOrigin = 'started' | 'watched'
 /** Coarse lifecycle the board and the ledger summary show. */
 export type TaskStatus = 'running' | 'idle' | 'blocked' | 'error' | 'archived'
 
-export type TicketStatus = 'draft' | 'todo' | 'active' | 'review' | 'done' | 'cancelled'
-export type TicketAccess = 'read' | 'write'
-export type SessionRole = 'work' | 'rework' | 'review'
-export type TicketPriority = 1 | 2 | 3
-export interface TicketRound { readonly n: number; readonly at: number; readonly sessionId?: string; readonly role: SessionRole; readonly summary: string; readonly verdict?: 'pass' | 'fail' }
-export interface TicketMove { readonly at: number; readonly from?: TicketStatus; readonly to: TicketStatus; readonly by: 'dot' | 'human'; readonly reason: string }
-export interface Ticket {
-  readonly id: string
-  readonly title: string
-  readonly goal: string
-  readonly deliverable?: string
-  readonly acceptance?: string
-  readonly access: TicketAccess
-  readonly dir: string
-  readonly workspaceId?: string
-  readonly status: TicketStatus
-  readonly priority: TicketPriority
-  readonly humanReview?: boolean
-  readonly sessions: readonly { readonly sessionId: string; readonly role: SessionRole; readonly at: number }[]
-  readonly rounds: readonly TicketRound[]
-  readonly history: readonly TicketMove[]
-  readonly createdAt: number
-  readonly updatedAt: number
-}
+/** The kind of work a run does on its change. */
+export type RunKind = 'work' | 'rework' | 'review'
+export type RunAccess = 'read' | 'write'
+export type ChangePriority = 1 | 2 | 3
 
 export interface TaskRecord {
-  readonly ticketId?: string
-  readonly role?: SessionRole
   readonly sessionId: string
   readonly origin: TaskOrigin
   readonly title: string
@@ -227,32 +198,13 @@ export interface PendingQuestionItem {
   readonly multiSelect?: boolean
 }
 
-/** A task as the board shows it: the stored ticket plus flags worked out from its sessions and the waiting requests. */
-export interface TicketView extends Ticket {
-  /** Any of its sessions has a request waiting for dot or the human. */
-  readonly waiting: boolean
-  /** Its newest session row ended in an error. */
-  readonly error: boolean
-  /** Active or in review, but no session of it is left unarchived. */
-  readonly orphaned: boolean
-  /** Any of its sessions is running. */
-  readonly running: boolean
-  /** A todo write task that waits for this task to release the directory. */
-  readonly lockedBy?: { readonly id: string; readonly title: string }
-  /** Last note of its newest session row. */
-  readonly latestNote?: string
-  /** How many rounds the task has recorded. */
-  readonly roundCount: number
-}
-
 /** Board snapshot the client renders. */
 export interface BoardView {
   readonly dotSessionId?: string
-  /** Sessions the human asked dot to watch; sessions of tasks are shown through `tickets` or `work`. */
+  /** Sessions the human asked dot to watch; task sessions are shown through `work`. */
   readonly tasks: readonly TaskRecord[]
   /** Started task sessions so chat notices and activity badges resolve Change titles. */
   readonly startedTasks?: readonly TaskRecord[]
-  readonly tickets: readonly TicketView[]
   /** Active and completed WorkBook Changes projected for the header counter and WorkBoard. */
   readonly work?: readonly import('./work-board.ts').WorkBoardItem[]
   readonly pending: readonly PendingView[]
@@ -264,8 +216,6 @@ export interface BoardView {
  * Who answers the approval prompts of the sessions in scope.
  * dot: dot settles what it can and asks the human the rest; human: every
  * request goes to the human; deny: every request is rejected.
- * The old blanket "allow all" mode is gone by product decision; a stored
- * legacy value reads as 'human', the safe fallback.
  */
 export type ApprovalMode = 'dot' | 'human' | 'deny'
 
@@ -307,12 +257,6 @@ export interface DotSettings {
   /** Whether dot may run her own background reflection pass. */
   readonly reflection: boolean
   readonly idleCheckMinutes: number
-  /**
-   * @deprecated The old free-form custom rules. They are no longer editable;
-   * a stored value is read once for the migration into the agreements and is
-   * never changed again.
-   */
-  readonly policy?: string
   /** The human's own persona text for dot; absent uses the default persona. */
   readonly persona?: string
   /** How dot addresses the human; absent uses the default. */
@@ -336,7 +280,6 @@ export interface FactoryResetPreview {
   readonly token: string
   readonly expiresAt: number
   readonly tasks: number
-  readonly tickets: number
   readonly changes: number
   readonly runs: number
   readonly schedules: number

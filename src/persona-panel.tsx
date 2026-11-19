@@ -163,7 +163,7 @@ function KnowledgeSection({ locale, api, onStatus, locked, onLock, discardSignal
             <div className="dsh-dot-setting-head">
               <span className="dsh-ui-label">{t(locale, 'pAgreements')}</span>
               <div className="dsh-dot-setting-tools">
-                <LockToggle locale={locale} label={t(locale, 'pAgreements')} locked={locked} onLock={next => onLock('memory', next)} />
+                <LockToggle locale={locale} label={t(locale, 'pAgreements')} locked={locked} onLock={next => onLock('agreements', next)} />
               </div>
             </div>
             <span className="dsh-ui-help">{t(locale, 'pAgreementsHint')}</span>
@@ -313,7 +313,7 @@ export function PersonaPanel({ locale, api, settings, onSaved, onStatusChange, d
         </div>
         </div>
       </div>
-      <KnowledgeSection locale={locale} api={api} onStatus={reportStatus} locked={settings.locks?.memory === true} onLock={onLock} {...discardSignal === undefined ? {} : { discardSignal }} onDirtyChange={setKnowledgeDirty} />
+      <KnowledgeSection locale={locale} api={api} onStatus={reportStatus} locked={settings.locks?.agreements === true} onLock={onLock} {...discardSignal === undefined ? {} : { discardSignal }} onDirtyChange={setKnowledgeDirty} />
       <p className="dsh-ui-hint dsh-dot-settings-note">{t(locale, 'pNote')}</p>
     </div>
   )

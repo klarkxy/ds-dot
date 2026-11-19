@@ -2,12 +2,12 @@
 import type { NoticeEntry, ParsedNotice } from './chat-format.ts'
 export interface Notice {
   readonly sessionId: string
-  readonly kind: 'turn-end' | 'error' | 'approval' | 'question' | 'archived' | 'lock-free' | 'task-human' | 'idle-check'
+  readonly kind: 'turn-end' | 'error' | 'approval' | 'question' | 'task-human' | 'idle-check'
   readonly text: string
   readonly display?: NoticeEntry
   readonly at: number
   readonly requestId?: string
-  readonly ticketId?: string
+  readonly changeId?: string
   /** Set on a persisted work-decision wake so delivery can be marked once. */
   readonly wakeKey?: string
 }
@@ -111,11 +111,11 @@ export class NoticeBatcher {
 /** The text prompt and structured display share the same folded set. */
 function foldedNotices(items: readonly Notice[]): readonly Notice[] {
   const latest = new Map<string, Notice>()
-  for (const item of items) if (item.kind === 'turn-end' && item.ticketId) {
-    const key = `${item.ticketId}\0${item.sessionId}`
+  for (const item of items) if (item.kind === 'turn-end' && item.changeId) {
+    const key = `${item.changeId}\0${item.sessionId}`
     if ((latest.get(key)?.at ?? Number.NEGATIVE_INFINITY) <= item.at) latest.set(key, item)
   }
-  return items.filter(item => item.kind !== 'turn-end' || !item.ticketId || latest.get(`${item.ticketId}\0${item.sessionId}`) === item)
+  return items.filter(item => item.kind !== 'turn-end' || !item.changeId || latest.get(`${item.changeId}\0${item.sessionId}`) === item)
 }
 
 export function formatNoticeDisplay(items: readonly Notice[]): ParsedNotice {
@@ -130,8 +130,8 @@ export function formatNotices(items: readonly Notice[], ready: readonly string[]
   const groups: Array<[string, (notice: Notice) => boolean]> = [
     ['Requests waiting for you:', item => item.kind === 'approval' || item.kind === 'question'],
     ['Errors:', item => item.kind === 'error'],
-    ['Tasks:', item => !['approval', 'question', 'error'].includes(item.kind) && (!!item.ticketId || item.kind === 'lock-free' || item.kind === 'task-human' || item.kind === 'idle-check')],
-    ['Watched sessions:', item => !item.ticketId && (item.kind === 'turn-end' || item.kind === 'archived')],
+    ['Tasks:', item => !['approval', 'question', 'error'].includes(item.kind) && (!!item.changeId || item.kind === 'task-human' || item.kind === 'idle-check')],
+    ['Watched sessions:', item => !item.changeId && item.kind === 'turn-end'],
   ]
   const lines = ['[dot notice] Updates:']
   for (const [heading, matches] of groups) {

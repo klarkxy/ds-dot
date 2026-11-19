@@ -83,8 +83,6 @@ export interface InputRecord {
   readonly constraints?: readonly Constraint[]
   readonly userRequest?: string
   readonly deliverableLanguage?: string
-  /** Free text from inputs written before constraints existed. */
-  readonly behaviorNotes?: string
   readonly designNotes?: string
   readonly supersedes?: string
   readonly source: string
@@ -181,33 +179,33 @@ const scenarioSchema = z.object({
   given: z.string().optional(),
   when: z.string(),
   then: z.string(),
-}).strict()
+})
 const requirementSchema = z.object({
   requirementRef: z.string().min(1),
   text: z.string(),
   required: z.boolean(),
   scenarios: z.array(scenarioSchema).optional(),
-}).strict()
+})
 const stepSpecSchema = z.object({
   stepRef: z.string().min(1),
   text: z.string(),
   covers: z.array(z.string().min(1)).optional(),
   after: z.array(z.string().min(1)).optional(),
-}).strict()
-const constraintSchema = z.object({ constraintRef: z.string().min(1), text: z.string() }).strict()
-const stepViewSchema = z.object({ stepRef: z.string().min(1), done: z.boolean(), runId: z.string().optional(), inputRef: z.string().min(1), subjectRef: z.unknown().optional() }).strict().transform(({ subjectRef: _oldProof, ...step }) => step)
-const baselineSchema = z.object({ workspaceRoot: z.string().min(1), scopeKey: z.string().min(1), artifactRef: z.string().min(1) }).strict()
-const writePathSchema = z.object({ path: z.string().min(1), type: z.enum(['file', 'directory']) }).strict()
+})
+const constraintSchema = z.object({ constraintRef: z.string().min(1), text: z.string() })
+const stepViewSchema = z.object({ stepRef: z.string().min(1), done: z.boolean(), runId: z.string().optional(), inputRef: z.string().min(1) })
+const baselineSchema = z.object({ workspaceRoot: z.string().min(1), scopeKey: z.string().min(1), artifactRef: z.string().min(1) })
+const writePathSchema = z.object({ path: z.string().min(1), type: z.enum(['file', 'directory']) })
 const writeScopeSchema = z.union([
-  z.object({ kind: z.literal('paths'), paths: z.array(writePathSchema) }).strict(),
-  z.object({ kind: z.literal('workspace-exclusive') }).strict(),
+  z.object({ kind: z.literal('paths'), paths: z.array(writePathSchema) }),
+  z.object({ kind: z.literal('workspace-exclusive') }),
 ])
 const deliverySchema = z.object({
   id: z.string().min(1), kind: z.enum(['initial', 'context', 'coordination']), targetSessionId: z.string(),
   inputRevision: z.number().int(), contentRef: z.string(), hostRequestId: z.string().optional(), source: z.string(),
   status: z.enum(['intent', 'accepted', 'rejected', 'unknown']), evidence: z.string().optional(),
   createdAt: z.number(), updatedAt: z.number(),
-}).strict()
+})
 
 export const changeSchema = z.object({
   id: z.string().min(1), title: z.string(), cwd: z.string().min(1), baselineRefs: z.unknown().optional().transform(() => [] as BaselineRef[]),
@@ -217,25 +215,25 @@ export const changeSchema = z.object({
   closeout: z.object({
     verificationId: z.string().min(1), source: z.string(),
     inputRef: z.string().min(1).optional(), subjectKey: z.string().min(1).optional(), at: z.number().optional(),
-  }).strict().optional(),
+  }).optional(),
   oversight: z.object({
     requested: z.boolean(), inputRef: z.string().min(1), inputRevision: z.number().int(),
     decision: z.object({
       result: z.enum(['accept', 'reject']), verificationId: z.string().min(1).optional(),
       subjectKey: z.string().min(1).optional(), source: z.string(), at: z.number(),
       notifiedAt: z.number().optional(),
-    }).strict().optional(),
-  }).strict().optional(),
+    }).optional(),
+  }).optional(),
   createdAt: z.number(), updatedAt: z.number(),
-}).strict()
+})
 export const inputSchema = z.object({
   id: z.string().min(1), changeId: z.string().min(1), revision: z.number().int().positive(), goal: z.string(),
   requirements: z.array(requirementSchema), steps: z.array(stepSpecSchema),
   constraints: z.array(constraintSchema).optional(),
   userRequest: z.string().optional(), deliverableLanguage: z.string().optional(),
-  behaviorNotes: z.string().optional(), designNotes: z.string().optional(), supersedes: z.string().optional(),
+  designNotes: z.string().optional(), supersedes: z.string().optional(),
   source: z.string(), createdAt: z.number(),
-}).strict()
+})
 export const runSchema = z.object({
   id: z.string().min(1), changeId: z.string().min(1), kind: z.enum(['work', 'rework', 'review']),
   inputRevision: z.number().int(), inputRef: z.string().min(1), stepRefs: z.array(z.string()),
@@ -250,25 +248,25 @@ export const runSchema = z.object({
   closeReason: z.string().optional(),
   closeIntent: z.enum(['completed', 'failed', 'stopped']).optional(),
   actionClaim: z.enum(['session', 'prompt']).optional(),
-  closureEvidence: z.object({ queueCleared: z.boolean(), agentIdle: z.boolean(), jobsSettled: z.boolean() }).strict().optional(),
+  closureEvidence: z.object({ queueCleared: z.boolean(), agentIdle: z.boolean(), jobsSettled: z.boolean() }).optional(),
   observation: z.string().optional(),
   cursor: z.object({
     seq: z.number().int().nonnegative().optional(),
     running: z.boolean().optional(),
     queue: z.enum(['empty', 'pending', 'unknown']).optional(),
     idle: z.boolean().optional(),
-  }).strict().optional(),
+  }).optional(),
   reworkOf: z.string().optional(),
   createdAt: z.number(), updatedAt: z.number(),
-}).strict()
+})
 const subjectSchema = z.object({
   workspaceRoot: z.string().min(1), cwd: z.string().min(1),
   baselineRefs: z.array(baselineSchema), artifactRef: z.string().min(1),
-  changes: z.array(z.object({ path: z.string().min(1), kind: z.enum(['added', 'modified', 'deleted']), sha256: z.string().optional() }).strict()),
+  changes: z.array(z.object({ path: z.string().min(1), kind: z.enum(['added', 'modified', 'deleted']), sha256: z.string().optional() })),
   protectedDirty: z.array(z.string()),
-  exclusions: z.array(z.object({ path: z.string().min(1), reason: z.string().min(1) }).strict()),
+  exclusions: z.array(z.object({ path: z.string().min(1), reason: z.string().min(1) })),
   writeScope: writeScopeSchema.optional(), outOfScopePaths: z.array(z.string()).optional(),
-}).strict()
+})
 export const verificationSchema = z.object({
   id: z.string().min(1), changeId: z.string().min(1), inputRevision: z.number().int(), inputRef: z.string().min(1),
   runIds: z.array(z.string()),
@@ -277,9 +275,9 @@ export const verificationSchema = z.object({
   checks: z.array(z.object({
     requirementRef: z.string(), applicability: z.enum(['applicable', 'not-applicable']),
     verdict: z.enum(['pass', 'fail', 'unverified', 'not-applicable']), evidenceRefs: z.array(z.string()), note: z.string().optional(),
-  }).strict()),
+  })),
   verdict: z.enum(['accept', 'rework', 'unverified']), createdAt: z.number(),
-}).strict()
+})
 
 export function parseChange(value: unknown): ChangeRecord | undefined {
   const parsed = changeSchema.safeParse(value)
@@ -653,6 +651,22 @@ export class WorkBook {
   /** One stored verification. Reading evidence uses this id; it does not fall through to a newer row. */
   verification(id: string): VerificationRecord | undefined { return this.verifications.get(id) }
 
+  /**
+   * Failed rounds against the change's current input: writer/rework runs settled
+   * with verdict fail plus verifications recorded as rework or unverified.
+   */
+  failedRounds(changeId: string): number {
+    const change = this.changes.get(changeId)
+    if (!change) return 0
+    const failedRuns = [...this.runs.values()].filter(run =>
+      run.changeId === changeId && run.kind !== 'review' && run.phase === 'failed'
+      && run.inputRef === change.currentInputRef && run.inputRevision === change.currentRevision).length
+    const failedVerifications = [...this.verifications.values()].filter(row =>
+      row.changeId === changeId && row.inputRef === change.currentInputRef && row.inputRevision === change.currentRevision
+      && (row.verdict === 'rework' || row.verdict === 'unverified')).length
+    return failedRuns + failedVerifications
+  }
+
   /** Read-only board projection. Done is derived from closeout plus released runs. */
   workView(changeId: string) {
     const change = this.changes.get(changeId)
@@ -766,7 +780,7 @@ export class WorkBook {
     })
   }
 
-  createChange(input: { title: string; cwd: string; goal: string; requirements?: readonly Requirement[]; steps?: readonly StepSpec[]; source?: string; priority?: 1 | 2 | 3; maxConcurrentRuns?: number; behaviorNotes?: string; constraints?: readonly Constraint[]; userRequest?: string; deliverableLanguage?: string; at?: number }): Promise<ChangeRecord> {
+  createChange(input: { title: string; cwd: string; goal: string; requirements?: readonly Requirement[]; steps?: readonly StepSpec[]; source?: string; priority?: 1 | 2 | 3; maxConcurrentRuns?: number; constraints?: readonly Constraint[]; userRequest?: string; deliverableLanguage?: string; at?: number }): Promise<ChangeRecord> {
     return this.exclusive(async () => {
       this.assertRecovered()
       const requirements = input.requirements ?? []
@@ -776,7 +790,6 @@ export class WorkBook {
       const at = input.at ?? Date.now()
       const changeId = `c-${++this.changeSeq}`
       const inputRow = this.inputRow(changeId, 1, input.goal, requirements, steps, input.source ?? 'user', at, {
-        behaviorNotes: input.behaviorNotes,
         constraints: input.constraints,
         userRequest: input.userRequest,
         deliverableLanguage: input.deliverableLanguage,
@@ -797,14 +810,14 @@ export class WorkBook {
     })
   }
 
-  reviseChange(changeId: string, patch: { goal?: string; requirements?: readonly Requirement[]; steps?: readonly StepSpec[]; cwd?: string; behaviorNotes?: string; constraints?: readonly Constraint[]; userRequest?: string; deliverableLanguage?: string; title?: string; priority?: 1 | 2 | 3; maxConcurrentRuns?: number; source?: string; at?: number }): Promise<ChangeRecord | WorkRefusal> {
+  reviseChange(changeId: string, patch: { goal?: string; requirements?: readonly Requirement[]; steps?: readonly StepSpec[]; cwd?: string; constraints?: readonly Constraint[]; userRequest?: string; deliverableLanguage?: string; title?: string; priority?: 1 | 2 | 3; maxConcurrentRuns?: number; source?: string; at?: number }): Promise<ChangeRecord | WorkRefusal> {
     return this.exclusive(async () => {
       const refused = this.recoveryRefusal()
       if (refused) return refused
       const current = this.changes.get(changeId)
       if (!current) return { ok: false, code: 'missing', message: `unknown change ${changeId}` }
       const at = patch.at ?? Date.now()
-      const semantic = patch.goal !== undefined || patch.requirements !== undefined || patch.steps !== undefined || patch.cwd !== undefined || patch.behaviorNotes !== undefined || patch.constraints !== undefined || patch.userRequest !== undefined || patch.deliverableLanguage !== undefined
+      const semantic = patch.goal !== undefined || patch.requirements !== undefined || patch.steps !== undefined || patch.cwd !== undefined || patch.constraints !== undefined || patch.userRequest !== undefined || patch.deliverableLanguage !== undefined
       if (!semantic) {
         const next: ChangeRecord = {
           ...current,
@@ -823,14 +836,9 @@ export class WorkBook {
       const requirements = patch.requirements ?? previous.requirements
       const steps = patch.steps ?? previous.steps
       const constraints = patch.constraints !== undefined ? patch.constraints : previous.constraints
-      if (patch.behaviorNotes !== undefined && patch.constraints === undefined && previous.constraints !== undefined) {
-        return { ok: false, code: 'invalid', message: `${previous.id} uses structured constraints, so behavior_notes would be ignored. Revise with constraints instead.` }
-      }
       const problem = inputContractError(requirements, steps, constraints)
       if (problem) return { ok: false, code: 'invalid', message: problem }
       const inputRow = this.inputRow(changeId, current.currentRevision + 1, patch.goal ?? previous.goal, requirements, steps, patch.source ?? 'revision', at, {
-        // Structured constraints replace legacy notes; carrying both would let old notes resurface.
-        ...(patch.constraints !== undefined ? {} : { behaviorNotes: patch.behaviorNotes ?? previous.behaviorNotes }),
         constraints,
         userRequest: patch.userRequest !== undefined ? patch.userRequest : previous.userRequest,
         deliverableLanguage: patch.deliverableLanguage !== undefined ? patch.deliverableLanguage : previous.deliverableLanguage,
@@ -1011,7 +1019,7 @@ export class WorkBook {
         stepRefs: [...(input.stepRefs ?? material.steps.map(step => step.stepRef))], cwd,
         workspaceRoot: identity.workspaceRoot, exclusiveRoot: identity.exclusiveRoot, uncertainBoundary,
         writeScope: input.writeScope, baselineRefs: [], requestedSessionId: `session-${id}`, creation: 'intent',
-        access: scopeWrites(input.writeScope) ? 'write' : 'read',
+        access: input.kind === 'review' ? 'read' : scopeWrites(input.writeScope) ? 'write' : 'read',
         deliveries: [delivery], phase: 'reserved', ...(input.reworkOf ? { reworkOf: input.reworkOf } : {}),
         createdAt: at, updatedAt: at,
       }
@@ -2129,14 +2137,13 @@ export class WorkBook {
     return found
   }
 
-  private inputRow(changeId: string, revision: number, goal: string, requirements: readonly Requirement[], steps: readonly StepSpec[], source: string, at: number, fields: { readonly behaviorNotes?: string; readonly constraints?: readonly Constraint[]; readonly userRequest?: string; readonly deliverableLanguage?: string; readonly supersedes?: string } = {}): InputRecord {
+  private inputRow(changeId: string, revision: number, goal: string, requirements: readonly Requirement[], steps: readonly StepSpec[], source: string, at: number, fields: { readonly constraints?: readonly Constraint[]; readonly userRequest?: string; readonly deliverableLanguage?: string; readonly supersedes?: string } = {}): InputRecord {
     const id = `input-${++this.inputSeq}`
     return {
       id, changeId, revision, goal,
       requirements: requirements.map(copyRequirement),
       steps: steps.map(copyStep),
       source, createdAt: at,
-      ...(fields.behaviorNotes !== undefined ? { behaviorNotes: fields.behaviorNotes } : {}),
       ...(fields.constraints !== undefined ? { constraints: fields.constraints.map(item => ({ constraintRef: item.constraintRef, text: item.text })) } : {}),
       ...(fields.userRequest !== undefined ? { userRequest: fields.userRequest } : {}),
       ...(fields.deliverableLanguage !== undefined ? { deliverableLanguage: fields.deliverableLanguage } : {}),

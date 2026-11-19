@@ -1,8 +1,7 @@
 import { Button, StateDot, Tag, type StateDotState, type TagTone } from '@deepseek-ai/dsh-client-ui-primitives'
-import { useState } from 'react'
-import { FINISHED_SHOWN, groupBoard, headerBoardCounts } from './board-groups.ts'
+import { groupBoard, headerBoardCounts } from './board-groups.ts'
 import { groupWork } from './work-board.ts'
-import type { BoardView, SessionRole, TaskStatus, TicketAccess, TicketStatus, TicketView } from './contracts.ts'
+import type { BoardView, TaskStatus } from './contracts.ts'
 import { formatWhen, t, timingLabel, type CopyLocale, type TextKey } from './ui-copy.ts'
 
 export const BOARD_ROOT = 'dsh-dot-board'
@@ -11,19 +10,10 @@ const DOT: Record<TaskStatus, StateDotState> = {
   running: 'ongoing', idle: 'done', blocked: 'warning', error: 'error', archived: 'idle',
 }
 
-const STATUS_KEY: Record<TicketStatus, TextKey> = {
-  draft: 'ticketDraft', todo: 'ticketTodo', active: 'ticketActive', review: 'ticketReview', done: 'ticketDone', cancelled: 'ticketCancelled',
-}
-const STATUS_TONE: Record<TicketStatus, TagTone> = {
-  draft: 'quiet', todo: 'neutral', active: 'info', review: 'warning', done: 'success', cancelled: 'quiet',
-}
-const ACCESS_KEY: Record<TicketAccess, TextKey> = { read: 'accessRead', write: 'accessWrite' }
-const ROLE_KEY: Record<SessionRole, TextKey> = { work: 'roleWork', rework: 'roleRework', review: 'roleReview' }
-
 /** Which part of the board the drawer shows: everything, or one of its three tabs. */
 export type BoardFilter = 'all' | 'waiting' | 'active' | 'watch'
 
-/** Items under each filter tab, from the same grouping the board draws. Legacy tickets are history and never count. */
+/** Items under each filter tab, from the same grouping the board draws. */
 export function boardCounts(view: BoardView | undefined): Record<Exclude<BoardFilter, 'all'>, number> {
   if (!view) return { waiting: 0, active: 0, watch: 0 }
   const groups = groupBoard(view)
@@ -39,7 +29,6 @@ export interface BoardProps {
   readonly locale: CopyLocale
   readonly view: BoardView | undefined
   readonly error?: string
-  /** Defaults to 'all'; legacy history only shows there. */
   readonly filter?: BoardFilter
   readonly onOpen: (sessionId: string) => void
   readonly onRetry: () => void
@@ -48,103 +37,15 @@ export interface BoardProps {
   readonly suppressEmpty?: boolean
 }
 
-function TextBlock({ label, text }: { label: string; text: string | undefined }) {
-  if (!text) return null
-  return (
-    <div className="dsh-dot-block">
-      <span className="dsh-ui-meta">{label}</span>
-      <p className="dsh-dot-text">{text}</p>
-    </div>
-  )
-}
-
-function TicketDetail({ locale, ticket, onOpen }: { locale: CopyLocale; ticket: TicketView; onOpen: (sessionId: string) => void }) {
-  return (
-    <div className="dsh-dot-detail">
-      <TextBlock label={t(locale, 'taskGoal')} text={ticket.goal} />
-      <TextBlock label={t(locale, 'taskDeliverable')} text={ticket.deliverable} />
-      <TextBlock label={t(locale, 'taskAcceptance')} text={ticket.acceptance} />
-      {ticket.sessions.length > 0 ? (
-        <div className="dsh-dot-block">
-          <span className="dsh-ui-meta">{t(locale, 'taskSessions')}</span>
-          {[...ticket.sessions].reverse().map(session => (
-            <button key={session.sessionId} type="button" className="dsh-dot-row dsh-dot-line" title={session.sessionId} onClick={() => onOpen(session.sessionId)}>
-              <span className="dsh-ui-compact dsh-ui-truncate">{t(locale, ROLE_KEY[session.role])}</span>
-              <span className="dsh-ui-spacer" />
-              <span className="dsh-ui-meta">{formatWhen(session.at)}</span>
-            </button>
-          ))}
-        </div>
-      ) : null}
-      {ticket.rounds.length > 0 ? (
-        <div className="dsh-dot-block">
-          <span className="dsh-ui-meta">{t(locale, 'taskRounds')}</span>
-          {[...ticket.rounds].reverse().map(round => (
-            <div key={round.n} className="dsh-dot-entry">
-              <span className="dsh-ui-hint">
-                #{round.n} · {t(locale, ROLE_KEY[round.role])}
-                {round.verdict ? ` · ${t(locale, round.verdict === 'pass' ? 'verdictPass' : 'verdictFail')}` : ''} · {formatWhen(round.at)}
-              </span>
-              <p className="dsh-dot-text">{round.summary}</p>
-            </div>
-          ))}
-        </div>
-      ) : null}
-      {ticket.history.length > 0 ? (
-        <div className="dsh-dot-block">
-          <span className="dsh-ui-meta">{t(locale, 'taskHistory')}</span>
-          {[...ticket.history].reverse().map((move, index) => (
-            <div key={`${move.at}-${index}`} className="dsh-dot-entry">
-              <span className="dsh-ui-hint">
-                {formatWhen(move.at)} · {move.from ? `${t(locale, STATUS_KEY[move.from])} → ` : ''}{t(locale, STATUS_KEY[move.to])} · {t(locale, move.by === 'human' ? 'byHuman' : 'byDot')}
-              </span>
-              <p className="dsh-dot-text">{move.reason}</p>
-            </div>
-          ))}
-        </div>
-      ) : null}
-    </div>
-  )
-}
-
-/** A legacy ticket is read-only history: it can be opened and read, nothing else. */
-function TicketRow({ locale, ticket, expanded, onToggle, onOpen }: {
-  locale: CopyLocale
-  ticket: TicketView
-  expanded: boolean
-  onToggle: () => void
-  onOpen: (sessionId: string) => void
-}) {
-  const place = `${t(locale, ACCESS_KEY[ticket.access])} · ${ticket.dir}${ticket.roundCount > 0 ? ` · ${t(locale, 'roundsCount').replace('{n}', String(ticket.roundCount))}` : ''}`
-  return (
-    <div className="dsh-dot-ticket" data-status={ticket.status}>
-      <button type="button" className="dsh-dot-row" aria-expanded={expanded} title={t(locale, expanded ? 'closeTask' : 'openTask')} onClick={onToggle}>
-        <StateDot state={ticket.status === 'done' ? 'done' : 'idle'} />
-        <span className="dsh-dot-main">
-          <span className="dsh-dot-titleline">
-            <span className="dsh-ui-compact dsh-ui-truncate">{ticket.title}</span>
-            <Tag tone={STATUS_TONE[ticket.status]}>{t(locale, STATUS_KEY[ticket.status])}</Tag>
-          </span>
-          <span className="dsh-ui-hint dsh-ui-truncate" title={ticket.dir}>{place}</span>
-          {ticket.latestNote ? <span className="dsh-ui-hint dsh-ui-truncate">{ticket.latestNote}</span> : null}
-        </span>
-      </button>
-      {expanded ? <TicketDetail locale={locale} ticket={ticket} onOpen={onOpen} /> : null}
-    </div>
-  )
-}
-
 function GroupTitle({ title, count }: { title: string; count?: number }) {
   return <span className="dsh-ui-meta">{count === undefined ? title : `${title} · ${count}`}</span>
 }
 
 /**
- * Board: requests waiting on the human, watched sessions, Dorothy's reminders and, folded away,
- * the legacy tickets. Pure render over a board snapshot; the work changes are drawn above by WorkBoardPanel.
+ * Board: requests waiting on the human, watched sessions and Dorothy's reminders.
+ * Pure render over a board snapshot; the work changes are drawn above by WorkBoardPanel.
  */
 export function Board({ locale, view, error, filter = 'all', onOpen, onRetry, onRemoveSchedule, suppressEmpty }: BoardProps) {
-  const [expanded, setExpanded] = useState<string>()
-  const [showLegacy, setShowLegacy] = useState(false)
   if (view === undefined) {
     return (
       <div className={BOARD_ROOT}>
@@ -161,7 +62,7 @@ export function Board({ locale, view, error, filter = 'all', onOpen, onRetry, on
   const shows = (section: BoardFilter) => filter === 'all' || filter === section
   const counts = boardCounts(view)
   const empty = !suppressEmpty && (filter === 'all'
-    ? groups.liveCount === 0 && groups.legacy.length === 0 && view.pending.length === 0 && view.schedules.length === 0
+    ? groups.liveCount === 0 && view.pending.length === 0 && view.schedules.length === 0
     : counts[filter] === 0 && !(filter === 'watch' && groups.watchedArchived > 0))
   return (
     <div className={BOARD_ROOT}>
@@ -179,16 +80,6 @@ export function Board({ locale, view, error, filter = 'all', onOpen, onRetry, on
                 <Tag tone="outline">{t(locale, item.kind)}</Tag>
               </button>
             ))}
-          </section>
-        ) : null}
-        {filter === 'all' && groups.legacy.length > 0 ? (
-          <section className="dsh-ui-stack" aria-label={t(locale, 'boardLegacy')}>
-            <Button variant="ghost" size="sm" className="dsh-dot-fold" aria-expanded={showLegacy} onClick={() => setShowLegacy(open => !open)}>
-              {t(locale, 'boardLegacy')} · {groups.legacy.length}
-            </Button>
-            {showLegacy ? groups.legacy.slice(0, FINISHED_SHOWN).map(ticket => (
-              <TicketRow key={ticket.id} locale={locale} ticket={ticket} expanded={expanded === ticket.id} onToggle={() => setExpanded(current => current === ticket.id ? undefined : ticket.id)} onOpen={onOpen} />
-            )) : null}
           </section>
         ) : null}
         {((shows('watch') && (groups.watched.length > 0 || groups.watchedArchived > 0)) || (filter === 'active' && groups.watched.some(task => task.status === 'running'))) ? (
@@ -241,13 +132,11 @@ export const boardCss = `
 .dsh-dot-board .dsh-dot-reminder { display: flex; align-items: center; gap: 8px; min-width: 0; padding: 4px 4px 4px 10px; }
 .dsh-dot-board .dsh-dot-reminder > button { flex-shrink: 0; white-space: nowrap; }
 .dsh-dot-board .dsh-dot-row > .dsh-ui-meta { white-space: nowrap; flex-shrink: 0; }
-.dsh-dot-board .dsh-dot-ticket,
 .dsh-dot-board .dsh-dot-work {
   display: flex; flex-direction: column; min-width: 0;
   border-radius: var(--dsw-radius-md); background: var(--dsw-alias-bg-layer-2);
   box-shadow: var(--dsw-elevation-stroke); overflow: hidden;
 }
-.dsh-dot-board .dsh-dot-ticket[data-status='done'], .dsh-dot-board .dsh-dot-ticket[data-status='cancelled'],
 .dsh-dot-board .dsh-dot-work[data-status='done'], .dsh-dot-board .dsh-dot-work[data-status='cancelled'] { background: transparent; }
 .dsh-dot-board .dsh-ui-stack > .dsh-dot-row { background: var(--dsw-alias-bg-layer-2); box-shadow: var(--dsw-elevation-stroke); border-radius: var(--dsw-radius-md); }
 .dsh-dot-board .dsh-dot-titleline { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; min-width: 0; }

@@ -244,7 +244,8 @@ export function filterVisibleChat(
       out.push(input)
     }
     for (const reply of block.replies) {
-      if (reply.kind === 'bot' && (hasVisibleView || (isLast && options?.preparingCard === true))) continue
+      // Text and a card in the same reply both show: ordinary replies are plain text,
+      // and a card no longer swallows the message written beside it.
       if (reply.kind === 'view' && (reply.failed || !reply.presentation) && !(isRoutineOnly && hasInvalidView)) continue
       if (reply.kind === 'tool' && droppedTools.has(reply)) continue
       out.push(reply)

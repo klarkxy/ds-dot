@@ -79,14 +79,6 @@ const str = (args: unknown, key: string): string | undefined => {
   return typeof value === 'string' ? value : undefined
 }
 
-/** paths is a JSON string in the schema. A model that passes the array itself is still that same list. */
-const pathsText = (args: unknown): string | undefined => {
-  const value = (args as Record<string, unknown> | null)?.paths
-  if (typeof value === 'string') return value
-  if (Array.isArray(value)) return JSON.stringify(value)
-  return undefined
-}
-
 const num = (args: unknown, key: string): number | undefined => {
   const value = (args as Record<string, unknown> | null)?.[key]
   return typeof value === 'number' ? value : undefined
@@ -95,7 +87,7 @@ const num = (args: unknown, key: string): number | undefined => {
 const bool = (args: unknown, key: string): boolean =>
   (args as Record<string, unknown> | null)?.[key] === true
 
-export const TASK_ACTIONS = ['create', 'revise', 'dispatch', 'read', 'list', 'supplement', 'finish', 'step', 'closeout', 'pause', 'resume', 'cancel', 'decide', 'reject'] as const
+export const TASK_ACTIONS = ['create', 'revise', 'dispatch', 'check', 'read', 'list', 'supplement', 'finish', 'step', 'closeout', 'pause', 'resume', 'cancel', 'decide', 'reject'] as const
 
 export function apply(ctx: Context): void {
   installDotWeb(ctx)
@@ -137,11 +129,9 @@ export function apply(ctx: Context): void {
   tool({
     name: 'show_view',
     description: [
-      'Deliver one card to the human and end this turn. Every reply to the human goes inside a card (a single text node suffices for prose).',
-      'Single-step rule: call show_view alone in its own step only after all earlier tool results have returned. Calling show_view alongside any other tool in the same step defers the card without ending the turn; wait for those results, then call show_view by itself. If view validation fails, fix the JSON and call show_view again in the same turn.',
-      'Schema: pass view as JSON text encoding one root ViewNode. Every node requires a "type" field; compose layouts with stack or row (children, optional let).',
-      'Display nodes: text, metric{label,value}, table{columns,rows}, chart{kind,categories,series}, progress{percent|value+max}, callout{text}, sources{items}, steps{items}. Rich visual nodes: math (plots), flow (node graphs), explore (scatter), map (locations). Reactive inputs: slider, number, choice, toggle.',
-      'Interaction & approvals: include options, confirm, or form with await_reply=true only when asking the human to decide or supply input (omit or set false for display-only cards). To relay a human approval, pass the exact pending request id in approval_id so the host renders a bound confirmation card directly. On background wake-ups with nothing for the human, do not call show_view — end silently with no output.',
+      'Show the human a card. Use it only when structure or interaction helps: a table, metrics, a chart, progress, steps, or sources; a choice, confirmation, or form you need answered (set await_reply=true); or relaying a pending approval (pass its request id as approval_id so the host renders bound controls). Ordinary replies are plain text, not cards.',
+      'Call show_view alone in its own step after all other tool results are in; a valid card ends the turn. If it shares a step with another tool call, the card is deferred and the turn stays open: wait for those results, then call show_view by itself. If validation fails, fix the JSON and call show_view again.',
+      'view is JSON text for one root ViewNode, and every node needs a "type" field. Layout: stack, row (children, optional let). Display: text, metric{label,value}, table{columns,rows}, chart{kind,categories,series}, progress{percent|value+max}, callout{text}, sources{items}, steps{items}; rich: math, flow, explore, map. Reactive inputs: slider, number, choice, toggle. Answer controls: options, confirm, form.',
     ].join(' '),
     parameters: {
       title: { type: 'string', description: 'Concise heading shown above the card.' },
@@ -231,18 +221,24 @@ export function apply(ctx: Context): void {
   // ── dot_workspace (merged from dot_list_workspaces + dot_create_workspace) ─
   tool(defineToolInput({
     name: TOOL.workspace,
-    description: 'Inspect or create DSH workspaces (file edits always run on task sessions, never here). action=list: list all workspaces (id, title, directory, session count), marking your own workspace. action=inspect: read metadata of one workspace (defaults to your own). action=files: list files and folders inside a workspace (read-only; optional relative path). action=create: register or reuse a workspace at an absolute directory, creating the directory if absent.',
+    description: 'Inspect or create DSH workspaces (file edits always run on task sessions, never here). action=list: list all workspaces (id, title, directory, session count), marking your own workspace. action=inspect: read metadata of one workspace (defaults to your own). action=files: list files and folders inside a workspace (read-only; optional relative path). action=read: read a text file inside the workspace (relative path under the workspace, or an absolute path inside a registered workspace/change directory; optional start_line and max_lines, default 400, max 2000). action=create: register or reuse a workspace at an absolute directory, creating the directory if absent.',
     parameters: {
-      action: { type: 'string', enum: ['list', 'inspect', 'files', 'create'], required: true, description: 'Operation: list, inspect, files, or create.' },
-      path: { type: 'string', description: 'create: absolute directory path. files: optional relative subpath inside the workspace.' },
+      action: { type: 'string', enum: ['list', 'inspect', 'files', 'create', 'read'], required: true, description: 'Operation: list, inspect, files, read, or create.' },
+      path: { type: 'string', description: 'create: absolute directory path. files: optional relative subpath inside the workspace. read: file path, relative inside the workspace or absolute inside an allowed root.' },
       title: { type: 'string', description: 'create: optional display title for a newly registered workspace.' },
-      workspace_id: { type: 'string', description: 'inspect/files: workspace id from action=list; omit to target your own workspace.' },
+      workspace_id: { type: 'string', description: 'inspect/files/read: workspace id from action=list; omit to target your own workspace.' },
+      start_line: { type: 'integer', description: 'read: first line to show, 1-based (default 1).' },
+      max_lines: { type: 'integer', description: 'read: maximum lines to show (default 400, max 2000).' },
     },
     execute: async (args) => {
       const action = str(args, 'action')
       if (action === 'create') return dot().createWorkspace(str(args, 'path') ?? '', str(args, 'title'))
       if (action === 'inspect') return dot().inspectWorkspace(str(args, 'workspace_id'))
       if (action === 'files') return dot().listWorkspaceFiles(str(args, 'workspace_id'), str(args, 'path'))
+      if (action === 'read') {
+        const numeric = args as { start_line?: unknown; max_lines?: unknown }
+        return dot().readWorkspaceFile(str(args, 'workspace_id'), str(args, 'path'), typeof numeric.start_line === 'number' ? numeric.start_line : undefined, typeof numeric.max_lines === 'number' ? numeric.max_lines : undefined)
+      }
       return dot().listWorkspaces()
     },
     title: 'Workspace',
@@ -251,28 +247,25 @@ export function apply(ctx: Context): void {
   // ── dot_task ──────────────────────────────────────────────────────────────
   tool(defineToolInput({
     name: TOOL.task,
-    description: 'Drive a contract-backed change from goal definition to verified closeout. create/revise define or update the input contract; dispatch reserves scope, captures the baseline, and launches a run; finish settles a writer run once its report arrives; closeout snapshots the delivery, evaluates checks, and accepts it (or opens human oversight when human_review is set). Optional independent review: dispatch with role=review, then closeout or reject. read/list inspect state; supplement delivers context once to an active run without changing requirements; step records progress notes; pause/resume/cancel control execution; decide requests a human decision on a recorded verification. Service refusals preserve scope and version invariants.',
+    description: 'Drive a contract-backed change from goal definition to verified closeout. create/revise define or update the input contract; dispatch reserves scope, captures the baseline, and launches a run (omit task_id to open a quick run on a new change in dir/workspace_id, or pass run_id to launch a saved reservation); finish settles a writer run once its report arrives; closeout snapshots the delivery, evaluates checks, and accepts it (or opens human oversight when human_review is set). check reports conflicting run reservations and active user sessions for dir/workspace_id (+ optional paths) without starting anything. Optional independent review: dispatch with role=review, then closeout or reject. read/list inspect state; supplement delivers context once to an active run without changing requirements; step records progress notes; pause/resume/cancel control execution; decide requests a human decision on a recorded verification. Service refusals preserve scope and version invariants.',
     parameters: {
       action: { type: 'string', enum: [...TASK_ACTIONS], required: true, description: 'Lifecycle action to perform.' },
       task_id: { type: 'string', description: 'Change id (required except on create, list, or initial dispatch of a new change).' },
       title: { type: 'string', description: 'create/revise/dispatch: concise human-facing change title.' },
       goal: { type: 'string', description: 'create/revise/dispatch: one English sentence stating what the finished delivery must achieve.' },
-      dir: { type: 'string', description: 'create/dispatch: absolute project directory.' },
-      workspace_id: { type: 'string', description: 'create/dispatch: target project workspace id.' },
+      dir: { type: 'string', description: 'create/dispatch/check: absolute project directory.' },
+      workspace_id: { type: 'string', description: 'create/dispatch/check: target project workspace id.' },
       requirements: { type: 'string', description: 'create/revise: JSON array of {requirementRef,text,required,scenarios?}. Write text in English stating what SHALL hold (quote exact strings verbatim). Each required item needs at least one scenario {scenarioRef,given?,when,then} with a globally unique scenarioRef (e.g. R1.a).' },
       steps: { type: 'string', description: 'create/revise: JSON array of {stepRef,text,covers?,after?} for planning notes (never treated as delivery proof). covers lists requirement/scenario ids served; after lists prerequisite step ids (acyclic).' },
       constraints: { type: 'string', description: 'create/revise: JSON array of {constraintRef,text} in English specifying execution boundaries (order, untouched paths, forbidden tools). Modifying constraints creates a new input revision.' },
       user_request: { type: 'string', description: "create/revise: the human's exact unedited, untranslated request text, passed verbatim to runs as the source of truth." },
       deliverable_language: { type: 'string', description: 'create/revise: target language for deliverable files/copy/commits (e.g. "Simplified Chinese"); omit to follow user_request and existing project files. Run reports stay in English.' },
-      behavior_notes: { type: 'string', description: 'Deprecated legacy constraint text; use structured constraints instead (passing both, or revising behavior_notes after constraints exist, is refused).' },
-      acceptance: { type: 'string', description: 'Legacy fallback acceptance text used only when structured requirements are omitted; prefer requirements with scenarios.' },
-      deliverable: { type: 'string', description: 'Legacy fallback deliverable summary; prefer structured requirements.' },
       priority: { type: 'integer', description: 'create/revise: priority from 1 (normal) to 3 (urgent).' },
       human_review: { type: 'boolean', description: 'create/revise: set true when the human asked to decide before acceptance. The first closeout records the verification and opens that decision; a later closeout accepts it.' },
       max_concurrent: { type: 'integer', description: 'create/revise: maximum concurrent open runs (1 to 8).' },
-      role: { type: 'string', enum: ['work', 'rework', 'review'], description: 'dispatch: run role. review is optional and reserves the whole workspace with write access; the brief tells the reviewer not to modify the delivery, but the session is not a read-only sandbox.' },
-      access: { type: 'string', enum: ['read', 'write'], description: 'dispatch: set "write" when the run will create, edit, or delete files; "read" is strictly read-only.' },
-      paths: { type: 'string', description: 'dispatch: JSON array of {path,type} ("file" or "directory") bounding write access, e.g. [{"path":"src/app.ts","type":"file"}]. Omit with access="write" only to reserve the entire change directory.' },
+      role: { type: 'string', enum: ['work', 'rework', 'review'], description: 'dispatch/check: run role. review is optional and reserves the whole workspace exclusively but launches read-only; verification needing writes (e.g. builds) belongs in a writer run.' },
+      access: { type: 'string', enum: ['read', 'write'], description: 'dispatch/check: set "write" when the run will create, edit, or delete files; "read" is strictly read-only.' },
+      paths: { type: 'string', description: 'dispatch/check: JSON array of {path,type} ("file" or "directory") bounding write access, e.g. [{"path":"src/app.ts","type":"file"}]. Omit with access="write" only to reserve the entire change directory.' },
       message: { type: 'string', description: 'dispatch: English supplementary notes appended after the rendered work-order brief (include only context not already in the input; never restate requirements or scope). supplement: English context delivered once to an active run without altering requirements.' },
       model: { type: 'string', description: 'dispatch: allowed provider/model key from dot_list_models; omit for default.' },
       preset: { type: 'string', description: 'dispatch: task preset id ("ptc" for scripted batch work, "cordis" for DSH plugin work); omit for default.' },
@@ -281,7 +274,7 @@ export function apply(ctx: Context): void {
       step_refs: { type: 'string', description: 'dispatch: JSON array of stepRef ids assigned to this run; omit to include all current steps.' },
       step_ref: { type: 'string', description: 'step: stepRef whose progress is being marked.' },
       input_ref: { type: 'string', description: 'read: specific historical inputRef to inspect; omit for current input and full history.' },
-      checks: { type: 'string', description: 'closeout: JSON array of {requirementRef,applicability,verdict,note,evidenceRefs}. A requirement passes only when every one of its scenarios has supporting evidence; name the scenario ids in note.' },
+      checks: { type: 'string', description: 'closeout: JSON array of {requirementRef,applicability,verdict,note,evidenceRefs}. Every pass needs resolvable evidence: run:<runId> for a run\'s captured Report, run:<runId>#<scenarioRef> for one of its Report bullets, or file:<path> for a delivered file.' },
       expected_input_ref: { type: 'string', description: 'closeout/supplement: exact inputRef copied from action=read.' },
       expected_input_revision: { type: 'integer', description: 'closeout/supplement/step/decide/reject: exact revision number copied from action=read.' },
       review_run_id: { type: 'string', description: 'closeout: optional open review run of this change; closeout holds it and refuses one that is already completed, failed, or stopped. reject: required open review run id to release for rework.' },
@@ -291,51 +284,6 @@ export function apply(ctx: Context): void {
     },
     execute: async (args) => dot().manageTask(args as Record<string, unknown>),
     title: 'Manage task',
-  }))
-
-  // ── dot_start_task ────────────────────────────────────────────────────────
-  tool(defineToolInput({
-    name: TOOL.startTask,
-    description: 'Check workspace conflicts (check_only=true), continue a reserved run, or open a quick run on an existing or newly created change (prefer dot_task create + dispatch for structured multi-requirement work). The service renders the run\'s opening brief from the work order and appends instruction as your notes. Write scope rules: any run that modifies files must pass access="write" and paths as a JSON array of {path, type} ("file" or "directory"), e.g. [{"path":"site/note.txt","type":"file"}]; omitting paths with access="write" reserves the entire change directory, whereas access="read" cannot modify files (never start a write task in read mode). role="review" reserves the whole workspace with write access and is told not to modify the delivery. Continuation rules: to launch a reserved run, pass its run_id (and matching paths if supplied; relative paths resolve against the change directory); ambiguous, mismatched, or unknown reservations are refused without creating a change, and a saved reservation keeps its original read/write gate. Model and preset must be permitted on this host.',
-    parameters: {
-      task_id: { type: 'string', description: 'Existing change id; omit only when creating a quick change in cwd/workspace_id.' },
-      run_id: { type: 'string', description: 'Reserved run id to launch; if paths is also passed, the scope must match.' },
-      role: { type: 'string', enum: ['work', 'rework', 'review'], description: 'Run role: work (default), rework, or review (reserves the whole workspace with write access; not a read-only sandbox).' },
-      access: { type: 'string', enum: ['read', 'write'], description: 'Set "write" whenever the run changes files (e.g. access "write" with paths [{"path":"site/note.txt","type":"file"}]); "read" is strictly read-only.' },
-      acceptance: { type: 'string', description: 'Legacy acceptance note when creating without dot_task requirements.' },
-      deliverable: { type: 'string', description: 'Legacy deliverable note when creating without dot_task requirements.' },
-      priority: { type: 'integer', description: 'Priority from 1 to 3 when creating a change.' },
-      check_only: { type: 'boolean', description: 'When true, report conflicting run reservations and active user sessions in the directory without starting a run.' },
-      capture_baseline: { type: 'boolean', description: 'When true, snapshot and publish the pre-write baseline before sending the first prompt. On failure, newly created unstarted reservations are released while existing reservations stay retryable.' },
-      title: { type: 'string', description: 'Short change title shown on the board.' },
-      instruction: { type: 'string', description: 'English supplementary notes appended to the rendered work-order brief (include only context absent from the input; omit when check_only=true).' },
-      workspace_id: { type: 'string', description: 'Target project workspace id (preferred over raw cwd when registered).' },
-      cwd: { type: 'string', description: 'Absolute directory path when no registered workspace applies.' },
-      goal: { type: 'string', description: 'One-sentence English goal when creating a change directly; defaults to instruction.' },
-      model: { type: 'string', description: `Allowed provider/model key from ${TOOL.listModels}; omit for default.` },
-      preset: { type: 'string', description: 'Agent preset id: omit for default; use "ptc" for scripted batch/mechanical tasks, or "cordis" for DSH plugin/preset development.' },
-      paths: { type: 'string', description: 'JSON array of {path, type} ("file" or "directory") for access="write", e.g. [{"path":"site/note.txt","type":"file"}]. Relative paths resolve against the change directory; omit with access="write" only to reserve the whole change directory.' },
-    },
-    execute: async (args, exec) => dot().startTask({
-      title: str(args, 'title') ?? 'task',
-      instruction: str(args, 'instruction') ?? '',
-      ...(str(args, 'task_id') ? { taskId: str(args, 'task_id')! } : {}),
-      ...(str(args, 'role') ? { role: str(args, 'role') as 'work' | 'rework' | 'review' } : {}),
-      ...(str(args, 'access') ? { access: str(args, 'access') as 'read' | 'write' } : {}),
-      ...(str(args, 'acceptance') !== undefined ? { acceptance: str(args, 'acceptance')! } : {}),
-      ...(str(args, 'deliverable') !== undefined ? { deliverable: str(args, 'deliverable')! } : {}),
-      ...(num(args, 'priority') !== undefined ? { priority: num(args, 'priority') as 1 | 2 | 3 } : {}),
-      checkOnly: bool(args, 'check_only'),
-      captureBaseline: bool(args, 'capture_baseline'),
-      ...str(args, 'workspace_id') ? { workspaceId: str(args, 'workspace_id')! } : {},
-      ...str(args, 'cwd') ? { cwd: str(args, 'cwd')! } : {},
-      ...str(args, 'goal') ? { goal: str(args, 'goal')! } : {},
-      ...str(args, 'model') ? { model: str(args, 'model')! } : {},
-      ...str(args, 'preset') ? { preset: str(args, 'preset')! } : {},
-      ...pathsText(args) ? { paths: pathsText(args)! } : {},
-      ...str(args, 'run_id') ? { runId: str(args, 'run_id')! } : {},
-    }, exec.signal ?? new AbortController().signal),
-    title: 'Start task',
   }))
 
   // ── dot_list_models ───────────────────────────────────────────────────────
@@ -431,7 +379,7 @@ export function apply(ctx: Context): void {
   // ── dot_schedule (merged from dot_schedule_add + dot_schedule_list + dot_schedule_remove) ──
   tool(defineToolInput({
     name: TOOL.schedule,
-    description: 'Manage persistent reminders that wake your active conversation segment with a [dot reminder] message when due. Always call action=list before action=add so you update or remove an existing reminder instead of creating duplicates. action=add requires exactly one timing field: after_minutes, at, every_minutes, or daily_time (optionally paired with weekdays). One-off reminders (after_minutes, at) fire at most once even across late wakes or restarts — never add a duplicate copy. All timestamps use host local time; each firing consumes a model turn, so choose sensible intervals and action=remove recurring reminders once their goal is done.',
+    description: 'Manage persistent reminders that wake your active conversation segment with a [dot reminder] message when due. action=add refuses a duplicate of a still-set reminder (same title, or same timing and prompt); remove the existing one first to change it. action=add requires exactly one timing field: after_minutes, at, every_minutes, or daily_time (optionally paired with weekdays). One-off reminders (after_minutes, at) fire at most once even across late wakes or restarts. All timestamps use host local time; each firing consumes a model turn, so choose sensible intervals and action=remove recurring reminders once their goal is done.',
     parameters: {
       action: { type: 'string', enum: ['add', 'list', 'remove'], required: true, description: 'Operation: add, list, or remove.' },
       title: { type: 'string', description: 'add: concise reminder label shown on the board.' },

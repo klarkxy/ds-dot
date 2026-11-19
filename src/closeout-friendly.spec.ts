@@ -2,7 +2,7 @@
  * Closeout must name the input it read and pass explicit checks.
  * A summary does not pass items, and a rejected review of this input stays rejected.
  */
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
@@ -75,7 +75,7 @@ async function readInput(task: { execute(args: Record<string, unknown>): Promise
 
 async function settleWriter(h: ReturnType<typeof harness>, taskId: string) {
   const started = await h.start.execute({
-    task_id: taskId, instruction: 'edit doc.md', access: 'write', capture_baseline: true,
+    task_id: taskId, instruction: 'edit doc.md', access: 'write',
     paths: JSON.stringify([{ path: 'doc.md', type: 'file' }]),
   }, h.exec)
   const runId = /started (run-\d+)/.exec(started)?.[1]
@@ -93,22 +93,27 @@ describe('closeout binds the read version and explicit checks', () => {
         action: 'create', title: 'Ship', goal: 'edit', dir: h.project,
         requirements: JSON.stringify([{ requirementRef: 'R1', text: 'edited', required: true }]),
       })) as { id: string }
-      await settleWriter(h, created.id)
-      const review = await h.start.execute({ task_id: created.id, role: 'review', instruction: 'look', capture_baseline: true }, h.exec)
+      // A second revision makes the expected-input fields required again.
+      await h.task.execute({
+        action: 'revise', task_id: created.id,
+        constraints: JSON.stringify([{ constraintRef: 'C1', text: 'stay in the project dir' }]),
+      })
+      const runId = await settleWriter(h, created.id)
+      const review = await h.start.execute({ task_id: created.id, role: 'review', instruction: 'look' }, h.exec)
       const reviewId = /started (run-\d+)/.exec(review)?.[1]
       expect(reviewId, review).toBeTruthy()
       const bare = await h.task.execute({
-        action: 'closeout', task_id: created.id, evidence_ref: 'log', summary: 'looks done',
-        checks: JSON.stringify([{ requirementRef: 'R1', applicability: 'applicable', verdict: 'pass', evidenceRefs: ['log'] }]),
+        action: 'closeout', task_id: created.id,
+        checks: JSON.stringify([{ requirementRef: 'R1', applicability: 'applicable', verdict: 'pass', evidenceRefs: [`run:${runId}`] }]),
       }).catch(error => { expect(error.code).toBe('dot/invalid'); return error.message as string })
       expect(bare).toContain('expected_input_ref')
-      expect(existsSync(join(h.home, 'artifacts', 'evidence', 'log'))).toBe(false)
+      expect(h.store.work.latestVerification(created.id)).toBeUndefined()
       expect(h.store.work.run(reviewId!)?.phase).not.toBe('settling')
       expect(h.store.work.change(created.id)?.closeout).toBeUndefined()
       const version = await readInput(h.task, created.id)
       const stale = await h.task.execute({
         action: 'closeout', task_id: created.id, ...version, expected_input_revision: version.expected_input_revision + 1,
-        checks: JSON.stringify([{ requirementRef: 'R1', applicability: 'applicable', verdict: 'pass', evidenceRefs: ['log'] }]),
+        checks: JSON.stringify([{ requirementRef: 'R1', applicability: 'applicable', verdict: 'pass', evidenceRefs: [`run:${runId}`] }]),
       }).catch(error => { expect(error.code).toBe('dot/invalid'); return error.message as string })
       expect(stale).toContain('is not current')
       expect(h.store.work.run(reviewId!)?.phase).not.toBe('settling')
@@ -119,7 +124,7 @@ describe('closeout binds the read version and explicit checks', () => {
     const h = harness()
     try {
       const started = await h.start.execute({
-        cwd: h.project, title: 'Fix', goal: 'update doc', instruction: 'edit doc.md', access: 'write', capture_baseline: true,
+        cwd: h.project, title: 'Fix', goal: 'update doc', instruction: 'edit doc.md', access: 'write',
         paths: JSON.stringify([{ path: 'doc.md', type: 'file' }]),
       }, h.exec)
       const changeId = /on (c-\d+)/.exec(started)?.[1]
@@ -128,18 +133,18 @@ describe('closeout binds the read version and explicit checks', () => {
       writeFileSync(join(h.project, 'doc.md'), 'new')
       expect(await h.task.execute({ action: 'finish', task_id: changeId!, run_id: runId })).toContain(`completed ${runId}`)
       const version = await readInput(h.task, changeId!)
-      const summarized = await h.task.execute({ action: 'closeout', task_id: changeId!, ...version, evidence_ref: 'doc-check', summary: 'updated' }).catch(error => { expect(error.code).toBe('dot/invalid'); return error.message as string })
+      const summarized = await h.task.execute({ action: 'closeout', task_id: changeId!, ...version }).catch(error => { expect(error.code).toBe('dot/invalid'); return error.message as string })
       expect(summarized).toContain('requires checks')
       expect(h.store.work.change(changeId!)?.closeout).toBeUndefined()
-      const failedGoal = await h.task.execute({
-        action: 'closeout', task_id: changeId!, ...version, evidence_ref: 'doc-check', summary: 'updated',
-        checks: JSON.stringify([{ requirementRef: 'goal', applicability: 'applicable', verdict: 'fail', evidenceRefs: ['doc-check'] }]),
-      }).catch(error => { expect(error.code).toBe('dot/invalid'); return error.message as string })
-      expect(failedGoal).toContain('explicit goal check')
-      expect(h.store.work.latestVerification(changeId!)).toBeUndefined()
+      const failedGoal = JSON.parse(await h.task.execute({
+        action: 'closeout', task_id: changeId!, ...version,
+        checks: JSON.stringify([{ requirementRef: 'goal', applicability: 'applicable', verdict: 'fail', evidenceRefs: [`run:${runId}`] }]),
+      })) as { verdict: string }
+      expect(failedGoal.verdict).toBe('rework')
+      expect(h.store.work.latestVerification(changeId!)?.verdict).toBe('rework')
       const accepted = await h.task.execute({
-        action: 'closeout', task_id: changeId!, ...version, evidence_ref: 'doc-check', summary: 'updated',
-        checks: JSON.stringify([{ requirementRef: 'goal', applicability: 'applicable', verdict: 'pass', evidenceRefs: ['doc-check'] }]),
+        action: 'closeout', task_id: changeId!, ...version,
+        checks: JSON.stringify([{ requirementRef: 'goal', applicability: 'applicable', verdict: 'pass', evidenceRefs: [`run:${runId}`] }]),
       })
       expect(accepted).toContain(`accepted ${changeId}`)
       expect(h.store.work.workView(changeId!)?.status).toBe('done')
@@ -157,7 +162,7 @@ describe('closeout binds the read version and explicit checks', () => {
       expect(subject.protectedDirty).not.toContain('other.txt')
       expect(subject.outOfScopePaths).toContain('other.txt')
       const current = h.store.work.change(created.id)!
-      const verification = await h.service.recordWorkVerification(created.id, [{ requirementRef: 'R1', applicability: 'applicable', verdict: 'pass', evidenceRefs: ['event:session-run-1:1'], note: 'doc.md contains the required edit' }], [runId], { inputRef: current.currentInputRef, inputRevision: current.currentRevision, subject })
+      const verification = await h.service.recordWorkVerification(created.id, [{ requirementRef: 'R1', applicability: 'applicable', verdict: 'pass', evidenceRefs: [`run:${runId}`], note: 'doc.md contains the required edit' }], [runId], { inputRef: current.currentInputRef, inputRevision: current.currentRevision, subject })
       if (!('id' in verification)) throw new Error(verification.message)
       const human = { expectedInputRevision: current.currentRevision, expectedVerificationId: verification.id }
       writeFileSync(join(h.project, 'doc.md'), 'drifted')
@@ -179,15 +184,16 @@ describe('closeout binds the read version and explicit checks', () => {
         action: 'create', title: 'Guarded', goal: 'edit', dir: h.project, human_review: true,
         requirements: JSON.stringify([{ requirementRef: 'R1', text: 'edited', required: true }]),
       })) as { id: string }
-      await settleWriter(h, created.id)
+      const runId = await settleWriter(h, created.id)
       const version = await readInput(h.task, created.id)
-      const checks = JSON.stringify([{ requirementRef: 'R1', applicability: 'applicable', verdict: 'pass', evidenceRefs: ['r1-log'] }])
-      const gate = await h.task.execute({ action: 'closeout', task_id: created.id, ...version, checks, evidence_ref: 'r1-log', summary: 'seen' })
+      const checks = JSON.stringify([{ requirementRef: 'R1', applicability: 'applicable', verdict: 'pass', evidenceRefs: [`run:${runId}`] }])
+      const gate = await h.task.execute({ action: 'closeout', task_id: created.id, ...version, checks })
       const pendingId = /pending (\S+)/.exec(gate)?.[1]
       expect(pendingId, gate).toBeTruthy()
       await h.service.answerWorkReview(pendingId!, true)
-      const skipped = await h.task.execute({ action: 'closeout', task_id: created.id, checks, evidence_ref: 'r1-log', summary: 'seen' }).catch(error => { expect(error.code).toBe('dot/invalid'); return error.message as string })
-      expect(skipped).toContain('expected_input_ref')
+      // With one revision the expected fields default to it; an explicit wrong one still refuses.
+      const skipped = await h.task.execute({ action: 'closeout', task_id: created.id, checks, expected_input_revision: 99 }).catch(error => { expect(error.code).toBe('dot/invalid'); return error.message as string })
+      expect(skipped).toContain('is not current')
       expect(h.store.work.change(created.id)?.closeout).toBeUndefined()
       const again = await readInput(h.task, created.id)
       const accepted = await h.task.execute({ action: 'closeout', task_id: created.id, ...again })
@@ -202,16 +208,16 @@ describe('closeout binds the read version and explicit checks', () => {
         action: 'create', title: 'Reviewed', goal: 'edit', dir: h.project,
         requirements: JSON.stringify([{ requirementRef: 'R1', text: 'edited', required: true }]),
       })) as { id: string }
-      await settleWriter(h, created.id)
-      const review = await h.start.execute({ task_id: created.id, role: 'review', instruction: 'look', capture_baseline: true }, h.exec)
+      const runId = await settleWriter(h, created.id)
+      const review = await h.start.execute({ task_id: created.id, role: 'review', instruction: 'look' }, h.exec)
       const reviewId = /started (run-\d+)/.exec(review)?.[1]
       expect(reviewId, review).toBeTruthy()
       expect(h.store.work.run(reviewId!)?.phase).toBe('active')
       const version = await readInput(h.task, created.id)
       expect(await h.task.execute({ action: 'reject', task_id: created.id, review_run_id: reviewId, expected_input_revision: version.expected_input_revision })).toContain('rejected')
-      const checks = JSON.stringify([{ requirementRef: 'R1', applicability: 'applicable', verdict: 'pass', evidenceRefs: ['r1-log'] }])
+      const checks = JSON.stringify([{ requirementRef: 'R1', applicability: 'applicable', verdict: 'pass', evidenceRefs: [`run:${runId}`] }])
       const again = await h.task.execute({
-        action: 'closeout', task_id: created.id, ...version, checks, evidence_ref: 'r1-log', summary: 'same delivery',
+        action: 'closeout', task_id: created.id, ...version, checks,
       }).catch(error => { expect(error.code).toBe('dot/invalid'); return error.message as string })
       expect(again).toContain(`${reviewId} rejected this delivery`)
       expect(h.store.work.change(created.id)?.closeout).toBeUndefined()
@@ -228,14 +234,14 @@ describe('closeout binds the read version and explicit checks', () => {
         requirements: JSON.stringify([{ requirementRef: 'R1', text: 'edited', required: true }]),
       })) as { id: string }
       await settleWriter(h, created.id)
-      const review = await h.start.execute({ task_id: created.id, role: 'review', instruction: 'look', capture_baseline: true }, h.exec)
+      const review = await h.start.execute({ task_id: created.id, role: 'review', instruction: 'look' }, h.exec)
       const reviewId = /started (run-\d+)/.exec(review)?.[1]
       expect(reviewId, review).toBeTruthy()
       expect(h.store.work.run(reviewId!)?.phase).toBe('active')
       const version = await readInput(h.task, created.id)
       expect(await h.task.execute({ action: 'reject', task_id: created.id, review_run_id: reviewId, expected_input_revision: version.expected_input_revision })).toContain('rejected')
       const rework = await h.start.execute({
-        task_id: created.id, role: 'rework', instruction: 'fix doc.md', access: 'write', capture_baseline: true,
+        task_id: created.id, role: 'rework', instruction: 'fix doc.md', access: 'write',
         paths: JSON.stringify([{ path: 'doc.md', type: 'file' }]),
       }, h.exec)
       const reworkId = /started (run-\d+)/.exec(rework)?.[1]
@@ -244,9 +250,9 @@ describe('closeout binds the read version and explicit checks', () => {
       expect(await h.task.execute({ action: 'finish', task_id: created.id, run_id: reworkId })).toContain(`completed ${reworkId}`)
       const again = await readInput(h.task, created.id)
       expect(again).toEqual(version)
-      const checks = JSON.stringify([{ requirementRef: 'R1', applicability: 'applicable', verdict: 'pass', evidenceRefs: ['r1-log'] }])
+      const checks = JSON.stringify([{ requirementRef: 'R1', applicability: 'applicable', verdict: 'pass', evidenceRefs: [`run:${reworkId}`] }])
       const accepted = await h.task.execute({
-        action: 'closeout', task_id: created.id, ...again, checks, evidence_ref: 'r1-log', summary: 'reworked',
+        action: 'closeout', task_id: created.id, ...again, checks,
       })
       expect(accepted).toContain(`accepted ${created.id}`)
       expect(h.store.work.workView(created.id)?.status).toBe('done')

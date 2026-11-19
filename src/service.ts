@@ -5,20 +5,20 @@
  * entry wires host events into it; the preset child plugin exposes its
  * operations as model tools.
  */
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { HarnessError } from '@deepseek-ai/dsh-llm'
 import { mkdir } from 'node:fs/promises'
 import { isAbsolute, join } from 'node:path'
 import { APPROVAL_DETAIL_LIMIT, approvalNotice } from './approval-risk.ts'
-import { writerPrior, evidenceRefGap, deliveryScope, scopeContainsPath, type DeliverySubject, type SubjectLook } from './acceptance.ts'
+import { writerPrior, parseEvidenceRef, reportBullet, deliveryScope, scopeContainsPath, type DeliverySubject, type SubjectLook } from './acceptance.ts'
 import { captureScopeAsync, defaultIgnoreCover, foldRel, ignoreCovered, isLinkReason, pruneSnapshots, readManifest, readSnapshotEntry, relativePath, saveSnapshot, scanScope, scanScopeAsync, baselineCaptures, wipeArtifacts, type SnapshotExclusion, type SnapshotSource } from './artifacts.ts'
-import { inputConstraints, renderBrief, renderSupplement, runTitle } from './brief.ts'
+import { renderBrief, renderSupplement, runTitle } from './brief.ts'
 import { bindRunSession, cancelWork, countRelayInserts, finishWork, launchReservedRun, observeRun, reconcileRun, supplementRun } from './execution.ts'
 import { detectWorkspaceRoot } from './git-root.ts'
 import {
   WRITE_PATHS_EXAMPLE, artifactName, constraintList, jsonArray,
   occupantOf, pathScope, plannedOccupant, plannedScope, requirementList, samePathList,
-  stepList, synthesizeRequirements, verifyRefusal,
+  stepList, verifyRefusal,
 } from './work-actions.ts'
 import { absoluteScopePath, InputShapeError, occupantsConflict, scopeWithinRoot, scopeWrites, type ChangeRecord, type Occupant, type RunRecord, type WorkRefusal } from './work.ts'
 import type { ShownView, ViewAnswer } from '@klarkxy/dsh-deep-view/contracts'
@@ -37,8 +37,8 @@ import { directoriesConflict } from './lock.ts'
 import { IdleChecker, idleCandidates } from './idle-check.ts'
 import { ACCEPTED_DELIVERY_HINT, IDLE_SILENCE_HINT } from './task-hints.ts'
 import { DOT_TRACE, emitDotTrace, type DotTraceInput } from './trace.ts'
-import type { Ticket, TicketAccess, TicketPriority, SessionRole } from './contracts.ts'
-import { AGREEMENTS_MAX_CHARS, COGNITION_MAX_CHARS, KnowledgeError, MemoryNotes, addEntry, agreementNotesBlock, agreementsSection, cognitionSection, normalizeAgreements, normalizeCognition, policyAsAgreements, removeEntry } from './memory.ts'
+import type { RunAccess, RunKind, ChangePriority } from './contracts.ts'
+import { AGREEMENTS_MAX_CHARS, COGNITION_MAX_CHARS, KnowledgeError, addEntry, agreementNotesBlock, agreementsSection, cognitionSection, normalizeAgreements, normalizeCognition, removeEntry } from './memory.ts'
 import { deliverPeer, guardRunWriteTool, PeerLedger, refreshChildSeals, sealChildSession, type PeerSendInput } from './peer.ts'
 import { PendingHub, type PendingAnswer } from './pending.ts'
 import { personaSection } from './persona.ts'
@@ -49,7 +49,7 @@ import { ScheduleInputError, describeTiming, scheduleLines, type ScheduleInput }
 import { openingText, reasonAfterTurn, reasonBeforeDelivery, type Segment } from './segments.ts'
 import type { DotStore } from './store.ts'
 import { factoryResetArchiveIds, factoryResetCounts, factoryResetStopGap, factoryResetTokenError, issueFactoryResetToken, type FactoryResetStopEvidence } from './factory-reset.ts'
-import { formatWorkspaceFiles, listWorkspaceFiles as listWorkspaceTree, WORKSPACE_LIST_MAX } from './workspace-inspect.ts'
+import { formatWorkspaceFiles, listWorkspaceFiles as listWorkspaceTree, readWorkspaceText, WORKSPACE_LIST_MAX } from './workspace-inspect.ts'
 import { eventTier } from './tiers.ts'
 import { TaskModelError, formatTaskModels, pickTaskModel, type TaskModelCatalog } from './task-models.ts'
 import { TaskPresetError, pickTaskPreset, type TaskPresetCatalog, type TaskPresetChoice } from './task-presets.ts'
@@ -66,8 +66,6 @@ export interface DotServiceOptions {
   readonly homeDir: string
   /** Preferred UI locale when known at construction time. */
   readonly locale?: CopyLocale
-  /** The legacy note file; only the one-time migration reads it. Defaults to memory.md in homeDir. */
-  readonly notes?: NoteFile
   /** Let original-session answerers settle approvals before waking dot. */
   readonly approvalGraceMs?: number
   readonly timer?: Timer
@@ -80,16 +78,11 @@ export interface DotServiceOptions {
 
 }
 
-/** The legacy note files; only migration reads them, and a missing file reads as empty. */
-export interface NoteFile {
-  readonly path: string
-  read(): Promise<string>
-  /** The old cognition.md file, when the file reader also knows it. */
-  readCognition?(): Promise<string>
-}
-
 /** The history tools themselves: their calls and results are not part of the record they read. */
 const LOOKUP_TOOLS: ReadonlySet<string> = new Set([TOOL.searchHistory, TOOL.readHistory])
+
+/** Writer/rework dispatches on one input revision stop after this many failed rounds. */
+const FAILED_ROUND_LIMIT = 3
 
 /** Sidebar title of dot's own workspace; the host keeps one title per workspace, so it is not translated. */
 export const HOME_TITLE = 'Dorothy'
@@ -119,11 +112,8 @@ export class DotService {
   private readonly inFlight = new Set<Promise<unknown>>()
   private readonly now: () => number
   private idleSince?: number
-  private readonly notes: NoteFile
   /** Changes to the agreements and cognition run one at a time, so two never start from the same text. */
   private knowledgeLane: Promise<unknown> = Promise.resolve()
-  /** The one-time legacy import; kept only while it runs so a failure is retried next time. */
-  private migration?: Promise<void>
   private requestedSegment?: { focus?: string }
   private readonly retryingCardNotifications = new Set<string>()
   /** Decision wakes already queued in this process. The durable mark is notifiedAt. */
@@ -140,7 +130,6 @@ export class DotService {
     this.currentLocale = options.locale ?? options.store.uiLocale
     this.cards = new DotCards(options.store, options.log)
     this.now = options.now ?? Date.now
-    this.notes = options.notes ?? new MemoryNotes(options.homeDir)
     this.pending = new PendingHub(this.now)
     this.pending.onChange(() => { void this.pruneApprovalDetails() })
     this.selfSettings = new SelfSettings(this)
@@ -162,10 +151,10 @@ export class DotService {
       void this.store.syncPending(this.pending.list())
     })
     this.idleChecker = new IdleChecker(
-      () => this.canIdleCheck() ? idleCandidates([], this.store.list(), this.pending.list(), this.store.workIdle()) : [],
+      () => this.canIdleCheck() ? idleCandidates(this.store.list(), this.pending.list(), this.store.workIdle()) : [],
       candidates => {
-        this.emit({ event: DOT_TRACE.idleFired, message: 'Routine check fired.', data: { candidates: candidates.map(row => `${row.ticket.id}:${row.reason}`).join('; ') } })
-        this.notify({ sessionId: this.store.dotSessionId!, kind: 'idle-check', text: `Routine check: ${candidates.map(row => `${row.ticket.id} "${row.ticket.title}": ${row.reason}`).join('; ')}\n  ${IDLE_SILENCE_HINT}`, at: this.now() })
+        this.emit({ event: DOT_TRACE.idleFired, message: 'Routine check fired.', data: { candidates: candidates.map(row => `${row.id}:${row.reason}`).join('; ') } })
+        this.notify({ sessionId: this.store.dotSessionId!, kind: 'idle-check', text: `Routine check: ${candidates.map(row => `${row.id} "${row.title}": ${row.reason}`).join('; ')}\n  ${IDLE_SILENCE_HINT}`, at: this.now() })
       },
       options.timer,
       () => this.emit({ event: DOT_TRACE.idleSuppressed, message: 'Routine check did not fire.', data: { reason: 'unchanged' } }),
@@ -314,8 +303,6 @@ export class DotService {
     if (this.closing) return Promise.reject(new DotError('dot/disposed', 'dot is shutting down'))
     this.ensuring ??= (async () => {
       try {
-        // A first run on an old install imports the legacy notes before any prompt is frozen.
-        await this.ensureMigration()
         // Registered once per run, so the workspace is in the sidebar from dot's first use on.
         if (!this.homeRegistered) {
           await this.homeWorkspace().then(() => { this.homeRegistered = true }, error => { this.options.log?.(`dsh-dot: dot's own workspace was not registered: ${messageOf(error)}`) })
@@ -588,7 +575,6 @@ export class DotService {
       this.reminders.refresh()
       this.homeRegistered = false
       this.ensuring = undefined
-      this.migration = undefined
       this.requestedSegment = undefined
       if (activeLocale) await this.store.setUiLocale(activeLocale)
       let sessionId: string
@@ -651,6 +637,41 @@ export class DotService {
     }
   }
 
+  /**
+   * Read-only file access for dot: relative paths stay inside the named (or her
+   * own) workspace; absolute paths must land inside a registered workspace or a
+   * change root. Refusals cover symlink escapes, directories, binaries, files
+   * over 2 MiB, and credential-like paths.
+   */
+  async readWorkspaceFile(id: string | undefined, target: string | undefined, startLine?: number, maxLines?: number): Promise<string> {
+    const home = await this.homeWorkspace().catch(error => { this.options.log?.(`dsh-dot: dot's own workspace is unavailable: ${messageOf(error)}`); return undefined })
+    const rows = this.host.listWorkspaces()
+    const trimmed = target?.trim() ?? ''
+    if (!trimmed) throw new DotError('dot/invalid', 'read requires path')
+    let baseDir: string | undefined
+    if (!isAbsolute(trimmed)) {
+      const key = id?.trim()
+      const row = key ? rows.find(item => item.id === key) : home
+      if (!row) throw new DotError('dot/unknown-workspace', key ? `no workspace ${key}` : 'no workspaces yet')
+      baseDir = row.path
+    }
+    const roots = [
+      ...rows.map(row => row.path),
+      ...this.store.work.listChanges().map(change => change.cwd),
+      ...this.store.work.listRuns().map(run => run.workspaceRoot),
+    ].filter((root): root is string => typeof root === 'string' && root.length > 0)
+    try {
+      const read = await readWorkspaceText(roots, baseDir, trimmed, { startLine, maxLines })
+      const width = String(read.totalLines).length
+      const numbered = read.lines.map((line, index) => `${String(read.start + index).padStart(width)}│${line}`)
+      const header = `${read.path} — ${read.totalLines} line${read.totalLines === 1 ? '' : 's'} total, showing ${read.lines.length === 0 ? 'none' : `${read.start}–${read.end}`}`
+      const note = read.truncated ? [`… truncated: ${read.totalLines - read.end} more line${read.totalLines - read.end === 1 ? '' : 's'}; call again with start_line=${read.end + 1}`] : []
+      return [header, ...numbered, ...note].join('\n')
+    } catch (error) {
+      throw new DotError('dot/invalid', error instanceof Error ? error.message : String(error))
+    }
+  }
+
   /** Mechanical panel action: no model message, approval, or queued switch. */
   newSegment(): Promise<string> {
     return this.serial(async () => {
@@ -690,18 +711,6 @@ export class DotService {
   reconcile(): Promise<void> { return this.track(() => this.reconcileNow()) }
 
   private async reconcileNow(): Promise<void> {
-    const rows = await this.host.listSessions(new AbortController().signal)
-    if (this.closing) return
-    const byId = new Map(rows.map(row => [row.sessionId, row]))
-    for (const task of this.store.list().filter(row => row.ticketId)) {
-      if (this.closing) return
-      const row = byId.get(task.sessionId)
-      if (row && !row.archived && task.status === 'archived') await this.store.track({ sessionId: task.sessionId, origin: task.origin, title: task.title, goal: task.goal, cwd: task.cwd, at: this.now() })
-      if (this.closing) return
-      if (row && !row.archived && !row.running && task.status === 'error') await this.store.apply({ type: 'status', sessionId: task.sessionId, status: 'running', at: this.now() }, [])
-      if (this.closing) return
-      await this.store.apply(!row || row.archived ? { type: 'archived', sessionId: task.sessionId, at: this.now() } : { type: 'status', sessionId: task.sessionId, status: row.running ? 'running' : 'idle', at: this.now() }, this.pending.list())
-    }
     for (const run of this.store.work.occupying()) {
       if (this.closing) return
       await reconcileRun(this.store.work, this.runHost(), run.id, this.now()).catch(error => {
@@ -716,13 +725,6 @@ export class DotService {
     this.recoverDecisionWakes()
     this.armIdleCheck()
   }
-  /** Legacy ticket writes stay explicitly closed; stored tickets remain readable. */
-  confirmTask(_id: string): Promise<Ticket> { return this.legacyClosed('task.confirm') }
-  deleteDraft(_id: string): Promise<boolean> { return this.legacyClosed('task.delete') }
-  cancelTask(_id: string): Promise<Ticket> { return this.legacyClosed('task.cancel') }
-  reviewTask(_id: string, _pass: boolean, _note?: string): Promise<Ticket> { return this.legacyClosed('task.review') }
-  setTaskPriority(_id: string, _priority: TicketPriority): Promise<Ticket> { return this.legacyClosed('task.priority') }
-
   /** The human removed a reminder in the board. */
   removeSchedule(id: string): Promise<boolean> { return this.track(() => this.reminders.remove(id)) }
 
@@ -736,7 +738,7 @@ export class DotService {
       .sort((a, b) => b.updatedAt - a.updatedAt)
     const shown = rows.filter(row => !row.archived).slice(0, limit)
     const titles = await this.host.titles(shown.map(row => row.sessionId), signal).catch(() => new Map<string, string>())
-    const lines = [ledgerSummary(this.store.list(), this.pending.list(), this.now(), this.store.listTickets(), this.store.workLedger()), '', '[all sessions, newest first]']
+    const lines = [ledgerSummary(this.store.list(), this.pending.list(), this.now(), this.store.workLedger()), '', '[all sessions, newest first]']
     for (const row of shown) {
       const tracked = this.store.tracks(row.sessionId) ? ' · tracked' : ''
       lines.push(`- ${row.sessionId} ${row.running ? 'RUNNING' : 'idle'} "${titles.get(row.sessionId) ?? '(untitled)'}" cwd=${row.cwd ?? '?'}${tracked}`)
@@ -813,8 +815,7 @@ export class DotService {
 
   manageTask(args: Record<string, unknown>): Promise<string> {
     const action = typeof args.action === 'string' ? args.action : ''
-    if (['move', 'delete', 'note', 'evidence'].includes(action)) return this.legacyClosed(`dot_task ${action}`)
-    const awaitsHost = ['finish', 'cancel', 'supplement', 'dispatch', 'closeout', 'reject'].includes(action)
+    const awaitsHost = ['finish', 'cancel', 'supplement', 'dispatch', 'check', 'closeout', 'reject'].includes(action)
     return awaitsHost ? this.manageWorkAction(args) : this.serial(() => this.manageWorkAction(args))
   }
 
@@ -828,7 +829,7 @@ export class DotService {
         return `${change.id} ${(view?.status ?? 'waiting').toUpperCase()} P${change.priority} ${change.cwd} "${change.title}"`
       }).join('\n') : 'No tasks.'
     }
-    if (action === 'dispatch') {
+    if (action === 'dispatch' || action === 'check') {
       return this.startWorkSession({
         title: typeof args.title === 'string' ? args.title : 'task',
         instruction: typeof args.instruction === 'string' ? args.instruction : typeof args.message === 'string' ? args.message : '',
@@ -836,17 +837,15 @@ export class DotService {
         ...(typeof args.dir === 'string' ? { cwd: args.dir } : {}),
         ...(typeof args.workspace_id === 'string' ? { workspaceId: args.workspace_id } : {}),
         ...(typeof args.goal === 'string' ? { goal: args.goal } : {}),
-        ...(typeof args.acceptance === 'string' ? { acceptance: args.acceptance } : {}),
-        ...(typeof args.deliverable === 'string' ? { deliverable: args.deliverable } : {}),
         ...(typeof args.priority === 'number' && (args.priority === 1 || args.priority === 2 || args.priority === 3) ? { priority: args.priority } : {}),
-        ...(typeof args.role === 'string' ? { role: args.role as SessionRole } : {}),
-        ...(typeof args.access === 'string' ? { access: args.access as TicketAccess } : {}),
+        ...(typeof args.role === 'string' ? { role: args.role as RunKind } : {}),
+        ...(typeof args.access === 'string' ? { access: args.access as RunAccess } : {}),
         ...(typeof args.paths === 'string' ? { paths: args.paths } : Array.isArray(args.paths) ? { paths: JSON.stringify(args.paths) } : {}),
         ...(typeof args.run_id === 'string' ? { runId: args.run_id } : {}),
         ...(typeof args.model === 'string' ? { model: args.model } : {}),
         ...(typeof args.preset === 'string' ? { preset: args.preset } : {}),
         ...(jsonArray(args.step_refs) ? { stepRefs: jsonArray(args.step_refs)!.map(String) } : {}),
-        captureBaseline: true,
+        checkOnly: action === 'check',
       })
     }
     if (action === 'create' || action === 'revise') return this.reviseOrCreate(args)
@@ -856,11 +855,10 @@ export class DotService {
     if (action === 'step') return this.stepFromTool(args)
     if (!changeId) throw new DotError('dot/invalid', 'task_id is required')
     if (action === 'closeout') return this.closeoutFromTool(args)
-    if (action === 'read' && this.store.ticket(changeId)) return JSON.stringify(this.store.ticket(changeId))
     if (action === 'read') return this.readWork(changeId, typeof args.input_ref === 'string' ? args.input_ref : undefined)
     if (action === 'reject') {
       const reviewRunId = typeof args.review_run_id === 'string' ? args.review_run_id : ''
-      const expectedInputRevision = typeof args.expected_input_revision === 'number' ? args.expected_input_revision : undefined
+      const expectedInputRevision = typeof args.expected_input_revision === 'number' ? args.expected_input_revision : this.soleInputRevision(changeId)
       if (expectedInputRevision === undefined) throw new DotError('dot/invalid', 'reject requires expected_input_revision')
       const released = await this.rejectWork(changeId, reviewRunId, expectedInputRevision)
       if (!released.ok) throw new DotError('dot/invalid', released.message)
@@ -871,9 +869,6 @@ export class DotService {
     throw new DotError('dot/invalid', `unknown task action ${action}`)
   }
 
-  startTask(input: { workspaceId?: string; cwd?: string; title: string; instruction: string; goal?: string; model?: string; preset?: string; taskId?: string; role?: SessionRole; access?: TicketAccess; acceptance?: string; deliverable?: string; priority?: TicketPriority; checkOnly?: boolean; paths?: string; runId?: string; stepRefs?: readonly string[]; captureBaseline?: boolean }, signal: AbortSignal): Promise<string> {
-    return this.startWorkSession(input)
-  }
 
   /** Agent-attributed delivery: the target sees dot as the sender, not the human. */
   send(sessionId: string, text: string): Promise<string> {
@@ -881,10 +876,10 @@ export class DotService {
       const recovery = this.store.work.recoveryError
       const task = this.store.task(sessionId)
       const run = this.store.work.sessionRun(sessionId)
-      if (recovery || task?.origin === 'started' || run || this.store.ticketForSession(sessionId)) {
-        throw new DotError('dot/legacy-closed', recovery
+      if (recovery || task?.origin === 'started' || run) {
+        throw new DotError('dot/send-closed', recovery
           ? `dot_send is closed until work records recover: ${recovery}`
-          : 'dot_send cannot continue a legacy started session or a run. Record a delivery on the run; nothing was relayed.')
+          : 'dot_send cannot continue a run session. Record a delivery on the run; nothing was relayed.')
       }
       return this.sendNow(sessionId, text)
     })
@@ -1096,65 +1091,7 @@ export class DotService {
     return run
   }
 
-  /**
-   * Import the old note sources once. A persistent marker makes the import
-   * idempotent: content cleared later is never pulled back in. The old files
-   * and state fields are read here once only; they are never live afterwards.
-   */
-  private ensureMigration(): Promise<void> {
-    if (this.store.knowledgeMigrated) return Promise.resolve()
-    if (!this.migration && this.closing) return Promise.reject(new DotError('dot/disposed', 'dot is shutting down'))
-    this.migration ??= this.runMigration().catch(error => {
-      // A failed import must not look done: clear it so the next call retries, and
-      // let the caller see the failure instead of silently continuing without the notes.
-      this.migration = undefined
-      throw error
-    })
-    return this.migration
-  }
-
-  private async runMigration(): Promise<void> {
-    const agreementsEmpty = !this.store.agreements.trim()
-    const cognitionEmpty = !this.store.cognition.trim()
-    // Only read a legacy source while its target layer is still empty, as the
-    // requirement says; a layer that already has content must not be blocked by
-    // an unrelated old file failing to read.
-    const legacyAgreements: string[] = []
-    if (agreementsEmpty) {
-      // The human's explicit requirements: only the old custom rules. The old notes
-      // file is dot's own understanding, so it migrates into cognition below.
-      // A read error is propagated so the import is not marked done and is retried.
-      const policy = this.store.settings.policy ?? ''
-      if (policy.trim()) legacyAgreements.push(policyAsAgreements(policy))
-    }
-
-    // dot's own understanding: the old state memory field, old cognition file and whole notes file.
-    const legacyCognition: string[] = []
-    let legacyUndo: string | undefined
-    if (cognitionEmpty) {
-      const stateMemory = this.store.legacyMemory?.trim()
-      if (stateMemory) legacyCognition.push(stateMemory)
-      const cognitionFile = ((await this.notes.readCognition?.()) ?? '').trim()
-      if (cognitionFile) legacyCognition.push(cognitionFile)
-      // The old notes file used to be the only note store; it belongs to cognition now.
-      const memoryFile = (await this.notes.read()).trim()
-      if (memoryFile) legacyCognition.push(memoryFile)
-      // The old single-step note undo was the note text before the last change; keep it
-      // as the previous cognition version (an empty undo is a real version too).
-      legacyUndo = this.store.legacyMemoryUndo
-    }
-
-    // Fill a layer only while it is still empty, then mark done even when there was nothing to import.
-    const patch: { agreements?: string; cognition?: string; cognitionHistory?: readonly { readonly text: string; readonly at: number }[]; knowledgeMigrated: string } = { knowledgeMigrated: '1' }
-    if (agreementsEmpty && legacyAgreements.length > 0) patch.agreements = normalizeAgreements(legacyAgreements.join('\n\n'))
-    if (cognitionEmpty && legacyCognition.length > 0) patch.cognition = normalizeCognition(legacyCognition.join('\n\n'))
-    if (cognitionEmpty && legacyUndo !== undefined) patch.cognitionHistory = [{ text: normalizeCognition(legacyUndo), at: this.now() }]
-    // Persist before flipping the marker in memory; a failed write leaves the import retryable.
-    await this.store.commitKnowledgeMigration(patch)
-  }
-
   async knowledgeView(): Promise<KnowledgeView> {
-    await this.ensureMigration()
     const undo = this.store.agreementsUndo
     return {
       agreements: { text: this.store.agreements, maxChars: AGREEMENTS_MAX_CHARS, canUndo: undo !== undefined && undo !== this.store.agreements },
@@ -1165,8 +1102,7 @@ export class DotService {
   /** dot adds one of the human's own requirements, in their words. */
   async agreementAdd(text: string): Promise<string> {
     return this.withKnowledge(async () => {
-      await this.ensureMigration()
-      if (this.store.settings.locks?.memory) throw new DotError('dot/setting-locked', 'agreements are locked by the human; use dot_settings (action=propose) for the change you want')
+      if (this.store.settings.locks?.agreements) throw new DotError('dot/setting-locked', 'agreements are locked by the human; use dot_settings (action=propose) for the change you want')
       const before = this.store.agreements
       let after: string
       try { after = addEntry(before, text) } catch (error) {
@@ -1183,8 +1119,7 @@ export class DotService {
   /** dot drops one agreement the human asked it to drop. */
   async agreementRemove(text: string): Promise<string> {
     return this.withKnowledge(async () => {
-      await this.ensureMigration()
-      if (this.store.settings.locks?.memory) throw new DotError('dot/setting-locked', 'agreements are locked by the human; use dot_settings (action=propose) for the change you want')
+      if (this.store.settings.locks?.agreements) throw new DotError('dot/setting-locked', 'agreements are locked by the human; use dot_settings (action=propose) for the change you want')
       const before = this.store.agreements
       let removed = ''
       let after = before
@@ -1201,7 +1136,6 @@ export class DotService {
   /** dot rewrites its whole cognition. */
   async cognitionRewrite(text: string): Promise<string> {
     return this.withKnowledge(async () => {
-      await this.ensureMigration()
       const next = normalizeCognition(text)
       if (next.trim().length > COGNITION_MAX_CHARS) throw new DotError('dot/invalid', `cognition is at most ${COGNITION_MAX_CHARS} characters; these have ${next.trim().length}`)
       const before = this.store.cognition
@@ -1214,7 +1148,6 @@ export class DotService {
   /** The human rewrote the agreements in the settings view (or approved a proposal). */
   async setAgreements(text: string, by: 'human' | 'dot' = 'human'): Promise<KnowledgeView> {
     return this.withKnowledge(async () => {
-      await this.ensureMigration()
       const next = normalizeAgreements(text)
       if (next.trim().length > AGREEMENTS_MAX_CHARS) throw new DotError('dot/invalid', `the agreements are at most ${AGREEMENTS_MAX_CHARS} characters; these have ${next.trim().length}`)
       const before = this.store.agreements
@@ -1229,7 +1162,6 @@ export class DotService {
   /** Put the agreements back to what they were before their latest change, whoever made it. */
   async undoAgreements(): Promise<KnowledgeView> {
     return this.withKnowledge(async () => {
-      await this.ensureMigration()
       const before = this.store.agreements
       if (!(await this.store.undoAgreements())) throw new DotError('dot/nothing-to-undo', 'there is no earlier version of the agreements')
       await this.afterAgreementsChange(before, this.store.agreements, 'human')
@@ -1240,7 +1172,6 @@ export class DotService {
   /** The human rewrote cognition, or the reflection pass did; neither is dot's own in-session change. */
   async setCognition(text: string, by: 'human' | 'dot' | 'reflection' = 'human', baseVersion?: number): Promise<KnowledgeView> {
     return this.withKnowledge(async () => {
-      await this.ensureMigration()
       if (baseVersion !== undefined && this.store.cognitionVersion !== baseVersion) throw new DotError('dot/stale-reflection', 'cognition changed since this reflection started')
       const next = normalizeCognition(text)
       if (next.trim().length > COGNITION_MAX_CHARS) throw new DotError('dot/invalid', `cognition is at most ${COGNITION_MAX_CHARS} characters; these have ${next.trim().length}`)
@@ -1256,7 +1187,6 @@ export class DotService {
   /** Put an earlier cognition text back; the replaced text joins the history too. */
   async restoreCognition(at: number): Promise<KnowledgeView> {
     return this.withKnowledge(async () => {
-      await this.ensureMigration()
       const before = this.store.cognition
       if (!(await this.store.restoreCognition(at, this.now()))) throw new DotError('dot/unknown-version', 'no earlier cognition version has that timestamp')
       if (this.store.cognition !== before) await this.afterCognitionChange(before, this.store.cognition, 'human')
@@ -1359,7 +1289,6 @@ export class DotService {
     const task = this.store.task(input.sessionId)
     const route = routeRequest(this.rules, input.kind)
     if (route.action === 'skip' || route.action === 'deny') return { decided: route.action }
-    const ticket = this.store.ticketForSession(input.sessionId)
     const run = this.store.work.sessionRun(input.sessionId)
     const notice = input.kind === 'approval'
       ? approvalNotice({
@@ -1368,7 +1297,7 @@ export class DotService {
           ...(input.reason !== undefined ? { reason: input.reason } : {}),
           ...(input.arguments !== undefined ? { arguments: input.arguments } : {}),
           ...(input.viaSubagent ? { viaSubagent: true } : {}),
-          ...(ticket?.access === 'read' || run?.access === 'read' ? { readOnly: true } : {}),
+          ...(run?.access === 'read' ? { readOnly: true } : {}),
         })
       : undefined
     const detail = notice?.text ?? input.detail
@@ -1382,8 +1311,9 @@ export class DotService {
       ...(input.signal !== undefined ? { signal: input.signal } : {}),
       ...(humanRequired ? { humanRequired: true } : {}),
     })
+    const runChange = run ? this.store.work.change(run.changeId) : undefined
     const where = task ? `task "${task.title}"` : `untracked session${input.cwd ? ` in ${input.cwd}` : ''}`
-    const lines = [ticket ? `${opened.id} for task ${ticket.id} "${ticket.title}": ${input.kind} · "${input.subject}"` : `${opened.id} · ${input.kind} from ${where} · "${input.subject}"`]
+    const lines = [runChange ? `${opened.id} for task ${runChange.id} "${runChange.title}": ${input.kind} · "${input.subject}"` : `${opened.id} · ${input.kind} from ${where} · "${input.subject}"`]
     if (detail) lines.push(`  detail: ${notice ? detail : clip(detail, 600)}`)
     if (humanRequired && notice) lines.push(`  human-required: ${notice.reasons.join(', ')}; do not use dot_answer.`)
     if (input.kind === 'question' && route.action === 'human') lines.push('  The human must answer the original question in its session; do not use dot_answer.')
@@ -1393,7 +1323,7 @@ export class DotService {
     // Decisions live in the system prompt and agreements, never repeated in each notice.
     // An already-aborted request is not queued at all.
     if (this.pending.get(opened.id)) {
-      this.emit({ event: DOT_TRACE.approvalOpened, message: `Opened ${input.kind} ${opened.id}.`, sessionId: input.sessionId, ...(ticket ? { ticketId: ticket.id } : {}), data: { requestId: opened.id, kind: input.kind } })
+      this.emit({ event: DOT_TRACE.approvalOpened, message: `Opened ${input.kind} ${opened.id}.`, sessionId: input.sessionId, ...(run ? { changeId: run.changeId } : {}), data: { requestId: opened.id, kind: input.kind } })
       this.notify({ sessionId: input.sessionId, kind: input.kind, requestId: opened.id, text: lines.join('\n'), at: this.now(), display: {
         ...approvalDisplay(input.arguments),
         kind: input.kind, sessionId: input.sessionId, requestId: opened.id, subject: input.subject,
@@ -1412,16 +1342,15 @@ export class DotService {
       kind: notice.kind, sessionId: notice.sessionId, summary: notice.text,
       ...(notice.requestId ? { requestId: notice.requestId } : {}),
     } }
-    const ticket = notice.ticketId ? this.store.ticket(notice.ticketId) : this.store.ticketForSession(notice.sessionId)
-    const role = ticket?.sessions.find(row => row.sessionId === notice.sessionId)?.role
-    const context = role ? `${ticket!.status.toUpperCase()}, ${role}, round ${ticket!.rounds.length}` : ticket?.status.toUpperCase()
-    const prefixed = ticket && notice.kind !== 'approval' && notice.kind !== 'question'
-      ? `task ${ticket.id} "${ticket.title}" (${context}): ${notice.text}`
+    const ownedRun = this.store.work.sessionRun(notice.sessionId)
+    const ownedChange = ownedRun ? this.store.work.change(ownedRun.changeId) : undefined
+    const prefixed = ownedChange && notice.kind !== 'approval' && notice.kind !== 'question'
+      ? `task ${ownedChange.id} "${ownedChange.title}" (${ownedChange.control.toUpperCase()}): ${notice.text}`
       : notice.text
-    const enriched = ticket ? { ...notice, ticketId: ticket.id, text: prefixed } : notice
+    const enriched = ownedChange ? { ...notice, changeId: ownedChange.id, text: prefixed } : notice
     const tier = eventTier(enriched.kind, this.store.task(enriched.sessionId)?.origin)
     if (tier === 'hold') {
-      this.emit({ event: DOT_TRACE.noticeHeld, message: `Held a ${enriched.kind} notice.`, ...(enriched.ticketId ? { ticketId: enriched.ticketId } : {}), sessionId: enriched.sessionId, data: { kind: enriched.kind } })
+      this.emit({ event: DOT_TRACE.noticeHeld, message: `Held a ${enriched.kind} notice.`, ...(enriched.changeId ? { changeId: enriched.changeId } : {}), sessionId: enriched.sessionId, data: { kind: enriched.kind } })
       this.batcher.hold(enriched)
     } else if (tier === 'wake') this.batcher.push(enriched, urgent, enriched.kind === 'approval' ? this.options.approvalGraceMs ?? APPROVAL_GRACE_MS : 0)
   }
@@ -1447,7 +1376,6 @@ export class DotService {
       await Promise.allSettled([...this.inFlight])
       await this.ensuring?.catch(() => undefined)
       await this.knowledgeLane
-      await this.migration?.catch(() => undefined)
       await this.store.flush()
     })()
     return this.disposal
@@ -1531,7 +1459,7 @@ export class DotService {
     return launched
   }
 
-  /** The existing ledger is how a run session is owned, notified and approved. It does not create a ticket. */
+  /** The existing ledger is how a run session is owned, notified and approved. It does not create a board row of its own. */
   private async rememberRun(runId: string): Promise<void> {
     const run = this.store.work.run(runId)
     const sessionId = run?.sessionId
@@ -1552,8 +1480,9 @@ export class DotService {
   private async supplementFromTool(args: Record<string, unknown>): Promise<string> {
     const text = typeof args.message === 'string' ? args.message : ''
     const runId = typeof args.run_id === 'string' ? args.run_id : ''
-    const inputRef = typeof args.expected_input_ref === 'string' ? args.expected_input_ref : ''
-    const inputRevision = typeof args.expected_input_revision === 'number' ? args.expected_input_revision : undefined
+    const sole = this.soleInput(this.store.work.run(runId)?.changeId)
+    const inputRef = typeof args.expected_input_ref === 'string' && args.expected_input_ref ? args.expected_input_ref : sole?.inputRef ?? ''
+    const inputRevision = typeof args.expected_input_revision === 'number' ? args.expected_input_revision : sole?.inputRevision
     if (!runId || !text.trim() || !inputRef || inputRevision === undefined || !Number.isInteger(inputRevision)) {
       throw new DotError('dot/invalid', 'supplement requires run_id, message, expected_input_ref and expected_input_revision')
     }
@@ -1574,8 +1503,10 @@ export class DotService {
   cancelWorkChange(changeId: string) {
     return cancelWork(this.store.work, this.runHost(), changeId, this.now())
   }
-  finishWorkRun(runId: string, phase: 'completed' | 'failed') {
-    return finishWork(this.store.work, this.runHost(), runId, phase, this.now())
+  async finishWorkRun(runId: string, phase: 'completed' | 'failed') {
+    const finished = await finishWork(this.store.work, this.runHost(), runId, phase, this.now())
+    if (finished.ok) await this.captureRunReport(runId)
+    return finished
   }
   observeWorkRun(runId: string) {
     return observeRun(this.store.work, this.runHost(), runId, this.now())
@@ -1709,7 +1640,18 @@ export class DotService {
       const outside = await scanScopeAsync(root, root, 'directory')
       outOfScopePaths = [...outside.files, ...outside.exclusions.map(item => item.path)].filter(rel => !scopeContainsPath(writeScope, root, rel))
     } catch { /* outside observations do not decide closeout */ }
-    const id = artifactName(`sub-${change.id}-${change.currentRevision}-${this.store.work.revision}`)
+    const stem = artifactName(`sub-${change.id}-${change.currentRevision}-${this.store.work.revision}`)
+    if (!stem) throw new DotError('dot/invalid', `${change.id} has no subject id`)
+    // A completed manifest is immutable, so a refused closeout's leftover snapshot
+    // stays in place and the retry gets a fresh id.
+    let id = stem
+    let attempt = 2
+    while (existsSync(join(this.options.homeDir, 'artifacts', id, 'manifest.json'))) {
+      const next = artifactName(`${stem}-a${attempt}`)
+      if (!next || next === id || attempt > 40) throw new DotError('dot/invalid', `${change.id} has too many failed subject attempts`)
+      id = next
+      attempt += 1
+    }
     const prior = writerPrior(change.baselineRefs, runs, ref => this.subjectLook().read(ref))
     if (prior.missing) throw new DotError('dot/invalid', `baseline ${prior.missing} is missing or incomplete`)
     const before = new Map(prior.files.filter(file => scopeContainsPath(writeScope, root, file.path)).map(file => [foldRel(file.path), file]))
@@ -1773,20 +1715,29 @@ export class DotService {
       }
     }
     if (kind === 'evidence') {
-      if (ref.split(/[\\/]/).includes('..')) return { ok: false, code: 'invalid', message: 'invalid evidence reference' }
+      const parsed = parseEvidenceRef(ref)
+      if (!parsed) return { ok: false, code: 'invalid', message: 'invalid evidence reference' }
       const checks = verification.checks.filter(check => check.evidenceRefs.includes(ref))
       if (!checks.length) return { ok: false, code: 'stale', message: `${ref} is not bound to ${verification.id}` }
-      if (artifactName(ref) && artifactName(ref) === ref) {
-        try {
-          const body = readFileSync(join(this.options.homeDir, 'artifacts', 'evidence', ref))
-          if (body.byteLength === 0) return { ok: false, code: 'missing', message: `evidence ${ref} is empty` }
-          return asText(`evidence:${ref}`, body)
-        } catch (error) {
-          if ((error as NodeJS.ErrnoException).code !== 'ENOENT') return { ok: false, code: 'missing', message: `evidence ${ref} could not be read` }
-        }
+      if (parsed.kind === 'run') {
+        const report = this.readRunReport(parsed.runId)
+        if (report === undefined) return { ok: false, code: 'missing', message: `run report ${parsed.runId} could not be read` }
+        const bullet = parsed.scenario ? reportBullet(report, parsed.scenario) : undefined
+        if (parsed.scenario && !bullet) return { ok: false, code: 'missing', message: `run report ${parsed.runId} has no Report bullet for ${parsed.scenario}` }
+        return asText(`evidence:${ref}`, new TextEncoder().encode(bullet ? `${bullet}\n\n${report}` : report))
       }
-      const notes = checks.flatMap(check => check.note ? [check.note] : [])
-      return asText(`evidence:${ref}`, new TextEncoder().encode(notes.length ? notes.join('\n\n') : ref))
+      const subject = verification.subject
+      const named = subject?.changes.find(item => foldRel(item.path) === foldRel(parsed.path))
+      if (!subject || !named) return { ok: false, code: 'stale', message: `${ref} is not a delivered file of ${verification.id}` }
+      if (named.kind === 'deleted' || !named.sha256) return { ok: false, code: 'missing', message: `${ref} was deleted in ${verification.id}` }
+      if (!artifactName(subject.artifactRef) || artifactName(subject.artifactRef) !== subject.artifactRef) return { ok: false, code: 'invalid', message: 'delivery snapshot is not a single relative id' }
+      try {
+        const bodyBytes = readSnapshotEntry(join(this.options.homeDir, 'artifacts', subject.artifactRef), named.path)
+        if (!bodyBytes || bodyBytes.byteLength === 0) return { ok: false, code: 'missing', message: `${ref} is missing from the delivery snapshot` }
+        return asText(`change:${named.path}`, bodyBytes)
+      } catch {
+        return { ok: false, code: 'missing', message: `${ref} could not be read` }
+      }
     }
     const subject = verification.subject
     const named = subject?.changes.find(item => item.path === ref)
@@ -1815,7 +1766,40 @@ export class DotService {
     if (!report.queueCleared || !report.idle || report.jobsSettled !== true) {
       return { ok: false as const, code: 'unknown' as const, message: `${runId} is not confirmed stopped` }
     }
-    return this.store.work.completeReviewHold(runId, prepared.updatedAt, { queueCleared: true, agentIdle: true, jobsSettled: true }, this.now())
+    const held = await this.store.work.completeReviewHold(runId, prepared.updatedAt, { queueCleared: true, agentIdle: true, jobsSettled: true }, this.now())
+    if ('id' in held) await this.captureRunReport(runId)
+    return held
+  }
+
+  /**
+   * The run's final assistant message is its report; closeout evidence refs
+   * resolve against this captured copy, not the live session log.
+   */
+  private async captureRunReport(runId: string): Promise<boolean> {
+    const run = this.store.work.run(runId)
+    if (!run?.sessionId || typeof this.host.latestReply !== 'function') return false
+    const reply = await this.host.latestReply(run.sessionId, 20_000).catch(() => undefined)
+    if (!reply?.trim()) return false
+    try {
+      const dir = join(this.options.homeDir, 'artifacts', 'evidence')
+      mkdirSync(dir, { recursive: true })
+      writeFileSync(join(dir, `${artifactName(runId)}.md`), reply)
+      return true
+    } catch { return false }
+  }
+
+  private readRunReport(runId: string): string | undefined {
+    try {
+      const body = readFileSync(join(this.options.homeDir, 'artifacts', 'evidence', `${artifactName(runId)}.md`))
+      return body.byteLength ? new TextDecoder().decode(body) : undefined
+    } catch { return undefined }
+  }
+
+  /** Refuse an evidence ref with the resolvable forms and the runs it may name. */
+  private evidenceRefHint(changeId: string, ref: string, reason?: string): DotError {
+    const runIds = this.store.work.listRuns().filter(run => run.changeId === changeId).map(run => run.id)
+    const detail = reason ? `${reason} ` : ''
+    return new DotError('dot/invalid', `${detail}evidence ${ref} must resolve: run:<runId> for a run's final report, run:<runId>#<scenarioRef> for a Report bullet, or file:<path> for a delivered file. Runs of ${changeId}: ${runIds.join(', ') || 'none'}`)
   }
 
   private subjectLook(): SubjectLook {
@@ -1851,25 +1835,20 @@ export class DotService {
     const title = text('title')
     const goal = text('goal')
     const dir = text('dir')
-    const acceptance = text('acceptance')
-    const deliverable = text('deliverable')
     const explicitRequirements = requirementList(args.requirements)
     const steps = args.steps === undefined ? undefined : stepList(args.steps)
     const constraints = constraintList(args.constraints)
-    const behaviorNotes = text('behavior_notes')
     const userRequest = text('user_request')
     const deliverableLanguage = text('deliverable_language')
-    if (constraints !== undefined && behaviorNotes !== undefined) throw new DotError('dot/invalid', 'pass constraints or behavior_notes, not both')
     const maxConcurrentRuns = typeof args.max_concurrent === 'number' ? args.max_concurrent : undefined
     const inputFields = {
       ...(constraints !== undefined ? { constraints } : {}),
-      ...(behaviorNotes !== undefined ? { behaviorNotes } : {}),
       ...(userRequest !== undefined ? { userRequest } : {}),
       ...(deliverableLanguage !== undefined ? { deliverableLanguage } : {}),
     }
     if (action === 'create') {
       if (!title?.trim() || !goal?.trim() || !dir || !isAbsolute(dir)) throw new DotError('dot/invalid', 'title, goal and an absolute dir are required')
-      const requirements = synthesizeRequirements(goal, explicitRequirements, acceptance, deliverable)
+      const requirements = explicitRequirements
         ?? [{ requirementRef: 'goal', text: goal, required: true }]
       let change: ChangeRecord
       try {
@@ -1892,10 +1871,7 @@ export class DotService {
     }
     const changeId = text('task_id') ?? ''
     if (!changeId) throw new DotError('dot/invalid', 'task_id is required')
-    const existingChange = this.store.work.change(changeId)
-    const existingInput = existingChange ? this.store.work.input(existingChange.currentInputRef) : undefined
-    const effectiveGoal = goal ?? existingInput?.goal ?? ''
-    const requirements = synthesizeRequirements(effectiveGoal, explicitRequirements, acceptance, deliverable)
+    const requirements = explicitRequirements
     const revised = await this.store.work.reviseChange(changeId, {
       ...(title !== undefined ? { title } : {}),
       ...(goal !== undefined ? { goal } : {}),
@@ -1918,7 +1894,7 @@ export class DotService {
     if (role !== 'work' && role !== 'rework' && role !== 'review') throw new DotError('dot/invalid', 'invalid role')
     const change = this.store.work.change(changeId)
     if (!change) throw new DotError('dot/invalid', `unknown change ${changeId}`)
-    const write = role === 'review' || args.access === 'write'
+    const write = args.access === 'write'
     const paths = pathScope(args.paths)
     if (role !== 'review' && paths && paths.length > 0 && args.access !== 'write') {
       throw new DotError('dot/invalid', `these paths are a write scope, so access must be "write". Example: access "write", paths ${WRITE_PATHS_EXAMPLE}. access "read" cannot write them, and the run is not reserved.`)
@@ -1943,7 +1919,7 @@ export class DotService {
     if (inputRef) {
       const row = this.store.work.input(inputRef)
       if (!row || row.changeId !== changeId) throw new DotError('dot/invalid', `unknown input ${inputRef}`)
-      return JSON.stringify({ ...row, constraints: inputConstraints(row) })
+      return JSON.stringify({ ...row, constraints: row.constraints ?? [] })
     }
     const view = this.workBoard(changeId)
     const material = this.store.work.input(change.currentInputRef)
@@ -1963,11 +1939,11 @@ export class DotService {
           ...(step.runId ? { runId: step.runId } : {}),
         }
       }),
-      behaviorNotes: material?.behaviorNotes ?? null,
-      constraints: material ? inputConstraints(material) : [],
+      constraints: material?.constraints ?? [],
       userRequest: material?.userRequest ?? null,
       deliverableLanguage: material?.deliverableLanguage ?? null,
       maxConcurrentRuns: change.maxConcurrentRuns,
+      failedRounds: this.store.work.failedRounds(changeId),
       history: this.store.work.inputsFor(changeId).map(row => ({ id: row.id, revision: row.revision, goal: row.goal })),
     })
   }
@@ -1994,7 +1970,7 @@ export class DotService {
     const changeId = typeof args.task_id === 'string' ? args.task_id : ''
     const stepRef = typeof args.step_ref === 'string' ? args.step_ref : ''
     const runId = typeof args.run_id === 'string' ? args.run_id : ''
-    const expectedInputRevision = typeof args.expected_input_revision === 'number' ? args.expected_input_revision : undefined
+    const expectedInputRevision = typeof args.expected_input_revision === 'number' ? args.expected_input_revision : this.soleInputRevision(changeId)
     if (!changeId || !stepRef || expectedInputRevision === undefined) {
       throw new DotError('dot/invalid', 'step requires task_id, step_ref and expected_input_revision')
     }
@@ -2044,10 +2020,11 @@ export class DotService {
     const changeId = typeof args.task_id === 'string' ? args.task_id : ''
     const change = this.store.work.change(changeId)
     if (!change) throw new DotError('dot/invalid', `unknown change ${changeId}`)
-    const expectedRef = typeof args.expected_input_ref === 'string' ? args.expected_input_ref : ''
+    const soleInput = this.soleInput(changeId)
+    const expectedRef = typeof args.expected_input_ref === 'string' && args.expected_input_ref ? args.expected_input_ref : soleInput?.inputRef ?? ''
     const expectedRevision = typeof args.expected_input_revision === 'number' && Number.isInteger(args.expected_input_revision)
       ? args.expected_input_revision
-      : undefined
+      : soleInput?.inputRevision
     if (!expectedRef || expectedRevision === undefined) {
       throw new DotError('dot/invalid', `closeout requires expected_input_ref and expected_input_revision for ${change.currentInputRef}@${change.currentRevision}. Copy inputRef and revision from action=read. Do not omit them.`)
     }
@@ -2096,6 +2073,9 @@ export class DotService {
       }
       if (!Array.isArray(row.evidenceRefs) || row.evidenceRefs.some(ref => typeof ref !== 'string')) {
         throw new DotError('dot/invalid', 'each check needs evidenceRefs')
+      }
+      if (row.verdict === 'pass' && row.evidenceRefs.length === 0) {
+        throw new DotError('dot/invalid', `check ${row.requirementRef} passes with no evidence; cite run:<runId>, run:<runId>#<scenarioRef>, or file:<path>`)
       }
       checks.push({
         requirementRef: row.requirementRef,
@@ -2148,15 +2128,34 @@ export class DotService {
       throw new DotError('dot/invalid', `review run ${namedReview.id} is already ${namedReview.phase}`)
     }
     const openReview = namedReview ?? allRuns.find(run => run.kind === 'review' && !['completed', 'failed', 'stopped'].includes(run.phase))
+    // Grammar and ownership are checked before the hold stops a live session.
     for (const check of checks) for (const ref of check.evidenceRefs) {
-      const gap = evidenceRefGap(ref)
-      if (gap) throw new DotError('dot/invalid', gap)
+      const parsed = parseEvidenceRef(ref)
+      if (!parsed) throw this.evidenceRefHint(changeId, ref)
+      if (parsed.kind === 'run') {
+        const run = this.store.work.run(parsed.runId)
+        if (!run || run.changeId !== changeId) throw this.evidenceRefHint(changeId, ref, `${parsed.runId} is not a run of ${changeId}.`)
+      }
     }
     if (openReview) {
       const held = await this.holdWorkReview(openReview.id)
       if (!('id' in held)) throw new DotError('dot/invalid', held.message)
     }
     const subject = await this.captureWorkSubject(changeId)
+    // Resolvability: the captured report must exist (one capture retry here if
+    // finish missed it), the scenario must be a filled Report bullet, and the
+    // file a change this delivery captured — deletions included.
+    for (const check of checks) for (const ref of check.evidenceRefs) {
+      const parsed = parseEvidenceRef(ref)!
+      if (parsed.kind === 'run') {
+        let report = this.readRunReport(parsed.runId)
+        if (report === undefined && (await this.captureRunReport(parsed.runId))) report = this.readRunReport(parsed.runId)
+        if (report === undefined) throw this.evidenceRefHint(changeId, ref, `no captured report for ${parsed.runId}.`)
+        if (parsed.scenario && !reportBullet(report, parsed.scenario)) throw this.evidenceRefHint(changeId, ref, `run report ${parsed.runId} has no filled "### Report" bullet for ${parsed.scenario}.`)
+      } else if (!subject.changes.some(item => foldRel(item.path) === foldRel(parsed.path))) {
+        throw this.evidenceRefHint(changeId, ref, `file ${parsed.path} is not in this delivery.`)
+      }
+    }
     const writerIds = allRuns.filter(run => run.kind !== 'review' && scopeWrites(run.writeScope)).map(run => run.id)
     const listedRuns = jsonArray(args.run_ids)?.map(item => String(item))
     const runIds = listedRuns ?? writerIds
@@ -2326,7 +2325,7 @@ export class DotService {
     return released.ok === true
   }
 
-  private async startWorkSession(input: { workspaceId?: string; cwd?: string; title: string; instruction: string; goal?: string; model?: string; taskId?: string; role?: SessionRole; access?: TicketAccess; acceptance?: string; deliverable?: string; priority?: TicketPriority; preset?: string; checkOnly?: boolean; paths?: string; runId?: string; stepRefs?: readonly string[]; captureBaseline?: boolean }): Promise<string> {
+  private async startWorkSession(input: { workspaceId?: string; cwd?: string; title: string; instruction: string; goal?: string; model?: string; taskId?: string; role?: RunKind; access?: RunAccess; priority?: ChangePriority; preset?: string; checkOnly?: boolean; paths?: string; runId?: string; stepRefs?: readonly string[] }): Promise<string> {
     const role = input.role ?? 'work'
     if (role !== 'work' && role !== 'rework' && role !== 'review') throw new DotError('dot/invalid', 'invalid role')
     let changeId = input.taskId
@@ -2337,31 +2336,39 @@ export class DotService {
       }
       changeId = named.changeId
     }
-    if (!changeId) {
-      const workspace = input.workspaceId ? this.host.listWorkspaces().find(row => row.id === input.workspaceId) : undefined
-      if (input.workspaceId && !workspace) throw new DotError('dot/unknown-workspace', `no workspace ${input.workspaceId}`)
+    let change = changeId ? this.store.work.change(changeId) : undefined
+    if (changeId && !change) throw new DotError('dot/invalid', `unknown change ${changeId}`)
+    const workspace = input.workspaceId ? this.host.listWorkspaces().find(row => row.id === input.workspaceId) : undefined
+    if (input.workspaceId && !workspace) throw new DotError('dot/unknown-workspace', `no workspace ${input.workspaceId}`)
+    // action=check reports the planned scope's conflicts only; it creates nothing.
+    if (input.checkOnly) {
+      const cwd = change?.cwd ?? workspace?.path ?? input.cwd ?? (await this.homeWorkspace()).path
+      if (!cwd || !isAbsolute(cwd)) throw new DotError('dot/invalid', 'directory must be absolute')
+      const candidate = plannedOccupant(cwd, plannedScope(role, input.access, input.paths, cwd))
+      return (await this.scopeReport(cwd, change?.id ?? '', candidate)).text
+    }
+    if (!change) {
       const cwd = workspace?.path ?? input.cwd ?? (await this.homeWorkspace()).path
       if (!cwd || !isAbsolute(cwd)) throw new DotError('dot/invalid', 'directory must be absolute')
       const goal = input.goal?.trim() || input.instruction.trim()
-      if (!goal && !input.checkOnly) throw new DotError('dot/invalid', 'instruction must be non-empty')
-      const baseGoal = goal || input.title
-      const synthesized = synthesizeRequirements(baseGoal, undefined, input.acceptance, input.deliverable)
-      const change = await this.store.work.createChange({
+      if (!goal) throw new DotError('dot/invalid', 'instruction must be non-empty')
+      change = await this.store.work.createChange({
         title: input.title,
         cwd,
-        goal: baseGoal,
-        ...(synthesized ? { requirements: synthesized } : {}),
+        goal,
+        requirements: [{ requirementRef: 'goal', text: goal, required: true }],
         ...(input.priority !== undefined ? { priority: input.priority } : {}),
         at: this.now(),
       })
       changeId = change.id
       void this.pruneWorkArtifactsIfNeeded()
     }
-    const change = this.store.work.change(changeId)
-    if (!change) throw new DotError('dot/invalid', `unknown change ${changeId}`)
-    if (input.checkOnly) {
-      const candidate = plannedOccupant(change.cwd, plannedScope(role, input.access, input.paths, change.cwd))
-      return (await this.scopeReport(change.cwd, change.id, candidate)).text
+    // Three failed rounds on this input revision is a sign to stop, not retry.
+    if (role !== 'review') {
+      const failed = this.store.work.failedRounds(change.id)
+      if (failed >= FAILED_ROUND_LIMIT) {
+        throw new DotError('dot/invalid', `${change.id} has ${failed} failed rounds on ${change.currentInputRef}@${change.currentRevision}. Stop and ask the human before another dispatch on this input. Recommended next step: report what failed and what you recommend to the requester, then wait for their decision. action=revise after the human decides starts a fresh revision.`)
+      }
     }
     const preset = await this.taskPreset(input.preset)
     const model = await this.taskModel(input.model)
@@ -2379,12 +2386,13 @@ export class DotService {
     let createdHere = false
     let runId = selected?.id
     if (!runId) {
-      const reserved = await this.reserveFromTool({ task_id: changeId, role, access: input.access ?? (role === 'review' ? 'write' : 'read'), ...(input.paths ? { paths: input.paths } : {}), ...(input.stepRefs ? { step_refs: input.stepRefs } : {}) })
+      const reserved = await this.reserveFromTool({ task_id: changeId, role, access: input.access ?? 'read', ...(input.paths ? { paths: input.paths } : {}), ...(input.stepRefs ? { step_refs: input.stepRefs } : {}) })
       runId = reserved.runId
       createdHere = true
     }
+    // Every write run publishes its pre-write baseline before the first prompt.
     const currentRun = this.store.work.run(runId)
-    if (input.captureBaseline === true && currentRun && scopeWrites(currentRun.writeScope) && currentRun.baselineRefs.length === 0) {
+    if (currentRun && scopeWrites(currentRun.writeScope) && currentRun.baselineRefs.length === 0) {
       let failure: string | undefined
       try {
         const published = await this.captureWorkBaseline(runId)
@@ -2421,6 +2429,18 @@ export class DotService {
     const launched = await this.launchWorkRun(runId, brief, preset.named ? preset.id : undefined, model)
     if (!launched.ok) return `reserved ${runId} on ${changeId}; not started: ${launched.message}${note}`
     return `started ${runId} on ${changeId}${note}`
+  }
+
+  /** The one input a never-revised change has; omitted expected-input fields mean it. */
+  private soleInput(changeId: string | undefined): { readonly inputRef: string; readonly inputRevision: number } | undefined {
+    if (!changeId) return undefined
+    const inputs = this.store.work.inputsFor(changeId)
+    const only = inputs.length === 1 ? inputs[0] : undefined
+    return only && only.revision === 1 ? { inputRef: only.id, inputRevision: only.revision } : undefined
+  }
+
+  private soleInputRevision(changeId: string): number | undefined {
+    return this.soleInput(changeId)?.inputRevision
   }
 
   /** Other changes block only where their write scope actually overlaps. This change's runs are not a lock on themselves. */
@@ -2488,10 +2508,6 @@ export class DotService {
     }
   }
 
-  private legacyClosed(entry: string): Promise<never> {
-    return Promise.reject(new DotError('dot/legacy-closed', `${entry} is closed. Legacy tickets are read-only history. Use dot_task action=create or action=dispatch for new work.`))
-  }
-
   private serial<T>(work: () => Promise<T>): Promise<T> {
     if (this.closing) return Promise.reject(new DotError('dot/disposed', 'dot is shutting down'))
     const run = this.lane.then(() => { this.assertOpen(); return work() })
@@ -2520,7 +2536,6 @@ export class DotService {
   /** Persona, model, agreements and cognition as a segment starting now would freeze them. */
   private async frozen(): Promise<Pick<Segment, 'persona' | 'model' | 'agreements' | 'cognition'>> {
     const model = this.host.modelKey()
-    await this.ensureMigration()
     return {
       persona: personaSection(this.store.settings, this.locale),
       ...model ? { model } : {},
@@ -2625,7 +2640,7 @@ export class DotService {
     const handoffOpening = openingText({
       ...handoff ? { handoff } : {},
       reason,
-      ledger: ledgerSummary(this.store.list(), this.pending.list(), at, this.store.listTickets(), this.store.workLedger()),
+      ledger: ledgerSummary(this.store.list(), this.pending.list(), at, this.store.workLedger()),
       ...reminders.length > 0 ? { reminders: scheduleLines(reminders) } : {},
       previous: from,
       at,

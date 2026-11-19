@@ -1,36 +1,26 @@
 import { describe, expect, it } from 'vitest'
 import { groupBoard, headerBoardCounts, sessionLookup } from './board-groups.ts'
-import type { BoardView, TaskRecord, TicketStatus, TicketView } from './contracts.ts'
+import type { BoardView, TaskRecord } from './contracts.ts'
 import type { WorkBoardItem } from './work-board.ts'
 
-const ticket = (id: string, status: TicketStatus, patch: Partial<TicketView> = {}): TicketView => ({
-  id, title: `Task ${id}`, goal: 'goal', access: 'write', dir: `/work/${id}`, status, priority: 2,
-  sessions: [], rounds: [], history: [], createdAt: 1, updatedAt: 1,
-  waiting: false, error: false, orphaned: false, running: false, roundCount: 0, ...patch,
-})
 const watched = (sessionId: string, status: TaskRecord['status'] = 'idle'): TaskRecord => ({
   sessionId, origin: 'watched', title: sessionId, goal: '', cwd: '/w', status, createdAt: 1, updatedAt: 1, unseenTurns: 0,
 })
-const board = (patch: Partial<BoardView>): BoardView => ({ tasks: [], tickets: [], pending: [], schedules: [], ...patch })
+const started = (sessionId: string): TaskRecord => ({
+  sessionId, origin: 'started', title: `task of ${sessionId}`, goal: '', cwd: '/p', status: 'idle', createdAt: 1, updatedAt: 1, unseenTurns: 0,
+})
+const board = (patch: Partial<BoardView>): BoardView => ({ tasks: [], pending: [], schedules: [], ...patch })
 
 describe('groupBoard', () => {
-  it('keeps legacy tickets as newest-first history and never counts them as waiting or live', () => {
+  it('keeps watched sessions live, counts the archived ones separately, and lists requests', () => {
     const groups = groupBoard(board({
       pending: [{ id: 'ap-1', kind: 'approval', sessionId: 's', createdAt: 1, subject: 'pwsh' }],
-      tickets: [
-        ticket('t-1', 'review', { humanReview: true, updatedAt: 3 }),
-        ticket('t-2', 'draft', { updatedAt: 1 }),
-        ticket('t-3', 'active', { updatedAt: 9 }),
-        ticket('t-4', 'done', { updatedAt: 5 }),
-      ],
       tasks: [watched('w-1'), watched('w-2', 'archived')],
     }))
-    expect(groups.legacy.map(row => row.id)).toEqual(['t-3', 't-4', 't-1', 't-2'])
     expect(groups.requests).toHaveLength(1)
     expect(groups.watched.map(row => row.sessionId)).toEqual(['w-1'])
     expect(groups.watchedArchived).toBe(1)
     expect(groups.liveCount).toBe(1)
-    expect(headerBoardCounts(board({ tickets: [ticket('t-1', 'review', { humanReview: true }), ticket('t-2', 'draft')] }))).toEqual({ liveCount: 0, waitingCount: 0 })
   })
 })
 
@@ -78,13 +68,13 @@ describe('headerBoardCounts', () => {
 })
 
 describe('sessionLookup', () => {
-  it('names the sessions of tasks by their task and keeps watched sessions', () => {
+  it('names watched and started sessions by their task and keeps them all', () => {
     const lookup = sessionLookup(board({
-      tickets: [ticket('t-1', 'active', { title: 'Ship', dir: '/proj', sessions: [{ sessionId: 'a', role: 'work', at: 1 }, { sessionId: 'b', role: 'rework', at: 2 }] })],
+      startedTasks: [started('a'), started('b')],
       tasks: [watched('w')],
     }))
-    expect(lookup.get('a')).toEqual({ title: 'Ship', cwd: '/proj' })
-    expect(lookup.get('b')).toEqual({ title: 'Ship', cwd: '/proj' })
+    expect(lookup.get('a')).toEqual({ title: 'task of a', cwd: '/p' })
+    expect(lookup.get('b')).toEqual({ title: 'task of b', cwd: '/p' })
     expect(lookup.get('w')).toEqual({ title: 'w', cwd: '/w' })
     expect(sessionLookup(undefined).size).toBe(0)
   })

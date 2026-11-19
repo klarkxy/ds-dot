@@ -75,8 +75,9 @@ describe('work order contract', () => {
         steps: JSON.stringify([{ stepRef: 's1', text: 'write note', covers: ['R1.a'] }]),
       })) as { id: string }
       await expect(h.task.execute({
-        action: 'create', title: 'Nope', goal: 'nope', dir: h.project, constraints: '[]', behavior_notes: 'also',
-      })).rejects.toThrow(/not both/)
+        action: 'create', title: 'Nope', goal: 'nope', dir: h.project,
+        constraints: JSON.stringify([{ constraintRef: 'k1', text: 'x' }, { constraintRef: 'k1', text: 'y' }]),
+      })).rejects.toThrow(/constraintRef/)
       const read = JSON.parse(await h.task.execute({ action: 'read', task_id: created.id }))
       expect(read.userRequest).toBe('write the note')
       expect(read.deliverableLanguage).toBe('zh-CN')
@@ -129,14 +130,14 @@ describe('work order contract', () => {
     } finally { h.cleanup() }
   })
 
-  it('refuses a behavior_notes revision once structured constraints exist', async () => {
+  it('clears constraints with an explicit empty revision', async () => {
     const h = harness()
     try {
       const created = JSON.parse(await h.task.execute({
         action: 'create', title: 'Ship', goal: 'land', dir: h.project,
         constraints: JSON.stringify([{ constraintRef: 'k1', text: 'do not add files' }]),
       })) as { id: string }
-      await expect(h.task.execute({ action: 'revise', task_id: created.id, behavior_notes: 'ignored' })).rejects.toThrow(/structured constraints/)
+      await expect(h.task.execute({ action: 'revise', task_id: created.id, constraints: '[bad' })).rejects.toThrow()
       expect(h.store.work.change(created.id)?.currentRevision).toBe(1)
       const cleared = JSON.parse(await h.task.execute({ action: 'revise', task_id: created.id, constraints: '[]' })) as { id: string }
       expect(cleared.id).toBe(created.id)

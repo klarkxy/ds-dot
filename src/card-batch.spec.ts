@@ -30,7 +30,7 @@ it.each([true, false])('reads the lookup before concluding with one card (card f
     apply(preset.ctx)
     await dotDevIndexReady()
     restrictInheritedTools(scoped.ctx, DOT_INHERITED_ALLOW, agent)
-    expect(ctx.tools.schemas(agent).map(tool => tool.name)).toEqual(expect.arrayContaining(['dot_start_task', 'show_view', 'web_fetch']))
+    expect(ctx.tools.schemas(agent).map(tool => tool.name)).toEqual(expect.arrayContaining(['dot_task', 'show_view', 'web_fetch']))
     const lookup = defineTool({
       name: 'web_fetch', description: 'Fixture source', parameters: {},
       output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: value }] },

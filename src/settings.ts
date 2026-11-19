@@ -2,11 +2,6 @@
  * Host-side reading and patching of dot's settings. Stored rows read field by
  * field, so one bad value falls back to its default instead of losing the rest;
  * patches from the panel are checked strictly and refused as a whole.
- *
- * Two legacy shapes are still read and never written back: the old 'allow'
- * approval mode (a blanket auto-allow the host cannot express; it reads as
- * the safe 'human' fallback) and the old 'policy' free-text rules (their
- * content is migrated into the agreements once).
  */
 import { z } from 'zod'
 import { DEFAULT_SETTINGS, SETTING_FIELDS, TASK_MODEL_LIST_MAX, type DotSettings, type SettingField, type TaskPermission } from './contracts.ts'
@@ -19,7 +14,7 @@ const FIELDS = {
     model: z.string().trim().min(1).max(200),
     reasoningEffort: z.string().trim().min(1).max(40).optional(),
   }).strict(),
-  approvals: z.enum(['dot', 'human', 'deny', 'allow']),
+  approvals: z.enum(['dot', 'human', 'deny']),
   questions: z.enum(['dot', 'human', 'off']),
   scope: z.enum(['all', 'tracked']),
   taskModels: z.object({
@@ -48,24 +43,9 @@ const isRecord = (value: unknown): value is Record<string, unknown> => value !==
 const TASK_PERMISSIONS = new Set<string>(['workspace-write', 'danger-full-access', 'default'])
 
 /**
- * The task permission of a stored row. The singular field wins; a legacy row
- * that carries the plural name as a plain string is read once for
- * compatibility. A value that is not one of the known presets leaves the
- * default in place, so a saved 'default' or 'danger-full-access' is never
- * quietly replaced.
- */
-function readTaskPermission(row: Record<string, unknown>): TaskPermission | undefined {
-  const singular = row.taskPermission
-  if (typeof singular === 'string' && TASK_PERMISSIONS.has(singular)) return singular as TaskPermission
-  const plural = row.taskPermissions
-  if (typeof plural === 'string' && TASK_PERMISSIONS.has(plural)) return plural as TaskPermission
-  return undefined
-}
-
-/**
- * The stored settings. The deprecated 'policy' text is carried through
- * untouched: the one-time migration reads it into the agreements, and no
- * patch can change it.
+ * The stored settings; read field by field. A value that is not one of the
+ * known presets leaves the default in place, so a saved 'default' or
+ * 'danger-full-access' is never quietly replaced.
  */
 export function parseSettings(value: unknown): DotSettings {
   const row = isRecord(value) ? value : {}
@@ -82,14 +62,10 @@ export function parseSettings(value: unknown): DotSettings {
     }
     const parsed = FIELDS[key].safeParse(row[key])
     if (!parsed.success) continue
-    // The old blanket auto-allow mode was removed by product decision; a stored
-    // legacy value falls back to 'human', the safe mode that asks the human.
-    if (key === 'approvals' && parsed.data === 'allow') { out.approvals = 'human'; continue }
     out[key] = parsed.data
   }
-  const permission = readTaskPermission(row)
-  if (permission !== undefined) out.taskPermission = permission
-  if (typeof row.policy === 'string') out.policy = row.policy
+  const permission = row.taskPermission
+  if (typeof permission === 'string' && TASK_PERMISSIONS.has(permission)) out.taskPermission = permission as TaskPermission
   return out as unknown as DotSettings
 }
 
@@ -103,7 +79,6 @@ export function patchSettings(current: DotSettings, patch: unknown, locale: Copy
     if (CLEARABLE.has(key) && value === null) { delete next[key]; continue }
     const parsed = FIELDS[key as Field].safeParse(value)
     if (!parsed.success) throw new SettingsError(`invalid value for ${key}`)
-    if (key === 'approvals' && parsed.data === 'allow') throw new SettingsError('invalid value for approvals')
     if (key in defaults && (parsed.data as string).trim() === defaults[key]!.trim()) { delete next[key]; continue }
     next[key] = parsed.data
   }

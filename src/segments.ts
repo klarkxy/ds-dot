@@ -21,10 +21,7 @@ export interface Segment {
   readonly persona: string
   /** Model the segment runs on, as `provider/model@effort`. */
   readonly model?: string
-  /** Legacy notes block frozen before the split into agreements and cognition. */
-  readonly memory?: string
-  /** Legacy notes block as this segment's conversation last accounted for it. */
-  readonly memorySeen?: string
+
   /** Agreements block of the system prompt as it read when the segment started; absent while there are none. */
   readonly agreements?: string
   /**
@@ -39,8 +36,6 @@ export interface Segment {
   readonly cognitionSeen?: string
   /** Handoff block of the system prompt; absent in the very first segment. */
   readonly opening?: string
-  /** Legacy field, read for storage compatibility only. Cards no longer hold a segment open. */
-  readonly openCard?: string
   readonly handoff?: Handoff
   /** Why the previous segment ended. */
   readonly reason?: RolloverReason
@@ -99,7 +94,7 @@ const WHY: Record<RolloverReason, string> = {
 }
 
 /** The handoff block a new segment keeps in its system prompt for its whole life. */
-export function openingText(input: { readonly handoff?: Handoff; readonly reason: RolloverReason; readonly ledger?: string; readonly reminders?: string; /** Session the conversation ran in until now. */ readonly previous?: string; /** Unanswered interactive card carried over from an earlier segment. */ readonly openCard?: string; readonly at: number }): string {
+export function openingText(input: { readonly handoff?: Handoff; readonly reason: RolloverReason; readonly ledger?: string; readonly reminders?: string; /** Session the conversation ran in until now. */ readonly previous?: string; readonly at: number }): string {
   const body = input.handoff ? handoffText(input.handoff) : ''
   const parts = [
     '[conversation handoff]',

@@ -85,11 +85,11 @@ describe('dot tools', () => {
   it('keeps the private reflection preset to history reads and one restricted submission', () => {
     expect(loadReflection().map(tool => tool.name).sort()).toEqual([TOOL.searchHistory, TOOL.readHistory, REFLECTION_SUBMIT_TOOL].sort())
   })
-  it('compiles every dot tool definition through defineTool and keeps 18 dot_* plus show_view', () => {
+  it('compiles every dot tool definition through defineTool and keeps 17 dot_* plus show_view', () => {
     const names = load().map(tool => tool.name)
     expect([...names].sort()).toEqual([...Object.values(TOOL), 'show_view'].sort())
-    expect(names).toHaveLength(19)
-    expect(new Set(names).size).toBe(19)
+    expect(names).toHaveLength(18)
+    expect(new Set(names).size).toBe(18)
   })
 
   it('marks only the reading tools read-only', () => {
@@ -117,9 +117,10 @@ describe('dot tools', () => {
   it('lists inspect/files on workspaces and names the Deep View rich nodes', () => {
     const workspace = load().find(row => row.name === TOOL.workspace) as { parameters: { properties?: { action?: { enum?: string[] } }; action?: { enum?: string[] } }; description: string }
     const action = workspace.parameters.properties?.action ?? workspace.parameters.action
-    expect(action?.enum).toEqual(['list', 'inspect', 'files', 'create'])
+    expect(action?.enum).toEqual(['list', 'inspect', 'files', 'create', 'read'])
     expect(workspace.description).toContain('inspect')
     expect(workspace.description).toContain('files')
+    expect(workspace.description).toContain('read')
     const view = load().find(row => row.name === 'show_view') as { description: string }
     for (const node of ['steps', 'math', 'flow', 'explore', 'map']) expect(view.description).toContain(node)
   })
@@ -127,16 +128,11 @@ describe('dot tools', () => {
   it('does not tell the model a review is read-only or that closeout takes a settled review', () => {
     type Tool = { description: string; parameters: { properties: Record<string, { description?: string }> } }
     const task = load().find(row => row.name === TOOL.task) as Tool
-    const start = load().find(row => row.name === TOOL.startTask) as Tool
     const role = task.parameters.properties.role?.description ?? ''
-    const startRole = start.parameters.properties.role?.description ?? ''
-    // Review reserves workspace-exclusive write access. Calling it read-only would hide that the session can modify files.
-    expect(role).toContain('write access')
-    expect(role).toContain('not a read-only sandbox')
-    expect(start.description).toContain('write access')
-    expect(start.description).not.toContain('for inspection')
-    expect(startRole).toContain('write access')
-    expect(startRole).toContain('not a read-only sandbox')
+    // Review holds the workspace exclusively so writers cannot run alongside, but the session launches read-only.
+    expect(role).toContain('reserves the whole workspace')
+    expect(role).toContain('read-only')
+    expect(role).not.toContain('write access')
     // closeoutFromTool refuses a review that is already completed, failed, or stopped, then holds an open one.
     const review = task.parameters.properties.review_run_id?.description ?? ''
     expect(review).toContain('open review')
@@ -291,9 +287,9 @@ describe('dot tools', () => {
 
   it('exposes exactly the high-level task operations and rejects removed actions', async () => {
     const tool = load().find(row => row.name === TOOL.task) as { parameters: { properties: Record<string, { enum?: string[] }> }; execute(args: unknown): Promise<string> }
-    expect(tool.parameters.properties.action.enum).toEqual(['create', 'revise', 'dispatch', 'read', 'list', 'supplement', 'finish', 'step', 'closeout', 'pause', 'resume', 'cancel', 'decide', 'reject'])
+    expect(tool.parameters.properties.action.enum).toEqual(['create', 'revise', 'dispatch', 'check', 'read', 'list', 'supplement', 'finish', 'step', 'closeout', 'pause', 'resume', 'cancel', 'decide', 'reject'])
     expect(tool.parameters.properties.action.enum).toEqual([...TASK_ACTIONS])
-    for (const action of ['reserve', 'baseline', 'subject', 'evidence', 'verify', 'hold', 'accept', 'move', 'note', 'delete', 'board', 'update']) await expect(tool.execute({ action })).rejects.toThrow()
+    for (const action of ['reserve', 'baseline', 'subject', 'evidence', 'verify', 'hold', 'accept', 'move', 'note', 'delete', 'board', 'update', 'start']) await expect(tool.execute({ action })).rejects.toThrow()
     for (const field of ['subject', 'subject_ref', 'evidence_ref', 'to', 'status', 'summary', 'session_id']) expect(tool.parameters.properties).not.toHaveProperty(field)
     expect(loadReflection().map(row => row.name)).not.toContain(TOOL.task)
   })

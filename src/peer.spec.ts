@@ -149,13 +149,11 @@ describe('owned sessions', () => {
       { sessionId: 'session-a', requestedSessionId: 'session-a', creation: 'confirmed' },
     ],
     tasks: [{ sessionId: 'session-watched', origin: 'watched' }, { sessionId: 'session-started', origin: 'started' }, { sessionId: 'session-dot', origin: 'started' }],
-    tickets: [{ sessions: [{ sessionId: 'session-ticket' }] }],
   }
 
   it('counts sessions dot opened and not a reserved id, a watched human, or dot itself', () => {
     expect(sessionIsOwned('session-a', input)).toBe(true)
     expect(sessionIsOwned('session-started', input)).toBe(true)
-    expect(sessionIsOwned('session-ticket', input)).toBe(true)
     expect(sessionIsOwned('session-reserved', input)).toBe(false)
     expect(sessionIsOwned('session-watched', input)).toBe(false)
     expect(sessionIsOwned('session-dot', input)).toBe(false)

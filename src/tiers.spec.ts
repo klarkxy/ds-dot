@@ -13,6 +13,5 @@ describe('eventTier', () => {
     expect(eventTier('turn-end', 'watched')).toBe('hold')
     expect(eventTier('status', 'started')).toBe('ledger')
     expect(eventTier('status', 'watched')).toBe('ledger')
-    expect(eventTier('archived', 'started')).toBe('ledger')
   })
 })

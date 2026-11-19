@@ -26,16 +26,14 @@ const NOTICE_TEXT = [
   '[dot notice] Updates from other sessions:',
   '- approval · session-f922364c-9f84-4ca4-af18-38f650070997: ap-23 · approval from untracked session in H:\\Code\\dsh-plugins · "pwsh"',
   '  detail: reason: escalate sandbox to danger-full-access: 需要读取 npm 发布步骤的真实日志，核实匿名下载与完整性匹配。 arguments: {"description":"Read actual npm publication verification lines","command":"gh run view --job 130514884834 --log --step \'Publish changed packages and verify archives\'","justification":"需要读取 npm 发布步骤的真实日志，核实匿名下载与完整性匹配。","sandbox_permissions":"danger-full-access","workdir":"H:\\\\Code\\\\dsh-plugins"}',
-  '  Decide it yourself with dot_answer: approve when the action fits the session\'s goal, stays inside its project, and can be undone.',
-  'Report what matters to the human, handle waiting requests by your rules, and keep quiet about routine progress.',
+  '  human-required: remote-exec; do not use dot_answer.',
 ].join('\n')
 
 const ESCALATED_NOTICE_TEXT = [
   '[dot notice] Updates from other sessions:',
   '- approval · session-f922364c-9f84-4ca4-af18-38f650070997: ap-25 · approval from untracked session in H:\\Code\\dsh-plugins · "pwsh"',
   '  detail: reason: escalate sandbox to danger-full-access: 需要发布包到 npm 仓库。 arguments: {"description":"Publish changed packages","command":"pnpm publish -r --access public","justification":"需要发布包到 npm 仓库。","sandbox_permissions":"danger-full-access","workdir":"H:\\\\Code\\\\dsh-plugins"}',
-  '  Decide it yourself with dot_answer: approve silently (no chat reply) when the action fits the session\'s goal, stays inside its project, and can be undone.',
-  'Report what matters to the human, handle waiting requests by your rules, and stay silent about routine progress.',
+  '  human-required: remote-exec; do not use dot_answer.',
 ].join('\n')
 
 function makeApi(snapshot: ChatSnapshot): ChatApi {
@@ -71,7 +69,7 @@ function makeApi(snapshot: ChatSnapshot): ChatApi {
 }
 
 describe('ChatPanel activity and notice cards', () => {
-  it('sends a starter prompt from the empty chat and explains a segment mark when opened', async () => {
+  it('fills the composer from a starter chip instead of sending, and explains a segment mark when opened', async () => {
     const empty: ChatSnapshot = { sessionId: 'dot-1', running: false, streaming: '', rev: 1, itemsRev: 1, items: [] }
     const api = makeApi(empty)
     api.say = vi.fn(async () => {})
@@ -80,7 +78,9 @@ describe('ChatPanel activity and notice cards', () => {
     await act(async () => { await Promise.resolve() })
     const starter = document.querySelector<HTMLButtonElement>('.dsh-dot-starter')!
     await act(async () => { starter.click() })
-    expect(api.say).toHaveBeenCalledWith(starter.textContent, [])
+    await act(async () => { await Promise.resolve(); await new Promise(resolve => setTimeout(resolve, 30)) })
+    expect(api.say).not.toHaveBeenCalled()
+    expect(document.querySelector<HTMLTextAreaElement>('.dsh-dot-input')?.value).toBe(starter.textContent)
     await act(async () => { root.unmount() })
 
     const segmented: ChatSnapshot = { ...empty, items: [
@@ -206,7 +206,7 @@ describe('ChatPanel activity and notice cards', () => {
     expect(document.body.textContent).not.toContain('The card failed to display.')
     await act(async () => root.unmount())
   })
-  it('disables an expired numbered card and hides duplicate prose', async () => {
+  it('disables an expired numbered card and keeps the prose beside it', async () => {
     const view = { type: 'confirm', id: 'ok' }
     const presentation = { owner: 'dsh-deep-view', title: 'Deploy', view, viewId: 'dot-card-4', interactive: true, awaitReply: true, dotCard: { number: 4, expired: true } }
     const call = vi.fn(async (endpoint: string, payload: unknown) => endpoint === 'card.detail'
@@ -221,7 +221,8 @@ describe('ChatPanel activity and notice cards', () => {
     await act(async () => { root.render(<ChatPanel locale="en" api={makeApi(snapshot)} Card={Card} onOpenSession={() => {}} />) })
     await act(async () => { await Promise.resolve() })
     expect(document.body.textContent).toContain('#4 · Expired')
-    expect(document.body.textContent).not.toContain('duplicate prose')
+    // A card beside text no longer swallows the text.
+    expect(document.body.textContent).toContain('duplicate prose')
     const confirm = [...document.querySelectorAll<HTMLButtonElement>('.dvui-root button')].find(button => button.textContent === 'Confirm')!
     expect(confirm).toBeDefined()
     // Expired cards are shown but cannot be submitted; the button must be absent or disabled.
@@ -625,7 +626,7 @@ describe('ChatPanel activity and notice cards', () => {
     expect(noticeBody.textContent).toContain('完全访问')
     expect(noticeBody.textContent).toContain('需要发布包到 npm 仓库。')
     expect(noticeBody.textContent).toContain('pnpm publish -r --access public')
-    expect(noticeBody.textContent).not.toContain('Decide it yourself with dot_answer')
+    expect(noticeBody.textContent).not.toContain('do not use dot_answer')
     expect(noticeBody.textContent).not.toContain('sandbox_permissions')
     expect(noticeBody.textContent).not.toContain('escalate sandbox to')
 

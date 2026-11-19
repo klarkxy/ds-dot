@@ -83,7 +83,7 @@
     "build": "tsdown",
     "watch": "tsdown --watch",
     "typecheck": "tsc --noEmit -p tsconfig.json",
-    "test": "vitest run",
+    "test": "node --test .agents/skills/dsh-web-acceptance/scripts/dsh-qa-harness.test.js && vitest run",
     "prepare": "tsdown"
   },
   "dependencies": {

@@ -181,8 +181,11 @@ export function filterVisibleChat(
 
     // Pure background request wake-up (only approval/question notices, no user message).
     if (!hasHumanInput && notices.length > 0) {
-      // A pure query leaves nothing the human must see. Any ending text is hidden; the journal is untouched.
-      if (isRoutineOnly && !hasVisibleView && !hasInvalidView && !hasTurnError && !hasToolError && !hasSideEffectTool && !hasRequestDecision && !streamingHere) {
+      // A pure query leaves nothing the human must see. The turn stays hidden only
+      // while it produced no reply text either; a non-empty reply is visible now
+      // that ordinary replies are plain text, mirroring hasVisibleView for cards.
+      if (isRoutineOnly && !hasVisibleView && !hasInvalidView && !hasTurnError && !hasToolError && !hasSideEffectTool && !hasRequestDecision && !streamingHere
+        && !bots.some(bot => bText(bot).trim())) {
         if (isLast) silentTail = true
         return
       }

@@ -25,11 +25,14 @@ describe('filterVisibleChat', () => {
     const move: ChatItem = { ...read, key: 'm', args: { action: 'move' } }
     expect(filterVisibleChat([notice, move]).items.map(row => row.key)).toEqual(['n', 'm'])
   })
-  it('hides any ending text on a pure idle query, and keeps a question card', () => {
+  it('hides a silent pure idle query, shows its reply text, and keeps a question card', () => {
     const notice: ChatItem = { kind: 'notice', key: 'n', text: '[dot notice] Updates:\nTasks:\n- idle-check · dot: Routine check: t-1 ready', at: 1, turn: 1 }
     const note: ChatItem = { kind: 'bot', key: 'b', text: '本次为后台例行检查，无新情况，未打扰用户。', at: 2, turn: 1 }
     const read: ChatItem = { kind: 'tool', key: 'r', name: 'dot_task', args: { action: 'list' }, status: 'done', at: 3, turn: 1 }
-    expect(filterVisibleChat([notice, read, note]).items).toEqual([])
+    expect(filterVisibleChat([notice, read]).items).toEqual([])
+    // Plain-text replies are first-class now: once Dorothy writes one, the turn
+    // stays visible like a card would.
+    expect(filterVisibleChat([notice, read, note]).items.map(item => item.key)).toEqual(['n', 'r', 'b'])
     const card: ChatItem = { kind: 'view', key: 'v', presentation: { viewId: 'ask' }, at: 4, turn: 1 }
     // A card beside text no longer swallows the text; the whole block stays visible.
     expect(filterVisibleChat([notice, card, note]).items.map(item => item.key)).toEqual(['n', 'v', 'b'])
@@ -57,10 +60,14 @@ describe('filterVisibleChat', () => {
     expect(filterVisibleChat([notice, added, note]).items.map(item => item.key)).toEqual(['n', 'a', 'b'])
     expect(filterVisibleChat([notice, removed, note]).items.map(item => item.key)).toEqual(['n', 'd', 'b'])
     expect(filterVisibleChat([notice, unknown, note]).items.map(item => item.key)).toEqual(['n', 'u', 'b'])
-    expect(filterVisibleChat([notice, listed, note]).items).toEqual([])
+    expect(filterVisibleChat([notice, listed]).items).toEqual([])
+    expect(filterVisibleChat([notice, listed, { ...note, text: ' ' }]).items).toEqual([])
+    expect(filterVisibleChat([notice, listed, note]).items.map(item => item.key)).toEqual(['n', 'l', 'b'])
     expect(filterVisibleChat([notice, created, note]).items.map(item => item.key)).toEqual(['n', 'c', 'b'])
-    expect(filterVisibleChat([notice, inspected, note]).items).toEqual([])
-    expect(filterVisibleChat([notice, files, note]).items).toEqual([])
+    expect(filterVisibleChat([notice, inspected]).items).toEqual([])
+    expect(filterVisibleChat([notice, inspected, note]).items.map(item => item.key)).toEqual(['n', 'i', 'b'])
+    expect(filterVisibleChat([notice, files]).items).toEqual([])
+    expect(filterVisibleChat([notice, files, note]).items.map(item => item.key)).toEqual(['n', 'f', 'b'])
     expect(filterVisibleChat([notice, moved, note]).items.map(item => item.key)).toEqual(['n', 'm', 'b'])
     expect(filterVisibleChat([notice, noted, note]).items.map(item => item.key)).toEqual(['n', 't', 'b'])
   })

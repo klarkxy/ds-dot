@@ -1,3 +1,4 @@
+import { spawnSync } from 'node:child_process'
 import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -112,6 +113,13 @@ describe('workspace read', () => {
     const template = await readWorkspaceText([root], root, '.env.example')
     expect(template.lines).toEqual(['TOKEN='])
     await expect(readWorkspaceText([root], root, '.env.local')).rejects.toThrow(/cannot read|credential/)
+  })
+
+  it.skipIf(process.platform === 'win32')('refuses a named pipe instead of hanging on it', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'dsh-dot-read-fifo-'))
+    const fifo = join(root, 'pipe')
+    spawnSync('mkfifo', [fifo])
+    await expect(readWorkspaceText([root], root, 'pipe')).rejects.toThrow(/not a regular file/)
   })
 
   it('rejects a bad start_line', async () => {

@@ -2,7 +2,7 @@
  * Read-only workspace inspection for Dorothy. Listing stays inside one
  * workspace root; file and shell writes stay on task sessions.
  */
-import type { Dirent } from 'node:fs'
+import { constants, type Dirent } from 'node:fs'
 import { open, readdir, realpath, stat } from 'node:fs/promises'
 import { isAbsolute, relative, resolve, sep } from 'node:path'
 import { credentialLikePath } from './approval-risk.ts'
@@ -131,10 +131,17 @@ export async function readWorkspaceText(
   if (credentialLikePath(trimmed) || credentialLikePath(real)) throw new Error(`${trimmed} looks like a credential file and will not be read`)
   const info = await stat(real)
   if (info.isDirectory()) throw new Error(`${trimmed} is a directory; use action=files to list it`)
+  if (!info.isFile()) throw new Error(`${trimmed} is not a regular file`)
   if (info.size > WORKSPACE_READ_MAX_BYTES) throw new Error(`${trimmed} is ${info.size} bytes; files over 2 MiB are not read`)
-  const handle = await open(real, 'r')
+  // O_NOFOLLOW keeps a symlink swapped in after realpath() from redirecting the
+  // open; comparing the opened handle's dev/ino catches any other swap — the
+  // read is refused rather than serving a different file than the one checked.
+  const flags = constants.O_NOFOLLOW === undefined ? 'r' : constants.O_RDONLY | constants.O_NOFOLLOW
+  const handle = await open(real, flags)
   let body: string
   try {
+    const opened = await handle.stat()
+    if (!opened.isFile() || opened.dev !== info.dev || opened.ino !== info.ino) throw new Error(`${trimmed} changed while it was being opened; try again`)
     const head = Buffer.alloc(Math.min(info.size, NUL_SCAN_BYTES))
     await handle.read(head, 0, head.length, 0)
     if (head.includes(0)) throw new Error(`${trimmed} is a binary file`)

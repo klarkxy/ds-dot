@@ -684,6 +684,7 @@ export class WorkBook {
       ...(material?.goal ? { summary: material.goal } : {}),
       runs: runs.map(run => ({
         id: run.id, kind: run.kind, phase: run.phase, cwd: run.cwd,
+        ...(run.sessionId ? { sessionId: run.sessionId } : {}),
         writeScope: run.writeScope,
         deliveries: run.deliveries.map(item => ({
           id: item.id, kind: item.kind, status: item.status, contentRef: item.contentRef,

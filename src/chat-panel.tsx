@@ -6,13 +6,13 @@
  * the host feed and redraws on every change.
  */
 import {
-  Button, DisclosureRow, IconCheckOutlineRegular, IconCloseOutlineRegular, IconWarningOutlineRegular,
-  MarkdownText, StateDot, Tag, TextShimmer, Tooltip, UserMessageBubble, useDismissOnOutsidePointer,
+  Button, DisclosureRow, IconCheckOutlineRegular, IconChevronDownOutlineRegular, IconCloseOutlineRegular, IconWarningOutlineRegular,
+  MarkdownText, Modal, modalSelector, StateDot, Tag, TextShimmer, Tooltip, UserMessageBubble, useDismissOnOutsidePointer,
   type MarkdownLabels, type StateDotState, type TagTone,
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ChangeEvent, type ClipboardEvent, type ComponentType, type DragEvent, type KeyboardEvent, type ReactNode } from 'react'
 import { Board, boardCounts, type BoardFilter } from './board.tsx'
-import { headerBoardCounts, sessionLookup } from './board-groups.ts'
+import { groupBoard, headerBoardCounts, sessionLookup } from './board-groups.ts'
 import { filterVisibleChat } from './chat-filter.ts'
 import { formatToolDetail, parseNotice, permissionLabel, resolveSessionBadge, summarizeNotice, summarizeToolCall, summarizeToolGroup, type NoticeEntry, type ParsedNotice, type SessionBadge, type TaskLookup } from './chat-format.ts'
 import { ContextPanel, type ContextApi } from './context-panel.tsx'
@@ -22,7 +22,7 @@ import type { BoardView, ChatItem, ChatSnapshot, DotSettings, RolloverReason } f
 import { CHAT_IMAGE_LIMIT, ChatImageRejected, imageName, inspectImageBytes, type ChatImage, type ChatImageError } from './chat-images.ts'
 import { SettingsPanel, settingsCss, type SaveNotice, type SettingsApi } from './settings-panel.tsx'
 import type { RenderFactorySlot } from '@klarkxy/dsh-plugin-kit/model-picker'
-import { cardCopy, intlLocale, t, toolLabel, type CopyLocale, type TextKey } from './ui-copy.ts'
+import { cardCopy, fillText, intlLocale, t, toolLabel, type CopyLocale, type TextKey } from './ui-copy.ts'
 import { WorkBoardPanel, type WorkApi } from './work-board.tsx'
 import type { WorkAcceptPayload, PendingGlance, WorkBoardItem, WorkReadRequest, WorkRejectPayload } from './work-board.ts'
 import { DotAvatar } from './whale.tsx'
@@ -46,7 +46,7 @@ export interface ChatApi extends SettingsApi, ContextApi, TrajectoryApi, Knowled
   removeSchedule(id: string): Promise<boolean>
   workAccept?(payload: WorkAcceptPayload): Promise<void>
   workReject?(payload: WorkRejectPayload): Promise<void>
-  workAnswer?(payload: { readonly id: string; readonly allow: boolean }): Promise<void>
+  workAnswer?(payload: { readonly id: string; readonly allow: boolean; readonly note?: string }): Promise<void>
   workResume?(payload: { readonly id: string }): Promise<void>
   workForceRelease?(payload: { readonly id: string }): Promise<void>
   workRead?(request: WorkReadRequest): Promise<{ readonly source: string; readonly body: string; readonly truncated?: boolean; readonly totalBytes?: number }>
@@ -157,6 +157,9 @@ export function rowsOf(items: readonly ChatItem[]): Row[] {
 export type DrawerTab = 'tasks' | 'settings' | 'persona' | 'context' | 'trajectory'
 const CONFIG_TABS: ReadonlySet<DrawerTab> = new Set(['settings', 'persona', 'context', 'trajectory'])
 
+/** A close or a tab switch; while the persona page holds unsaved edits the request waits for the human. */
+type DrawerAction = { readonly kind: 'close' } | { readonly kind: 'tab'; readonly tab: DrawerTab }
+
 interface DrawerProps {
   readonly locale: CopyLocale
   readonly api: ChatApi
@@ -169,25 +172,34 @@ interface DrawerProps {
   readonly proposalCount: number
   readonly tasks: ReactNode
   readonly renderFactorySlot?: RenderFactorySlot
-  readonly onTab: (tab: DrawerTab) => void
+  readonly personaDirty: boolean
+  readonly pendingAction?: DrawerAction
+  readonly discardSignal: number
+  readonly onRequest: (action: DrawerAction) => void
+  readonly onCancelPending: () => void
+  readonly onDiscardPending: () => void
+  readonly onDirtyChange: (dirty: boolean) => void
   readonly onWide: () => void
   readonly onSaved: (next: DotSettings) => void
   readonly onProposalCount: (count: number) => void
-  readonly onClose: () => void
 }
 
 /**
  * One drawer docked beside the chat for the board and every settings page.
  * It has no backdrop, so the conversation and the composer stay usable while it is open.
  */
-function WorkDrawer({ locale, api, tab, wide, settings, trajectoryRev, running, waiting, proposalCount, tasks, renderFactorySlot, onTab, onWide, onSaved, onProposalCount, onClose }: DrawerProps) {
+function WorkDrawer({ locale, api, tab, wide, settings, trajectoryRev, running, waiting, proposalCount, tasks, renderFactorySlot, personaDirty, pendingAction, discardSignal, onRequest, onCancelPending, onDiscardPending, onDirtyChange, onWide, onSaved, onProposalCount }: DrawerProps) {
   const [saveNotice, setSaveNotice] = useState<SaveNotice>()
+  useEffect(() => { setSaveNotice(undefined) }, [tab])
+  const requestClose = useCallback(() => { onRequest({ kind: 'close' }) }, [onRequest])
+  const requestTab = useCallback((next: DrawerTab) => { onRequest({ kind: 'tab', tab: next }) }, [onRequest])
   useEffect(() => {
-    const close = (event: globalThis.KeyboardEvent) => { if (event.key === 'Escape' && !event.defaultPrevented) onClose() }
+    const close = (event: globalThis.KeyboardEvent) => {
+      if (event.key === 'Escape' && !event.defaultPrevented && !document.querySelector(modalSelector)) requestClose()
+    }
     document.addEventListener('keydown', close)
     return () => document.removeEventListener('keydown', close)
-  }, [onClose])
-  useEffect(() => { setSaveNotice(undefined) }, [tab])
+  }, [requestClose])
   useEffect(() => {
     if (saveNotice?.kind !== 'saved') return
     const timer = setTimeout(() => setSaveNotice(undefined), 2200)
@@ -205,7 +217,7 @@ function WorkDrawer({ locale, api, tab, wide, settings, trajectoryRev, running, 
   const activeItem = items.find(item => item.value === tab) ?? items[0]!
   return (
     <div className="dsh-dot-drawer-layer">
-    <button type="button" tabIndex={-1} className="dsh-dot-drawer-backdrop" aria-label={t(locale, 'closeDrawer')} onClick={onClose} />
+    <button type="button" tabIndex={-1} className="dsh-dot-drawer-backdrop" aria-label={t(locale, 'closeDrawer')} onClick={requestClose} />
     <aside className="dsh-dot-drawer" data-kind={isTasks ? 'tasks' : 'settings'} data-wide={wide ? '' : undefined} role="dialog" aria-label={isTasks ? t(locale, 'tasks') : t(locale, 'settings')}>
       <header className="dsh-dot-drawer-head">
         {isTasks ? (
@@ -221,10 +233,11 @@ function WorkDrawer({ locale, api, tab, wide, settings, trajectoryRev, running, 
               type="button"
               aria-pressed={tab === item.value}
               aria-controls={`dsh-dot-drawer-panel-${item.value}`}
-              onClick={() => onTab(item.value)}
+              onClick={() => requestTab(item.value)}
             >
               <span className="dsh-dot-nav-label">{item.label}</span>
               {item.badge > 0 ? <span className="dsh-dot-nav-badge">{item.badge}</span> : null}
+              {item.value === 'persona' && personaDirty ? <span className="dsh-dot-dirty-dot" aria-hidden="true" /> : null}
             </button>
           ))}
         </nav>
@@ -242,8 +255,16 @@ function WorkDrawer({ locale, api, tab, wide, settings, trajectoryRev, running, 
           </span>
         ) : null}
         <Button variant="ghost" size="sm" className="dsh-dot-drawer-widen" icon={wide ? <NarrowGlyph /> : <WidenGlyph />} aria-label={t(locale, wide ? 'narrowDrawer' : 'widenDrawer')} title={t(locale, wide ? 'narrowDrawer' : 'widenDrawer')} aria-pressed={wide} onClick={onWide} />
-        <Button variant="ghost" size="sm" icon={<IconCloseOutlineRegular size={15} />} aria-label={t(locale, 'closeDrawer')} title={t(locale, 'closeDrawer')} onClick={onClose} />
+        <Button variant="ghost" size="sm" icon={<IconCloseOutlineRegular size={15} />} aria-label={t(locale, 'closeDrawer')} title={t(locale, 'closeDrawer')} onClick={requestClose} />
       </header>
+      {pendingAction ? (
+        <div className="dsh-dot-unsaved-bar" role="alert">
+          <span>{t(locale, 'unsavedChanges')}</span>
+          <span className="dsh-dot-spacer" />
+          <Button variant="ghost" size="sm" onClick={onCancelPending}>{t(locale, 'unsavedKeepEditing')}</Button>
+          <Button variant="primary" size="sm" onClick={onDiscardPending}>{t(locale, 'unsavedDiscard')}</Button>
+        </div>
+      ) : null}
       <div className="dsh-dot-settings-scroll">
         <div className="dsh-dot-settings" data-tab={tab} id={`dsh-dot-drawer-panel-${tab}`} role="region" aria-label={activeItem.title}>
           {tab === 'tasks'
@@ -251,7 +272,7 @@ function WorkDrawer({ locale, api, tab, wide, settings, trajectoryRev, running, 
             : tab === 'settings'
               ? <SettingsPanel locale={locale} api={api} {...settings ? { settings } : {}} onSaved={onSaved} onStatusChange={setSaveNotice} onProposalCount={onProposalCount} {...renderFactorySlot ? { renderFactorySlot } : {}} />
               : tab === 'persona'
-                ? <PersonaPanel locale={locale} api={api} {...settings ? { settings } : {}} onSaved={onSaved} onStatusChange={setSaveNotice} />
+                ? <PersonaPanel locale={locale} api={api} {...settings ? { settings } : {}} discardSignal={discardSignal} onDirtyChange={onDirtyChange} onSaved={onSaved} onStatusChange={setSaveNotice} />
                 : tab === 'context'
                   ? <ContextPanel locale={locale} api={api} running={running} />
                   : <TrajectoryPanel locale={locale} api={api} {...trajectoryRev === undefined ? {} : { rev: trajectoryRev }} running={running} />}
@@ -263,14 +284,21 @@ function WorkDrawer({ locale, api, tab, wide, settings, trajectoryRev, running, 
 }
 
 /** The board tab: a filter row, the work changes waiting on the human, then the ticket board. */
-function TasksTab({ locale, view, workApi, boardError, onOpen, onRetry, onRemoveSchedule }: {
+function TasksTab({ locale, view, workApi, boardError, pendingRemoveTitle, onUndoRemove, onOpen, onRetry, onRemoveSchedule }: {
   locale: CopyLocale; view?: BoardView; workApi?: WorkApi; boardError?: string
+  pendingRemoveTitle?: string; onUndoRemove?: () => void
   onOpen: (sessionId: string) => void; onRetry: () => void; onRemoveSchedule: (id: string) => void
 }) {
   const [filter, setFilter] = useState<BoardFilter>('all')
   const counts = boardCounts(view)
+  const totalCount = useMemo(() => {
+    if (!view) return 0
+    const groups = groupBoard(view)
+    const openWork = (view.work ?? []).filter(w => w.status !== 'done' && w.status !== 'cancelled').length
+    return openWork + groups.requests.length + groups.watched.length + view.schedules.length
+  }, [view])
   const filters: readonly { value: BoardFilter; label: string }[] = [
-    { value: 'all', label: t(locale, 'filterAll') },
+    { value: 'all', label: totalCount > 0 ? `${t(locale, 'filterAll')} (${totalCount})` : t(locale, 'filterAll') },
     { value: 'waiting', label: `${t(locale, 'filterWaiting')} (${counts.waiting})` },
     { value: 'active', label: `${t(locale, 'filterActive')} (${counts.active})` },
     { value: 'watch', label: `${t(locale, 'filterWatch')} (${counts.watch})` },
@@ -280,7 +308,13 @@ function TasksTab({ locale, view, workApi, boardError, onOpen, onRetry, onRemove
       <div className="dsh-dot-filters" role="group" aria-label={t(locale, 'tasks')}>
         {filters.map(item => <button key={item.value} type="button" aria-pressed={filter === item.value} onClick={() => setFilter(item.value)}>{item.label}</button>)}
       </div>
-      {workApi && filter !== 'watch' ? <WorkBoardPanel locale={locale} api={workApi} filter={filter} items={view?.work ?? NO_WORK} pending={view?.pending ?? NO_PENDING} onChanged={onRetry} /> : null}
+      {pendingRemoveTitle && onUndoRemove ? (
+        <div className="dsh-dot-undo-bar" role="status">
+          <span className="dsh-dot-undo-text">{fillText(t(locale, 'reminderRemoved'), { title: pendingRemoveTitle })}</span>
+          <Button variant="ghost" size="sm" onClick={onUndoRemove}>{t(locale, 'undoAction')}</Button>
+        </div>
+      ) : null}
+      {workApi && filter !== 'watch' ? <WorkBoardPanel locale={locale} api={workApi} filter={filter} items={view?.work ?? NO_WORK} pending={view?.pending ?? NO_PENDING} onChanged={onRetry} onOpenSession={onOpen} /> : null}
       <Board locale={locale} view={view} filter={filter} suppressEmpty={(view?.work?.length ?? 0) > 0} {...boardError === undefined ? {} : { error: boardError }} onOpen={onOpen} onRetry={onRetry} onRemoveSchedule={onRemoveSchedule} />
     </div>
   )
@@ -312,10 +346,54 @@ export interface ChatPanelProps {
   readonly renderFactorySlot?: RenderFactorySlot
 }
 
+function imageCacheKey(text: string, images: readonly { readonly mediaType: string; readonly name?: string }[]): string {
+  return `${text.trim()}\0${images.map(img => `${img.mediaType}:${img.name ?? ''}`).join('|')}`
+}
+
+const UNDO_REMINDER_MS = 4_500
+
 export function ChatPanel({ locale, api, Card, onOpenSession, renderFactorySlot }: ChatPanelProps) {
   const { state, error, retry } = useChatFeed(api)
-  const [board, boardError, refreshBoard] = useBoard(api, state.snapshot?.boardRev)
-  const removeSchedule = useCallback((id: string) => { void api.removeSchedule(id).then(refreshBoard, refreshBoard) }, [api, refreshBoard])
+  const [rawBoard, boardError, refreshBoard] = useBoard(api, state.snapshot?.boardRev)
+  const [pendingRemoval, setPendingRemoval] = useState<{ id: string; title: string }>()
+  const pendingRemovalRef = useRef<{ id: string; title: string; timer: ReturnType<typeof setTimeout> } | undefined>(undefined)
+  const commitPendingRemoval = useCallback((id: string) => api.removeSchedule(id).then(refreshBoard, refreshBoard), [api, refreshBoard])
+  useEffect(() => () => {
+    if (pendingRemovalRef.current) {
+      clearTimeout(pendingRemovalRef.current.timer)
+      void api.removeSchedule(pendingRemovalRef.current.id).catch(() => {})
+      pendingRemovalRef.current = undefined
+    }
+  }, [api])
+  const removeSchedule = useCallback((id: string) => {
+    if (pendingRemovalRef.current) {
+      clearTimeout(pendingRemovalRef.current.timer)
+      void commitPendingRemoval(pendingRemovalRef.current.id)
+      pendingRemovalRef.current = undefined
+    }
+    const found = rawBoard?.schedules.find(item => item.id === id)
+    if (!found) { void commitPendingRemoval(id); return }
+    const timer = setTimeout(() => {
+      pendingRemovalRef.current = undefined
+      // The row stays hidden while the removal is in flight: a slow RPC must not show it
+      // again, which would invite a second remove on top of the first.
+      void commitPendingRemoval(id).finally(() => {
+        setPendingRemoval(current => current?.id === id ? undefined : current)
+      })
+    }, UNDO_REMINDER_MS)
+    pendingRemovalRef.current = { id, title: found.title, timer }
+    setPendingRemoval({ id, title: found.title })
+  }, [rawBoard, commitPendingRemoval])
+  const undoRemoveSchedule = useCallback(() => {
+    if (!pendingRemovalRef.current) return
+    clearTimeout(pendingRemovalRef.current.timer)
+    pendingRemovalRef.current = undefined
+    setPendingRemoval(undefined)
+  }, [])
+  const board = useMemo<BoardView | undefined>(() => {
+    if (!rawBoard || !pendingRemoval) return rawBoard
+    return { ...rawBoard, schedules: rawBoard.schedules.filter(item => item.id !== pendingRemoval.id) }
+  }, [rawBoard, pendingRemoval])
   const workApi = useMemo<WorkApi | undefined>(() => {
     if (!api.workAccept || !api.workReject || !api.workAnswer || !api.workResume) return undefined
     return {
@@ -328,9 +406,14 @@ export function ChatPanel({ locale, api, Card, onOpenSession, renderFactorySlot 
   const running = snapshot?.running === true
   const streaming = snapshot?.streaming ?? ''
   const [echoes, setEchoes] = useState<{ text: string; at: number; images: readonly ChatImage[] }[]>([])
+  const [sentPreviews, setSentPreviews] = useState<Readonly<Record<string, readonly string[]>>>({})
+  const [previewImage, setPreviewImage] = useState<{ src: string; name: string }>()
   const [sendError, setSendError] = useState<string>()
   const [drawerTab, setDrawerTab] = useState<DrawerTab | null>(null)
   const [drawerWide, setDrawerWide] = useState(false)
+  const [personaDirty, setPersonaDirty] = useState(false)
+  const [discardSignal, setDiscardSignal] = useState(0)
+  const [pendingDrawerAction, setPendingDrawerAction] = useState<DrawerAction>()
   const [settings, setSettings] = useSettings(api)
   const [proposalCount, setProposalCount] = useState(0)
   useEffect(() => {
@@ -338,7 +421,30 @@ export function ChatPanel({ locale, api, Card, onOpenSession, renderFactorySlot 
     api.settingProposals(life.signal).then(rows => { if (!life.signal.aborted) setProposalCount(rows.length) }, () => {})
     return () => life.abort()
   }, [api])
-  const closeDrawer = useCallback(() => setDrawerTab(null), [])
+  // One guard for every way the drawer closes or switches: the header shortcuts, the
+  // tab strip, Escape and the backdrop all pass through here, so a dirty persona page
+  // holds the request instead of dropping the draft.
+  const applyDrawerAction = useCallback((action: DrawerAction) => {
+    setDrawerTab(action.kind === 'close' ? null : action.tab)
+  }, [])
+  const requestDrawer = useCallback((action: DrawerAction) => {
+    if (action.kind === 'tab' && action.tab === drawerTab) return
+    if (drawerTab === 'persona' && personaDirty) { setPendingDrawerAction(action); return }
+    applyDrawerAction(action)
+  }, [drawerTab, personaDirty, applyDrawerAction])
+  const discardDrawerAction = useCallback(() => {
+    const action = pendingDrawerAction
+    setPendingDrawerAction(undefined)
+    setPersonaDirty(false)
+    setDiscardSignal(value => value + 1)
+    if (action) applyDrawerAction(action)
+  }, [pendingDrawerAction, applyDrawerAction])
+  const cancelDrawerAction = useCallback(() => setPendingDrawerAction(undefined), [])
+  // Leaving the persona page settles the guard: a saved page has nothing left to hold.
+  useEffect(() => {
+    if (drawerTab !== 'persona') { setPersonaDirty(false); setPendingDrawerAction(undefined) }
+  }, [drawerTab])
+  useEffect(() => { if (!personaDirty) setPendingDrawerAction(undefined) }, [personaDirty])
   const configOpen = drawerTab !== null && CONFIG_TABS.has(drawerTab)
   const labels = useMemo<MarkdownLabels>(() => {
     const c = cardCopy(locale)
@@ -361,21 +467,34 @@ export function ChatPanel({ locale, api, Card, onOpenSession, renderFactorySlot 
     setSendError(undefined)
     const echo = { text, at: Date.now(), images }
     setEchoes(list => [...list, echo])
-    try { await api.say(text, images) } catch (failure) {
+    try {
+      await api.say(text, images)
+    } catch (failure) {
       setEchoes(list => list.filter(item => item !== echo))
       const message = failure instanceof Error ? failure.message : String(failure)
       setSendError(/\bHTTP 413\b/.test(message) ? t(locale, 'sendTooLarge') : message)
       throw failure
     }
+    // Keep the local bytes only for a message the host accepted: a rejected send must not
+    // leave a thumbnail keyed by text and file name for the next message that happens to match.
+    if (images.length > 0) {
+      const key = imageCacheKey(text, images)
+      const urls = images.map(img => `data:${img.mediaType};base64,${img.data}`)
+      setSentPreviews(prev => ({ ...prev, [key]: urls }))
+    }
   }, [api])
 
   const hasStreaming = Boolean(streaming.trim())
   const preparingCard = snapshot?.preparingCard === true
-  const filtered = useMemo(() => filterVisibleChat(state.items, { streaming: hasStreaming, running }), [state.items, hasStreaming, running])
+  const filtered = useMemo(() => filterVisibleChat(state.items, { streaming: hasStreaming, running, preparingCard }), [state.items, hasStreaming, running, preparingCard])
   const rows = useMemo(() => rowsOf(filtered.items), [filtered.items])
   const scroller = useRef<HTMLDivElement>(null)
   const stuck = useRef(true)
   const lastTop = useRef(0)
+  const [pinned, setPinned] = useState(true)
+  const [unreadBelow, setUnreadBelow] = useState(false)
+  const activitySig = `${rows.length}:${snapshot?.itemsRev ?? 0}:${streaming.length}`
+  const prevActivitySig = useRef(activitySig)
   // Direction-aware: any real upward scroll releases the bottom pin, even within STICK_PX of the
   // bottom, so streaming updates cannot yank the viewport back. Scrolling back down to within
   // STICK_PX re-pins. A scrollTop drop that lands at the bottom is a browser clamp after the
@@ -385,16 +504,32 @@ export function ChatPanel({ locale, api, Card, onOpenSession, renderFactorySlot 
     if (!el) return
     const gap = el.scrollHeight - el.scrollTop - el.clientHeight
     const up = el.scrollTop < lastTop.current - 3 && gap > 3
-    stuck.current = up ? false : gap < STICK_PX
+    const nextPinned = up ? false : gap < STICK_PX
+    stuck.current = nextPinned
     lastTop.current = el.scrollTop
+    setPinned(prev => prev === nextPinned ? prev : nextPinned)
+    if (nextPinned) setUnreadBelow(false)
+  }, [])
+  const scrollToBottom = useCallback(() => {
+    const el = scroller.current
+    stuck.current = true
+    setPinned(true)
+    setUnreadBelow(false)
+    if (el) {
+      el.scrollTop = el.scrollHeight
+      lastTop.current = el.scrollTop
+    }
   }, [])
   useLayoutEffect(() => {
     const el = scroller.current
     if (el && stuck.current) {
       el.scrollTop = el.scrollHeight
       lastTop.current = el.scrollTop
+    } else if (!stuck.current && prevActivitySig.current !== activitySig) {
+      setUnreadBelow(true)
     }
-  }, [rows, streaming, pendingEchoes, running])
+    prevActivitySig.current = activitySig
+  }, [rows, streaming, pendingEchoes, running, activitySig])
 
   const counts = useMemo(() => headerBoardCounts(board), [board])
   const live = counts.liveCount
@@ -404,9 +539,13 @@ export function ChatPanel({ locale, api, Card, onOpenSession, renderFactorySlot 
   // The log is the heaviest part of the panel (markdown, cards). Keeping its elements stable lets
   // opening a drawer, typing or a board poll skip redrawing every message.
   const sessionId = snapshot?.sessionId ?? ''
-  const logRows = useMemo(() => rows.map(row => <Fragment key={row.kind === 'tools' ? 'tools:' + row.key : row.item.key}>{renderRow(row, { locale, labels, Card, sessionId, answers: state.answers, hiddenRequestIds: filtered.hiddenRequestIds, tasks: tasksBySession, onOpenSession })}</Fragment>), [rows, locale, labels, Card, sessionId, state.answers, filtered.hiddenRequestIds, tasksBySession, onOpenSession])
-  const lastTool = rows.at(-1)?.kind === 'tools'
-  const showThinking = running && !preparingCard && !lastTool && !filtered.silentTail
+  const openPreview = useCallback((src: string, name: string) => setPreviewImage({ src, name }), [])
+  const logRows = useMemo(() => rows.map(row => <Fragment key={row.kind === 'tools' ? 'tools:' + row.key : row.item.key}>{renderRow(row, { locale, labels, Card, sessionId, answers: state.answers, hiddenRequestIds: filtered.hiddenRequestIds, tasks: tasksBySession, sentPreviews, onPreviewImage: openPreview, onOpenSession })}</Fragment>), [rows, locale, labels, Card, sessionId, state.answers, filtered.hiddenRequestIds, tasksBySession, sentPreviews, openPreview, onOpenSession])
+  const lastRow = rows.at(-1)
+  const lastTool = lastRow?.kind === 'tools'
+  const lastInReply = lastRow !== undefined && (lastRow.kind === 'tools' || lastRow.item.kind === 'bot' || lastRow.item.kind === 'view' || lastRow.item.kind === 'error')
+  const showStreaming = running && !preparingCard && hasStreaming
+  const showThinking = running && !preparingCard && !hasStreaming && !lastTool && !filtered.silentTail
   const segmentCount = useMemo(() => 1 + state.items.filter(item => item.kind === 'segment').length, [state.items])
   const contextUse = useContextUse(api, snapshot?.itemsRev, running)
   const contextPct = contextUse ? Math.min(100, (contextUse.used / contextUse.window) * 100) : undefined
@@ -422,25 +561,26 @@ export function ChatPanel({ locale, api, Card, onOpenSession, renderFactorySlot 
         </div>
         <span className="dsh-dot-spacer" />
         {contextUse && contextPct !== undefined ? (
-          <Button variant="ghost" size="sm" className="dsh-dot-ctx-pill" aria-pressed={drawerTab === 'context'} title={t(locale, 'ctxPill').replace('{pct}', `${contextPct.toFixed(1)}%`)} onClick={() => setDrawerTab(current => current === 'context' ? null : 'context')}>
+          <Button variant="ghost" size="sm" className="dsh-dot-ctx-pill" aria-pressed={drawerTab === 'context'} title={t(locale, 'ctxPill').replace('{pct}', `${contextPct.toFixed(1)}%`)} onClick={() => requestDrawer(drawerTab === 'context' ? { kind: 'close' } : { kind: 'tab', tab: 'context' })}>
             <span className="dsh-dot-ctx-track" aria-hidden="true"><span style={{ width: `${contextPct}%` }} /></span>
             <span className="dsh-dot-ctx-num">{compactTokens(contextUse.used)}</span>
           </Button>
         ) : null}
-        <Button variant="ghost" size="sm" aria-expanded={drawerTab === 'tasks'} aria-pressed={drawerTab === 'tasks'} onClick={() => setDrawerTab(current => current === 'tasks' ? null : 'tasks')}>
+        <Button variant="ghost" size="sm" aria-expanded={drawerTab === 'tasks'} aria-pressed={drawerTab === 'tasks'} onClick={() => requestDrawer(drawerTab === 'tasks' ? { kind: 'close' } : { kind: 'tab', tab: 'tasks' })}>
           {t(locale, 'tasks')} {live}{waiting > 0 ? <span className="dsh-dot-badge">{waiting}</span> : null}
         </Button>
-        <Button variant="ghost" size="sm" className="dsh-dot-gear" aria-label={t(locale, 'settings')} aria-pressed={configOpen} title={t(locale, 'settings')} onClick={() => setDrawerTab(configOpen ? null : 'settings')}>
+        <Button variant="ghost" size="sm" className="dsh-dot-gear" aria-label={t(locale, 'settings')} aria-pressed={configOpen} title={t(locale, 'settings')} onClick={() => requestDrawer(configOpen ? { kind: 'close' } : { kind: 'tab', tab: 'settings' })}>
           <GearGlyph />
           {proposalCount > 0 ? <span className="dsh-dot-gear-dot" aria-hidden="true" /> : null}
         </Button>
       </header>
       <div className="dsh-dot-stage">
       <section className="dsh-dot-chatcol">
+      <div className="dsh-dot-scroll-wrap">
       <div className="dsh-dot-scroll" ref={scroller} onScroll={onScroll}>
         <div className="dsh-dot-log">
           {snapshot === undefined && error === undefined ? <div className="dsh-dot-center"><DotAvatar size={56} /><span className="dsh-dot-muted">{t(locale, 'loading')}</span></div> : null}
-          {snapshot !== undefined && rows.length === 0 && pendingEchoes.length === 0 && (!running || filtered.silentTail) ? (
+          {snapshot !== undefined && rows.length === 0 && pendingEchoes.length === 0 && !showStreaming && (!running || filtered.silentTail) ? (
             <div className="dsh-dot-center">
               <DotAvatar size={72} />
               <span className="dsh-dot-greeting">{t(locale, 'greeting')}</span>
@@ -453,10 +593,18 @@ export function ChatPanel({ locale, api, Card, onOpenSession, renderFactorySlot 
             </div>
           ) : null}
           {logRows}
-          {pendingEchoes.map(echo => <div key={'echo:' + echo.at} className="dsh-dot-user dsh-dot-echo"><UserMessageBubble>{echo.text}</UserMessageBubble>{echo.images.length > 0 ? <ImageNotes locale={locale} images={echo.images.map(image => ({ mediaType: image.mediaType, ...(image.name ? { name: image.name } : {}) }))} /> : null}</div>)}
-          {preparingCard ? <BotLine lead={!lastTool}><span role="status"><TextShimmer active>{t(locale, 'cardPreparing')}</TextShimmer></span></BotLine> : null}
-          {showThinking ? <BotLine lead={!lastTool}><TextShimmer active>{t(locale, 'thinking')}</TextShimmer></BotLine> : null}
+          {pendingEchoes.map(echo => <div key={'echo:' + echo.at} className="dsh-dot-user dsh-dot-echo">{echo.text ? <UserMessageBubble>{echo.text}</UserMessageBubble> : null}{echo.images.length > 0 ? <ImageNotes locale={locale} images={echo.images.map(image => ({ mediaType: image.mediaType, previewUrl: `data:${image.mediaType};base64,${image.data}`, ...(image.name ? { name: image.name } : {}) }))} onPreview={openPreview} /> : null}</div>)}
+          {showStreaming ? <BotLine lead={!lastInReply}><MarkdownText text={streaming} labels={labels} variant="body" streaming /></BotLine> : null}
+          {preparingCard ? <BotLine lead={!lastInReply}><span role="status"><TextShimmer active>{t(locale, 'cardPreparing')}</TextShimmer></span></BotLine> : null}
+          {showThinking ? <BotLine lead={!lastInReply}><TextShimmer active>{t(locale, 'thinking')}</TextShimmer></BotLine> : null}
         </div>
+      </div>
+      {!pinned ? (
+        <button type="button" className="dsh-dot-scroll-fab" data-unread={unreadBelow ? '' : undefined} onClick={scrollToBottom}>
+          <IconChevronDownOutlineRegular size={13} />
+          <span>{t(locale, unreadBelow ? 'scrollNew' : 'scrollBottom')}</span>
+        </button>
+      ) : null}
       </div>
       {error !== undefined ? (
         <div className="dsh-dot-banner-wrap">
@@ -474,8 +622,8 @@ export function ChatPanel({ locale, api, Card, onOpenSession, renderFactorySlot 
         disabled={snapshot === undefined}
         items={state.items}
         onNewSegment={() => api.newSegment()}
-        onOpenTasks={() => setDrawerTab('tasks')}
-        onOpenSettings={() => setDrawerTab('settings')}
+        onOpenTasks={() => requestDrawer({ kind: 'tab', tab: 'tasks' })}
+        onOpenSettings={() => requestDrawer({ kind: 'tab', tab: 'settings' })}
         onSend={send}
         onStop={() => { void api.stop() }}
         onDismissError={() => setSendError(undefined)}
@@ -493,16 +641,33 @@ export function ChatPanel({ locale, api, Card, onOpenSession, renderFactorySlot 
           running={running}
           waiting={waiting}
           proposalCount={proposalCount}
-          tasks={<TasksTab locale={locale} {...board ? { view: board } : {}} {...workApi ? { workApi } : {}} {...boardError === undefined ? {} : { boardError }} onOpen={onOpenSession} onRetry={refreshBoard} onRemoveSchedule={removeSchedule} />}
+          tasks={<TasksTab locale={locale} {...board ? { view: board } : {}} {...workApi ? { workApi } : {}} {...boardError === undefined ? {} : { boardError }} {...pendingRemoval ? { pendingRemoveTitle: pendingRemoval.title, onUndoRemove: undoRemoveSchedule } : {}} onOpen={onOpenSession} onRetry={refreshBoard} onRemoveSchedule={removeSchedule} />}
           {...renderFactorySlot ? { renderFactorySlot } : {}}
-          onTab={setDrawerTab}
+          personaDirty={personaDirty}
+          {...pendingDrawerAction ? { pendingAction: pendingDrawerAction } : {}}
+          discardSignal={discardSignal}
+          onRequest={requestDrawer}
+          onCancelPending={cancelDrawerAction}
+          onDiscardPending={discardDrawerAction}
+          onDirtyChange={setPersonaDirty}
           onWide={() => setDrawerWide(value => !value)}
           onSaved={setSettings}
           onProposalCount={setProposalCount}
-          onClose={closeDrawer}
         />
       ) : null}
       </div>
+      <Modal
+        open={previewImage !== undefined}
+        onClose={() => setPreviewImage(undefined)}
+        title={previewImage?.name ?? t(locale, 'imagePreview')}
+        closeLabel={t(locale, 'closeDrawer')}
+      >
+        {previewImage ? (
+          <div className="dsh-dot-lightbox">
+            <img src={previewImage.src} alt={previewImage.name} className="dsh-dot-lightbox-img" />
+          </div>
+        ) : null}
+      </Modal>
     </div>
   )
 }
@@ -551,6 +716,8 @@ interface RenderContext {
   readonly answers: NonNullable<ChatSnapshot['answers']>
   readonly hiddenRequestIds: ReadonlySet<string>
   readonly tasks: TaskLookup
+  readonly sentPreviews: Readonly<Record<string, readonly string[]>>
+  readonly onPreviewImage: (src: string, name: string) => void
   readonly onOpenSession: (sessionId: string) => void
 }
 
@@ -558,13 +725,21 @@ function renderRow(row: Row, context: RenderContext): ReactNode {
   if (row.kind === 'tools') return <BotLine lead={row.lead}><ToolActivity locale={context.locale} items={row.items} tasks={context.tasks} onOpenSession={context.onOpenSession} /></BotLine>
   const item = row.item
   switch (item.kind) {
-    case 'user':
+    case 'user': {
+      const previews = item.images && item.images.length > 0 ? context.sentPreviews[imageCacheKey(item.text, item.images)] : undefined
       return (
         <div className="dsh-dot-user">
           {item.text ? <UserMessageBubble>{item.text}</UserMessageBubble> : null}
-          {item.images && item.images.length > 0 ? <ImageNotes locale={context.locale} images={item.images} /> : null}
+          {item.images && item.images.length > 0 ? (
+            <ImageNotes
+              locale={context.locale}
+              images={item.images.map((img, idx) => ({ ...img, ...(previews?.[idx] ? { previewUrl: previews[idx] } : {}) }))}
+              onPreview={context.onPreviewImage}
+            />
+          ) : null}
         </div>
       )
+    }
     case 'answer':
       return <div className="dsh-dot-user dsh-dot-answer"><UserMessageBubble>{item.text}</UserMessageBubble></div>
     case 'notice':
@@ -885,10 +1060,31 @@ async function readImageFile(file: File): Promise<ChatImage> {
   return { mediaType: inspected.mediaType, data: bytesToBase64(bytes), ...(name ? { name } : {}) }
 }
 
-function ImageNotes({ locale, images }: { locale: CopyLocale; images: readonly { readonly mediaType: string; readonly name?: string }[] }) {
+function ImageNotes({ locale, images, onPreview }: {
+  locale: CopyLocale
+  images: readonly { readonly mediaType: string; readonly name?: string; readonly previewUrl?: string }[]
+  onPreview?: (src: string, name: string) => void
+}) {
   return (
     <div className="dsh-dot-images">
-      {images.map((image, index) => <span key={`${image.name ?? image.mediaType}:${index}`} className="dsh-dot-image-chip">{t(locale, 'imageAttached')}{image.name ? ` · ${image.name}` : ''}</span>)}
+      {images.map((image, index) => {
+        const label = image.name ? `${t(locale, 'imageAttached')} · ${image.name}` : t(locale, 'imageAttached')
+        if (image.previewUrl && onPreview) {
+          return (
+            <button
+              key={`${image.name ?? image.mediaType}:${index}`}
+              type="button"
+              className="dsh-dot-image-thumb"
+              title={t(locale, 'imagePreview')}
+              onClick={() => onPreview(image.previewUrl!, image.name ?? t(locale, 'imageAttached'))}
+            >
+              <img src={image.previewUrl} alt={label} className="dsh-dot-image-thumb-img" />
+              <span className="dsh-dot-image-thumb-name">{label}</span>
+            </button>
+          )
+        }
+        return <span key={`${image.name ?? image.mediaType}:${index}`} className="dsh-dot-image-chip">{label}</span>
+      })}
     </div>
   )
 }
@@ -1734,7 +1930,17 @@ export const chatCss = settingsCss + `
 .dsh-dot-chat .dsh-dot-ctx-num { font: 12px/16px var(--ds-font-family-code); color: var(--dsw-alias-label-secondary); }
 .dsh-dot-chat .dsh-dot-stage { position: relative; flex: 1; min-height: 0; display: flex; flex-direction: row; container-type: inline-size; }
 .dsh-dot-chat .dsh-dot-chatcol { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; }
+.dsh-dot-chat .dsh-dot-scroll-wrap { position: relative; flex: 1; min-height: 0; display: flex; flex-direction: column; }
 .dsh-dot-chat .dsh-dot-scroll { flex: 1; min-height: 0; overflow-y: auto; }
+.dsh-dot-chat .dsh-dot-scroll-fab {
+  position: absolute; right: 20px; bottom: 12px; z-index: 4;
+  display: inline-flex; align-items: center; gap: 5px; padding: 5px 12px;
+  border: 0; border-radius: 999px; background: var(--dsw-alias-bg-layer-2);
+  box-shadow: var(--dsw-elevation-prominent); color: var(--dsw-alias-label-primary);
+  font: inherit; font-size: 12px; line-height: 18px; cursor: pointer;
+}
+.dsh-dot-chat .dsh-dot-scroll-fab:hover { background: var(--dsw-alias-interactive-bg-hover); }
+.dsh-dot-chat .dsh-dot-scroll-fab[data-unread] { color: var(--dsw-alias-state-business-primary); font-weight: 500; }
 .dsh-dot-chat .dsh-dot-drawer-layer { position: absolute; inset: 0; z-index: 10; display: flex; justify-content: flex-end; overflow: hidden; }
 .dsh-dot-chat .dsh-dot-drawer-backdrop {
   position: absolute; inset: 0; padding: 0; border: 0; border-radius: 0; cursor: default;
@@ -1748,6 +1954,12 @@ export const chatCss = settingsCss + `
   animation: dsh-dot-drawer-in var(--ds-transition-duration, 0.2s) var(--ds-ease-in-out, ease-out);
 }
 .dsh-dot-chat .dsh-dot-drawer[data-wide] { width: min(640px, 100%); }
+@container (min-width: 860px) {
+  .dsh-dot-chat .dsh-dot-drawer-layer { position: relative; inset: auto; z-index: 1; flex: 0 0 auto; height: 100%; overflow: visible; }
+  .dsh-dot-chat .dsh-dot-drawer-backdrop { display: none; }
+  .dsh-dot-chat .dsh-dot-drawer { width: 400px; max-width: 48cqw; box-shadow: none; }
+  .dsh-dot-chat .dsh-dot-drawer[data-wide] { width: 540px; max-width: 56cqw; }
+}
 .dsh-dot-chat .dsh-dot-drawer-title {
   display: inline-flex; align-items: center; gap: 8px; margin: 0; padding: 0 6px;
   font-size: 14px; line-height: 20px; font-weight: 600; color: var(--dsw-alias-label-primary);
@@ -1819,7 +2031,7 @@ export const chatCss = settingsCss + `
 }
 .dsh-dot-chat .dsh-dot-greeting { font-size: 16px; line-height: 24px; font-weight: 600; }
 .dsh-dot-chat .dsh-dot-muted { font-size: 13px; line-height: 20px; color: var(--dsw-alias-label-secondary); max-width: 420px; }
-.dsh-dot-chat .dsh-dot-user { display: flex; justify-content: flex-end; padding-left: 48px; }
+.dsh-dot-chat .dsh-dot-user { display: flex; flex-direction: column; align-items: flex-end; gap: 6px; padding-left: 48px; }
 .dsh-dot-chat .dsh-dot-user > * { max-width: 100%; white-space: pre-wrap; overflow-wrap: anywhere; }
 .dsh-dot-chat .dsh-dot-echo { opacity: 0.55; }
 .dsh-dot-chat .dsh-dot-bot { display: flex; gap: 10px; align-items: flex-start; }
@@ -2149,4 +2361,74 @@ export const chatCss = settingsCss + `
 .dsh-dot-chat .dsh-dot-image-chip button {
   border: 0; background: transparent; color: inherit; cursor: pointer; padding: 0; font: inherit;
 }
+.dsh-dot-chat .dsh-dot-dirty-dot {
+  width: 6px; height: 6px; border-radius: 3px; flex-shrink: 0;
+  background: var(--dsw-alias-state-warn-primary);
+}
+.dsh-dot-chat .dsh-dot-unsaved-bar,
+.dsh-dot-chat .dsh-dot-undo-bar {
+  display: flex; align-items: center; gap: 8px; padding: 6px 12px;
+  border-radius: var(--dsw-radius-sm); background: var(--dsw-alias-bg-layer-2);
+  box-shadow: var(--dsw-elevation-stroke); font-size: 12px; line-height: 18px;
+  color: var(--dsw-alias-label-primary);
+}
+.dsh-dot-chat .dsh-dot-unsaved-bar {
+  margin: 8px 12px 0; flex-wrap: wrap;
+}
+.dsh-dot-chat .dsh-dot-undo-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dsh-dot-chat .dsh-dot-image-thumb {
+  display: inline-flex; align-items: center; gap: 6px; max-width: 240px; padding: 3px 8px 3px 3px;
+  border: 0; border-radius: var(--dsw-radius-sm); background: var(--dsw-alias-bg-layer-2);
+  box-shadow: var(--dsw-elevation-stroke); color: var(--dsw-alias-label-secondary);
+  font: inherit; font-size: 12px; line-height: 18px; cursor: pointer;
+}
+.dsh-dot-chat .dsh-dot-image-thumb:hover { background: var(--dsw-alias-interactive-bg-hover); color: var(--dsw-alias-label-primary); }
+.dsh-dot-chat .dsh-dot-image-thumb-img { width: 28px; height: 28px; object-fit: cover; border-radius: 4px; flex-shrink: 0; }
+.dsh-dot-chat .dsh-dot-image-thumb-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dsh-dot-chat .dsh-dot-lightbox { display: flex; justify-content: center; align-items: center; padding: 8px 0; }
+.dsh-dot-chat .dsh-dot-lightbox-img { max-width: 100%; max-height: 72vh; object-fit: contain; border-radius: var(--dsw-radius-sm); }
+.dsh-dot-chat .dsh-dot-approval-detail {
+  margin-top: 8px; border-radius: var(--dsw-radius-sm);
+  background: var(--dsw-alias-bg-layer-1); box-shadow: var(--dsw-elevation-stroke); overflow: hidden;
+}
+.dsh-dot-chat .dsh-dot-approval-toggle {
+  display: flex; align-items: center; gap: 6px; width: 100%; padding: 6px 10px;
+  border: 0; background: transparent; color: var(--dsw-alias-label-secondary);
+  font: inherit; font-size: 12px; line-height: 18px; text-align: left; cursor: pointer;
+}
+.dsh-dot-chat .dsh-dot-approval-toggle:hover { background: var(--dsw-alias-interactive-bg-hover); color: var(--dsw-alias-label-primary); }
+.dsh-dot-chat .dsh-dot-approval-toggle:focus-visible { outline: 2px solid var(--dsw-alias-brand-primary); outline-offset: -2px; }
+.dsh-dot-chat .dsh-dot-approval-body {
+  display: flex; flex-direction: column; gap: 6px; padding: 8px 10px 10px;
+  border-top: 0.5px solid var(--dsw-alias-border-l2); font-size: 12px; line-height: 18px;
+}
+.dsh-dot-chat .dsh-dot-detail-row { display: flex; align-items: baseline; flex-wrap: wrap; gap: 6px 10px; min-width: 0; }
+.dsh-dot-chat .dsh-dot-detail-label { flex: 0 0 auto; min-width: 84px; color: var(--dsw-alias-label-tertiary); font-size: 11px; line-height: 17px; }
+.dsh-dot-chat .dsh-dot-detail-value {
+  flex: 1 1 180px; min-width: 0; color: var(--dsw-alias-label-primary);
+  font-family: var(--ds-font-family-code); font-size: 12px; line-height: 18px; overflow-wrap: anywhere;
+}
+.dsh-dot-chat .dsh-dot-detail-args {
+  flex: 1 1 100%; margin: 2px 0 0; padding: 7px 10px; max-height: 220px; overflow: auto;
+  border-radius: var(--dsw-radius-sm); background: var(--dsw-alias-bg-base); box-shadow: var(--dsw-elevation-stroke);
+  color: var(--dsw-alias-label-secondary); font: 11px/17px var(--ds-font-family-code);
+  white-space: pre-wrap; overflow-wrap: anywhere;
+}
+.dsh-dot-chat .dsh-dot-approval-missing {
+  margin: 6px 0 0; padding: 6px 10px; border-radius: var(--dsw-radius-sm);
+  background: var(--dsw-alias-bg-layer-1); color: var(--dsw-alias-label-tertiary); font-size: 12px; line-height: 18px;
+}
+.dsh-dot-chat .dsh-dot-notify-retry {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: 8px; padding: 7px 10px;
+  border-radius: var(--dsw-radius-sm); background: var(--dsw-alias-bg-layer-1); box-shadow: var(--dsw-elevation-stroke);
+  font-size: 12px; line-height: 18px; color: var(--dsw-alias-label-secondary);
+}
+.dsh-dot-chat .dsh-dot-notify-retry [role='alert'] { color: var(--dsw-alias-label-error); }
+.dsh-dot-chat .dsh-dot-retry-btn {
+  padding: 2px 10px; border: 0; border-radius: var(--dsw-radius-sm);
+  background: var(--dsw-alias-interactive-bg-hover); box-shadow: var(--dsw-elevation-stroke);
+  color: var(--dsw-alias-label-primary); font: inherit; font-size: 12px; line-height: 18px; cursor: pointer;
+}
+.dsh-dot-chat .dsh-dot-retry-btn:hover:not(:disabled) { background: var(--dsw-alias-interactive-bg-active); }
+.dsh-dot-chat .dsh-dot-retry-btn:disabled { opacity: 0.55; cursor: default; }
 `

@@ -1,4 +1,5 @@
 import { act } from 'react'
+import { Simulate } from 'react-dom/test-utils'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -604,6 +605,101 @@ describe('WorkBoard', () => {
     await act(async () => { const node = document.querySelector<HTMLDetailsElement>('details')!; node.open = false; node.dispatchEvent(new dom.window.Event('toggle')) })
     await openDetails()
     expect(calls).toHaveLength(refs.length)
+    await act(async () => root.unmount())
+  })
+
+  it('collects an optional reject note, jumps to the bound run session, and auto-folds secondary changed files', async () => {
+    const onReject = vi.fn()
+    const onOpenSession = vi.fn()
+    const multi: WorkBoardItem = {
+      ...item,
+      runs: [{ id: 'run-2', kind: 'review', phase: 'settling', cwd: 'H:/repo', sessionId: 'sess-review-2' }],
+      verification: {
+        id: 'v-3', verdict: 'accept', subjectKey: 'subject-key-long', inputRef: 'in-4', inputRevision: 4,
+        changes: [
+          { path: 'src/first.ts', kind: 'modified' },
+          { path: 'src/second.ts', kind: 'added' },
+        ],
+      },
+    }
+    const root = createRoot(document.getElementById('root')!)
+    await act(async () => {
+      root.render(
+        <WorkBoard
+          locale="zh"
+          items={[multi]}
+          pending={[]}
+          onAccept={vi.fn()}
+          onReject={onReject}
+          onAnswer={vi.fn()}
+          onResume={vi.fn()}
+          onOpenSession={onOpenSession}
+          onRead={req => Promise.resolve({ source: req.ref, body: `FILE_${req.ref}` })}
+        />,
+      )
+    })
+
+    await act(async () => { buttonIncluding('打开会话')?.click() })
+    expect(onOpenSession).toHaveBeenCalledWith('sess-review-2')
+
+    await click('退回')
+    const input = document.querySelector<HTMLInputElement>('.dsh-dot-work-reject-input input, input.dsh-dot-work-reject-input')!
+    // react-dom is initialized before this spec stubs the JSDOM globals, so its
+    // input/change listener support is off; drive the controlled field through
+    // React's own event path instead of a raw DOM event.
+    await act(async () => {
+      Simulate.change(input, { target: { value: '请补充边界单测' } } as never)
+    })
+    await click('确认退回')
+    expect(onReject).toHaveBeenCalledWith({
+      id: 'c-1', reviewRunId: 'run-2', expectedInputRevision: 4, note: '请补充边界单测',
+    })
+
+    await openDetails()
+    const bodies = [...document.querySelectorAll<HTMLElement>('.dsh-dot-work-source-body')]
+    expect(bodies).toHaveLength(2)
+    expect(bodies[0]!.hasAttribute('data-collapsed')).toBe(false)
+    expect(bodies[1]!.hasAttribute('data-collapsed')).toBe(true)
+    await click('全部展开')
+    expect(bodies[1]!.hasAttribute('data-collapsed')).toBe(false)
+
+    await act(async () => root.unmount())
+  })
+
+  it('opens a folded changed file on the first click while its preview is still pending', async () => {
+    const pending: Array<(error: Error) => void> = []
+    const onRead = (request: WorkReadRequest) => {
+      if (request.ref !== 'src/second.ts') return Promise.resolve({ source: request.ref, body: `FILE_${request.ref}` })
+      return new Promise<never>((_resolve, reject) => { pending.push(reject) })
+    }
+    const multi: WorkBoardItem = {
+      ...item,
+      verification: {
+        id: 'v-3', verdict: 'accept', subjectKey: 'subject-key-long', inputRef: 'in-4', inputRevision: 4,
+        changes: [
+          { path: 'src/first.ts', kind: 'modified' },
+          { path: 'src/second.ts', kind: 'added' },
+        ],
+      },
+    }
+    const root = createRoot(document.getElementById('root')!)
+    await act(async () => {
+      root.render(<WorkBoard locale="zh" items={[multi]} pending={[]} onAccept={vi.fn()} onReject={vi.fn()} onAnswer={vi.fn()} onResume={vi.fn()} onRead={onRead} />)
+    })
+    await openDetails()
+    const head = document.querySelector<HTMLAnchorElement>('a[data-change-path="src/second.ts"]')!
+    const body = head.parentElement!.querySelector<HTMLElement>('.dsh-dot-work-source-body')!
+    expect(body.hasAttribute('data-collapsed')).toBe(true)
+    expect(pending.length).toBeGreaterThan(0)
+    await act(async () => { head.click() })
+    expect(body.hasAttribute('data-collapsed')).toBe(false)
+    await act(async () => {
+      for (const reject of [...pending]) reject(new Error('preview unavailable'))
+      await Promise.resolve()
+    })
+    expect(body.hasAttribute('data-collapsed')).toBe(false)
+    expect(body.textContent).toContain('读取失败')
+    expect(body.textContent).toContain('preview unavailable')
     await act(async () => root.unmount())
   })
 })

@@ -287,6 +287,9 @@ describe('Dorothy self-management controls', () => {
 
     expect(document.body.textContent).toContain('查看全局 · dot_overview')
     expect(document.body.textContent).toContain('结束：已停止')
+    const recHead = document.querySelector<HTMLButtonElement>('.dsh-dot-tr-recordhead')!
+    await act(async () => recHead.click())
+    expect(document.querySelectorAll('.dsh-dot-tr-copy').length).toBeGreaterThanOrEqual(2)
     await act(async () => root.unmount())
   })
 

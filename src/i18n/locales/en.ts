@@ -505,6 +505,21 @@ const enUi: UiText = {
   workExcludeDir: 'Ignored directory',
   workExcludeFile: 'Ignored file',
   workExcludeLink: 'Symlink',
+  scrollBottom: 'Jump to latest',
+  scrollNew: 'New updates · Jump to latest',
+  unsavedChanges: 'You have unsaved changes on this page',
+  unsavedKeepEditing: 'Keep editing',
+  unsavedDiscard: 'Discard changes',
+  reminderRemoved: 'Removed reminder "{title}"',
+  undoAction: 'Undo',
+  imagePreview: 'Preview image',
+  workRejectPlaceholder: 'Optional note for Dorothy (Enter to submit)…',
+  workRejectConfirm: 'Confirm reject',
+  workRejectCancel: 'Cancel',
+  workRejectPrefix: 'Rejected "{title}": {note}',
+  workOpenSession: 'Open session',
+  workSourceExpandAll: 'Expand all',
+  workSourceCollapseAll: 'Collapse all',
 }
 
 export const en: LocalePack = {

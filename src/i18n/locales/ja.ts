@@ -504,6 +504,21 @@ const jaUi: UiText = {
   workExcludeDir: '除外ディレクトリ',
   workExcludeFile: '除外ファイル',
   workExcludeLink: 'シンボリックリンク',
+  scrollBottom: '最新へ移動',
+  scrollNew: '新着あり · 最新へ',
+  unsavedChanges: '未保存の変更があります',
+  unsavedKeepEditing: '編集を続ける',
+  unsavedDiscard: '変更を破棄',
+  reminderRemoved: 'リマインダー「{title}」を削除しました',
+  undoAction: '元に戻す',
+  imagePreview: '画像をプレビュー',
+  workRejectPlaceholder: '差し戻し理由（任意・Enterで送信）…',
+  workRejectConfirm: '差し戻す',
+  workRejectCancel: 'キャンセル',
+  workRejectPrefix: '「{title}」を差し戻しました：{note}',
+  workOpenSession: 'セッションを開く',
+  workSourceExpandAll: 'すべて展開',
+  workSourceCollapseAll: 'すべて折りたたむ',
 }
 
 const jaCard: CardCopy = {

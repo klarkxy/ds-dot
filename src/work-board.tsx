@@ -1,5 +1,5 @@
-import { Button, SegmentedTabs, StateDot, Tag, type SegmentedTab, type StateDotState, type TagTone } from '@deepseek-ai/dsh-client-ui-primitives'
-import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
+import { Button, Input, SegmentedTabs, StateDot, Tag, type SegmentedTab, type StateDotState, type TagTone } from '@deepseek-ai/dsh-client-ui-primitives'
+import { useCallback, useEffect, useId, useMemo, useRef, useState, type MouseEvent } from 'react'
 import { BOARD_ROOT } from './board.tsx'
 import { FINISHED_SHOWN } from './board-groups.ts'
 import { t, type CopyLocale, type TextKey } from './ui-copy.ts'
@@ -23,7 +23,7 @@ const FAILURE_KEY: Record<ReturnType<typeof workFailure>, TextKey> = {
 export interface WorkApi {
   workAccept(payload: WorkAcceptPayload): Promise<void>
   workReject(payload: WorkRejectPayload): Promise<void>
-  workAnswer(payload: { readonly id: string; readonly allow: boolean }): Promise<void>
+  workAnswer(payload: { readonly id: string; readonly allow: boolean; readonly note?: string }): Promise<void>
   workResume(payload: { readonly id: string }): Promise<void>
   workForceRelease?(payload: { readonly id: string }): Promise<void>
   workRead?(request: WorkReadRequest): Promise<{ readonly source: string; readonly body: string; readonly truncated?: boolean; readonly totalBytes?: number }>
@@ -34,7 +34,7 @@ type WorkRead = NonNullable<WorkApi['workRead']>
 /** Which groups the drawer filter keeps: everything, only what needs the human, or only work in progress. */
 export type WorkFilter = 'all' | 'waiting' | 'active'
 
-export function WorkBoard({ locale, items, pending, notice, filter = 'all', onAccept, onReject, onAnswer, onResume, onForceRelease, onRead }: {
+export function WorkBoard({ locale, items, pending, notice, filter = 'all', onAccept, onReject, onAnswer, onResume, onForceRelease, onRead, onOpenSession }: {
   readonly locale: CopyLocale
   readonly filter?: WorkFilter
   readonly items: readonly WorkBoardItem[]
@@ -42,10 +42,11 @@ export function WorkBoard({ locale, items, pending, notice, filter = 'all', onAc
   readonly notice?: string
   readonly onAccept: (payload: WorkAcceptPayload) => void
   readonly onReject: (payload: WorkRejectPayload) => void
-  readonly onAnswer: (payload: { readonly id: string; readonly allow: boolean }) => void
+  readonly onAnswer: (payload: { readonly id: string; readonly allow: boolean; readonly note?: string }) => void
   readonly onResume: (payload: { readonly id: string }) => void
   readonly onForceRelease?: (payload: { readonly id: string }) => void
   readonly onRead?: WorkRead
+  readonly onOpenSession?: (sessionId: string) => void
 }) {
   const groups = useMemo(() => groupWork(items, pending), [items, pending])
   // Finished work folds away like finished tickets; it would otherwise grow without end.
@@ -53,7 +54,7 @@ export function WorkBoard({ locale, items, pending, notice, filter = 'all', onAc
   const section = (title: TextKey, rows: readonly WorkBoardItem[]) => rows.length === 0 ? null : (
     <section className="dsh-ui-stack" aria-label={t(locale, title)}>
       <span className="dsh-ui-meta">{t(locale, title)} · {rows.length}</span>
-      {rows.map(row => <WorkRow key={row.id} locale={locale} item={row} pending={pending} onAccept={onAccept} onReject={onReject} onAnswer={onAnswer} onResume={onResume} {...onForceRelease ? { onForceRelease } : {}} {...onRead ? { onRead } : {}} />)}
+      {rows.map(row => <WorkRow key={row.id} locale={locale} item={row} pending={pending} onAccept={onAccept} onReject={onReject} onAnswer={onAnswer} onResume={onResume} {...onForceRelease ? { onForceRelease } : {}} {...onRead ? { onRead } : {}} {...onOpenSession ? { onOpenSession } : {}} />)}
     </section>
   )
   return (
@@ -68,7 +69,7 @@ export function WorkBoard({ locale, items, pending, notice, filter = 'all', onAc
             <Button variant="ghost" size="sm" className="dsh-dot-fold" aria-expanded={showDone} onClick={() => setShowDone(open => !open)}>
               {t(locale, 'workDone')} · {groups.done.length}
             </Button>
-            {showDone ? groups.done.slice(0, FINISHED_SHOWN).map(row => <WorkRow key={row.id} locale={locale} item={row} pending={pending} onAccept={onAccept} onReject={onReject} onAnswer={onAnswer} onResume={onResume} {...onForceRelease ? { onForceRelease } : {}} {...onRead ? { onRead } : {}} />) : null}
+            {showDone ? groups.done.slice(0, FINISHED_SHOWN).map(row => <WorkRow key={row.id} locale={locale} item={row} pending={pending} onAccept={onAccept} onReject={onReject} onAnswer={onAnswer} onResume={onResume} {...onForceRelease ? { onForceRelease } : {}} {...onRead ? { onRead } : {}} {...onOpenSession ? { onOpenSession } : {}} />) : null}
           </section>
         ) : null}
       </div>
@@ -106,10 +107,11 @@ function exclusionReason(locale: CopyLocale, reason: string): string {
   return reason
 }
 
-function WorkFacts({ locale, item, onRead }: {
+function WorkFacts({ locale, item, onRead, onOpenSession }: {
   readonly locale: CopyLocale
   readonly item: WorkBoardItem
   readonly onRead?: WorkRead
+  readonly onOpenSession?: (sessionId: string) => void
 }) {
   const verification = item.verification
   const checks = verification?.checks ?? []
@@ -129,6 +131,19 @@ function WorkFacts({ locale, item, onRead }: {
   const [pane, setPane] = useState<SourcePane>('evidence')
   // Sources are read only once the human opens this card's details: a closed card costs no request and no preview text.
   const [open, setOpen] = useState(false)
+  const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(() => new Set(
+    changes.length > 1 ? changes.slice(1).filter(c => c.kind !== 'deleted').map(c => `change:${c.path}`) : [],
+  ))
+  useEffect(() => {
+    setCollapsed(new Set(changes.length > 1 ? changes.slice(1).filter(c => c.kind !== 'deleted').map(c => `change:${c.path}`) : []))
+  }, [identity, changeKey, changes.length])
+  const toggleSource = useCallback((key: string) => {
+    setCollapsed(prev => {
+      const next = new Set(prev)
+      if (next.has(key)) next.delete(key); else next.add(key)
+      return next
+    })
+  }, [])
   const loaded = slot.identity === identity ? slot.loaded : {}
   const fullState = slot.identity === identity ? slot.full : {}
   const fullFlights = useRef(new Set<string>())
@@ -150,6 +165,15 @@ function WorkFacts({ locale, item, onRead }: {
       setSlot(current => current.identity === token ? { ...current, loaded: { ...current.loaded, [key]: { ok: false, message } } } : current)
     })
   }, [onRead, item.id, verificationId, inputRef, inputRevision])
+  // A folded row has to open on the first click. Treating "not loaded yet" as
+  // "only retry the read" leaves a slow or failed preview inside display:none,
+  // so the chevron never expands and the error stays unreachable.
+  const onSourceHeadClick = (event: MouseEvent<HTMLAnchorElement>, kind: 'evidence' | 'change', ref: string, key: string, isCollapsed: boolean) => {
+    event.preventDefault()
+    const needsLoad = Boolean(identity) && loaded[key]?.ok !== true
+    if (needsLoad) loadPreview(kind, ref, identity)
+    if (isCollapsed || !needsLoad) toggleSource(key)
+  }
   const loadFull = useCallback((kind: 'evidence' | 'change', ref: string, token: string) => {
     if (!onRead || !verificationId || !token) return
     const key = `${kind}:${ref}`
@@ -237,30 +261,52 @@ function WorkFacts({ locale, item, onRead }: {
       </>
     )
   }
-  const evidencePane = evidence.length === 0 ? null : evidence.map(ref => (
-    <div key={ref} className="dsh-dot-work-source">
-      <a className="dsh-dot-work-source-head" href={`#evidence-${encodeURIComponent(ref)}`} data-evidence-ref={ref} onClick={event => { event.preventDefault(); if (identity && loaded[`evidence:${ref}`]?.ok !== true) loadPreview('evidence', ref, identity) }}>
-        <FileGlyph />
-        <span>{t(locale, 'workEvidence')} {ref}</span>
-      </a>
-      {outcome('evidence', ref)}
-    </div>
-  ))
-  const filesPane = changes.length === 0 ? null : changes.map(change => (
-    <div key={change.path} className="dsh-dot-work-source">
-      {change.kind === 'deleted'
-        ? <span className="dsh-dot-work-source-head"><FileGlyph /><span>{change.path}</span><Tag tone="danger">{factLabel(locale, 'change', change.kind)}</Tag></span>
-        : (
-          <a className="dsh-dot-work-source-head" href={`#change-${encodeURIComponent(change.path)}`} data-change-path={change.path} onClick={event => { event.preventDefault(); if (identity && loaded[`change:${change.path}`]?.ok !== true) loadPreview('change', change.path, identity) }}>
-            <FileGlyph />
-            <span>{change.path}</span>
-            <Tag tone={change.kind === 'added' ? 'success' : 'info'}>{factLabel(locale, 'change', change.kind)}</Tag>
-          </a>
-        )}
-      {outcome('change', change.path)}
-    </div>
-  ))
+  const evidenceKeys = evidence.map(ref => `evidence:${ref}`)
+  const fileKeys = changes.filter(c => c.kind !== 'deleted').map(c => `change:${c.path}`)
+  const evidencePane = evidence.length === 0 ? null : evidence.map(ref => {
+    const key = `evidence:${ref}`
+    const isCollapsed = collapsed.has(key)
+    return (
+      <div key={ref} className="dsh-dot-work-source">
+        <a className="dsh-dot-work-source-head" href={`#evidence-${encodeURIComponent(ref)}`} data-evidence-ref={ref} aria-expanded={!isCollapsed} onClick={event => onSourceHeadClick(event, 'evidence', ref, key, isCollapsed)}>
+          <span className="dsh-dot-work-chevron" aria-hidden="true">{isCollapsed ? '▸' : '▾'}</span>
+          <FileGlyph />
+          <span>{t(locale, 'workEvidence')} {ref}</span>
+        </a>
+        <div className="dsh-dot-work-source-body" data-collapsed={isCollapsed ? '' : undefined}>{outcome('evidence', ref)}</div>
+      </div>
+    )
+  })
+  const filesPane = changes.length === 0 ? null : changes.map(change => {
+    const key = `change:${change.path}`
+    const isCollapsed = collapsed.has(key)
+    return (
+      <div key={change.path} className="dsh-dot-work-source">
+        {change.kind === 'deleted'
+          ? <span className="dsh-dot-work-source-head"><FileGlyph /><span>{change.path}</span><Tag tone="danger">{factLabel(locale, 'change', change.kind)}</Tag></span>
+          : (
+            <a className="dsh-dot-work-source-head" href={`#change-${encodeURIComponent(change.path)}`} data-change-path={change.path} aria-expanded={!isCollapsed} onClick={event => onSourceHeadClick(event, 'change', change.path, key, isCollapsed)}>
+              <span className="dsh-dot-work-chevron" aria-hidden="true">{isCollapsed ? '▸' : '▾'}</span>
+              <FileGlyph />
+              <span>{change.path}</span>
+              <Tag tone={change.kind === 'added' ? 'success' : 'info'}>{factLabel(locale, 'change', change.kind)}</Tag>
+            </a>
+          )}
+        {change.kind === 'deleted' ? null : <div className="dsh-dot-work-source-body" data-collapsed={isCollapsed ? '' : undefined}>{outcome('change', change.path)}</div>}
+      </div>
+    )
+  })
   const shownPane = evidencePane && filesPane ? pane : evidencePane ? 'evidence' : 'files'
+  const activeKeys = shownPane === 'evidence' ? evidenceKeys : fileKeys
+  const anyCollapsed = activeKeys.some(key => collapsed.has(key))
+  const toggleAllActive = () => {
+    setCollapsed(prev => {
+      const next = new Set(prev)
+      if (anyCollapsed) { for (const key of activeKeys) next.delete(key) }
+      else { for (const key of activeKeys) next.add(key) }
+      return next
+    })
+  }
   const review = item.runs.find(run => run.kind === 'review')
   return (
     <details className="dsh-dot-work-facts" open={open} onToggle={event => setOpen(event.currentTarget.open)}>
@@ -278,9 +324,18 @@ function WorkFacts({ locale, item, onRead }: {
             ))}
           </div>
         ) : null}
-        {evidencePane && filesPane ? <SourceTabs locale={locale} value={pane} evidence={evidence.length} files={changes.length} onChange={setPane} /> : null}
+        {(evidencePane && filesPane) || activeKeys.length > 1 ? (
+          <div className="dsh-dot-work-pane-bar">
+            {evidencePane && filesPane ? <SourceTabs locale={locale} value={pane} evidence={evidence.length} files={changes.length} onChange={setPane} /> : (!evidencePane && filesPane ? <span className="dsh-ui-meta">{t(locale, 'workFiles')}</span> : <span />)}
+            {activeKeys.length > 1 ? (
+              <Button variant="ghost" size="sm" onClick={toggleAllActive}>
+                {t(locale, anyCollapsed ? 'workSourceExpandAll' : 'workSourceCollapseAll')}
+              </Button>
+            ) : null}
+          </div>
+        ) : null}
         {evidencePane ? <div className="dsh-dot-work-pane" hidden={shownPane !== 'evidence'}>{evidencePane}</div> : null}
-        {filesPane ? <div className="dsh-dot-work-pane" hidden={shownPane !== 'files'}>{!evidencePane ? <span className="dsh-ui-meta">{t(locale, 'workFiles')}</span> : null}{filesPane}</div> : null}
+        {filesPane ? <div className="dsh-dot-work-pane" hidden={shownPane !== 'files'}>{!evidencePane && activeKeys.length <= 1 ? <span className="dsh-ui-meta">{t(locale, 'workFiles')}</span> : null}{filesPane}</div> : null}
         <details className="dsh-dot-work-diag">
           <summary>{t(locale, 'workDiagnostics')}</summary>
           <div className="dsh-dot-work-list">
@@ -289,7 +344,7 @@ function WorkFacts({ locale, item, onRead }: {
               {verification ? ` · ${t(locale, 'workVerification')} ${verification.id}` : ''}
               {verification?.subjectKey ? ` · ${t(locale, 'workSubject')} ${shortId(verification.subjectKey)}` : ''}
             </span>
-            {item.runs.map(run => <RunFacts key={run.id} locale={locale} run={run} />)}
+            {item.runs.map(run => <RunFacts key={run.id} locale={locale} run={run} {...onOpenSession ? { onOpenSession } : {}} />)}
             {review ? <span className="dsh-dot-work-facts-line">{t(locale, 'workReview')} {review.id}</span> : null}
             {item.closeout ? <span className="dsh-dot-work-facts-line">{t(locale, 'workCloseout')} {item.closeout.verificationId}</span> : null}
             {item.blockers.length > 0 ? <span className="dsh-dot-work-facts-line">{t(locale, 'workBlockers')} {item.blockers.join(', ')}</span> : null}
@@ -325,7 +380,7 @@ function FileGlyph() {
   )
 }
 
-function RunFacts({ locale, run }: { readonly locale: CopyLocale; readonly run: WorkRunView }) {
+function RunFacts({ locale, run, onOpenSession }: { readonly locale: CopyLocale; readonly run: WorkRunView; readonly onOpenSession?: (sessionId: string) => void }) {
   const paths = scopeText(run.writeScope)
   const exclusive = run.writeScope?.kind === 'workspace-exclusive'
   return (
@@ -333,6 +388,14 @@ function RunFacts({ locale, run }: { readonly locale: CopyLocale; readonly run: 
       <span className="dsh-dot-work-run-line">
         <span className="dsh-dot-work-mono">{run.id}</span> {factLabel(locale, 'kind', run.kind)}/{factLabel(locale, 'phase', run.phase)}
         {run.writeScope ? ` · ${t(locale, 'workScope')} ${exclusive ? t(locale, 'workScopeExclusive') : paths || t(locale, 'workScopeNone')}` : ''}
+        {run.sessionId && onOpenSession ? (
+          <>
+            {' · '}
+            <button type="button" className="dsh-dot-work-session-link" onClick={() => onOpenSession(run.sessionId!)}>
+              {t(locale, 'workOpenSession')} ↗
+            </button>
+          </>
+        ) : null}
       </span>
       {(run.deliveries ?? []).map(delivery => (
         <span key={delivery.id} className="dsh-dot-work-run-line">
@@ -354,25 +417,43 @@ function itemDot(item: WorkBoardItem, needsHuman: boolean): StateDotState {
   return 'ongoing'
 }
 
-function WorkRow({ locale, item, pending, onAccept, onReject, onAnswer, onResume, onForceRelease, onRead }: {
+function WorkRow({ locale, item, pending, onAccept, onReject, onAnswer, onResume, onForceRelease, onRead, onOpenSession }: {
   readonly locale: CopyLocale
   readonly item: WorkBoardItem
   readonly pending: readonly PendingGlance[]
   readonly onAccept: (payload: WorkAcceptPayload) => void
   readonly onReject: (payload: WorkRejectPayload) => void
-  readonly onAnswer: (payload: { readonly id: string; readonly allow: boolean }) => void
+  readonly onAnswer: (payload: { readonly id: string; readonly allow: boolean; readonly note?: string }) => void
   readonly onResume: (payload: { readonly id: string }) => void
   readonly onForceRelease?: (payload: { readonly id: string }) => void
   readonly onRead?: WorkRead
+  readonly onOpenSession?: (sessionId: string) => void
 }) {
+  const [rejectMode, setRejectMode] = useState<'reject' | 'look' | undefined>()
+  const [rejectNote, setRejectNote] = useState('')
   const accept = acceptPayload(item)
   const reject = rejectPayload(item)
   const resume = resumePayload(item)
   const forceRelease = onForceRelease ? forceReleasePayload(item) : undefined
   const look = lookRequest(item, pending)
   const lookOpen = Boolean(look && look !== 'stale' && look !== 'withdrawn')
-  const actions = lookOpen || accept || reject || resume || forceRelease
+  const latestSessionId = useMemo(() => [...item.runs].reverse().find(run => Boolean(run.sessionId))?.sessionId, [item.runs])
+  const actions = lookOpen || accept || reject || resume || forceRelease || Boolean(latestSessionId && onOpenSession)
   const delivery = item.runs.flatMap(run => run.deliveries ?? []).at(-1)
+  useEffect(() => {
+    if (rejectMode === 'reject' && !reject) { setRejectMode(undefined); setRejectNote('') }
+    if (rejectMode === 'look' && !lookOpen) { setRejectMode(undefined); setRejectNote('') }
+  }, [rejectMode, reject, lookOpen])
+  const submitReject = () => {
+    const note = rejectNote.trim()
+    if (rejectMode === 'look' && lookOpen && typeof look === 'object' && look) {
+      onAnswer({ id: look.id, allow: false, ...(note ? { note } : {}) })
+    } else if (rejectMode === 'reject' && reject) {
+      onReject({ ...reject, ...(note ? { note } : {}) })
+    }
+    setRejectMode(undefined)
+    setRejectNote('')
+  }
   return (
     <div className="dsh-dot-work" data-work={item.id} data-status={item.status}>
       <div className="dsh-dot-work-head">
@@ -390,27 +471,50 @@ function WorkRow({ locale, item, pending, onAccept, onReject, onAnswer, onResume
       {actions ? (
         <div className="dsh-dot-work-actions">
           {lookOpen && typeof look === 'object' && look ? <Button variant="primary" size="sm" onClick={() => onAnswer({ id: look.id, allow: true })}>{t(locale, 'workLookAccept')}</Button> : null}
-          {lookOpen && typeof look === 'object' && look ? <Button variant="ghost" size="sm" onClick={() => onAnswer({ id: look.id, allow: false })}>{t(locale, 'workLookReject')}</Button> : null}
+          {lookOpen && typeof look === 'object' && look ? <Button variant="ghost" size="sm" aria-expanded={rejectMode === 'look'} onClick={() => setRejectMode(m => m === 'look' ? undefined : 'look')}>{t(locale, 'workLookReject')}</Button> : null}
           {accept ? <Button variant="primary" size="sm" onClick={() => onAccept(accept)}>{t(locale, 'workAccept')}</Button> : null}
-          {reject ? <Button variant="ghost" size="sm" onClick={() => onReject(reject)}>{t(locale, 'workReject')}</Button> : null}
+          {reject ? <Button variant="ghost" size="sm" aria-expanded={rejectMode === 'reject'} onClick={() => setRejectMode(m => m === 'reject' ? undefined : 'reject')}>{t(locale, 'workReject')}</Button> : null}
           {resume ? <Button variant="ghost" size="sm" onClick={() => onResume(resume)}>{t(locale, 'workResume')}</Button> : null}
           {forceRelease && onForceRelease ? <Button variant="ghost" size="sm" onClick={() => onForceRelease(forceRelease)}>{t(locale, 'workForceRelease')}</Button> : null}
+          {latestSessionId && onOpenSession ? (
+            <Button variant="ghost" size="sm" className="dsh-dot-work-open" onClick={() => onOpenSession(latestSessionId)}>
+              {t(locale, 'workOpenSession')} ↗
+            </Button>
+          ) : null}
+        </div>
+      ) : null}
+      {rejectMode ? (
+        <div className="dsh-dot-work-reject-box">
+          <Input
+            className="dsh-dot-work-reject-input"
+            aria-label={t(locale, 'workRejectPlaceholder')}
+            placeholder={t(locale, 'workRejectPlaceholder')}
+            value={rejectNote}
+            onChange={event => setRejectNote(event.target.value)}
+            onKeyDown={event => {
+              if (event.key === 'Enter' && !event.nativeEvent.isComposing) { event.preventDefault(); submitReject() }
+              if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); setRejectMode(undefined); setRejectNote('') }
+            }}
+          />
+          <Button variant="primary" size="sm" onClick={submitReject}>{t(locale, 'workRejectConfirm')}</Button>
+          <Button variant="ghost" size="sm" onClick={() => { setRejectMode(undefined); setRejectNote('') }}>{t(locale, 'workRejectCancel')}</Button>
         </div>
       ) : null}
       {look === 'stale' ? <p className="dsh-ui-hint">{t(locale, 'workLookStale')}</p> : null}
       {look === 'withdrawn' ? <p className="dsh-ui-hint">{t(locale, 'workLookWithdrawn')}</p> : null}
-      <WorkFacts locale={locale} item={item} {...onRead ? { onRead } : {}} />
+      <WorkFacts locale={locale} item={item} {...onRead ? { onRead } : {}} {...onOpenSession ? { onOpenSession } : {}} />
     </div>
   )
 }
 /** Renders the board's work and sends versioned actions. A refusal stays on screen; the parent re-reads the board after every action. */
-export function WorkBoardPanel({ locale, api, items, pending, filter = 'all', onChanged }: {
+export function WorkBoardPanel({ locale, api, items, pending, filter = 'all', onChanged, onOpenSession }: {
   readonly locale: CopyLocale
   readonly api: WorkApi
   readonly items: readonly WorkBoardItem[]
   readonly pending: readonly PendingGlance[]
   readonly filter?: WorkFilter
   readonly onChanged: () => void
+  readonly onOpenSession?: (sessionId: string) => void
 }) {
   const [notice, setNotice] = useState<string>()
   const run = (work: Promise<unknown>) => {
@@ -435,6 +539,7 @@ export function WorkBoardPanel({ locale, api, items, pending, filter = 'all', on
       onResume={payload => run(api.workResume(payload))}
       {...api.workForceRelease ? { onForceRelease: payload => run(api.workForceRelease!(payload)) } : {}}
       {...api.workRead ? { onRead: api.workRead } : {}}
+      {...onOpenSession ? { onOpenSession } : {}}
     />
   )
 }

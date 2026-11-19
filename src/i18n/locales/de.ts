@@ -504,6 +504,21 @@ const deUi: UiText = {
   workExcludeDir: 'Ignoriertes Verzeichnis',
   workExcludeFile: 'Ignorierte Datei',
   workExcludeLink: 'Symlink',
+  scrollBottom: 'Nach unten',
+  scrollNew: 'Neue Updates · Nach unten',
+  unsavedChanges: 'Ungespeicherte Änderungen auf dieser Seite',
+  unsavedKeepEditing: 'Weiterbearbeiten',
+  unsavedDiscard: 'Verwerfen',
+  reminderRemoved: 'Erinnerung „{title}“ entfernt',
+  undoAction: 'Rückgängig',
+  imagePreview: 'Bildvorschau',
+  workRejectPlaceholder: 'Grund für Ablehnung (optional, Enter zum Senden)…',
+  workRejectConfirm: 'Ablehnen bestätigen',
+  workRejectCancel: 'Abbrechen',
+  workRejectPrefix: '„{title}“ abgelehnt: {note}',
+  workOpenSession: 'Sitzung öffnen',
+  workSourceExpandAll: 'Alle ausklappen',
+  workSourceCollapseAll: 'Alle einklappen',
 }
 
 const deCard: CardCopy = {

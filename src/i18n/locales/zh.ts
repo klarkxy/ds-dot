@@ -505,6 +505,21 @@ export const zhUi = {
   workExcludeDir: '忽略的目录',
   workExcludeFile: '忽略的文件',
   workExcludeLink: '符号链接',
+  scrollBottom: '回到底部',
+  scrollNew: '有新动态 · 回到底部',
+  unsavedChanges: '当前页有未保存的修改',
+  unsavedKeepEditing: '继续编辑',
+  unsavedDiscard: '放弃改动',
+  reminderRemoved: '已移除提醒「{title}」',
+  undoAction: '撤销',
+  imagePreview: '预览图片',
+  workRejectPlaceholder: '补充退回原因（选填，回车提交）…',
+  workRejectConfirm: '确认退回',
+  workRejectCancel: '取消',
+  workRejectPrefix: '已退回「{title}」：{note}',
+  workOpenSession: '打开会话',
+  workSourceExpandAll: '全部展开',
+  workSourceCollapseAll: '全部收起',
 } as const
 
 export const zh: LocalePack = {

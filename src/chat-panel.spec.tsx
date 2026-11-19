@@ -1,4 +1,5 @@
 import { act } from 'react'
+import { Simulate } from 'react-dom/test-utils'
 import { JSDOM } from 'jsdom'
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 import { DEFAULT_SETTINGS, type ChatItem, type ChatSnapshot } from './contracts.ts'
@@ -429,12 +430,140 @@ describe('ChatPanel activity and notice cards', () => {
     await act(async () => { root.unmount() })
   })
 
-  it('shows card preparation instead of streamed ordinary prose', async () => {
+  it('shows card preparation instead of streamed ordinary prose, and renders streamed prose when not preparing a card', async () => {
     const snapshot: ChatSnapshot = { sessionId: 'dot', running: true, streaming: 'hidden streamed prose', preparingCard: true, rev: 1, itemsRev: 1, items: [{ kind: 'user', key: 'u', text: 'hi', at: 1 }] }
     const root = createRoot(document.getElementById('root')!)
     await act(async () => { root.render(<ChatPanel locale="zh" api={makeApi(snapshot)} onOpenSession={() => {}} />) })
     expect(document.body.textContent).toContain('正在生成卡片…')
     expect(document.body.textContent).not.toContain('hidden streamed prose')
+
+    const liveStream: ChatSnapshot = { ...snapshot, preparingCard: false, streaming: '实时流式回复内容' }
+    await act(async () => { root.render(<ChatPanel locale="zh" api={makeApi(liveStream)} onOpenSession={() => {}} />) })
+    expect(document.body.textContent).toContain('实时流式回复内容')
+    expect(document.body.textContent).not.toContain('思考中…')
+    await act(async () => { root.unmount() })
+  })
+
+  it('guards unsaved PersonaPanel edits before switching tabs or closing the drawer, and supports reminder removal undo', async () => {
+    vi.useFakeTimers()
+    try {
+      const snapshot: ChatSnapshot = { sessionId: 'dot-1', running: false, streaming: '', rev: 1, itemsRev: 1, items: [] }
+      const removed: string[] = []
+      const base = makeApi(snapshot)
+      const api: ChatApi = {
+        ...base,
+        board: async () => ({
+          pending: [],
+          tasks: [],
+          tickets: [],
+          schedules: [{ id: 'sch-undo', title: '每日站会', prompt: 'standup', timing: { kind: 'daily', time: '09:30' }, createdAt: 1, nextAt: 5_000_000_000_000 }],
+        }),
+        removeSchedule: async id => { removed.push(id); return true },
+      }
+      const root = createRoot(document.getElementById('root')!)
+      await act(async () => { root.render(<ChatPanel locale="zh" api={api} onOpenSession={() => {}} />) })
+      await act(async () => { await Promise.resolve(); await Promise.resolve() })
+
+      const gear = document.querySelector<HTMLButtonElement>('button[aria-label="设置"]')!
+      await act(async () => { gear.click() })
+      const navButtons = [...document.querySelectorAll<HTMLButtonElement>('.dsh-dot-drawer-tabs button')]
+      await act(async () => { navButtons[1]!.click() })
+      await act(async () => { await Promise.resolve(); await Promise.resolve() })
+
+      const textarea = document.querySelector<HTMLTextAreaElement>('textarea.dsh-dot-persona-text')!
+      // react-dom is initialized before this spec stubs the JSDOM globals, so its
+      // input/change listener support is off; drive the controlled field through
+      // React's own event path instead of a raw DOM event.
+      await act(async () => {
+        Simulate.change(textarea, { target: { value: '未保存的新人设草稿' } } as never)
+      })
+      expect(document.querySelector('.dsh-dot-dirty-dot')).not.toBeNull()
+
+      // The composer /settings shortcut is another drawer entrance: it must pass the
+      // same guard instead of swapping tabs underneath the dirty draft.
+      const quickBtn = document.querySelector<HTMLButtonElement>('button[aria-label="快捷指令"]')!
+      await act(async () => { quickBtn.click() })
+      const settingsOption = [...document.querySelectorAll<HTMLButtonElement>('.dsh-dot-slash-item')].find(b => b.textContent?.includes('/settings'))!
+      await act(async () => { settingsOption.click(); await Promise.resolve() })
+      expect(document.querySelector('.dsh-dot-unsaved-bar')?.textContent).toContain('当前页有未保存的修改')
+      expect(document.querySelector('aside.dsh-dot-drawer [role="region"]')?.getAttribute('aria-label')).toBe('人设与约定')
+
+      await act(async () => { navButtons[2]!.click() })
+      expect(document.querySelector('.dsh-dot-unsaved-bar')?.textContent).toContain('当前页有未保存的修改')
+      expect(document.querySelector('aside.dsh-dot-drawer [role="region"]')?.getAttribute('aria-label')).toBe('人设与约定')
+
+      const discard = [...document.querySelectorAll<HTMLButtonElement>('.dsh-dot-unsaved-bar button')].find(b => b.textContent === '放弃改动')!
+      await act(async () => { discard.click() })
+      expect(document.querySelector('aside.dsh-dot-drawer [role="region"]')?.getAttribute('aria-label')).toBe('上下文用量')
+
+      const tasksBtn = [...document.querySelectorAll<HTMLButtonElement>('.dsh-dot-head button')].find(b => b.textContent?.startsWith('任务'))!
+      await act(async () => { tasksBtn.click() })
+      expect(document.body.textContent).toContain('每日站会')
+      const removeBtn = [...document.querySelectorAll<HTMLButtonElement>('.dsh-dot-reminder button')].find(b => b.textContent === '移除')!
+      await act(async () => { removeBtn.click() })
+      expect(removed).toEqual([])
+      expect(document.querySelector('.dsh-dot-undo-bar')?.textContent).toContain('已移除提醒「每日站会」')
+
+      const undoBtn = [...document.querySelectorAll<HTMLButtonElement>('.dsh-dot-undo-bar button')].find(b => b.textContent === '撤销')!
+      await act(async () => { undoBtn.click() })
+      await act(async () => { vi.advanceTimersByTime(5_000) })
+      expect(removed).toEqual([])
+      expect(document.body.textContent).toContain('每日站会')
+
+      const removeAgain = [...document.querySelectorAll<HTMLButtonElement>('.dsh-dot-reminder button')].find(b => b.textContent === '移除')!
+      await act(async () => { removeAgain.click() })
+      await act(async () => { vi.advanceTimersByTime(5_000); await Promise.resolve() })
+      expect(removed).toEqual(['sch-undo'])
+
+      await act(async () => { root.unmount() })
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('lets a blurred address save leave the persona page, and still guards an address edit that has not blurred', async () => {
+    const snapshot: ChatSnapshot = { sessionId: 'dot-1', running: false, streaming: '', rev: 1, itemsRev: 1, items: [] }
+    const saved: unknown[] = []
+    const api: ChatApi = {
+      ...makeApi(snapshot),
+      setSettings: async patch => { saved.push(patch); return { ...DEFAULT_SETTINGS, ...patch } },
+    }
+    const root = createRoot(document.getElementById('root')!)
+    await act(async () => { root.render(<ChatPanel locale="zh" api={api} onOpenSession={() => {}} />) })
+    await act(async () => { await Promise.resolve(); await Promise.resolve() })
+
+    const gear = document.querySelector<HTMLButtonElement>('button[aria-label="设置"]')!
+    await act(async () => { gear.click() })
+    const personaTab = () => [...document.querySelectorAll<HTMLButtonElement>('.dsh-dot-drawer-tabs button')][1]!
+    await act(async () => { personaTab().click() })
+    await act(async () => { await Promise.resolve(); await Promise.resolve() })
+
+    const address = () => document.querySelector<HTMLInputElement>('input[aria-label="对你的称呼"]')!
+    await act(async () => { Simulate.change(address(), { target: { value: '朋友' } } as never) })
+    expect(document.querySelector('.dsh-dot-dirty-dot')).not.toBeNull()
+    // Blur commits the address before the click that leaves, so the guard must not
+    // raise a bar Discard cannot undo.
+    await act(async () => { Simulate.blur(address()) })
+    const contextTab = [...document.querySelectorAll<HTMLButtonElement>('.dsh-dot-drawer-tabs button')][2]!
+    await act(async () => { contextTab.click() })
+    expect(document.querySelector('.dsh-dot-unsaved-bar')).toBeNull()
+    expect(document.querySelector('aside.dsh-dot-drawer [role="region"]')?.getAttribute('aria-label')).toBe('上下文用量')
+    expect(saved).toEqual([{ address: '朋友' }])
+
+    await act(async () => { personaTab().click() })
+    await act(async () => { Simulate.change(address(), { target: { value: '伙伴' } } as never) })
+    expect(document.querySelector('.dsh-dot-dirty-dot')).not.toBeNull()
+    await act(async () => {
+      document.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+    })
+    expect(document.querySelector('.dsh-dot-unsaved-bar')?.textContent).toContain('当前页有未保存的修改')
+    expect(document.querySelector('aside.dsh-dot-drawer [role="region"]')?.getAttribute('aria-label')).toBe('人设与约定')
+    expect(saved).toEqual([{ address: '朋友' }])
+    const discard = [...document.querySelectorAll<HTMLButtonElement>('.dsh-dot-unsaved-bar button')].find(b => b.textContent === '放弃改动')!
+    await act(async () => { discard.click() })
+    expect(document.querySelector('aside.dsh-dot-drawer')).toBeNull()
+    expect(saved).toEqual([{ address: '朋友' }])
+
     await act(async () => { root.unmount() })
   })
   it('silences background/already-handled requests while showing structured cards for requests needing the human', async () => {
@@ -710,10 +839,16 @@ describe('ChatPanel bottom pin', () => {
     await stream(2)
     expect(top).toBe(1000)
 
-    // Slight upward scroll (30px, inside STICK_PX): the update must not pull it back.
+    // Slight upward scroll (30px, inside STICK_PX): the update must not pull it back, and shows the jump-to-latest pill.
     await scrollTo(570)
     await stream(3)
     expect(top).toBe(570)
+    const fab = document.querySelector<HTMLButtonElement>('.dsh-dot-scroll-fab')
+    expect(fab).not.toBeNull()
+    expect(fab!.hasAttribute('data-unread')).toBe(true)
+    await act(async () => { fab!.click() })
+    expect(top).toBe(1000)
+    expect(document.querySelector('.dsh-dot-scroll-fab')).toBeNull()
 
     // Back at the bottom: following resumes.
     await scrollTo(600)

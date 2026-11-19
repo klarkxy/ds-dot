@@ -52,6 +52,7 @@ const named = (scope: ParentNode, text: string) => buttons(scope).find(button =>
 describe('Board', () => {
   it('counts only requests, work and watched sessions: legacy tickets are history', async () => {
     expect(boardCounts(full)).toEqual({ waiting: 1, active: 0, watch: 2 })
+    expect(boardCounts({ ...full, tasks: [{ ...full.tasks[0]!, status: 'running' }] })).toEqual({ waiting: 1, active: 1, watch: 2 })
     const waiting = await render(full, { filter: 'waiting' })
     expect(labels()).toEqual(['Needs you'])
     await act(async () => waiting.root.unmount())

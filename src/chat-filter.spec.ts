@@ -191,4 +191,14 @@ describe('filterVisibleChat', () => {
       expect(res.silentTail).toBe(true)
     }
   })
+
+  it('keeps committed bot replies visible during multi-step running turns unless preparingCard is active', () => {
+    const stepItems: ChatItem[] = [
+      { kind: 'user', key: 'u1', text: 'check status', at: 1, turn: 1, trigger: 'human' },
+      { kind: 'bot', key: 'b1', text: '我先查一下当前会话状态。', at: 2, turn: 1, trigger: 'human' },
+      { kind: 'tool', key: 't1', name: 'dot_overview', status: 'running', at: 3, turn: 1, trigger: 'human' },
+    ]
+    expect(filterVisibleChat(stepItems, { running: true, preparingCard: false }).items.map(i => i.key)).toEqual(['u1', 'b1', 't1'])
+    expect(filterVisibleChat(stepItems, { running: true, preparingCard: true }).items.map(i => i.key)).toEqual(['u1', 't1'])
+  })
 })

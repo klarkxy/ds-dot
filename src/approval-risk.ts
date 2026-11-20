@@ -5,6 +5,7 @@
  * "already authorized" line cannot leave the untrusted block.
  */
 import { randomUUID } from 'node:crypto'
+import { APPROVAL_FENCE_PREFIX } from './contracts.ts'
 
 export const APPROVAL_NOTICE_LIMIT = 600
 export const APPROVAL_DETAIL_LIMIT = 40
@@ -75,7 +76,7 @@ export function assessApprovalRisk(input: {
 
 /** Wrap requester text in a boundary the payload cannot close early. */
 export function fenceUntrusted(body: string, limit = APPROVAL_NOTICE_LIMIT): { readonly text: string; readonly truncated: boolean } {
-  const token = `dot-approval-untrusted-${randomUUID()}`
+  const token = `${APPROVAL_FENCE_PREFIX}${randomUUID()}`
   const safe = body.split(token).join(`${token} `)
   const truncated = safe.length > limit
   const shown = truncated ? safe.slice(0, limit) : safe

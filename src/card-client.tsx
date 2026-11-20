@@ -1,12 +1,14 @@
 /** dot's own answer channel around Deep View's shared renderer. */
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
-import { MarkdownText, type MarkdownLabels } from '@deepseek-ai/dsh-client-ui-primitives'
-import { WidgetCard, type Answer } from '@klarkxy/dsh-deep-view/widget'
+import { Button, MarkdownText, Tag, type MarkdownLabels } from '@deepseek-ai/dsh-client-ui-primitives'
+import { WidgetCard, type Answer, type ButtonHost } from '@klarkxy/dsh-deep-view/widget'
+import type { ViewNode } from '@klarkxy/dsh-deep-view/contracts'
 import { checkShownView } from '@klarkxy/dsh-deep-view/core'
 import { checkedAnswer } from '@klarkxy/dsh-deep-view/answers'
 import { uiEn } from '@klarkxy/dsh-deep-view/copy'
 import { cardCopy, copyLocale, t as uiT, type CardTextKey, type CopyLocale } from './ui-copy.ts'
-import type { ApprovalDetail } from './contracts.ts'
+import { approvalDisplay, folderName, permissionLabel } from './chat-format.ts'
+import { APPROVAL_FENCE_PREFIX, type ApprovalDetail } from './contracts.ts'
 import type { CardComponent } from './chat-panel.tsx'
 
 interface CardLocale {
@@ -14,6 +16,84 @@ interface CardLocale {
   subscribe(listener: () => void): () => void
 }
 const translationKeys = new Map(Object.entries(uiEn).map(([key, english]) => [english, key as CardTextKey]))
+
+const CardButton: ButtonHost = props => <Button {...props} />
+
+const APPROVAL_FENCE = new RegExp(`</?${APPROVAL_FENCE_PREFIX}[0-9a-f-]+>`, 'gi')
+
+/** The approval card the server sends is a stack of text dumps plus a confirm node named 'approval'. */
+function isApprovalView(node: ViewNode): boolean {
+  if (node.type !== 'stack' || !Array.isArray(node.children)) return false
+  let confirm = false
+  for (const child of node.children) {
+    if (child.type === 'text') continue
+    if (child.type === 'confirm' && child.id === 'approval') confirm = true
+    else return false
+  }
+  return confirm
+}
+
+/** The text node of an approval card is a fenced dump for the model; the panel shows it only as a fallback. */
+function approvalDumpText(view: ViewNode): string {
+  if (!Array.isArray(view.children)) return ''
+  return view.children
+    .filter(child => child.type === 'text')
+    .map(child => typeof child.text === 'string' ? child.text : '')
+    .join('\n')
+    .replace(APPROVAL_FENCE, '')
+    .trim()
+}
+
+/** approvalDisplay only reads string commands; a shell argv array is joined for display. */
+function approvalCommand(args: unknown, fallback: string | undefined): string | undefined {
+  if (fallback || args === null || typeof args !== 'object') return fallback
+  const command = (args as Record<string, unknown>).command
+  if (Array.isArray(command)) return command.map(part => String(part)).join(' ') || undefined
+  return undefined
+}
+
+/** justification wins over the request reason; a bare sandbox-escalation prefix is already covered by the meta line. */
+function approvalReason(detail: ApprovalDetail | null | undefined, justification: string | undefined): string | undefined {
+  const reason = justification ?? detail?.reason?.trim()
+  const match = /^escalate sandbox to [a-z0-9_-]+(?::\s*([\s\S]+))?$/i.exec(reason ?? '')
+  return match ? match[1]?.trim() || undefined : reason
+}
+
+/** Structured summary of a pending approval, parsed from the stored request arguments. */
+function ApprovalSummary({ detail, dump, locale }: { detail: ApprovalDetail | null | undefined; dump: string; locale: CopyLocale }) {
+  const args = useMemo<unknown>(() => {
+    if (detail?.arguments === undefined) return undefined
+    try { return JSON.parse(detail.arguments) } catch { return undefined }
+  }, [detail?.arguments])
+  const display = approvalDisplay(args)
+  const command = approvalCommand(args, display.command)
+  const why = approvalReason(detail, display.reason)
+  const dir = display.cwd
+  const sandbox = permissionLabel(locale, display.permission)
+  const designed = args !== undefined && Boolean(command || display.description || why || dir || sandbox)
+  return (
+    <div className="dsh-dot-approval-summary">
+      <div className="dsh-dot-approval-head">
+        <Tag tone="warning">{uiT(locale, 'approvalNeeded')}</Tag>
+        {detail?.toolName ? <code className="dsh-dot-code-pill">{detail.toolName}</code> : null}
+      </div>
+      {designed ? (
+        <>
+          {display.description ? <p className="dsh-dot-approval-desc">{display.description}</p> : null}
+          {why ? <p className="dsh-dot-approval-why">{why}</p> : null}
+          {command ? <pre className="dsh-dot-cmd">{command}</pre> : null}
+          {dir || sandbox ? (
+            <p className="dsh-dot-approval-meta">
+              {dir ? <span title={dir}>{uiT(locale, 'approvalDir')} {folderName(dir) ?? dir}</span> : null}
+              {dir && sandbox ? ' · ' : null}
+              {sandbox ? <span>{uiT(locale, 'approvalSandbox')} {sandbox}</span> : null}
+            </p>
+          ) : null}
+        </>
+      ) : dump ? <p className="dsh-dot-approval-raw">{dump}</p> : null}
+    </div>
+  )
+}
 
 /** A focused key-value row for the approval detail panel. */
 function DetailRow({ label, value }: { label: string; value: string }) {
@@ -173,15 +253,45 @@ export function createDotCards(call: (endpoint: string, payload: unknown) => Pro
     if (!valid) return <div className="dvui-root" role="alert">{dict.invalid}</div>
     // An expired card is still shown (not settled/hidden) but its submit is disabled.
     const canAnswer = valid.interactive && pending && !expired && answer === null && !notifyPending
+    // The approval layout requires the shape AND card.detail binding the view to an approval;
+    // a model-built lookalike stack keeps the generic layout but still loses fence tags.
+    const approvalShape = isApprovalView(valid.view)
+    const approval = approvalShape && (approvalDetail !== undefined || detailMissing)
+    const dump = approval ? approvalDumpText(valid.view) : ''
+    // checkedAnswer keeps validating against valid.view; only the widget loses the model dump.
+    const shownView = !approvalShape || !Array.isArray(valid.view.children) ? valid.view
+      : approval
+        ? { ...valid.view, children: valid.view.children.filter(child => child.type !== 'text') }
+        : {
+            ...valid.view,
+            children: valid.view.children.map(child => child.type === 'text' && typeof child.text === 'string'
+              ? { ...child, text: child.text.replace(APPROVAL_FENCE, '') }
+              : child),
+          }
+    const localNote = expired && !answer ? uiT(loc, 'cardsHint') : dict.local
+    const detailPanel = (approvalDetail !== undefined || detailMissing) && (
+      <ApprovalDetailPanel detail={approvalDetail} locale={loc} missing={detailMissing} />
+    )
+    const widget = (
+      <WidgetCard title={approval ? '' : valid.title} view={shownView}
+        onSubmit={canAnswer ? submit : undefined} busy={busy} answer={answer}
+        settled={answer !== null || (valid.interactive && !pending && answer === null) || notifyPending}
+        localOnly={valid.interactive && (!pending || expired) && answer === null && !notifyPending}
+        localNote={localNote} t={t} labels={labels} Markdown={MarkdownText} ButtonComponent={CardButton} />
+    )
     return (
       <div className="dvui-root">
-        <WidgetCard title={valid.title} view={valid.view}
-          onSubmit={canAnswer ? submit : undefined} busy={busy} answer={answer}
-          settled={answer !== null || (valid.interactive && !pending && answer === null) || notifyPending}
-          localOnly={valid.interactive && (!pending || expired) && answer === null && !notifyPending}
-          t={t} labels={labels} Markdown={MarkdownText} />
-        {(approvalDetail !== undefined || detailMissing) && (
-          <ApprovalDetailPanel detail={approvalDetail} locale={loc} missing={detailMissing} />
+        {approval ? (
+          <div className="dsh-dot-approval-card" data-expired={expired && !answer ? '' : undefined}>
+            <ApprovalSummary detail={approvalDetail ?? null} dump={dump} locale={loc} />
+            {detailPanel}
+            {widget}
+          </div>
+        ) : (
+          <>
+            {widget}
+            {detailPanel}
+          </>
         )}
         {notifyPending && (
           <div className="dsh-dot-notify-retry" role="status">
@@ -192,10 +302,10 @@ export function createDotCards(call: (endpoint: string, payload: unknown) => Pro
             {retryFailed ? <span role="alert">{uiT(loc, 'notifyRetryFailed')}</span> : null}
           </div>
         )}
-        {detailFailed ? <p role="alert">{uiT(loc, 'cardDetailFailed')}</p> : null}
-        {expired && !answer ? <p role="status">{uiT(loc, 'cardsHint')}</p> : null}
-        {answerStatus ? <p role="status">{uiT(loc, answerStatus === 'answered' ? 'cardAnswered' : 'cardAnswerBusy')}</p> : null}
-        {failed && !notifyPending && !expired && !answerStatus ? <p role="alert">{dict.answerFailed}</p> : null}
+        {detailFailed ? <p className="dsh-dot-card-status" data-tone="error" role="alert">{uiT(loc, 'cardDetailFailed')}</p> : null}
+        {expired && !answer && !valid.interactive ? <p className="dsh-dot-card-status" role="status">{uiT(loc, 'cardsHint')}</p> : null}
+        {answerStatus ? <p className="dsh-dot-card-status" role="status">{uiT(loc, answerStatus === 'answered' ? 'cardAnswered' : 'cardAnswerBusy')}</p> : null}
+        {failed && !notifyPending && !expired && !answerStatus ? <p className="dsh-dot-card-status" data-tone="error" role="alert">{dict.answerFailed}</p> : null}
       </div>
     )
   }

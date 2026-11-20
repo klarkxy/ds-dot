@@ -172,3 +172,60 @@ describe('factory reset', () => {
     await act(async () => root.unmount())
   })
 })
+
+describe('auto update setting', () => {
+  it('saves the toggle, shows the last check result, and checks on demand', async () => {
+    const saved: Array<Partial<DotSettings>> = []
+    let current: DotSettings = { ...DEFAULT_SETTINGS }
+    const checks: string[] = []
+    const api = {
+      models: async () => ({ groups: [] }),
+      settings: async () => current,
+      settingProposals: async () => [],
+      decideSetting: async () => 'ok',
+      setSettings: async (patch: Partial<DotSettings>) => { saved.push(patch); current = { ...current, ...patch } as DotSettings; return current },
+      updateStatus: async () => ({ lastCheckAt: Date.parse('2025-11-20T12:00:00'), lastResult: { kind: 'up-to-date', at: Date.parse('2025-11-20T12:00:00') } }),
+      updateCheck: async () => { checks.push('x'); return { lastCheckAt: Date.parse('2025-11-20T15:00:00'), lastResult: { kind: 'updated', at: Date.parse('2025-11-20T15:00:00'), from: '0.3.0', to: '0.3.1' } } },
+    }
+    function Harness() {
+      const [settings, setSettings] = useState<DotSettings>(current)
+      return <SettingsPanel locale="en" api={api as never} settings={settings} onSaved={setSettings} />
+    }
+    const root = createRoot(document.getElementById('root')!)
+    await act(async () => root.render(<Harness />))
+    await act(async () => { await Promise.resolve() })
+    expect(document.body.textContent).toContain('Last check:')
+    expect(document.body.textContent).toContain('Up to date')
+
+    const tablist = document.querySelector('[role="tablist"][aria-label="Auto update"]')!
+    expect(tablist).not.toBeNull()
+    const off = [...tablist.querySelectorAll<HTMLElement>('[role="tab"]')].find(tab => tab.textContent?.trim() === 'Off')!
+    await act(async () => off.click())
+    expect(saved).toEqual([{ autoUpdate: false }])
+
+    const button = [...document.querySelectorAll<HTMLButtonElement>('button')].find(row => row.textContent === 'Check now')!
+    await act(async () => button.click())
+    await act(async () => { await Promise.resolve() })
+    expect(checks).toHaveLength(1)
+    expect(document.body.textContent).toContain('Updated from 0.3.0 to 0.3.1')
+    await act(async () => root.unmount())
+  })
+
+  it('hides the status line and check button without the update API', async () => {
+    let current: DotSettings = { ...DEFAULT_SETTINGS }
+    const api = {
+      models: async () => ({ groups: [] }),
+      settings: async () => current,
+      settingProposals: async () => [],
+      decideSetting: async () => 'ok',
+      setSettings: async (patch: Partial<DotSettings>) => { current = { ...current, ...patch } as DotSettings; return current },
+    }
+    const root = createRoot(document.getElementById('root')!)
+    await act(async () => root.render(<SettingsPanel locale="en" api={api as never} settings={current} onSaved={() => {}} />))
+    await act(async () => { await Promise.resolve() })
+    expect(document.querySelector('[role="tablist"][aria-label="Auto update"]')).not.toBeNull()
+    expect(document.body.textContent).not.toContain('Last check:')
+    expect([...document.querySelectorAll('button')].some(row => row.textContent === 'Check now')).toBe(false)
+    await act(async () => root.unmount())
+  })
+})

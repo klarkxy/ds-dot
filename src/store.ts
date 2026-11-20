@@ -134,6 +134,11 @@ export class DotStore {
   get lastConversationAt(): number | undefined { return this.state.lastConversationAt }
   get lastFactoryResetAt(): number | undefined { return this.state.lastFactoryResetAt }
 
+  get updateStatus(): import('./auto-update.ts').UpdateStatus | undefined { return this.state.update }
+  setUpdateStatus(next: import('./auto-update.ts').UpdateStatus | undefined): Promise<void> {
+    return this.setDot({ update: next })
+  }
+
   addCard(card: import('./card-state.ts').DotCardRecord): Promise<void> {
     const updated = [...this.cards.map(row => row.answer ? row : { ...row, expired: true }), card]
     if (updated.length <= MAX_STORED_CARDS) {

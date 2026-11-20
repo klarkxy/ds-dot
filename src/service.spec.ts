@@ -158,10 +158,11 @@ function setup(settings?: Partial<DotSettings>, trace?: { info: (event: string, 
   const clock = manualTimer()
   const store = new DotStore(undefined)
   // Reflection is off unless a test asks for it, so the reminder clock's periodic
-  // check does not start background passes in unrelated tests.
+  // check does not start background passes in unrelated tests; self-update is off
+  // likewise so its clock stays out of timer assertions.
   // Relay tests cover untracked sessions, so they opt into scope=all.
   // A fresh install defaults to tracked; see DEFAULT_SETTINGS.
-  void store.setSettings({ ...DEFAULT_SETTINGS, reflection: false, idleCheckMinutes: 0, scope: 'all', ...settings })
+  void store.setSettings({ ...DEFAULT_SETTINGS, reflection: false, idleCheckMinutes: 0, autoUpdate: false, scope: 'all', ...settings })
   let at = 1000
   const service = new DotService({ host: fake.host, store, homeDir, approvalGraceMs: 0, timer: clock.timer, now: () => at, ...(trace ? { trace } : {}) })
   return { ...fake, ...clock, store, service, advance: (ms: number) => { at += ms } }

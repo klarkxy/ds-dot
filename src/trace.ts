@@ -22,6 +22,9 @@ export const DOT_TRACE = {
   peerUnknown: 'peer.unknown',
   peerRefused: 'peer.refused',
   factoryReset: 'factory.reset',
+  updateChecked: 'update.checked',
+  updateApplied: 'update.applied',
+  updateFailed: 'update.failed',
 } as const
 
 export type DotTraceEventName = (typeof DOT_TRACE)[keyof typeof DOT_TRACE]

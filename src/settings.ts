@@ -23,6 +23,7 @@ const FIELDS = {
   }).strict(),
   taskPermission: z.enum(['workspace-write', 'danger-full-access', 'default']),
   reflection: z.boolean(),
+  autoUpdate: z.boolean(),
   idleCheckMinutes: z.number().int().min(0).max(1440),
   persona: z.string().max(PERSONA_MAX_CHARS),
   address: z.string().trim().min(1).max(ADDRESS_MAX_CHARS),

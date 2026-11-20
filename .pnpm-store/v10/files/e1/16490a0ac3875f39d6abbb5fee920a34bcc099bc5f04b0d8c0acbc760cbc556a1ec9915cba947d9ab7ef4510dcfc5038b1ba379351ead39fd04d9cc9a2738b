@@ -1,0 +1,314 @@
+import { r as asText } from "./core2.js";
+import { isRecord } from "./contracts.js";
+import { c as english } from "./ui.js";
+import { n as formatNumber } from "./chart.js";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { jsx, jsxs } from "react/jsx-runtime";
+import embed from "vega-embed";
+//#region src/explore.tsx
+const PICK_SIGNAL = "pick";
+const BRUSH_SIGNAL = "brush";
+const TABLE_ROWS = 50;
+const isScalar = (value) => typeof value === "string" || typeof value === "number" || typeof value === "boolean";
+const keyOf = (value) => typeof value === "string" && value !== "" ? value : null;
+function exploreMeta(node) {
+	const mode = node.select === "interval" ? "interval" : "point";
+	return {
+		mode,
+		category: keyOf(node.colorKey) ?? keyOf(node.xKey) ?? "",
+		signal: mode === "interval" ? BRUSH_SIGNAL : PICK_SIGNAL
+	};
+}
+function exploreRows(node) {
+	if (!Array.isArray(node.data)) return [];
+	const rows = [];
+	for (const item of node.data) {
+		if (!isRecord(item)) continue;
+		const row = {};
+		for (const [key, value] of Object.entries(item)) if (isScalar(value)) row[key] = value;
+		rows.push(row);
+	}
+	return rows;
+}
+function selectionParam(mode, category, editable) {
+	if (mode === "interval") return editable ? {
+		type: "interval",
+		encodings: ["x", "y"]
+	} : {
+		type: "interval",
+		encodings: ["x", "y"],
+		on: "[pointerdown[false], window:pointerup] > window:pointermove",
+		clear: false,
+		translate: false,
+		zoom: false
+	};
+	return editable ? {
+		type: "point",
+		fields: [category]
+	} : {
+		type: "point",
+		fields: [category],
+		on: "view:click[false]",
+		clear: false,
+		toggle: false
+	};
+}
+/** Vega-Lite `params.value` is compiled into the selection store and, for an
+* interval, the brush's pixel signals. Empty selections omit it: `{}` would
+* seed a null range. */
+function exploreSelectionValue(meta, value, xKey, yKey) {
+	if (meta.mode === "point") {
+		const items = (Array.isArray(value) ? value : []).filter(isScalar);
+		return items.length === 0 ? void 0 : items.map((item) => ({ [meta.category]: item }));
+	}
+	const ranges = intervalSelection(value, xKey, yKey);
+	return Object.keys(ranges).length === 0 ? void 0 : ranges;
+}
+function exploreSpec(node, editable = true, selection) {
+	const xKey = keyOf(node.xKey);
+	const yKey = keyOf(node.yKey);
+	const colorKey = keyOf(node.colorKey);
+	const rows = exploreRows(node);
+	if (xKey === null || yKey === null || rows.length === 0) return null;
+	const meta = exploreMeta(node);
+	const select = selectionParam(meta.mode, meta.category, editable);
+	const initial = exploreSelectionValue(meta, selection, xKey, yKey);
+	return {
+		data: { values: rows },
+		mark: {
+			type: "circle",
+			tooltip: true,
+			size: 64,
+			opacity: .9
+		},
+		width: "container",
+		height: 260,
+		autosize: {
+			type: "fit-x",
+			contains: "padding"
+		},
+		params: [{
+			name: meta.signal,
+			select,
+			...initial !== void 0 ? { value: initial } : {}
+		}],
+		encoding: {
+			x: {
+				field: xKey,
+				type: "quantitative"
+			},
+			y: {
+				field: yKey,
+				type: "quantitative"
+			},
+			color: colorKey === null ? { value: "var(--dsw-alias-state-business-primary)" } : {
+				field: colorKey,
+				type: "nominal",
+				scale: { range: [
+					"var(--dsw-alias-state-business-primary)",
+					"var(--dsw-alias-brand-primary)",
+					"var(--dsw-alias-label-tertiary)"
+				] }
+			},
+			opacity: {
+				condition: {
+					param: meta.signal,
+					value: 1
+				},
+				value: .28
+			}
+		},
+		config: {
+			background: "transparent",
+			view: { stroke: "transparent" },
+			axis: {
+				domain: false,
+				tickSize: 0,
+				gridDash: [3, 3],
+				gridColor: "var(--dsw-alias-border-l2)",
+				labelColor: "var(--dsw-alias-label-tertiary)",
+				titleColor: "var(--dsw-alias-label-secondary)",
+				labelFontSize: 11
+			},
+			legend: {
+				labelColor: "var(--dsw-alias-label-secondary)",
+				titleColor: "var(--dsw-alias-label-secondary)",
+				labelFontSize: 11,
+				titleFontSize: 11
+			}
+		}
+	};
+}
+function pointSelection(value, category) {
+	if (!isRecord(value)) return [];
+	const predicate = isRecord(value.vlPoint) && Array.isArray(value.vlPoint.or) ? value.vlPoint.or : [];
+	const seen = /* @__PURE__ */ new Set();
+	const out = [];
+	for (const tuple of predicate) {
+		const item = isRecord(tuple) ? tuple[category] : void 0;
+		if (isScalar(item) && !seen.has(item)) {
+			seen.add(item);
+			out.push(item);
+		}
+	}
+	return out;
+}
+function intervalSelection(value, xKey, yKey) {
+	const out = {};
+	if (!isRecord(value)) return out;
+	for (const key of [xKey, yKey]) {
+		const range = value[key];
+		if (Array.isArray(range) && range.length === 2 && range.every((item) => typeof item === "number" && Number.isFinite(item))) out[key] = [range[0], range[1]];
+	}
+	return out;
+}
+function selectionText(meta, value, t) {
+	if (value === null) return null;
+	if (meta.mode === "point") {
+		const values = Array.isArray(value) ? value : [];
+		if (values.length === 0) return null;
+		const shown = values.slice(0, 4).map((item) => asText(item)).join(", ");
+		return t("{n} selected: {values}", {
+			n: values.length,
+			values: values.length > 4 ? `${shown}, …` : shown
+		});
+	}
+	const ranges = isRecord(value) ? Object.entries(value) : [];
+	if (ranges.length === 0) return null;
+	return ranges.map(([key, range]) => `${key} ${formatNumber(range[0])} – ${formatNumber(range[1])}`).join(" · ");
+}
+function ExploreView({ node, lookup, setInput, t = english, editable = true }) {
+	const rows = useMemo(() => exploreRows(node), [node]);
+	const meta = useMemo(() => exploreMeta(node), [node]);
+	const xKey = keyOf(node.xKey);
+	const yKey = keyOf(node.yKey);
+	const columns = [
+		xKey,
+		yKey,
+		keyOf(node.colorKey)
+	].filter((key) => key !== null);
+	const host = useRef(null);
+	const [failed, setFailed] = useState(false);
+	const restored = (() => {
+		try {
+			return typeof node.id === "string" ? lookup(node.id) : void 0;
+		} catch {
+			return;
+		}
+	})();
+	const [picked, setPicked] = useState(restored ?? (meta.mode === "point" ? [] : {}));
+	const latest = useRef(restored);
+	const [seeded, setSeeded] = useState(0);
+	const publish = useRef(() => {});
+	publish.current = (value) => {
+		if (!editable) return;
+		latest.current = value;
+		setPicked(value);
+		if (typeof node.id === "string" && node.id !== "") setInput(node.id, value);
+	};
+	useEffect(() => {
+		setPicked(restored ?? (meta.mode === "point" ? [] : {}));
+	}, [restored, meta.mode]);
+	useEffect(() => {
+		const key = JSON.stringify(restored ?? null);
+		if (JSON.stringify(latest.current ?? null) === key) return;
+		latest.current = restored;
+		setSeeded((count) => count + 1);
+	}, [restored, meta.mode]);
+	const spec = useMemo(() => exploreSpec(node, editable, latest.current), [
+		node,
+		editable,
+		seeded
+	]);
+	useEffect(() => {
+		const element = host.current;
+		if (spec === null || element === null) return void 0;
+		setFailed(false);
+		let done = false;
+		let result = null;
+		embed(element, spec, {
+			actions: false,
+			ast: true,
+			renderer: "svg"
+		}).then((embedded) => {
+			if (done) {
+				embedded.finalize();
+				return;
+			}
+			result = embedded;
+			embedded.view.addSignalListener(meta.signal, (_name, value) => {
+				if (done) return;
+				publish.current(meta.mode === "point" ? pointSelection(value, meta.category) : intervalSelection(value, xKey ?? "", yKey ?? ""));
+			});
+		}).catch(() => {
+			if (!done) setFailed(true);
+		});
+		return () => {
+			done = true;
+			result?.finalize();
+		};
+	}, [
+		spec,
+		meta,
+		xKey,
+		yKey
+	]);
+	if (spec === null || rows.length === 0) return /* @__PURE__ */ jsx("div", {
+		className: "dvui-explore",
+		children: /* @__PURE__ */ jsx("span", {
+			className: "dvui-muted",
+			children: t("Nothing to explore")
+		})
+	});
+	const summary = selectionText(meta, picked, t);
+	const hint = meta.mode === "interval" ? t("Drag to select a range; double-click to clear") : t("Click points to select; double-click to clear");
+	const shown = rows.slice(0, TABLE_ROWS);
+	const caption = typeof node.caption === "string" ? node.caption : "";
+	return /* @__PURE__ */ jsxs("figure", {
+		className: "dvui-explore",
+		children: [
+			failed ? /* @__PURE__ */ jsx("div", {
+				className: "dvui-tool-error",
+				role: "alert",
+				children: t("The chart could not be drawn.")
+			}) : /* @__PURE__ */ jsx("div", {
+				ref: host,
+				className: "dvui-explore-host"
+			}),
+			/* @__PURE__ */ jsx("div", {
+				className: "dvui-caption",
+				role: "status",
+				"aria-live": "polite",
+				children: summary ?? hint
+			}),
+			/* @__PURE__ */ jsxs("details", { children: [
+				/* @__PURE__ */ jsx("summary", { children: t("Data: {n} rows", { n: rows.length }) }),
+				/* @__PURE__ */ jsx("div", {
+					className: "dvui-table",
+					children: /* @__PURE__ */ jsxs("table", { children: [/* @__PURE__ */ jsx("thead", { children: /* @__PURE__ */ jsx("tr", { children: columns.map((key) => /* @__PURE__ */ jsx("th", {
+						scope: "col",
+						children: key
+					}, key)) }) }), /* @__PURE__ */ jsx("tbody", { children: shown.map((row, index) => /* @__PURE__ */ jsx("tr", { children: columns.map((key) => /* @__PURE__ */ jsx("td", {
+						className: typeof row[key] === "number" ? "dvui-num" : void 0,
+						children: asText(row[key] ?? "")
+					}, key)) }, index)) })] })
+				}),
+				rows.length > shown.length ? /* @__PURE__ */ jsx("div", {
+					className: "dvui-caption",
+					children: t("Showing {shown} of {n} rows", {
+						shown: shown.length,
+						n: rows.length
+					})
+				}) : null
+			] }),
+			caption !== "" ? /* @__PURE__ */ jsx("figcaption", {
+				className: "dvui-caption",
+				children: caption
+			}) : null
+		]
+	});
+}
+//#endregion
+export { ExploreView };
+
+//# sourceMappingURL=explore.js.map

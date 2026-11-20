@@ -1,0 +1,110 @@
+//#region src/official-ui.d.ts
+/**
+ * Shared contract that keeps every plugin's browser-side UI on the official
+ * DeepSeek Harness Web design language.
+ *
+ * Two rules produce that language, and both are load-bearing here:
+ *
+ * 1. Colour, radius, elevation and focus come from the host theme's real
+ *    `--dsw-*` tokens, written under their own names. Plugins never invent a
+ *    token, never alias the official ones behind a private palette (a private
+ *    alias is just a second, diverging theme), and never carries a literal
+ *    fallback — the host publishes light and dark, and a literal would pin one
+ *    of them. The only non-colour custom properties used are the host's own
+ *    content-font axis and frame clearance.
+ *
+ * 2. Anything the host already ships is used, not reimplemented. Controls come
+ *    from `@deepseek-ai/dsh-client-ui-primitives` (`Button`, `Input`,
+ *    `Checkbox`, `Switch`, `Tag`, `Pill`, `SegmentedControl`, `Menu`, `Modal`,
+ *    `Tooltip`, `Toast`, `DisclosureRow`, `StateDot`, `PathLabel`, the settings
+ *    form suite). This module only styles what primitives do not cover: page
+ *    scaffolding, field layout, banners, empty states and scroll regions.
+ *
+ * The metrics below are transcribed from the primitives' own CSS modules so a
+ * feature panel lines up pixel-for-pixel with a native one: the 14/22 body and
+ * 13/20 compact type tiers, the 0.5px hairline scale, and the elevation family
+ * that draws a surface's edge in its shadow (`border: 0`) instead of a border.
+ */
+/**
+ * Every `--dsw-*` token this repo is allowed to reference, grouped by role.
+ *
+ * Plugins may only colour through this list. It is exported so the guard test
+ * can fail a build when a stylesheet reaches for anything else — the failure
+ * mode this prevents is silent: an unknown token resolves to nothing, so a
+ * border disappears or a label inherits the wrong colour with no error anywhere.
+ */
+declare const OFFICIAL_THEME_TOKENS: {
+  /** Surfaces, from the page up to the topmost nested card. */
+  readonly surface: readonly ["--dsw-alias-bg-base", "--dsw-alias-bg-layer-1", "--dsw-alias-bg-layer-2", "--dsw-alias-bg-layer-3", "--dsw-alias-bg-layer-4", "--dsw-alias-bg-module-platform", "--dsw-alias-bg-overlay"];
+  /** Hairlines. l1 is near-invisible on a menu surface, so menus use l2+. */
+  readonly border: readonly ["--dsw-alias-border-l1", "--dsw-alias-border-l2", "--dsw-alias-border-l3", "--dsw-alias-border-l4"];
+  /** Text. `caption` is menu shortcut text, `dimmed` is placeholder text. */
+  readonly label: readonly ["--dsw-alias-label-primary", "--dsw-alias-label-secondary", "--dsw-alias-label-tertiary", "--dsw-alias-label-caption", "--dsw-alias-label-dimmed", "--dsw-alias-label-error", "--dsw-alias-label-primary-foreground"];
+  /** Interactive fills. The `-danger` hover belongs to destructive rows. */
+  readonly interactive: readonly ["--dsw-alias-interactive-bg-hover", "--dsw-alias-interactive-bg-active", "--dsw-alias-interactive-bg-hover-danger"];
+  /** Accent and status. `business` is the focus ring's default colour. */
+  readonly accent: readonly ["--dsw-alias-brand-primary", "--dsw-alias-button-primary-fill", "--dsw-alias-button-primary-hover", "--dsw-alias-button-tool-bar-fill", "--dsw-alias-button-tool-bar-hover", "--dsw-alias-button-ghost-active-fill", "--dsw-alias-button-ghost-active-border"];
+  readonly state: readonly ["--dsw-alias-state-business-primary", "--dsw-alias-state-success-primary", "--dsw-alias-state-warn-primary", "--dsw-alias-state-error-primary", "--dsw-alias-state-idle-primary"];
+  /** Corner scale: sm 8, md 12, lg the large card, panel the modal. */
+  readonly radius: readonly ["--dsw-radius-sm", "--dsw-radius-md", "--dsw-radius-lg", "--dsw-radius-panel"];
+  /** An elevated surface draws its edge in the shadow, so it keeps border: 0. */
+  readonly elevation: readonly ["--dsw-elevation-soft", "--dsw-elevation-stroke", "--dsw-elevation-stroke-color", "--dsw-elevation-panel", "--dsw-elevation-prominent"];
+  /** Floats, masks and scrollbars. */
+  readonly overlay: readonly ["--dsw-menu-surface-fill", "--dsw-menu-backdrop-filter", "--dsw-mask-blur", "--dsw-alias-bg-mask-1", "--dsw-alias-menu-icon", "--dsw-alias-scrollbar-bg-l2", "--dsw-alias-scrollbar-hover-l2", "--dsw-shadow-lv3"];
+  /** Motion, focus and type axis, published by the host rather than by a component. */
+  readonly system: readonly ["--dsw-focus-ring-width", "--dsw-focus-ring-color", "--dsw-font-markdown-code-font-family", "--ds-transition-duration", "--ds-ease-in-out", "--ds-font-family-code", "--dsh-scrollbar-thumb", "--dsh-scrollbar-thumb-hover", "--dsh-content-font-size-secondary", "--dsh-content-font-delta", "--dsh-frame-top-clearance", "--dsh-composer-model-icon-display", "--dsh-composer-model-text-display"];
+};
+/** Every official token name, flat. Used by the token guard test. */
+declare const OFFICIAL_THEME_TOKEN_NAMES: readonly string[];
+/** The elevation steps a surface can be raised by, softest first. */
+type OfficialElevation = 'soft' | 'stroke' | 'panel' | 'prominent';
+/**
+ * The host's focus ring shorthand, verbatim. Writing this per control is how
+ * rings drift apart; a stylesheet that draws its own focus style should use
+ * {@link officialFocus} instead. The colour fallback is the host's own default.
+ */
+declare const OFFICIAL_FOCUS_RING = "var(--dsw-focus-ring-width) solid var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary))";
+/**
+ * A complete `outline` declaration at the official geometry. `offset` defaults
+ * to the 2px the native controls use; the host's inline field rules sit at 1px
+ * and a segmented tab pulls the ring inside itself at -2px.
+ */
+declare function officialFocus(offset?: string): string;
+/**
+ * An elevated surface. The host draws a raised surface's edge inside its
+ * shadow rather than as a border, so a card sets `border: 0` and takes the edge
+ * from the elevation — which is also why its border stays off the alias-border
+ * set that a flat, non-elevated rule would use.
+ */
+declare function officialElevation(level: OfficialElevation): string;
+/**
+ * An elevated surface whose edge should read as a specific hairline. Rebinding
+ * the stroke colour is how a menu card picks l1 while a panel picks l3, without
+ * the two growing apart by hand.
+ */
+declare function officialStrokedElevation(level: OfficialElevation, color: string): string;
+/**
+ * The shared stylesheet for a plugin UI, scoped under that plugin's root class.
+ *
+ * Scoping is what keeps this safe to always-bundle into every client: the rules
+ * can only match inside the plugin's own subtree, so two plugins can both mount
+ * `dsh-ui-card` without either styling the other's markup.
+ *
+ * Each recipe matches the root element *and* its descendants, because the
+ * commonest arrangement is one element that is both — a surface that carries
+ * the root class and `dsh-ui-card`, or a portaled dialog that is the root and
+ * the `dsh-ui-surface`. A descendant-only scope would silently leave those
+ * unstyled, with no error anywhere.
+ *
+ * A caveat worth knowing: `Modal` and `Menu` portal to `document.body`, so their
+ * content leaves the plugin's subtree entirely. A portaled surface therefore
+ * needs its own root class on an element inside the portal.
+ *
+ * Only patterns that primitives do not provide live here. If a control appears
+ * below that `Button`/`Input`/`Switch`/`Tag`/`Menu` already covers, that is a
+ * bug in this file: use the primitive and delete the recipe.
+ */
+declare function officialUiCss(roots: string | readonly string[]): string;
+//#endregion
+export { OFFICIAL_FOCUS_RING, OFFICIAL_THEME_TOKENS, OFFICIAL_THEME_TOKEN_NAMES, OfficialElevation, officialElevation, officialFocus, officialStrokedElevation, officialUiCss };
+//# sourceMappingURL=official-ui.d.ts.map

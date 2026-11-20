@@ -1,0 +1,43 @@
+import { groupModelMenuChoices, knownModelFromChoices, modelMenuEffortLabel, modelMenuEffortOptions, modelMenuShortName, modelRouteKey as modelMenuChoiceKey, modelRouteOverride as modelMenuOverride, normalizeModelRoute as normalizeModelMenuRoute, parseModelMenuChoices, parseModelMenuChoices as parseModelMenuChoices$1, parseModelRouteKey as parseModelMenuChoiceKey, readModelCatalog } from "@klarkxy/dsh-model-route";
+import { useEffect, useState } from "react";
+//#region src/model-menu.ts
+/**
+* Shared plugin-page model menu.
+*
+* Everything lives in @klarkxy/dsh-model-route: the pure contract (route
+* values, schema marker, catalog parsing, menu grouping) in its core entry,
+* and the ModelMenu popover component in its `./ui` browser entry. This entry
+* re-exports the core so existing plugin-kit consumers keep working, and adds
+* the React catalog hook on top. It must stay free of any ui-primitives
+* import so host-side and node-test consumers never load the component
+* bundle — the popover component and its styles live in
+* `@klarkxy/dsh-model-route/ui`.
+*/
+/** @deprecated Use useModelCatalog and ModelCatalogStatus from model-route/ui for errors and retries. */
+function useModelMenuChoices(client, bound) {
+	const [choices, setChoices] = useState([]);
+	useEffect(() => {
+		if (typeof document === "undefined") return;
+		let live = true;
+		const load = () => {
+			readModelCatalog(client).then((value) => {
+				if (live) setChoices(parseModelMenuChoices$1(value, bound));
+			}).catch(() => {
+				if (live) setChoices([]);
+			});
+		};
+		load();
+		return () => {
+			live = false;
+		};
+	}, [
+		client,
+		bound?.provider,
+		bound?.model
+	]);
+	return choices;
+}
+//#endregion
+export { groupModelMenuChoices, knownModelFromChoices, modelMenuChoiceKey, modelMenuEffortLabel, modelMenuEffortOptions, modelMenuOverride, modelMenuShortName, normalizeModelMenuRoute, parseModelMenuChoiceKey, parseModelMenuChoices, useModelMenuChoices };
+
+//# sourceMappingURL=model-menu.js.map

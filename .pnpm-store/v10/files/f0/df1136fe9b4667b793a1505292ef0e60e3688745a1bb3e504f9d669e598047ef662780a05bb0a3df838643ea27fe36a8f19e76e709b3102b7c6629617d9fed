@@ -1,0 +1,54 @@
+import { ModelSettingsChangesIdentity } from "./contracts.js";
+import { TypertRemoteContribution } from "@deepseek-ai/dsh-typert-protocol";
+//#region src/model-settings-client.d.ts
+type ModelSettingsChangeFrame = {
+  kind: 'ready';
+} | {
+  kind: 'changed';
+  ns: string;
+  revision: number;
+};
+/** This stream carries invalidations only; ready is never a settings snapshot. */
+declare function parseModelSettingsChangeFrame(value: unknown): ModelSettingsChangeFrame;
+/** One owner's contribution. Each package mounts only its own endpoint. */
+declare function modelSettingsChangesRemote(packageName: string, identity?: ModelSettingsChangesIdentity): TypertRemoteContribution;
+interface RemoteMountContext {
+  inject(dependencies: string[], callback: (scope: unknown) => void): unknown;
+}
+/** Mount from a synchronous apply. Disposal waits for an in-flight mount and
+ * then withdraws it, so the contribution cannot outlive the plugin. */
+declare function mountModelSettingsChanges(ctx: RemoteMountContext, packageName: string): void;
+interface StreamItem {
+  generation: number;
+  value: unknown;
+  signal: AbortSignal;
+  accept(): void;
+}
+interface ChangeStream extends AsyncIterable<StreamItem> {
+  dispose(): Promise<void>;
+}
+type OpenChangeStream = (options: {
+  name: string;
+  open(signal: AbortSignal): AsyncIterable<unknown>;
+  ended(accepted: boolean): Error;
+}) => ChangeStream;
+interface ModelSettingsSubscriberScope {
+  remote: {
+    $stream: OpenChangeStream;
+  } & Record<string, {
+    watch?(signal: AbortSignal): AsyncIterable<unknown>;
+  } | OpenChangeStream | undefined>;
+  effect(callback: () => () => void | Promise<void>): unknown;
+}
+interface ModelSettingsSubscriberContext {
+  inject(dependencies: string[], callback: (scope: unknown) => void): unknown;
+}
+interface ModelSettingsSubscriber {
+  subscribe(onChange: () => void, onError?: (message: string) => void): () => void;
+}
+/** Native RemoteStream owns carrier reconnects; no timers or browser transport.
+ * A factory shares one logical stream while at least one subscriber remains. */
+declare function createModelSettingsSubscriber(ctx: ModelSettingsSubscriberContext, packageName: string, identity?: ModelSettingsChangesIdentity, accept?: (ns: string) => boolean): ModelSettingsSubscriber;
+//#endregion
+export { ModelSettingsChangeFrame, ModelSettingsSubscriber, ModelSettingsSubscriberContext, ModelSettingsSubscriberScope, createModelSettingsSubscriber, modelSettingsChangesRemote, mountModelSettingsChanges, parseModelSettingsChangeFrame };
+//# sourceMappingURL=model-settings-client.d.ts.map

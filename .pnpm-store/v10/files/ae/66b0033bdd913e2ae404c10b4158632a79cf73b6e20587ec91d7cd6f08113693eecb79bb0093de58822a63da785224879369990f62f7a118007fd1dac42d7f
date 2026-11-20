@@ -1,0 +1,207 @@
+import { _ as normalizeModelRoute, a as catalogFailures, c as modelCatalogErrorMessage, d as parseModelMenuChoices, f as readModelCatalog, g as modelRouteOverride, h as modelRouteKey, i as MODEL_CATALOG_INJECT, l as modelCatalogFailures, m as isModelRouteValue, n as modelMenuEffortLabel, o as checkedModelCatalog, p as defaultModelRoute, r as modelMenuShortName, s as knownModelFromChoices, t as groupModelMenuChoices, u as modelMenuEffortOptions, v as parseModelRouteKey, y as sameModelRoute } from "./menu.js";
+import { i as readModelRouteMarker, n as MODEL_ROUTE_ROLE, r as modelRouteMarker, t as MODEL_ROUTE_MARKER } from "./marker.js";
+//#region src/detect.ts
+function isObject(value) {
+	return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+/** Resolve native Schemastery child ids and JSON Schema local references. */
+function projection(root) {
+	const refs = isObject(root.refs) ? root.refs : void 0;
+	const resolve = (input) => {
+		let node = refs && (typeof input === "number" || typeof input === "string") ? refs[String(input)] : input;
+		const seen = /* @__PURE__ */ new Set();
+		for (let step = 0; step < 32 && isObject(node); step++) {
+			if (seen.has(node)) return void 0;
+			seen.add(node);
+			const ref = node.$ref;
+			if (typeof ref !== "string") return node;
+			if (ref === "#") {
+				node = root;
+				continue;
+			}
+			if (!ref.startsWith("#/")) return node;
+			let target = root;
+			for (const segment of ref.slice(2).split("/")) target = isObject(target) ? target[segment.replace(/~1/g, "/").replace(/~0/g, "~")] : void 0;
+			if (!isObject(target)) return void 0;
+			node = target;
+		}
+	};
+	return {
+		resolve,
+		node: resolve(refs ? root.uid : root)
+	};
+}
+function allowsString(input, resolve, depth = 0) {
+	if (depth > 16) return false;
+	const node = resolve(input);
+	if (!node) return false;
+	if (node.type === "string") return true;
+	for (const key of [
+		"anyOf",
+		"oneOf",
+		"allOf"
+	]) {
+		const branches = node[key];
+		if (Array.isArray(branches) && branches.some((branch) => allowsString(branch, resolve, depth + 1))) return true;
+	}
+	if ((node.type === "union" || node.type === "intersect") && Array.isArray(node.list) && node.list.some((branch) => allowsString(branch, resolve, depth + 1))) return true;
+	return (node.type === "transform" || node.type === "lazy") && allowsString(node.inner, resolve, depth + 1);
+}
+function routeShape(node, resolve) {
+	const properties = routeProperties(node, resolve);
+	return Boolean(properties && allowsString(properties.provider, resolve) && allowsString(properties.model, resolve));
+}
+/** Markers can sit on a transform/union around the actual route object. */
+function routeProperties(node, resolve, seen = /* @__PURE__ */ new Set()) {
+	if (seen.has(node)) return void 0;
+	seen.add(node);
+	const direct = isObject(node.properties) ? node.properties : node.type === "object" && isObject(node.dict) ? node.dict : void 0;
+	if (direct) return direct;
+	const intersect = node.type === "intersect" && Array.isArray(node.list) ? node.list : Array.isArray(node.allOf) ? node.allOf : void 0;
+	if (intersect) {
+		const merged = {};
+		for (const branch of intersect) {
+			const child = resolve(branch);
+			const properties = child && routeProperties(child, resolve, new Set(seen));
+			if (properties) Object.assign(merged, properties);
+		}
+		return Object.keys(merged).length ? merged : void 0;
+	}
+	const branches = node.type === "transform" || node.type === "lazy" ? [node.inner] : ["union", "intersect"].includes(String(node.type)) && Array.isArray(node.list) ? node.list : [
+		node.anyOf,
+		node.oneOf,
+		node.allOf
+	].flatMap((value) => Array.isArray(value) ? value : []);
+	for (const branch of branches) {
+		const child = resolve(branch);
+		const properties = child && routeProperties(child, resolve, seen);
+		if (properties && allowsString(properties.provider, resolve) && allowsString(properties.model, resolve)) return properties;
+	}
+}
+/** Same-path wrappers retain their route leaf's presentation/contract metadata. */
+function routeMetadata(node, resolve, seen = /* @__PURE__ */ new Set()) {
+	if (seen.has(node)) return {};
+	seen.add(node);
+	const own = {
+		marker: readModelRouteMarker(node),
+		label: typeof node.title === "string" ? node.title : isObject(node.meta) && typeof node.meta.description === "string" ? node.meta.description : void 0,
+		description: typeof node.description === "string" ? node.description : void 0
+	};
+	const branches = node.type === "transform" || node.type === "lazy" ? [node.inner] : ["union", "intersect"].includes(String(node.type)) && Array.isArray(node.list) ? node.list : [
+		node.anyOf,
+		node.oneOf,
+		node.allOf
+	].flatMap((value) => Array.isArray(value) ? value : []);
+	for (const branch of branches) {
+		const child = resolve(branch);
+		if (!child) continue;
+		const nested = routeMetadata(child, resolve, seen);
+		own.marker ??= readModelRouteMarker(branch) ?? nested.marker;
+		own.label ??= nested.label;
+		own.description ??= nested.description;
+	}
+	return own;
+}
+/** Recognize both JSON Schema nodes and native serialized Schemastery schemas. */
+function hasModelRouteShape(schema) {
+	if (!isObject(schema)) return false;
+	const { resolve, node } = projection(schema);
+	return Boolean(node && routeShape(node, resolve));
+}
+/** Find route leaves without visiting unrelated metadata or definition nodes. */
+function detectModelFields(schema, options = {}) {
+	if (!isObject(schema)) return [];
+	const { resolve, node: root } = projection(schema);
+	if (!root) return [];
+	const found = /* @__PURE__ */ new Map();
+	const maxDepth = options.maxDepth ?? 32;
+	const ancestors = [];
+	const visit = (input, path, value, depth, editable = true, arrayItem = false) => {
+		if (depth > maxDepth) return;
+		const node = resolve(input);
+		if (!node) return;
+		if (ancestors.some((item) => item.node === node && item.value === value)) return;
+		ancestors.push({
+			node,
+			value
+		});
+		try {
+			const metadata = routeMetadata(node, resolve);
+			const marker = readModelRouteMarker(input) ?? metadata.marker;
+			if (marker || routeShape(node, resolve)) {
+				const candidate = routeProperties(node, resolve);
+				const properties = candidate && allowsString(candidate.provider, resolve) && allowsString(candidate.model, resolve) ? candidate : void 0;
+				const keys = Object.keys(properties ?? {}).filter((key) => [
+					"provider",
+					"model",
+					"reasoningEffort"
+				].includes(key));
+				const preserveSiblings = properties && (Object.keys(properties).some((key) => !keys.includes(key)) || isObject(value) && Object.keys(value).some((key) => ![
+					"provider",
+					"model",
+					"reasoningEffort"
+				].includes(key)));
+				const current = value === void 0 ? void 0 : normalizeModelRoute(value);
+				const override = modelRouteOverride(current);
+				const field = {
+					path,
+					via: marker ? "marker" : "shape",
+					...metadata.label ? { label: metadata.label } : {},
+					...metadata.description ? { description: metadata.description } : {},
+					...!path.length ? {
+						rootKeys: keys,
+						...!properties ? { editable: false } : {}
+					} : {},
+					...preserveSiblings ? {
+						preserveSiblings: true,
+						writeKeys: keys
+					} : {},
+					...properties && !allowsString(properties.reasoningEffort, resolve) ? { supportsReasoning: false } : {},
+					...marker ? { marker } : {},
+					...current ? { current } : {},
+					...override && options.knownModel ? { known: options.knownModel(override) } : {},
+					...!editable ? { editable: false } : {},
+					...arrayItem ? { arrayItem: true } : {}
+				};
+				const key = JSON.stringify(path);
+				if (!found.has(key) || marker) found.set(key, field);
+				return;
+			}
+			for (const key of [
+				"anyOf",
+				"oneOf",
+				"allOf"
+			]) {
+				const branches = node[key];
+				if (Array.isArray(branches)) for (const branch of branches) visit(branch, path, value, depth + 1, editable, arrayItem);
+			}
+			if ((node.type === "union" || node.type === "intersect") && Array.isArray(node.list)) for (const branch of node.list) visit(branch, path, value, depth + 1, editable, arrayItem);
+			if (node.type === "transform" || node.type === "lazy") visit(node.inner, path, value, depth + 1, editable, arrayItem);
+			const properties = isObject(node.properties) ? node.properties : node.type === "object" && isObject(node.dict) ? node.dict : void 0;
+			if (properties) for (const [key, child] of Object.entries(properties)) visit(child, [...path, key], isObject(value) ? value[key] : void 0, depth + 1, editable);
+			const items = node.items ?? (node.type === "array" ? node.inner : void 0);
+			if (items !== void 0) {
+				if (Array.isArray(value) && value.length) value.forEach((item, index) => visit(items, [...path, String(index)], item, depth + 1, editable, true));
+				else visit(items, [...path, "[]"], void 0, depth + 1, false, true);
+			}
+			if (node.type === "dict") {
+				if (isObject(value) && Object.keys(value).length) for (const [key, item] of Object.entries(value)) visit(node.inner, [...path, key], item, depth + 1, editable);
+				else visit(node.inner, [...path, "*"], void 0, depth + 1, false);
+			}
+			if (isObject(node.additionalProperties)) {
+				const declared = new Set(Object.keys(properties ?? {}));
+				const extra = isObject(value) ? Object.entries(value).filter(([key]) => !declared.has(key)) : [];
+				if (extra.length) for (const [key, item] of extra) visit(node.additionalProperties, [...path, key], item, depth + 1, editable);
+				else visit(node.additionalProperties, [...path, "*"], void 0, depth + 1, false);
+			}
+		} finally {
+			ancestors.pop();
+		}
+	};
+	visit(root, [], options.value, 0);
+	return [...found.values()];
+}
+//#endregion
+export { MODEL_CATALOG_INJECT, MODEL_ROUTE_MARKER, MODEL_ROUTE_ROLE, catalogFailures, checkedModelCatalog, defaultModelRoute, detectModelFields, groupModelMenuChoices, hasModelRouteShape, isModelRouteValue, knownModelFromChoices, modelCatalogErrorMessage, modelCatalogFailures, modelMenuEffortLabel, modelMenuEffortOptions, modelMenuShortName, modelRouteKey, modelRouteMarker, modelRouteOverride, normalizeModelRoute, parseModelMenuChoices, parseModelRouteKey, readModelCatalog, readModelRouteMarker, sameModelRoute };
+
+//# sourceMappingURL=index.js.map

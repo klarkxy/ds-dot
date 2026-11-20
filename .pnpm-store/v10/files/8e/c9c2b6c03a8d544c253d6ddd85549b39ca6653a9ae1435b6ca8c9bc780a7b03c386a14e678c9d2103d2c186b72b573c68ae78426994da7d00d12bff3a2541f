@@ -1,0 +1,37 @@
+//#region src/route.d.ts
+/**
+ * Shared model-route value contract.
+ *
+ * A feature plugin stores its model override as a ModelRoute on its own
+ * settings page. Empty provider/model means "follow the host default model".
+ * Pure and browser-safe: no cordis, no React, no schema library.
+ */
+/** A concrete provider model a feature call should use. */
+interface ModelRoute {
+  provider: string;
+  model: string;
+  reasoningEffort?: string;
+}
+/** Empty route: no explicit model, the feature follows the host default. */
+declare function defaultModelRoute(): ModelRoute;
+/** Structural check: both id fields are strings (either may be empty). */
+declare function isModelRouteValue(value: unknown): value is ModelRoute;
+/**
+ * Coerce a stored value into a ModelRoute. Anything malformed collapses to the
+ * empty route, matching the per-plugin normalizers this contract replaces.
+ */
+declare function normalizeModelRoute(value: unknown): ModelRoute;
+/** The override to actually call with: undefined when the route is empty. */
+declare function modelRouteOverride(route: ModelRoute | undefined): ModelRoute | undefined;
+/** Stable key for one route, safe to use as a select-option value. */
+declare function modelRouteKey(provider: string, model: string): string;
+/** Inverse of modelRouteKey; undefined for malformed keys. */
+declare function parseModelRouteKey(value: string): {
+  provider: string;
+  model: string;
+} | undefined;
+/** True when both routes name the same target; two empty routes are equal. */
+declare function sameModelRoute(a: ModelRoute | undefined, b: ModelRoute | undefined): boolean;
+//#endregion
+export { modelRouteOverride as a, sameModelRoute as c, modelRouteKey as i, defaultModelRoute as n, normalizeModelRoute as o, isModelRouteValue as r, parseModelRouteKey as s, ModelRoute as t };
+//# sourceMappingURL=route.d.ts.map

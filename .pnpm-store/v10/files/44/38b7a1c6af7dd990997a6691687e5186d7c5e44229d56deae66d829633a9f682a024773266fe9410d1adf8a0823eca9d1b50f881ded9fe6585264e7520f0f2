@@ -1,0 +1,273 @@
+import { ModelRoute } from "@klarkxy/dsh-model-route";
+import { ContextFormed } from "@deepseek-ai/dsh-llm";
+//#region src/contracts.d.ts
+/** Public, browser-safe contracts. Host implementations stay in their owning packages. */
+type ProducerSourceKind = `plugin:${string}`;
+type ProducerMessageSource = {
+  kind: ProducerSourceKind;
+  plugin: string;
+} & ContextFormed;
+/**
+ * V4 sessions persist the producing extension in `kind`; the retired generic
+ * `plugin` wrapper is not admitted. Each feature plugin declares its own kind.
+ */
+declare module '@deepseek-ai/dsh-llm' {
+  interface MessageSourceMap {
+    [kind: ProducerSourceKind]: ProducerMessageSource;
+  }
+}
+declare function producerMessageSource(plugin: string): ProducerMessageSource;
+type RpcResult<T = unknown> = {
+  ok: true;
+  value: T;
+} | {
+  ok: false;
+  error: {
+    code: string;
+    message: string;
+  };
+};
+declare const CHAT_EVENTS_SLOT = "dsh-editor.chat.events";
+interface EvidenceRef {
+  sessionId: string;
+  seq: number;
+  kind: 'user' | 'tool' | 'turn' | 'manual';
+  excerpt?: string;
+}
+interface TaskContract {
+  id: string;
+  sessionId: string;
+  sourceVersion: string;
+  revision: number;
+  goal: string;
+  deliverables: string[];
+  inScope: string[];
+  outOfScope: string[];
+  constraints: string[];
+  acceptance: string[];
+  assumptions: string[];
+  questions: string[];
+  evidence: EvidenceRef[];
+  readiness: 'pending' | 'clear-request' | 'user-confirmed' | 'disclosed-assumptions' | 'cancelled' | 'stale';
+  updatedAt: number;
+}
+interface TaskCheckpoint {
+  id: string;
+  sessionId: string;
+  sourceVersion: string;
+  contractVersion?: number;
+  fromSeq: number;
+  toSeq: number;
+  revision: number;
+  status: 'running' | 'completed' | 'failed' | 'cancelled';
+  items: Array<{
+    label: string;
+    state: 'pending' | 'verified' | 'failed';
+    evidence: EvidenceRef[];
+  }>;
+  constraints: string[];
+  nextAction: string;
+  createdAt: number;
+}
+type KnowledgeScope = {
+  kind: 'global';
+} | {
+  kind: 'project';
+  projectId: string;
+};
+type KnowledgeKind = 'preference' | 'project-fact' | 'decision' | 'vocabulary' | 'activity' | 'lesson';
+/** Descriptive context, never an executable instruction or authorization. */
+interface ContextKnowledge {
+  subject: string;
+  domain: string;
+  key: string;
+  aliases: string[];
+  observedAt: number;
+  /** The user's own time expression, not an inferred completion date. */
+  eventTime?: string;
+  activityStatus?: 'planned' | 'in-progress' | 'blocked' | 'paused' | 'completed' | 'cancelled' | 'unknown';
+}
+/** A scoped method. Observations remain candidates until explicitly accepted. */
+interface ProcedureKnowledge {
+  origin: 'instruction' | 'observation';
+  goal: string;
+  when: string[];
+  steps: string[];
+  avoid: string[];
+  verify: string[];
+}
+interface MemoryRecord {
+  id: string;
+  revision: number;
+  scope: KnowledgeScope;
+  kind: KnowledgeKind;
+  status: 'candidate' | 'active' | 'rejected' | 'superseded' | 'revoked' | 'deleted';
+  title: string;
+  content: string;
+  tags: string[];
+  evidence: EvidenceRef[];
+  exceptions: string[];
+  source: 'user' | 'memory' | 'dream' | 'self-improvement';
+  context?: ContextKnowledge;
+  procedure?: ProcedureKnowledge;
+  createdAt: number;
+  updatedAt: number;
+  expiresAt?: number;
+  supersedes?: string[];
+  /** Exact record revisions behind a derived candidate; revalidated on adoption. */
+  basis?: Array<{
+    id: string;
+    revision: number;
+  }>;
+}
+type NewMemoryRecord = Omit<MemoryRecord, 'id' | 'revision' | 'createdAt' | 'updatedAt'>;
+interface MemoryQuery {
+  scope: KnowledgeScope;
+  query?: string;
+  kinds?: KnowledgeKind[];
+  statuses?: MemoryRecord['status'][];
+  limit?: number;
+}
+interface MemoryMutationOptions {
+  signal?: AbortSignal;
+  isCurrent?: () => boolean;
+}
+interface MemoryService {
+  list(query: MemoryQuery): Promise<MemoryRecord[]>;
+  create(record: NewMemoryRecord, options?: MemoryMutationOptions): Promise<MemoryRecord>;
+  update(id: string, patch: Partial<Pick<MemoryRecord, 'title' | 'content' | 'tags' | 'exceptions' | 'status' | 'expiresAt'>>, expectedRevision: number, options?: MemoryMutationOptions): Promise<MemoryRecord>;
+  /** Explicit user promotion, persisted atomically on the same record; preserves expiry and evidence. */
+  promoteToGlobal(id: string, expectedRevision: number, options?: MemoryMutationOptions): Promise<MemoryRecord>;
+  remove(id: string, expectedRevision: number, options?: MemoryMutationOptions): Promise<void>;
+  recall(query: MemoryQuery): Promise<MemoryRecord[]>;
+}
+/**
+ * The session creation metadata the host snapshots when it creates a delegated child
+ * thread. Mirrors `CreateAgentOptions.meta` in `@deepseek-ai/dsh-agent`; it is durable
+ * session data, so it survives a restart and needs no ancestry walk.
+ */
+interface SubagentSessionLike {
+  readonly header?: {
+    readonly parentSession?: unknown;
+    readonly origin?: unknown;
+    readonly delegationDepth?: unknown;
+    readonly isSeeded?: unknown;
+    readonly classification?: unknown;
+  };
+}
+/**
+ * True when `session` is a delegated child thread rather than a human-driven top-level
+ * conversation.
+ *
+ * A message's `source.kind === 'user'` cannot answer this: a lead agent's dispatch prompt
+ * is delivered as the child's own user message, so delegated work is indistinguishable
+ * from a person typing once you only look at the message. Plugins use this to keep
+ * automatic writes and derived model calls on top-level sessions.
+ */
+declare function isSubagentSession(session: unknown): boolean;
+/** Project keys come only from the host-validated session directory, never client input. */
+declare function projectIdFromCwd(cwd: string | undefined): string | undefined;
+/**
+ * One settings owner's Remote stream. Typert accepts either case in an RPC
+ * segment, so the Cordis service key and the wire namespace use the same
+ * Pascal segment. The scope's first letter stays uppercase.
+ */
+interface ModelSettingsChangesIdentity {
+  readonly service: string;
+  readonly namespace: string;
+}
+/** `@klarkxy/dsh-git-commit` becomes `KlarkxyDshGitCommitModelSettingsChanges`. */
+declare function modelSettingsChangesIdentity(packageName: string): ModelSettingsChangesIdentity;
+/**
+ * Repository extension: a native web provider announces that its local
+ * availability changed. Kind is `search` or `fetch`; id is the provider id.
+ * Listeners refresh management state and must not treat this as a network probe.
+ */
+declare const WEB_PROVIDER_AVAILABILITY_EVENT: "web/provider-availability-updated";
+/**
+ * Optional display metadata a provider may attach when it registers directly
+ * with `ctx.web`. Execution and credentials stay with the provider; this object
+ * is display-only and must never carry secret values.
+ */
+interface DshWebManagementDescriptor {
+  readonly id: string;
+  readonly label: string;
+  readonly description: string;
+  readonly defaultBaseURL?: string;
+  readonly credentialRef?: string;
+  /** True when the key is shared with another surface. The page must not delete it. */
+  readonly credentialShared?: boolean;
+  /** Optional notice naming the settings surface that owns a shared credential. */
+  readonly credentialHint?: string;
+  readonly billing: 'request' | 'model-and-tools' | 'none' | 'unknown';
+  /** Optional provider-supplied billing summary. */
+  readonly pricing?: string;
+  /** Public HTTPS page explaining provider charges. */
+  readonly pricingUrl?: string;
+  /** Public HTTPS page where the user can create an API key. */
+  readonly signupUrl?: string;
+  /** Plugin that owns configuration. Native providers keep their settings there. */
+  readonly configurationOwner?: string;
+  /** Explicit settings link supplied by the provider, never inferred from its id. */
+  readonly configurationUrl?: string;
+  /** Fixed legacy route migrated by a bundle-owned adapter; not used by native plugins. */
+  readonly legacyId?: string;
+}
+/**
+ * Host Creator agent-preset id (`agentPresets.composedPreset`).
+ * Plugins that gate Creator-only tools or prompt sections compare against this.
+ */
+declare const CREATOR_PRESET_ID = "cordis";
+/**
+ * Shared "Session Management" settings section id. The section is provided by
+ * shared infrastructure (see `registerSessionSettingsItem` in `client-utils`),
+ * not by any one business plugin: every participant registers only a row into
+ * {@link SESSION_SETTINGS_ITEM_SLOT}, so any enabled subset yields the same page.
+ */
+declare const SESSION_SETTINGS_SECTION_ID = "session-manager";
+/**
+ * Child list slot declared by the shared Session Management page. Neutral
+ * naming on purpose: participants never import each other, they only
+ * contribute `{id, order}` rows into this slot while the page is alive.
+ */
+declare const SESSION_SETTINGS_ITEM_SLOT = "dsh.session-settings.item";
+/**
+ * Host-owned nav icon seat: a root-scoped list where each entry's `id` must
+ * equal the `settings.section` id it decorates. Owner props are
+ * `{size, active}`; icons stay `aria-hidden` so the section label remains the
+ * accessible name. Contributors into a shared section may register the same
+ * icon `id` with different priorities — the ledger keeps every entry while the
+ * host renders one icon per section.
+ */
+declare const SETTINGS_SECTION_ICON_SLOT = "settings.section.icon";
+/** Root context service key holding the shared auxiliary-model state. */
+declare const AUXILIARY_MODEL_SERVICE = "dshAuxiliaryModel";
+/** Authenticated host-RPC channel for get/set of the shared default. */
+declare const AUXILIARY_MODEL_CHANNEL = "/dsh-auxiliary-model";
+/** Model-settings namespace under which the shared default is published. */
+declare const AUXILIARY_MODEL_NS = "@klarkxy/dsh-plugin-kit/auxiliary-model";
+/**
+ * Typert identity of the shared change stream. Mounted on the root context
+ * with ownerNs filtering, so frames only carry {@link AUXILIARY_MODEL_NS}.
+ */
+declare const AUXILIARY_MODEL_CHANGES_IDENTITY: ModelSettingsChangesIdentity;
+/** The value the shared default persists: `model: null` means follow the live session/host model. */
+interface AuxiliaryModelDefaults {
+  readonly revision: number;
+  readonly model: ModelRoute | null;
+}
+/** Shape of the root singleton; produced and owned by `auxiliary-model.ts`. */
+interface AuxiliaryModelShared {
+  readonly ready: Promise<void>;
+  snapshot(): AuxiliaryModelDefaults;
+}
+/**
+ * Synchronously read the shared auxiliary default; `undefined` only when no
+ * participant retains the singleton or the default is legitimately unset.
+ * An initialization or snapshot failure propagates: silently falling back to
+ * a different model after a storage error would spend the wrong budget.
+ */
+declare function getAuxiliaryModel(host: unknown): ModelRoute | undefined;
+//#endregion
+export { AUXILIARY_MODEL_CHANGES_IDENTITY, AUXILIARY_MODEL_CHANNEL, AUXILIARY_MODEL_NS, AUXILIARY_MODEL_SERVICE, AuxiliaryModelDefaults, AuxiliaryModelShared, CHAT_EVENTS_SLOT, CREATOR_PRESET_ID, ContextKnowledge, DshWebManagementDescriptor, EvidenceRef, KnowledgeKind, KnowledgeScope, MemoryMutationOptions, MemoryQuery, MemoryRecord, MemoryService, type ModelRoute, ModelSettingsChangesIdentity, NewMemoryRecord, ProcedureKnowledge, ProducerMessageSource, ProducerSourceKind, RpcResult, SESSION_SETTINGS_ITEM_SLOT, SESSION_SETTINGS_SECTION_ID, SETTINGS_SECTION_ICON_SLOT, SubagentSessionLike, TaskCheckpoint, TaskContract, WEB_PROVIDER_AVAILABILITY_EVENT, getAuxiliaryModel, isSubagentSession, modelSettingsChangesIdentity, producerMessageSource, projectIdFromCwd };
+//# sourceMappingURL=contracts.d.ts.map

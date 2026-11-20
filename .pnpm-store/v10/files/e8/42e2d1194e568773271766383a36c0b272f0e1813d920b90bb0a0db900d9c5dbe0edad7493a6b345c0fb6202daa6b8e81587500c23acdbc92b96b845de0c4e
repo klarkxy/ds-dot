@@ -1,0 +1,55 @@
+import { ModelRoute } from "@klarkxy/dsh-model-route";
+//#region src/model-settings.d.ts
+/** Built-in display copy; plain strings preserve third-party and user-provided text. */
+type ModelSettingsText = string | {
+  zh: string;
+  en: string;
+};
+/** Plugin-owned model settings, independent of native volatile Config forms. */
+interface ModelSettingsField {
+  path: string[];
+  label: ModelSettingsText;
+  description?: ModelSettingsText;
+  current?: ModelRoute;
+  editable?: false;
+  allowFollow?: boolean;
+  followLabel?: ModelSettingsText;
+}
+interface ModelSettingsSnapshot {
+  revision: number;
+  fields: ModelSettingsField[];
+  /** A separate model domain, e.g. external Codex; never use the DSH catalog here. */
+  catalog?: unknown;
+  catalogError?: ModelSettingsText;
+}
+interface ModelSettingsProvider {
+  ns: string;
+  title: ModelSettingsText;
+  instanceId?: string;
+  read(signal: AbortSignal): ModelSettingsSnapshot | Promise<ModelSettingsSnapshot>;
+  write(path: readonly string[], route: ModelRoute, expectedRevision: number, signal: AbortSignal): Promise<unknown>;
+}
+declare const MODEL_SETTINGS_EVENT = "model-settings/collect";
+declare const MODEL_SETTINGS_CHANGED_EVENT = "model-settings/changed";
+interface ModelSettingsChange {
+  ns: string;
+  revision: number;
+}
+/** Publish only after the owner's save commits. A failed observer must never
+ * turn an already committed write into an apparent save failure. */
+declare function notifyModelSettingsChanged(ctx: {
+  parallel(name: typeof MODEL_SETTINGS_CHANGED_EVENT, change: ModelSettingsChange): Promise<void>;
+}, ns: string, revision: number): void;
+type Collector = (provider: ModelSettingsProvider) => void;
+interface ModelSettingsEvents {
+  on(name: typeof MODEL_SETTINGS_EVENT, callback: (collect: Collector) => void): () => void;
+}
+interface ModelSettingsDiscovery {
+  parallel(name: typeof MODEL_SETTINGS_EVENT, collect: Collector): Promise<void>;
+}
+/** Cordis disposes the listener with its fiber. In-flight references also fail closed. */
+declare function registerModelSettings(ctx: ModelSettingsEvents, provider: ModelSettingsProvider): () => void;
+declare function collectModelSettings(ctx: ModelSettingsDiscovery): Promise<ModelSettingsProvider[]>;
+//#endregion
+export { MODEL_SETTINGS_CHANGED_EVENT, MODEL_SETTINGS_EVENT, ModelSettingsChange, ModelSettingsDiscovery, ModelSettingsEvents, ModelSettingsField, ModelSettingsProvider, ModelSettingsSnapshot, ModelSettingsText, collectModelSettings, notifyModelSettingsChanged, registerModelSettings };
+//# sourceMappingURL=model-settings.d.ts.map

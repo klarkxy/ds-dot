@@ -1,0 +1,18 @@
+import { r as ModelRouteMarkerMeta } from "./marker.js";
+import { z } from "zod";
+//#region src/zod.d.ts
+/**
+ * Zod field schema for a ModelRoute config entry, pre-marked so hubs detect it
+ * without shape heuristics. Defaults mirror defaultModelRoute(): empty means
+ * "follow the host default model".
+ */
+declare function modelRouteZod(meta?: ModelRouteMarkerMeta): z.ZodObject<{
+  provider: z.ZodDefault<z.ZodString>;
+  model: z.ZodDefault<z.ZodString>;
+  reasoningEffort: z.ZodOptional<z.ZodString>;
+}, z.core.$strip>;
+/** Attach the model-route marker to any zod schema. */
+declare function withModelRouteMarker<S extends z.ZodType>(schema: S, meta?: ModelRouteMarkerMeta): S;
+//#endregion
+export { modelRouteZod, withModelRouteMarker };
+//# sourceMappingURL=zod.d.ts.map

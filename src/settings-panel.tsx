@@ -6,7 +6,7 @@ import { groupModelMenuChoices, modelMenuShortName, parseModelMenuChoices, type 
 import { renderModelPicker, type RenderFactorySlot } from '@klarkxy/dsh-plugin-kit/model-picker'
 import { Button, Checkbox, IconSearchOutlineRegular, Input, SegmentedTabs, type SegmentedTab } from '@deepseek-ai/dsh-client-ui-primitives'
 import { createContext, useCallback, useContext, useEffect, useId, useMemo, useState, type ReactNode } from 'react'
-import { type ApprovalMode, type DotSettings, type FactoryResetPreview, type FactoryResetResult, type ModelChoice, type SettingField, type SettingProposal, type TakeoverMode, type TaskModelRule, type TaskPermission } from './contracts.ts'
+import { type ApprovalMode, type DotSettings, type FactoryResetPreview, type FactoryResetResult, type KeepaliveInfo, type ModelChoice, type SettingField, type SettingProposal, type TakeoverMode, type TaskModelRule, type TaskPermission } from './contracts.ts'
 import { factoryResetScope, t, type CopyLocale, type TextKey } from './ui-copy.ts'
 
 /** null on model, persona or address goes back to the default. */
@@ -15,6 +15,8 @@ export type SaveNotice = { readonly kind: 'saved' } | { readonly kind: 'error'; 
 
 export interface SettingsApi {
   setSettings(patch: SettingsPatch): Promise<DotSettings>
+  /** The provider/model dot's next request would run on and its cache TTL; absent without keepalive UI. */
+  keepalive?(signal: AbortSignal): Promise<KeepaliveInfo | undefined>
   /** Raw host model catalog; parsed here. */
   models(): Promise<unknown>
   settingProposals(signal: AbortSignal): Promise<SettingProposal[]>
@@ -203,7 +205,7 @@ function Proposals({ locale, api, choices, refresh, onDecided, onCountChange }: 
 const IDLE_CHECK_MAX = 1440
 
 /** Minutes between routine checks; saved when the field loses focus, and a value the host would refuse goes back to the saved one. */
-function IdleCheckInput({ locale, value, onCommit }: { locale: CopyLocale; value: number; onCommit: (minutes: number) => void }) {
+function IdleCheckInput({ locale, value, onCommit, label, unit }: { locale: CopyLocale; value: number; onCommit: (minutes: number) => void; label?: string; unit?: string }) {
   const [draft, setDraft] = useState(String(value))
   useEffect(() => { setDraft(String(value)) }, [value])
   const commit = () => {
@@ -221,13 +223,13 @@ function IdleCheckInput({ locale, value, onCommit }: { locale: CopyLocale; value
         min={0}
         max={IDLE_CHECK_MAX}
         step={1}
-        aria-label={t(locale, 'sIdleCheck')}
+        aria-label={label ?? t(locale, 'sIdleCheck')}
         value={draft}
         onChange={event => setDraft(event.target.value)}
         onBlur={commit}
         onKeyDown={event => { if (event.key === 'Enter') event.currentTarget.blur() }}
       />
-      <span className="dsh-ui-meta">{t(locale, 'sIdleCheckUnit')}</span>
+      <span className="dsh-ui-meta">{unit ?? t(locale, 'sIdleCheckUnit')}</span>
     </div>
   )
 }

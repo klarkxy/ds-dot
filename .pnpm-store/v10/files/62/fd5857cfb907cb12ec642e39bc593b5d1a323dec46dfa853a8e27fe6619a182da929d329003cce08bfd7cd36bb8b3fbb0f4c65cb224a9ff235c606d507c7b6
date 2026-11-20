@@ -1,0 +1,153 @@
+import { DEFAULT_PLUGIN_LOG_LEVEL, PLUGIN_LOG_LEVELS, PLUGIN_LOG_MAX_CONTEXT_CHARS, PLUGIN_LOG_MAX_MESSAGE_CHARS, buildPluginLogEntry, createChildPluginLogger, isPluginLogLevel, mergePluginLogContext, normalizePluginLogEvent, normalizePluginLogSource, parsePluginLogLevel, pluginLogLevelEnabled, sanitizePluginLogContext, sanitizePluginLogError, sanitizePluginLogText, truncateLogText } from "./log-shared.js";
+//#region src/client-logger.ts
+const CLIENT_PLUGIN_LOG_GLOBAL = "__KLARKXY_PLUGIN_LOGS__";
+const CLIENT_PLUGIN_LOG_LIMIT = 500;
+function readStorageFlag(key) {
+	try {
+		const value = (globalThis.window?.localStorage)?.getItem?.(key);
+		return typeof value === "string" && value.trim() ? value.trim() : void 0;
+	} catch {
+		return;
+	}
+}
+function sharedClientBuffer(limit) {
+	const carrier = globalThis;
+	if (!Array.isArray(carrier["__KLARKXY_PLUGIN_LOGS__"])) try {
+		carrier[CLIENT_PLUGIN_LOG_GLOBAL] = [];
+	} catch {
+		return [];
+	}
+	const list = carrier[CLIENT_PLUGIN_LOG_GLOBAL];
+	const overflow = list.length - limit;
+	if (overflow > 0) list.splice(0, overflow);
+	return list;
+}
+function readClientPluginLogs(source) {
+	const carrier = globalThis;
+	const list = Array.isArray(carrier["__KLARKXY_PLUGIN_LOGS__"]) ? carrier[CLIENT_PLUGIN_LOG_GLOBAL] : [];
+	if (!source) return list.slice();
+	const normalized = normalizePluginLogSource(source);
+	return list.filter((entry) => entry.source === normalized);
+}
+function clearClientPluginLogs() {
+	const carrier = globalThis;
+	if (Array.isArray(carrier["__KLARKXY_PLUGIN_LOGS__"])) carrier[CLIENT_PLUGIN_LOG_GLOBAL].length = 0;
+}
+function createClientPluginLogger(source, ctx, options = {}) {
+	const normalized = normalizePluginLogSource(source);
+	const now = options.now ?? (() => /* @__PURE__ */ new Date());
+	const limit = Math.max(10, options.bufferLimit ?? 500);
+	const browserCtx = ctx && typeof ctx === "object" ? ctx : void 0;
+	const resolveMinimum = () => {
+		if (options.minimumLevel) return options.minimumLevel;
+		return parsePluginLogLevel(readStorageFlag("dsh-plugin-log-level"), normalized, DEFAULT_PLUGIN_LOG_LEVEL);
+	};
+	const logger = {
+		source: normalized,
+		file: null,
+		lastWriteError: null,
+		debug: (event, message, context) => logger.write({
+			level: "debug",
+			event,
+			message,
+			...context ? { context } : {}
+		}),
+		info: (event, message, context) => logger.write({
+			level: "info",
+			event,
+			message,
+			...context ? { context } : {}
+		}),
+		warn: (event, message, error, context) => logger.write({
+			level: "warn",
+			event,
+			message,
+			...error !== void 0 ? { error } : {},
+			...context ? { context } : {}
+		}),
+		error: (event, message, error, context) => logger.write({
+			level: "error",
+			event,
+			message,
+			...error !== void 0 ? { error } : {},
+			...context ? { context } : {}
+		}),
+		fault: (event, message, error, context) => logger.write({
+			level: "fault",
+			event,
+			message,
+			...error !== void 0 ? { error } : {},
+			...context ? { context } : {}
+		}),
+		child: (context) => createChildPluginLogger(logger, context),
+		write(input) {
+			try {
+				if (!pluginLogLevelEnabled(input.level, resolveMinimum())) return false;
+				const entry = buildPluginLogEntry(input, {
+					at: now(),
+					source: normalized,
+					surface: "client"
+				});
+				const buffer = sharedClientBuffer(limit);
+				buffer.push(entry);
+				const overflow = buffer.length - limit;
+				if (overflow > 0) buffer.splice(0, overflow);
+				if (options.forwardToHostLogger !== false && browserCtx?.logger) {
+					const summary = sanitizePluginLogText(`${normalized} [${entry.event}]: ${entry.message}`, 500);
+					if (entry.level === "warn" && typeof browserCtx.logger.warn === "function") browserCtx.logger.warn(summary);
+					else if ((entry.level === "error" || entry.level === "fault") && typeof browserCtx.logger.error === "function") browserCtx.logger.error(summary);
+				}
+				if (readStorageFlag("dsh-plugin-log-console") === "1") {
+					const con = globalThis.console;
+					(entry.level === "debug" ? con?.debug : entry.level === "info" ? con?.info : entry.level === "warn" ? con?.warn : con?.error)?.call(con, `[${normalized}] ${entry.event}: ${entry.message}`, entry);
+				}
+				return true;
+			} catch {
+				return false;
+			}
+		}
+	};
+	return logger;
+}
+function installClientPluginLogger(ctx, source, options = {}) {
+	const logger = createClientPluginLogger(source, ctx, options);
+	logger.info("client.loaded", "Client plugin initialized.", options.loadedContext);
+	const browserCtx = ctx && typeof ctx === "object" ? ctx : void 0;
+	if (typeof browserCtx?.effect === "function") try {
+		browserCtx.effect(() => () => {
+			logger.debug("client.disposed", "Client plugin disposed.");
+		}, `${logger.source}.client-logger`);
+	} catch {}
+	return logger;
+}
+async function clientLogStep(logger, step, context, action, completedLevel = "debug") {
+	const started = Date.now();
+	const base = {
+		...context,
+		step
+	};
+	logger.debug("step.started", "Client step started.", base);
+	try {
+		const result = await action();
+		logger.write({
+			level: completedLevel,
+			event: "step.completed",
+			message: "Client step completed.",
+			context: {
+				...base,
+				durationMs: Date.now() - started
+			}
+		});
+		return result;
+	} catch (error) {
+		logger.error("step.failed", "Client step failed.", error, {
+			...base,
+			durationMs: Date.now() - started
+		});
+		throw error;
+	}
+}
+//#endregion
+export { CLIENT_PLUGIN_LOG_GLOBAL, CLIENT_PLUGIN_LOG_LIMIT, DEFAULT_PLUGIN_LOG_LEVEL, PLUGIN_LOG_LEVELS, PLUGIN_LOG_MAX_CONTEXT_CHARS, PLUGIN_LOG_MAX_MESSAGE_CHARS, buildPluginLogEntry, clearClientPluginLogs, clientLogStep, createChildPluginLogger, createClientPluginLogger, installClientPluginLogger, isPluginLogLevel, mergePluginLogContext, normalizePluginLogEvent, normalizePluginLogSource, parsePluginLogLevel, pluginLogLevelEnabled, readClientPluginLogs, sanitizePluginLogContext, sanitizePluginLogError, sanitizePluginLogText, truncateLogText };
+
+//# sourceMappingURL=client-logger.js.map

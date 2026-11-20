@@ -6,6 +6,7 @@
 import { z } from 'zod'
 import { DEFAULT_SETTINGS, SETTING_FIELDS, TASK_MODEL_LIST_MAX, type DotSettings, type SettingField, type TaskPermission } from './contracts.ts'
 import { type CopyLocale } from './i18n/index.ts'
+import { CACHE_TTL_MAX_ENTRIES, CACHE_TTL_MAX_MINUTES } from './keepalive.ts'
 import { ADDRESS_MAX_CHARS, PERSONA_MAX_CHARS, defaultAddress, defaultPersona } from './persona.ts'
 
 const FIELDS = {
@@ -24,6 +25,8 @@ const FIELDS = {
   taskPermission: z.enum(['workspace-write', 'danger-full-access', 'default']),
   reflection: z.boolean(),
   idleCheckMinutes: z.number().int().min(0).max(1440),
+  cacheTtl: z.record(z.string().trim().min(1).max(400), z.number().int().min(0).max(CACHE_TTL_MAX_MINUTES))
+    .refine(map => Object.keys(map).length <= CACHE_TTL_MAX_ENTRIES),
   persona: z.string().max(PERSONA_MAX_CHARS),
   address: z.string().trim().min(1).max(ADDRESS_MAX_CHARS),
   locks: z.object(Object.fromEntries(SETTING_FIELDS.map(field => [field, z.boolean().optional()]))).strict(),

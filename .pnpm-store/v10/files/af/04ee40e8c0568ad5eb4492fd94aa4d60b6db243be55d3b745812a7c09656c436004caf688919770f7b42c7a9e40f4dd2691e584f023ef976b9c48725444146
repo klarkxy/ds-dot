@@ -1,0 +1,144 @@
+import { runCli } from "@klarkxy/dsh-plugin-kit/cli-process";
+import { type GhProbe } from "./gh.js";
+export declare const API_ROOT = "https://api.github.com";
+export declare const MAX_BYTES: number;
+export declare const SEARCH_RESULT_CAP = 1000;
+export type GitHubErrorKind = "not-found" | "rate-limit" | "redirect" | "auth" | "http" | "invalid";
+export declare class GitHubError extends Error {
+    readonly kind: GitHubErrorKind;
+    constructor(kind: GitHubErrorKind, message: string);
+}
+export declare function parseRepo(value: unknown): {
+    owner: string;
+    name: string;
+};
+export declare function cleanPath(value: unknown): string;
+export declare function cleanRef(value: unknown): string | undefined;
+export interface GitHubDeps {
+    fetcher?: typeof fetch;
+    discover?: (signal: AbortSignal) => Promise<GhProbe | null>;
+    run?: typeof runCli;
+}
+export interface GitHubSearchArgs {
+    query: string;
+    limit?: number;
+    offset?: number;
+}
+export interface GitHubFetchArgs {
+    repo: string;
+    path?: string;
+    ref?: string;
+}
+export declare class GitHubClient {
+    private readonly lifetime;
+    private confirmedProbe?;
+    private pendingProbe?;
+    private readonly fetcher;
+    private readonly run;
+    private readonly discoverProbe;
+    constructor(deps?: GitHubDeps);
+    private readonly work;
+    private track;
+    dispose(): Promise<void>;
+    private abandonProbe;
+    private ghBroken;
+    private merged;
+    private probe;
+    private startProbe;
+    private awaitProbe;
+    private request;
+    private viaGh;
+    private viaHttp;
+    searchRepos(args: GitHubSearchArgs, signal?: AbortSignal): Promise<{
+        source: string;
+        fetchedAt: string;
+        transport: "gh" | "anonymous";
+        searchScope: string;
+        query: string;
+        total: number;
+        offset: number;
+        nextOffset: number | null;
+        results: {
+            name: string;
+            description: string | null;
+            url: string;
+            homepage: string | null;
+            topics: string[];
+            license: string | null;
+            stars: number;
+            pushedAt: string | null;
+            archived: boolean;
+            defaultBranch: string | null;
+            verification: string;
+        }[];
+    }>;
+    searchCode(args: GitHubSearchArgs, signal?: AbortSignal): Promise<{
+        source: string;
+        fetchedAt: string;
+        transport: string;
+        searchScope: string;
+        query: string;
+        total: number;
+        offset: number;
+        nextOffset: number | null;
+        results: {
+            repository: string;
+            manifestPath: string;
+            url: string | null;
+            installSpec: string;
+            hint: string;
+            verification: string;
+        }[];
+    }>;
+    fetchPlugin(args: GitHubFetchArgs, signal?: AbortSignal): Promise<{
+        source: string;
+        fetchedAt: string;
+        transport: "gh" | "anonymous";
+        repository: {
+            fullName: string;
+            renamedFrom: string | null;
+            url: string;
+            description: string | null;
+            homepage: string | null;
+            topics: string[];
+            license: string | null;
+            stars: number;
+            pushedAt: string | null;
+            archived: boolean;
+            disabled: boolean;
+            defaultBranch: string;
+        };
+        resolved: {
+            requestedRef: string | null;
+            ref: string;
+            sha: string;
+            committedAt: string | null;
+        };
+        package: {
+            name: string | null;
+            version: string | null;
+            description: string | null;
+            engines: Record<string, string>;
+            dependencies: Record<string, string>;
+            peerDependencies: Record<string, string>;
+            bundleDeclared: boolean;
+            bundlePatch: string | null;
+            hasPrepareScript: boolean;
+            license: string | null;
+        } | null;
+        pluginManifest: {
+            id: string | null;
+            engines: Record<string, string>;
+            tools: string[];
+        } | null;
+        install: {
+            pinned: string;
+            latest: string;
+            requiresBuildAllowance: boolean | null;
+            note: string;
+        };
+        notice: string;
+    }>;
+    private readJsonFile;
+}
+//# sourceMappingURL=github.d.ts.map

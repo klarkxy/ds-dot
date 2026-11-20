@@ -1,0 +1,54 @@
+import { a as modelRouteOverride, c as sameModelRoute, i as modelRouteKey, n as defaultModelRoute, o as normalizeModelRoute, r as isModelRouteValue, s as parseModelRouteKey, t as ModelRoute } from "./route.js";
+import { a as modelRouteMarker, i as ModelRouteText, n as MODEL_ROUTE_ROLE, o as readModelRouteMarker, r as ModelRouteMarkerMeta, t as MODEL_ROUTE_MARKER } from "./marker.js";
+import { a as catalogFailures, c as modelCatalogErrorMessage, d as parseModelMenuChoices, f as readModelCatalog, i as ModelMenuChoice, l as modelCatalogFailures, n as ModelCatalogClient, o as checkedModelCatalog, r as ModelCatalogFailure, s as knownModelFromChoices, t as MODEL_CATALOG_INJECT, u as modelMenuEffortOptions } from "./catalog.js";
+//#region src/detect.d.ts
+/** One model-route field found in a projected settings schema. */
+interface DetectedModelField {
+  /** Concrete keys and numeric indices; [] denotes an informational item template. */
+  readonly path: readonly string[];
+  readonly via: 'marker' | 'shape';
+  readonly marker?: ModelRouteMarkerMeta;
+  readonly current?: ModelRoute;
+  readonly known?: boolean;
+  /** False for a collection template with no live item to edit. */
+  readonly editable?: false;
+  /** Clearing this route must retain the array element instead of unsetting it. */
+  readonly arrayItem?: true;
+  readonly label?: string;
+  readonly description?: string;
+  readonly rootKeys?: readonly string[];
+  readonly writeKeys?: readonly string[];
+  readonly preserveSiblings?: true;
+  readonly supportsReasoning?: false;
+}
+interface DetectModelFieldsOptions {
+  readonly value?: unknown;
+  readonly knownModel?: (route: ModelRoute) => boolean;
+  /** Recursion budget against deep or circular projections; defaults to 32. */
+  readonly maxDepth?: number;
+}
+/** Recognize both JSON Schema nodes and native serialized Schemastery schemas. */
+declare function hasModelRouteShape(schema: unknown): boolean;
+/** Find route leaves without visiting unrelated metadata or definition nodes. */
+declare function detectModelFields(schema: unknown, options?: DetectModelFieldsOptions): DetectedModelField[];
+//#endregion
+//#region src/menu.d.ts
+/** Localize standard effort ids only when the provider has not supplied a display name. */
+declare function modelMenuEffortLabel(effort: {
+  id: string;
+  name: string;
+}, locale?: string): string;
+/** One provider group in the menu, in catalog order, after applying the search query. */
+interface ModelMenuGroup {
+  readonly provider: string;
+  /** Provider display name, from the catalog group or split from the "Provider / Model" label. */
+  readonly name: string;
+  readonly items: readonly ModelMenuChoice[];
+}
+/** The short model label shown inside a provider group. */
+declare function modelMenuShortName(choice: ModelMenuChoice): string;
+/** Group catalog choices by provider and filter them by a case-insensitive query. */
+declare function groupModelMenuChoices(choices: readonly ModelMenuChoice[], query: string): ModelMenuGroup[];
+//#endregion
+export { DetectModelFieldsOptions, DetectedModelField, MODEL_CATALOG_INJECT, MODEL_ROUTE_MARKER, MODEL_ROUTE_ROLE, ModelCatalogClient, ModelCatalogFailure, ModelMenuChoice, ModelMenuGroup, ModelRoute, ModelRouteMarkerMeta, ModelRouteText, catalogFailures, checkedModelCatalog, defaultModelRoute, detectModelFields, groupModelMenuChoices, hasModelRouteShape, isModelRouteValue, knownModelFromChoices, modelCatalogErrorMessage, modelCatalogFailures, modelMenuEffortLabel, modelMenuEffortOptions, modelMenuShortName, modelRouteKey, modelRouteMarker, modelRouteOverride, normalizeModelRoute, parseModelMenuChoices, parseModelRouteKey, readModelCatalog, readModelRouteMarker, sameModelRoute };
+//# sourceMappingURL=index.d.ts.map

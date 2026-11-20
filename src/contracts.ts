@@ -260,6 +260,8 @@ export interface DotSettings {
   /** Whether dot may run her own background reflection pass. */
   readonly reflection: boolean
   readonly idleCheckMinutes: number
+  /** Prompt-cache TTL overrides by `provider/model` key, in minutes; 0 turns keepalive off for that model. */
+  readonly cacheTtl?: Readonly<Record<string, number>>
   /** The human's own persona text for dot; absent uses the default persona. */
   readonly persona?: string
   /** How dot addresses the human; absent uses the default. */
@@ -358,6 +360,15 @@ export interface DotContextUsage {
 /** Usage baseline recorded when the human clears cumulative totals mid-segment. */
 export interface DotUsageOffset extends DotContextUsage {
   readonly sessionId: string
+}
+
+/** The cache-keepalive setting of the model dot's next request would run on. */
+export interface KeepaliveInfo {
+  readonly provider: string
+  readonly model: string
+  /** Effective TTL in minutes: the human's override or the built-in default. 0 disables pings. */
+  readonly minutes: number
+  readonly defaultMinutes: number
 }
 
 /** The frozen prompt blocks of the current segment; live values before a segment exists. */

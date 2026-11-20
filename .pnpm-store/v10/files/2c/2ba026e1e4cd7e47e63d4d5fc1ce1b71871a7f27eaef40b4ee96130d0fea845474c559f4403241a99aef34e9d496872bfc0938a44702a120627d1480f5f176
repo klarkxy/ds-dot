@@ -1,0 +1,378 @@
+import { AUXILIARY_MODEL_CHANGES_IDENTITY, AUXILIARY_MODEL_CHANNEL, AUXILIARY_MODEL_NS, AUXILIARY_MODEL_SERVICE, getAuxiliaryModel } from "./contracts.js";
+import { createPluginLogger } from "./logger.js";
+import { registerHostRpc } from "./host-rpc.js";
+import { notifyModelSettingsChanged, registerModelSettings } from "./model-settings.js";
+import { createModelSettingsChanges } from "./model-settings-changes.js";
+import { modelRouteOverride, normalizeModelRoute } from "@klarkxy/dsh-model-route";
+//#region src/auxiliary-model.ts
+const DOMAIN_NAME = "dsh_auxiliary";
+const DOMAIN_VERSION = 1;
+const TABLE = "settings";
+const KEY = "defaults";
+const INJECT = [
+	"storageDomain",
+	"webServer",
+	"connection"
+];
+/** Marker on the benign "released while the domain was still opening" error. */
+const RECOVERABLE = Symbol.for("klarkxy.dsh.auxiliary-model.recoverable");
+function recoverable(error) {
+	error[RECOVERABLE] = true;
+	return error;
+}
+async function openSharedDomain(scope) {
+	const [{ defineDomain, domainTable }, { z }] = await Promise.all([import("@deepseek-ai/dsh-storage-domain"), import("./zod.js")]);
+	const identifier = z.string().min(1).max(250).refine((value) => value === value.trim() && !/[\x00-\x1f\x7f]/.test(value), "model route identifiers must be non-blank, trimmed and control-free");
+	const model = z.union([z.object({
+		provider: identifier,
+		model: identifier,
+		reasoningEffort: identifier.max(80).optional()
+	}).strict(), z.null()]);
+	return scope.storageDomain.open(defineDomain({
+		name: DOMAIN_NAME,
+		version: DOMAIN_VERSION,
+		tables: { [TABLE]: domainTable(z.object({
+			revision: z.number().int().nonnegative(),
+			model
+		}).strict()) }
+	}));
+}
+/** Marks an optimistic-lock conflict so the RPC envelope can carry 'conflict'. */
+function conflictError(message) {
+	return Object.assign(new Error(message), { conflict: true });
+}
+/** RPC-visible error classification; storage failures stay sanitized. */
+function rpcFailure(error) {
+	if (error && typeof error === "object" && "conflict" in error) return {
+		ok: false,
+		error: {
+			code: "auxiliary-model/conflict",
+			message: error instanceof Error ? error.message : "Revision conflict"
+		}
+	};
+	if (error instanceof Error && /Invalid model route|valid expected revision|Unknown auxiliary model setting/.test(error.message)) return {
+		ok: false,
+		error: {
+			code: "auxiliary-model/rejected",
+			message: error.message
+		}
+	};
+	return {
+		ok: false,
+		error: {
+			code: "auxiliary-model/store",
+			message: "Auxiliary model store request failed"
+		}
+	};
+}
+/**
+* Serialized optimistic-lock write; resolves after the durable put commits.
+* Revision verification happens inside the queue: two writers carrying the
+* same expectedRevision race for one slot and only the first commits.
+* Notification fires only after commit, so a failed observer can never turn
+* an already committed write into an apparent save failure.
+*/
+function setSharedModel(state, ctx, input, expectedRevision) {
+	if (!Number.isSafeInteger(expectedRevision)) return Promise.reject(conflictError("A valid expected revision is required; reload and retry"));
+	const row = input && typeof input === "object" && !Array.isArray(input) ? input : void 0;
+	const validField = (value) => typeof value === "string" && value === value.trim() && !/[\x00-\x1f\x7f]/.test(value);
+	if (!row || [
+		"provider",
+		"model",
+		"reasoningEffort"
+	].some((key) => row[key] !== void 0 && !validField(row[key]))) return Promise.reject(/* @__PURE__ */ new Error("Invalid model route"));
+	const normalized = normalizeModelRoute(row);
+	if ((Boolean(row.provider) || Boolean(row.model)) && !modelRouteOverride(normalized)) return Promise.reject(/* @__PURE__ */ new Error("Invalid model route"));
+	const commit = state.tail.then(async () => {
+		if (state.closed || !state.domain) throw new Error("Auxiliary model settings are unloading; retry in a moment");
+		if (expectedRevision !== state.data.revision) {
+			createPluginLogger(ctx, "dsh-plugin-kit", { forwardHostWarnError: false }).warn("auxiliary-model.conflict", "Auxiliary model update rejected due to revision conflict.", void 0, {
+				expectedRevision: Number(expectedRevision),
+				currentRevision: state.data.revision
+			});
+			throw conflictError("Auxiliary model settings changed; reload and retry");
+		}
+		const next = {
+			revision: state.data.revision + 1,
+			model: modelRouteOverride(normalized) ?? null
+		};
+		await state.domain.table(TABLE).put(KEY, {
+			revision: next.revision,
+			model: next.model
+		});
+		state.data = next;
+		createPluginLogger(ctx, "dsh-plugin-kit", { forwardHostWarnError: false }).info("auxiliary-model.updated", "Updated global auxiliary model default.", {
+			revision: next.revision,
+			provider: next.model?.provider ?? null,
+			model: next.model?.model ?? null
+		});
+		notifyModelSettingsChanged(ctx.root, AUXILIARY_MODEL_NS, next.revision);
+		return next;
+	});
+	state.tail = commit.then(() => {}, () => {});
+	return commit;
+}
+function initScope(state, ctx, scope) {
+	const log = createPluginLogger(ctx, "dsh-plugin-kit", { forwardHostWarnError: false });
+	const generation = ++state.generation;
+	let disposed = false;
+	scope.effect(() => () => {
+		disposed = true;
+	});
+	const stale = () => state.closed || disposed || state.generation !== generation;
+	const run = (async () => {
+		state.available = false;
+		const domain = await openSharedDomain(scope);
+		if (stale()) {
+			await domain.close();
+			throw recoverable(/* @__PURE__ */ new Error("Auxiliary model store released during open"));
+		}
+		state.domain = domain;
+		try {
+			scope.effect(() => () => domain.close());
+		} catch (error) {
+			await domain.close();
+			throw error;
+		}
+		const stored = domain.table(TABLE).get(KEY);
+		if (stale()) {
+			await domain.close();
+			throw recoverable(/* @__PURE__ */ new Error("Auxiliary model store superseded during open"));
+		}
+		state.data = {
+			revision: stored?.revision ?? 0,
+			model: stored?.model ?? null
+		};
+		state.error = void 0;
+		state.available = true;
+		log.info("auxiliary-model.opened", "Shared auxiliary model store opened.", {
+			generation,
+			revision: state.data.revision,
+			hasModel: Boolean(state.data.model)
+		});
+		scope.effect(() => registerModelSettings(scope, {
+			ns: AUXILIARY_MODEL_NS,
+			title: {
+				zh: "辅助模型",
+				en: "Auxiliary model"
+			},
+			read(signal) {
+				signal.throwIfAborted();
+				const { revision, model } = state.data;
+				return {
+					revision,
+					fields: [{
+						path: ["model"],
+						label: {
+							zh: "全局辅助模型",
+							en: "Global auxiliary model"
+						},
+						current: model ?? void 0,
+						allowFollow: true,
+						followLabel: {
+							zh: "当前会话模型",
+							en: "Current conversation model"
+						}
+					}]
+				};
+			},
+			async write(path, route, expectedRevision, signal) {
+				signal.throwIfAborted();
+				if (path.length !== 1 || path[0] !== "model") throw new Error("Unknown auxiliary model setting");
+				return setSharedModel(state, ctx, route, expectedRevision);
+			}
+		}));
+		scope.effect(() => registerHostRpc(scope, AUXILIARY_MODEL_CHANNEL, async (endpoint, payload, signal) => {
+			signal.throwIfAborted();
+			if (state.closed) return {
+				ok: false,
+				error: {
+					code: "auxiliary-model/unloading",
+					message: "Auxiliary model settings are unloading; retry in a moment"
+				}
+			};
+			if (!state.available) return state.error ? {
+				ok: false,
+				error: {
+					code: "auxiliary-model/store",
+					message: "Auxiliary model store request failed"
+				}
+			} : {
+				ok: false,
+				error: {
+					code: "auxiliary-model/unavailable",
+					message: "Auxiliary model settings are unavailable; retry in a moment"
+				}
+			};
+			if (endpoint === "defaults.get") {
+				const { revision, model } = state.data;
+				return {
+					ok: true,
+					value: {
+						revision,
+						model
+					}
+				};
+			}
+			if (endpoint === "defaults.set") try {
+				const body = payload && typeof payload === "object" && !Array.isArray(payload) ? payload : {};
+				const value = await setSharedModel(state, ctx, body.model, body.expectedRevision);
+				signal.throwIfAborted();
+				return {
+					ok: true,
+					value
+				};
+			} catch (error) {
+				if (signal.aborted) throw error;
+				return rpcFailure(error);
+			}
+			return {
+				ok: false,
+				error: {
+					code: "auxiliary-model/unknown-endpoint",
+					message: `Unknown endpoint: ${endpoint}`
+				}
+			};
+		}, {
+			isEndpoint: (endpoint) => /^[a-z.]+$/.test(endpoint),
+			logger: log
+		}));
+		createModelSettingsChanges(scope, AUXILIARY_MODEL_CHANGES_IDENTITY, AUXILIARY_MODEL_NS);
+		scope.effect(() => () => {
+			if (state.generation === generation) {
+				state.available = false;
+				state.domain = void 0;
+			}
+		});
+	})().catch((error) => {
+		if (error && typeof error === "object" && error[RECOVERABLE]) log.debug("auxiliary-model.superseded", "Shared auxiliary model init superseded during open.", { generation });
+		else log.error("auxiliary-model.init-failed", "Shared auxiliary model store failed to open.", error, { generation });
+		if (error && typeof error === "object") error.auxGeneration = generation;
+		if (state.generation === generation) {
+			state.available = false;
+			state.error = error;
+		}
+		throw error;
+	});
+	run.catch(() => {});
+	const armed = run.then(() => {});
+	armed.catch(() => {});
+	state.ready = armed;
+	return run;
+}
+function teardown(state, ctx) {
+	if (!state.closing) {
+		state.closed = true;
+		const root = ctx.root;
+		state.closing = (async () => {
+			await state.scopeInit?.catch(() => {});
+			await state.tail.catch(() => {});
+			try {
+				await state.fiber?.dispose();
+			} catch (error) {
+				createPluginLogger(ctx, "dsh-plugin-kit", { forwardHostWarnError: false }).fault("auxiliary-model.dispose-failed", "Shared auxiliary model owner fiber failed to dispose.", error);
+				try {
+					ctx.logger?.warn("auxiliary-model: fiber dispose failed", error);
+				} catch {}
+			}
+			try {
+				if (root.get("dshAuxiliaryModel", false) === state) state.stopUnprovide?.();
+			} catch {}
+			state.stopUnprovide = void 0;
+		})();
+	}
+	return state.closing;
+}
+function createSharedState(ctx) {
+	const root = ctx.root;
+	const state = {
+		users: 0,
+		closed: false,
+		available: false,
+		generation: 0,
+		tail: Promise.resolve(),
+		data: {
+			revision: 0,
+			model: null
+		},
+		snapshot() {
+			if (this.error) throw this.error;
+			if (!this.available) throw new Error("Auxiliary model store is unavailable; retry in a moment");
+			return this.data;
+		},
+		ready: Promise.resolve(),
+		teardown() {
+			return teardown(this, ctx);
+		}
+	};
+	const inactive = INJECT.filter((service) => {
+		try {
+			return root.get(service, true) === void 0;
+		} catch {
+			return true;
+		}
+	});
+	if (inactive.length) throw new Error(`retainAuxiliaryModel requires active ${inactive.join(", ")}; declare them in inject`);
+	state.fiber = root.inject(INJECT, (scope) => {
+		state.scopeInit = initScope(state, ctx, scope);
+	});
+	state.ready = Promise.resolve(state.fiber).then(() => {
+		if (!state.scopeInit) throw recoverable(/* @__PURE__ */ new Error("Auxiliary model owner fiber settled without initializing its scope"));
+		return state.scopeInit;
+	});
+	state.ready.catch((error) => {
+		const tag = error.auxGeneration;
+		if (tag !== void 0 && tag !== state.generation) return;
+		state.error = state.error ?? error;
+		state.closed = true;
+		state.teardown();
+	});
+	state.stopUnprovide = root.provide(AUXILIARY_MODEL_SERVICE, state);
+	return state;
+}
+async function obtainShared(ctx) {
+	const root = ctx.root;
+	for (;;) {
+		const existing = root.get(AUXILIARY_MODEL_SERVICE, false);
+		if (existing) {
+			if (!existing.closed) return existing;
+			await existing.closing;
+			continue;
+		}
+		return createSharedState(ctx);
+	}
+}
+/**
+* Retain the shared auxiliary-model store for the calling plugin.
+*
+* Resolves once storage is open and the read/write surfaces are live, with a
+* release function; register it as `ctx.effect(() => release)` so the store
+* unloads with the plugin. The first participant opens the shared owner
+* fiber; `await release()` drains pending writes and fully tears the owner
+* down when the last participant leaves. Requires `storageDomain`,
+* `webServer` and `connection` to exist on the host.
+*
+* Concurrent retainers share one owner; a retain arriving during teardown
+* waits for the closing owner and then reinstalls — it never inherits a
+* half-torn-down state.
+*/
+async function retainAuxiliaryModel(ctx) {
+	for (;;) {
+		const state = await obtainShared(ctx);
+		await state.ready;
+		if (state.closed) continue;
+		state.users += 1;
+		let released = false;
+		return async () => {
+			if (released) return;
+			released = true;
+			state.users -= 1;
+			if (state.users <= 0) await state.teardown();
+			else await state.tail.catch(() => {});
+		};
+	}
+}
+//#endregion
+export { getAuxiliaryModel, retainAuxiliaryModel };
+
+//# sourceMappingURL=auxiliary-model.js.map

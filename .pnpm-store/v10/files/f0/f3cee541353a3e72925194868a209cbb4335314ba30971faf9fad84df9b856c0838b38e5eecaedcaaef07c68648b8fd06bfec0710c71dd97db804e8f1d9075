@@ -1,0 +1,49 @@
+import { O as ViewNode, w as ViewAnswer } from "./contracts2.js";
+//#region src/runtime.d.ts
+type ToolArgsView = {
+  has(key: string): boolean;
+  complete(key: string): boolean;
+  text(key: string): string | undefined;
+  value(key: string): unknown;
+};
+type ToolViewBlock = {
+  callId: string;
+  name?: string;
+  args?: ToolArgsView;
+  argsRaw?: string;
+  kind?: 'tool-result';
+  meta?: unknown;
+  isError?: boolean;
+  error?: {
+    name: string;
+    code: string;
+    reason?: string;
+  };
+  content?: readonly unknown[];
+  subCalls?: readonly ToolViewBlock[];
+};
+type ReplySnapshot = {
+  order: readonly string[];
+  locations: {
+    getTurn(turn: number): readonly string[];
+  };
+  nodes: {
+    get(key: string): {
+      kind: string;
+      data?: {
+        root?: ToolViewBlock;
+        source?: unknown;
+        content?: readonly unknown[];
+      };
+    } | undefined;
+  };
+};
+//#endregion
+//#region src/answers.d.ts
+/** Read visible, durable user/steering messages only, including inherited history. */
+declare function replyAnswers(snapshot: ReplySnapshot): ReadonlyMap<string, ViewAnswer>;
+declare function checkedAnswer(answer: ViewAnswer | undefined, id: string | undefined, view: ViewNode, revision?: number): ViewAnswer | null;
+declare function sameAnswers(left: ReadonlyMap<string, ViewAnswer>, right: ReadonlyMap<string, ViewAnswer>): boolean;
+//#endregion
+export { checkedAnswer, replyAnswers, sameAnswers };
+//# sourceMappingURL=answers.d.ts.map

@@ -1,0 +1,87 @@
+import { C as truncateLogText, S as sanitizePluginLogText, _ as normalizePluginLogSource, a as PluginLogContext, b as sanitizePluginLogContext, c as PluginLogInput, d as PluginLogger, f as buildPluginLogEntry, g as normalizePluginLogEvent, h as mergePluginLogContext, i as PLUGIN_LOG_MAX_MESSAGE_CHARS, l as PluginLogLevel, m as isPluginLogLevel, n as PLUGIN_LOG_LEVELS, o as PluginLogEntry, p as createChildPluginLogger, r as PLUGIN_LOG_MAX_CONTEXT_CHARS, s as PluginLogError, t as DEFAULT_PLUGIN_LOG_LEVEL, u as PluginLogScalar, v as parsePluginLogLevel, x as sanitizePluginLogError, y as pluginLogLevelEnabled } from "./log-shared2.js";
+//#region src/logger.d.ts
+declare const PLUGIN_LOG_MAX_AGE_MS: number;
+declare const PLUGIN_LOG_MAX_FILE_BYTES: number;
+declare const PLUGIN_LOG_MAX_ARCHIVE_BYTES: number;
+declare const PLUGIN_LOG_RECENT_LIMIT = 200;
+interface RotatingPluginLoggerOptions {
+  directory?: string;
+  home?: string;
+  profile?: string;
+  minimumLevel?: PluginLogLevel;
+  env?: NodeJS.ProcessEnv;
+  now?: () => Date;
+  pid?: number;
+  maxFileBytes?: number;
+  maxArchiveBytes?: number;
+  maxAgeMs?: number;
+  recentLimit?: number;
+  forwardHostWarnError?: boolean;
+}
+interface InstallPluginLoggerOptions extends RotatingPluginLoggerOptions {
+  loadedContext?: PluginLogContext;
+}
+declare function safeProfileName(profile: string | undefined | null): string;
+declare function pluginLogDirectory(home: string, profile?: string): string;
+declare function resolveHostLogTarget(ctx: unknown, options?: Pick<RotatingPluginLoggerOptions, 'directory' | 'home' | 'profile' | 'env'>): {
+  directory: string | null;
+  anchor: string | null;
+  profile?: string;
+};
+/**
+ * Synchronous, append-only rotating JSONL logger modeled on DSH Spaces
+ * diagnostics: 7-day or 100 MiB active rotation, 7-day / 100 MiB archive
+ * retention, secret and path redaction, and non-throwing write resilience.
+ */
+declare class RotatingPluginLogger implements PluginLogger {
+  readonly source: string;
+  readonly file: string | null;
+  private lastError;
+  private size;
+  private openedAt;
+  private initialized;
+  private writing;
+  private sequence;
+  private loggedWriteFailure;
+  private readonly recent;
+  private readonly directory;
+  private readonly anchor;
+  private readonly profile;
+  private readonly minimum;
+  private readonly now;
+  private readonly pid;
+  private readonly maxFileBytes;
+  private readonly maxArchiveBytes;
+  private readonly maxAgeMs;
+  private readonly recentLimit;
+  constructor(source: string, options?: RotatingPluginLoggerOptions & {
+    anchor?: string | null;
+  });
+  get lastWriteError(): string | null;
+  recentEntries(limit?: number): PluginLogEntry[];
+  debug(event: string, message: string, context?: PluginLogContext): boolean;
+  info(event: string, message: string, context?: PluginLogContext): boolean;
+  warn(event: string, message: string, error?: unknown, context?: PluginLogContext): boolean;
+  error(event: string, message: string, error?: unknown, context?: PluginLogContext): boolean;
+  fault(event: string, message: string, error?: unknown, context?: PluginLogContext): boolean;
+  child(context: PluginLogContext): PluginLogger;
+  write(input: PluginLogInput): boolean;
+  private pushRecent;
+  private prepare;
+  private rotate;
+  private rotateStaleActive;
+  private prune;
+  private openManagedDirectory;
+  private regularFile;
+}
+declare function createPluginLogger(ctxOrSource: unknown, maybeSource?: string | RotatingPluginLoggerOptions, maybeOptions?: RotatingPluginLoggerOptions): PluginLogger;
+declare function installPluginLogger(ctx: unknown, source: string, options?: InstallPluginLoggerOptions): PluginLogger;
+declare function nextPluginOperationId(prefix?: string): string;
+declare function currentPluginLogContext(): PluginLogContext | undefined;
+declare function withPluginLogContext<T>(context: PluginLogContext, action: () => T): T;
+declare function pluginLogStep<T>(logger: PluginLogger, step: string, context: PluginLogContext | undefined, action: () => Promise<T>, completedLevel?: PluginLogLevel): Promise<T>;
+declare function pluginLogSyncStep<T>(logger: PluginLogger, step: string, context: PluginLogContext | undefined, action: () => T, completedLevel?: PluginLogLevel): T;
+declare function readPluginLogTail(file: string, maxBytes?: number): string;
+//#endregion
+export { DEFAULT_PLUGIN_LOG_LEVEL, InstallPluginLoggerOptions, PLUGIN_LOG_LEVELS, PLUGIN_LOG_MAX_AGE_MS, PLUGIN_LOG_MAX_ARCHIVE_BYTES, PLUGIN_LOG_MAX_CONTEXT_CHARS, PLUGIN_LOG_MAX_FILE_BYTES, PLUGIN_LOG_MAX_MESSAGE_CHARS, PLUGIN_LOG_RECENT_LIMIT, PluginLogContext, PluginLogEntry, PluginLogError, PluginLogInput, PluginLogLevel, PluginLogScalar, PluginLogger, RotatingPluginLogger, RotatingPluginLoggerOptions, buildPluginLogEntry, createChildPluginLogger, createPluginLogger, currentPluginLogContext, installPluginLogger, isPluginLogLevel, mergePluginLogContext, nextPluginOperationId, normalizePluginLogEvent, normalizePluginLogSource, parsePluginLogLevel, pluginLogDirectory, pluginLogLevelEnabled, pluginLogStep, pluginLogSyncStep, readPluginLogTail, resolveHostLogTarget, safeProfileName, sanitizePluginLogContext, sanitizePluginLogError, sanitizePluginLogText, truncateLogText, withPluginLogContext };
+//# sourceMappingURL=logger.d.ts.map

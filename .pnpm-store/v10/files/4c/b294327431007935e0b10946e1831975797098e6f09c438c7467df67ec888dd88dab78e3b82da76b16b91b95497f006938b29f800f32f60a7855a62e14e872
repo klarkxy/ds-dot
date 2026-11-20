@@ -1,0 +1,226 @@
+import { C as isName, S as evaluate, b as compileFormula } from "./core2.js";
+import { isRecord } from "./contracts.js";
+import { c as english } from "./ui.js";
+import { useEffect } from "react";
+import { jsx, jsxs } from "react/jsx-runtime";
+import { Coordinates, Mafs, Plot, Point, Text, useMovablePoint } from "mafs";
+//#region src/math.tsx
+const DEFAULT_DOMAIN = [-10, 10];
+const DEFAULT_RANGE = [-10, 10];
+const CURVE_COLORS = [
+	"var(--dsw-alias-state-business-primary)",
+	"var(--dsw-alias-brand-primary)",
+	"var(--dsw-alias-label-secondary)",
+	"var(--dsw-alias-label-tertiary)"
+];
+const curveColor = (index) => CURVE_COLORS[index % CURVE_COLORS.length];
+const POINT_COLOR = "var(--dsw-alias-state-business-primary)";
+/** `lookup` can throw (the scope reports unknown names); a missing binding
+* falls back to the declared coordinate instead of breaking the plane. */
+const safeLookup = (lookup) => (name) => {
+	try {
+		return lookup(name);
+	} catch {
+		return;
+	}
+};
+const finite = (value) => typeof value === "number" && Number.isFinite(value) ? value : void 0;
+/** Ordered domain/range with sane defaults; degenerate input falls back. */
+function mathBounds(domain, range) {
+	const read = (value, fallback) => {
+		if (!Array.isArray(value)) return fallback;
+		const a = finite(value[0]);
+		const b = finite(value[1]);
+		if (a === void 0 || b === void 0 || a === b) return fallback;
+		return a < b ? [a, b] : [b, a];
+	};
+	return {
+		x: read(domain, DEFAULT_DOMAIN),
+		y: read(range, DEFAULT_RANGE)
+	};
+}
+/** Every declared curve is kept: a failed one carries `error` and is skipped
+* at draw time instead of dropping the whole view. */
+function compileCurves(curves) {
+	if (!Array.isArray(curves)) return [];
+	const out = [];
+	for (const item of curves) {
+		const expression = typeof item?.expression === "string" ? item.expression : "";
+		const compiled = compileFormula(expression);
+		out.push(compiled.error === void 0 ? {
+			label: typeof item?.label === "string" ? item.label : void 0,
+			expression,
+			tree: compiled.tree
+		} : {
+			label: typeof item?.label === "string" ? item.label : void 0,
+			expression,
+			error: compiled.error
+		});
+	}
+	return out;
+}
+/** f(x) for one compiled expression. x binds the running variable; other names
+* read the view scope through `lookup`. Failures and non-finite results are
+* NaN so the plotter just breaks the line there. */
+function curveAt(curve, x, lookup) {
+	if (curve.tree === void 0) return NaN;
+	const scope = (name) => {
+		if (name === "x") return x;
+		try {
+			return lookup(name);
+		} catch {
+			return;
+		}
+	};
+	const result = evaluate(curve.tree, scope);
+	const value = result.error === void 0 ? finite(result.value) : void 0;
+	return value === void 0 ? NaN : value;
+}
+/** Uniform samples for tests and label placement; only finite values kept. */
+function sampleCurve(curve, domain, lookup, samples = 64) {
+	const count = Math.max(2, Math.min(512, Math.floor(samples)));
+	const [min, max] = domain;
+	const out = [];
+	for (let index = 0; index < count; index += 1) {
+		const x = min + (max - min) * index / (count - 1);
+		const y = curveAt(curve, x, lookup);
+		if (Number.isFinite(y)) out.push([x, y]);
+	}
+	return out;
+}
+function pointBinding(id) {
+	return {
+		x: `${id}X`,
+		y: `${id}Y`
+	};
+}
+function curveLabelAt(curve, domain, lookup) {
+	if (typeof curve.label !== "string" || curve.label === "") return null;
+	const last = sampleCurve(curve, domain, lookup, 40).at(-1);
+	if (last === void 0) return null;
+	return {
+		at: last,
+		text: curve.label
+	};
+}
+function useBoundPoint(point, lookup, setInput) {
+	const [declaredX, declaredY] = [finite(point.x) ?? 0, finite(point.y) ?? 0];
+	const externalX = finite(lookup(pointBinding(point.id).x)) ?? declaredX;
+	const externalY = finite(lookup(pointBinding(point.id).y)) ?? declaredY;
+	const movable = useMovablePoint([externalX, externalY], {
+		color: POINT_COLOR,
+		...point.constrain === "horizontal" || point.constrain === "vertical" ? { constrain: point.constrain } : {}
+	});
+	const { x, y, setPoint } = movable;
+	useEffect(() => {
+		setInput(pointBinding(point.id).x, x);
+		setInput(pointBinding(point.id).y, y);
+	}, [
+		setInput,
+		point.id,
+		x,
+		y
+	]);
+	useEffect(() => {
+		if (Math.abs(externalX - x) > 1e-9 || Math.abs(externalY - y) > 1e-9) setPoint([externalX, externalY]);
+	}, [
+		externalX,
+		externalY,
+		x,
+		y,
+		setPoint
+	]);
+	return {
+		spec: point,
+		x,
+		y,
+		element: movable.element
+	};
+}
+function EditableMathPoint({ point, lookup, setInput }) {
+	return useBoundPoint(point, lookup, setInput).element;
+}
+function MathView({ node, lookup, setInput, t = english, editable = true }) {
+	const safe = safeLookup(lookup);
+	const bounds = mathBounds(node.domain, node.range);
+	const curves = compileCurves(node.curves);
+	const points = (Array.isArray(node.mathPoints) ? node.mathPoints : []).filter((point) => isRecord(point) && isName(point.id)).map((spec) => ({
+		spec,
+		x: finite(safe(pointBinding(spec.id).x)) ?? finite(spec.x) ?? 0,
+		y: finite(safe(pointBinding(spec.id).y)) ?? finite(spec.y) ?? 0
+	}));
+	const shown = curves.filter((curve) => curve.tree !== void 0);
+	const readouts = points.filter((item) => typeof item.spec.label === "string" && item.spec.label !== "");
+	return /* @__PURE__ */ jsxs("figure", {
+		className: "dvui-math",
+		children: [
+			/* @__PURE__ */ jsx("div", {
+				className: "dvui-math-plot",
+				children: /* @__PURE__ */ jsxs(Mafs, {
+					height: 320,
+					pan: false,
+					zoom: false,
+					viewBox: {
+						x: bounds.x,
+						y: bounds.y,
+						padding: 0
+					},
+					children: [
+						/* @__PURE__ */ jsx(Coordinates.Cartesian, {}),
+						shown.map((curve, index) => {
+							const color = curveColor(index);
+							const label = curveLabelAt(curve, bounds.x, safe);
+							return /* @__PURE__ */ jsxs("g", { children: [/* @__PURE__ */ jsx(Plot.OfX, {
+								y: (x) => curveAt(curve, x, safe),
+								domain: bounds.x,
+								color,
+								minSamplingDepth: 5,
+								maxSamplingDepth: 10
+							}), label ? /* @__PURE__ */ jsx(Text, {
+								x: label.at[0],
+								y: label.at[1],
+								attach: "ne",
+								attachDistance: 8,
+								color,
+								children: label.text
+							}) : null] }, `${curve.expression}-${index}`);
+						}),
+						points.map((item) => editable ? /* @__PURE__ */ jsx(EditableMathPoint, {
+							point: item.spec,
+							lookup: safe,
+							setInput
+						}, item.spec.id) : /* @__PURE__ */ jsx(Point, {
+							x: item.x,
+							y: item.y,
+							color: POINT_COLOR
+						}, item.spec.id))
+					]
+				})
+			}),
+			readouts.length > 0 ? /* @__PURE__ */ jsx("div", {
+				className: "dvui-math-readout",
+				"aria-label": t("Point values"),
+				children: readouts.map((item) => /* @__PURE__ */ jsxs("span", { children: [
+					/* @__PURE__ */ jsx("i", { style: { background: POINT_COLOR } }),
+					item.spec.label,
+					" (",
+					formatCoordinate(item.x),
+					", ",
+					formatCoordinate(item.y),
+					")"
+				] }, item.spec.id))
+			}) : null,
+			typeof node.caption === "string" && node.caption !== "" ? /* @__PURE__ */ jsx("figcaption", {
+				className: "dvui-caption",
+				children: node.caption
+			}) : null
+		]
+	});
+}
+function formatCoordinate(value) {
+	return Number.isFinite(value) ? String(Number(value.toPrecision(6))) : "—";
+}
+//#endregion
+export { MathView };
+
+//# sourceMappingURL=math.js.map

@@ -1,0 +1,309 @@
+import { SESSION_SETTINGS_ITEM_SLOT, SESSION_SETTINGS_SECTION_ID, SETTINGS_SECTION_ICON_SLOT } from "./contracts.js";
+import { createElement, useCallback, useEffect, useRef, useSyncExternalStore } from "react";
+//#region src/client-utils.ts
+/** Fixed pause for failing background reads; manual work is never replayed. */
+function createPluginReadGate(now = Date.now, logger) {
+	let pausedUntil = 0;
+	let epoch = 0;
+	return {
+		canRead: () => now() >= pausedUntil,
+		reset: () => {
+			epoch++;
+			pausedUntil = 0;
+		},
+		async run(read) {
+			const current = epoch;
+			try {
+				const value = await read();
+				if (current === epoch) {
+					if (pausedUntil > 0) logger?.debug("read-gate.resumed", "Background read gate recovered.");
+					pausedUntil = 0;
+				}
+				return value;
+			} catch (error) {
+				const message = error instanceof Error ? error.message : "";
+				if (current === epoch && (/(?:^|\s)transport failure for .+: HTTP (?:404|405|503)\b/.test(message) || error instanceof TypeError && /^(?:Failed to fetch|fetch failed|NetworkError when attempting to fetch resource\.?)$/i.test(message))) {
+					pausedUntil = now() + 3e4;
+					logger?.warn("read-gate.paused", "Background reads paused for 30s after transport failure.", error);
+				}
+				throw error;
+			}
+		}
+	};
+}
+/** The Editor retains its manuscript session separately; native DSH exposes the main-view binding. */
+function selectedSessionId(client) {
+	const workspace = client.uiWorkspace?.current;
+	return workspace ? workspace.getSnapshot()?.sessionId ?? "" : client.uiSession.adapter.current.getSnapshot().key ?? "";
+}
+/**
+* Owner props are data the host composed, never a Cordis context: reading an
+* undeclared property off one throws instead of returning undefined, which
+* would crash the slot entry and abdicate its cell for good. Tolerate a
+* throwing read so a mistaken prop degrades to "not supplied".
+*/
+function read(source, key) {
+	if (source === null || typeof source !== "object") return void 0;
+	try {
+		return source[key];
+	} catch {
+		return;
+	}
+}
+function readString(source, key) {
+	const value = read(source, key);
+	return typeof value === "string" ? value : void 0;
+}
+/** Owner props win; native settings only supplies close, so resolve its selected session. */
+function useNativeSeat(client, props) {
+	const current = useSyncExternalStore(useCallback((fn) => (client.uiWorkspace?.current ?? client.uiSession.adapter.current).subscribe(fn), [client]), useCallback(() => selectedSessionId(client), [client]), () => "");
+	const language = useSyncExternalStore(useCallback((fn) => client.locale.subscribe(fn), [client]), useCallback(() => client.locale.getSnapshot().active, [client]), () => "en");
+	const sessionId = readString(props, "sessionId") ?? readString(read(props, "owner"), "sessionId") ?? current;
+	const requestedLocale = read(props, "locale") ?? read(read(props, "owner"), "locale") ?? language;
+	return {
+		sessionId,
+		locale: String(requestedLocale).startsWith("zh") ? "zh" : "en",
+		hidden: read(props, "hidden") === true || read(read(props, "owner"), "hidden") === true
+	};
+}
+/** Refresh on native log boundaries/reconnect/focus. Read-only settling is bounded to an observed job. */
+function useFeatureRefresh(client, sessionId, refresh, working = false, enabled = true) {
+	const refreshRef = useRef(refresh);
+	refreshRef.current = refresh;
+	useEffect(() => {
+		if (!enabled) return;
+		let timer;
+		const queue = () => {
+			if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
+			clearTimeout(timer);
+			timer = setTimeout(() => refreshRef.current(), 150);
+		};
+		const stopEvents = (sessionId ? client.sessions.binding?.(sessionId)?.eventSource : void 0)?.subscribe(queue);
+		const stopConnection = client.connection?.generation?.subscribe(queue);
+		const visibility = () => {
+			if (document.visibilityState === "visible") queue();
+		};
+		window.addEventListener("focus", queue);
+		document.addEventListener("visibilitychange", visibility);
+		document.addEventListener("toggle", queue, true);
+		return () => {
+			clearTimeout(timer);
+			stopEvents?.();
+			stopConnection?.();
+			window.removeEventListener("focus", queue);
+			document.removeEventListener("visibilitychange", visibility);
+			document.removeEventListener("toggle", queue, true);
+		};
+	}, [
+		client,
+		sessionId,
+		enabled
+	]);
+	useEffect(() => {
+		if (!enabled || !working) return;
+		let delay = 250;
+		const until = Date.now() + 3e5;
+		let timer;
+		const tick = () => {
+			if (Date.now() >= until) return;
+			if (document.visibilityState !== "hidden") refreshRef.current();
+			delay = Math.min(delay * 2, 2e3);
+			timer = setTimeout(tick, delay);
+		};
+		timer = setTimeout(tick, delay);
+		return () => clearTimeout(timer);
+	}, [
+		client,
+		sessionId,
+		working,
+		enabled
+	]);
+}
+/** One `<svg>` with the shared icon chrome; children are plain elements. */
+function lineIcon(children) {
+	return function SettingsSectionIcon(props) {
+		return createElement("svg", {
+			"aria-hidden": "true",
+			width: props.size ?? 16,
+			height: props.size ?? 16,
+			viewBox: "0 0 16 16",
+			fill: "none",
+			stroke: "currentColor",
+			strokeWidth: 1,
+			strokeLinecap: "round",
+			strokeLinejoin: "round"
+		}, ...children.map(([tag, attrs], index) => createElement(tag, {
+			key: index,
+			...attrs
+		})));
+	};
+}
+/** Chat bubble for the shared Session Management section. */
+const IconSessionSettings = lineIcon([["path", { d: "M8.5 13a5.5 5.5 0 0 0 5.5-5.5A5.5 5.5 0 0 0 8.5 2 5.5 5.5 0 0 0 3 7.5a5.48 5.48 0 0 0 .9 3L2.8 12.6a.5.5 0 0 0 .62.62l2.9-.98a5.48 5.48 0 0 0 2.18.76Z" }]]);
+/** Serif-flavoured letter A for the Font section. */
+const IconFontSettings = lineIcon([
+	["path", { d: "M3.3 12.6 7.9 3.1a.5.5 0 0 1 .9 0l4.6 9.5" }],
+	["path", { d: "M5.2 9.4h6.3" }],
+	["path", { d: "M2.4 12.6h2.4" }],
+	["path", { d: "M11.9 12.6h2.4" }]
+]);
+/** Keyboard for the Shortcuts section. */
+const IconKeyboardSettings = lineIcon([
+	["rect", {
+		x: 1.75,
+		y: 4.75,
+		width: 12.5,
+		height: 7.5,
+		rx: 1.2
+	}],
+	["path", { d: "M4.5 7.25h0" }],
+	["path", { d: "M8 7.25h0" }],
+	["path", { d: "M11.5 7.25h0" }],
+	["path", { d: "M5.25 9.75h5.5" }]
+]);
+/** Linked model nodes for the Model Management section. */
+const IconModelNetworkSettings = lineIcon([
+	["line", {
+		x1: 10.6,
+		y1: 5.3,
+		x2: 8.8,
+		y2: 7.1
+	}],
+	["line", {
+		x1: 7.2,
+		y1: 8.9,
+		x2: 5.4,
+		y2: 10.7
+	}],
+	["circle", {
+		cx: 12,
+		cy: 4,
+		r: 1.9
+	}],
+	["circle", {
+		cx: 4,
+		cy: 12,
+		r: 1.9
+	}],
+	["circle", {
+		cx: 8,
+		cy: 8,
+		r: 1.5
+	}]
+]);
+/**
+* Contribute the nav icon of a `settings.section` entry. The `settings
+* .section.icon` seat is declared by the host independently of the section
+* list, so the wait runs in parallel: the icon appears as soon as both seats
+* exist and unloading removes it again, restoring the host's default glyph.
+* The `id` must equal the section id; `order`/`priority` mirror `order` so the
+* icon cell sorts like its section and, for shared sections, several
+* contributors can register the same icon id under different priorities
+* without duplicating nav entries.
+*/
+function registerSettingsSectionIcon(ctx, sectionId, order, component) {
+	const slots = ctx.slots;
+	return slots.inject(SETTINGS_SECTION_ICON_SLOT, () => slots.register({
+		name: SETTINGS_SECTION_ICON_SLOT,
+		id: sectionId,
+		order,
+		priority: order
+	}, component));
+}
+/** Private Cordis rendezvous; every bundled copy of this helper resolves the same root service. */
+const SESSION_SETTINGS_PAGE_SERVICE = "dshSessionSettingsPage";
+/** The page component renders only its declared child list: items paint their own titles and styles. */
+function SessionSettingsPageView(props) {
+	return props.renderSlot(SESSION_SETTINGS_ITEM_SLOT, {});
+}
+/**
+* Acquire the root-owned page service, creating and providing it on first use.
+* One counter covers participants, the section wait and the provider: the last
+* release removes the wait and then the provider synchronously (Cordis deletes
+* the impl before its async disposer awaits), so a later acquire sees a clean
+* get() miss and can re-establish the page.
+*/
+function acquireSessionSettingsPage(root) {
+	const existing = root.get(SESSION_SETTINGS_PAGE_SERVICE, false);
+	if (existing) return existing;
+	const slots = root.slots;
+	let users = 0;
+	let stopPage;
+	let unprovide;
+	const page = {
+		retain() {
+			users += 1;
+			if (!stopPage) stopPage = slots.inject("settings.section", () => slots.register({
+				name: "settings.section",
+				id: SESSION_SETTINGS_SECTION_ID,
+				order: 30,
+				label: () => {
+					const locale = root.get("locale", false);
+					return String(locale?.getSnapshot?.().active ?? "").startsWith("zh") ? "会话管理" : "Session Management";
+				},
+				children: { [SESSION_SETTINGS_ITEM_SLOT]: {
+					kind: "list",
+					scope: "root"
+				} }
+			}, SessionSettingsPageView));
+		},
+		release() {
+			if (users <= 0) return;
+			users -= 1;
+			if (users > 0) return;
+			stopPage?.();
+			stopPage = void 0;
+			unprovide?.();
+		}
+	};
+	unprovide = root.provide(SESSION_SETTINGS_PAGE_SERVICE, page);
+	return page;
+}
+/**
+* Contribute one row to the shared Session Management settings page.
+*
+* `ctx` is the plugin's own context: the row's slot wait unloads with the
+* plugin, while the page itself is retained on the shared root context for as
+* long as any contributor lives. There is no fallback seat — when every
+* contributor is gone the section disappears with the page. Returns a disposer.
+* Shared root-owned infrastructure (the auxiliary-model card) calls this on
+* `ctx.root` so its row, icon and page share are owned by the root lifetime
+* and released by the returned disposer, not by any plugin fiber.
+*/
+function registerSessionSettingsItem(ctx, item, component) {
+	const slots = ctx.slots;
+	const root = ctx.root;
+	const page = acquireSessionSettingsPage(root);
+	let stopItem;
+	let stopIcon;
+	try {
+		page.retain();
+		stopItem = slots.inject(SESSION_SETTINGS_ITEM_SLOT, () => slots.register({
+			name: SESSION_SETTINGS_ITEM_SLOT,
+			...item
+		}, component));
+		stopIcon = slots.inject(SETTINGS_SECTION_ICON_SLOT, () => slots.register({
+			name: SETTINGS_SECTION_ICON_SLOT,
+			id: SESSION_SETTINGS_SECTION_ID,
+			order: item.order,
+			priority: item.order
+		}, IconSessionSettings));
+	} catch (error) {
+		stopIcon?.();
+		stopItem?.();
+		page.release();
+		throw error;
+	}
+	let disposed = false;
+	return () => {
+		if (disposed) return;
+		disposed = true;
+		stopIcon?.();
+		stopItem?.();
+		page.release();
+	};
+}
+//#endregion
+export { IconFontSettings, IconKeyboardSettings, IconModelNetworkSettings, IconSessionSettings, createPluginReadGate, registerSessionSettingsItem, registerSettingsSectionIcon, selectedSessionId, useFeatureRefresh, useNativeSeat };
+
+//# sourceMappingURL=client-utils.js.map

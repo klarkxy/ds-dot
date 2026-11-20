@@ -1,0 +1,9 @@
+import { ModelCatalogClient, ModelCatalogClient as ModelCatalogClient$1, ModelMenuChoice, ModelMenuChoice as ModelMenuChoice$1, ModelMenuGroup, ModelRoute, groupModelMenuChoices, knownModelFromChoices, modelMenuEffortLabel, modelMenuEffortOptions, modelMenuShortName, modelRouteKey as modelMenuChoiceKey, modelRouteOverride as modelMenuOverride, normalizeModelRoute as normalizeModelMenuRoute, parseModelMenuChoices, parseModelRouteKey as parseModelMenuChoiceKey } from "@klarkxy/dsh-model-route";
+//#region src/model-menu.d.ts
+/** The stored selection. Empty provider/model means "follow the default". */
+type ModelMenuRoute = ModelRoute;
+/** @deprecated Use useModelCatalog and ModelCatalogStatus from model-route/ui for errors and retries. */
+declare function useModelMenuChoices(client: ModelCatalogClient$1, bound?: ModelMenuRoute): ModelMenuChoice$1[];
+//#endregion
+export { type ModelCatalogClient, type ModelMenuChoice, type ModelMenuGroup, ModelMenuRoute, groupModelMenuChoices, knownModelFromChoices, modelMenuChoiceKey, modelMenuEffortLabel, modelMenuEffortOptions, modelMenuOverride, modelMenuShortName, normalizeModelMenuRoute, parseModelMenuChoiceKey, parseModelMenuChoices, useModelMenuChoices };
+//# sourceMappingURL=model-menu.d.ts.map

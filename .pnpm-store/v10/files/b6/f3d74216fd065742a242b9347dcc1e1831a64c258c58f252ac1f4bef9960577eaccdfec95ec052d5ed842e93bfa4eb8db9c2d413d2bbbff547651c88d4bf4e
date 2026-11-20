@@ -1,0 +1,201 @@
+{
+  "name": "@klarkxy/dsh-plugin-kit",
+  "version": "0.8.1",
+  "description": "Shared support library for klarkxy DSH plugins, providing the default auxiliary model, shared session settings, diagnostic logging, independent feature contexts, RPC, UI helpers and optional shared model picker integration; installed automatically by dependent plugins.",
+  "homepage": "https://klarkxy.github.io/dsh-plugins/plugins/plugin-kit/",
+  "license": "SEE LICENSE IN LICENSE",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "main": "./lib/index.js",
+  "types": "./lib/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/index.d.ts",
+      "import": "./lib/index.js",
+      "default": "./lib/index.js"
+    },
+    "./contracts": {
+      "types": "./lib/contracts.d.ts",
+      "import": "./lib/contracts.js",
+      "default": "./lib/contracts.js"
+    },
+    "./host-rpc": {
+      "types": "./lib/host-rpc.d.ts",
+      "import": "./lib/host-rpc.js",
+      "default": "./lib/host-rpc.js"
+    },
+    "./domain": {
+      "types": "./lib/domain.d.ts",
+      "import": "./lib/domain.js",
+      "default": "./lib/domain.js"
+    },
+    "./model-settings": {
+      "types": "./lib/model-settings.d.ts",
+      "import": "./lib/model-settings.js",
+      "default": "./lib/model-settings.js"
+    },
+    "./model-settings-changes": {
+      "types": "./lib/model-settings-changes.d.ts",
+      "import": "./lib/model-settings-changes.js",
+      "default": "./lib/model-settings-changes.js"
+    },
+    "./client-utils": {
+      "types": "./lib/client-utils.d.ts",
+      "import": "./lib/client-utils.js",
+      "default": "./lib/client-utils.js"
+    },
+    "./model-menu": {
+      "types": "./lib/model-menu.d.ts",
+      "import": "./lib/model-menu.js",
+      "default": "./lib/model-menu.js"
+    },
+    "./model-picker": {
+      "types": "./lib/model-picker.d.ts",
+      "import": "./lib/model-picker.js",
+      "default": "./lib/model-picker.js"
+    },
+    "./llm-call": {
+      "types": "./lib/llm-call.d.ts",
+      "import": "./lib/llm-call.js",
+      "default": "./lib/llm-call.js"
+    },
+    "./official-ui": {
+      "types": "./lib/official-ui.d.ts",
+      "import": "./lib/official-ui.js",
+      "default": "./lib/official-ui.js"
+    },
+    "./package.json": "./package.json",
+    "./model-settings-client": {
+      "types": "./lib/model-settings-client.d.ts",
+      "import": "./lib/model-settings-client.js",
+      "default": "./lib/model-settings-client.js"
+    },
+    "./auxiliary-model": {
+      "types": "./lib/auxiliary-model.d.ts",
+      "import": "./lib/auxiliary-model.js",
+      "default": "./lib/auxiliary-model.js"
+    },
+    "./auxiliary-context": {
+      "types": "./lib/auxiliary-context.d.ts",
+      "import": "./lib/auxiliary-context.js",
+      "default": "./lib/auxiliary-context.js"
+    },
+    "./auxiliary-model-client": {
+      "types": "./lib/auxiliary-model-client.d.ts",
+      "import": "./lib/auxiliary-model-client.js",
+      "default": "./lib/auxiliary-model-client.js"
+    },
+    "./cli-process": {
+      "types": "./lib/cli-process.d.ts",
+      "import": "./lib/cli-process.js",
+      "default": "./lib/cli-process.js"
+    },
+    "./cli-media": {
+      "types": "./lib/cli-media.d.ts",
+      "import": "./lib/cli-media.js",
+      "default": "./lib/cli-media.js"
+    },
+    "./log-shared": {
+      "types": "./lib/log-shared.d.ts",
+      "import": "./lib/log-shared.js",
+      "default": "./lib/log-shared.js"
+    },
+    "./logger": {
+      "types": "./lib/logger.d.ts",
+      "import": "./lib/logger.js",
+      "default": "./lib/logger.js"
+    },
+    "./client-logger": {
+      "types": "./lib/client-logger.d.ts",
+      "import": "./lib/client-logger.js",
+      "default": "./lib/client-logger.js"
+    }
+  },
+  "files": [
+    "lib",
+    "README.md",
+    "docs/README.zh-CN.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsdown",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "vitest run --root ../.. --config vitest.editor-plugins.config.ts --maxWorkers=2 plugins/dsh-plugin-kit/src"
+  },
+  "dependencies": {
+    "@klarkxy/dsh-model-route": "0.3.0"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/dsh-llm": ">=0.2.0-rc.2",
+    "@deepseek-ai/dsh-storage-domain": ">=0.2.0-rc.2",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "@deepseek-ai/dsh-typert-protocol": ">=0.2.0-rc.2",
+    "@deepseek-ai/dsh-attachment": ">=0.2.0-rc.2",
+    "@deepseek-ai/dsh-tools": ">=0.2.1-rc.1"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/dsh-llm": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-storage-domain": {
+      "optional": true
+    },
+    "react": {
+      "optional": true
+    },
+    "react-dom": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-typert-protocol": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-attachment": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-tools": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "zod": "4.4.3",
+    "@deepseek-ai/cordis": "4.1.0",
+    "@deepseek-ai/dsh-client-ui-primitives": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-client-ui-slots": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-llm": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-storage-domain": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-storage-json": "0.2.2-rc.1",
+    "@types/react": "18.3.31",
+    "@types/react-dom": "^18.3.0",
+    "react": "18.3.1",
+    "react-dom": "18.3.1",
+    "@deepseek-ai/dsh-typert-protocol": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-api-gateway": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-attachment": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-tools": "0.2.2-rc.1"
+  },
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "dsh-plugins",
+    "deepseek-harness",
+    "deepseek-harness-plugin",
+    "plugin-kit",
+    "shared-library",
+    "auxiliary-model"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/klarkxy/dsh-plugins.git",
+    "directory": "plugins/dsh-plugin-kit"
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
+  "dshRelease": {
+    "contentHash": "25955ab0d80581abe42fdcb1056fe63df494fc7ed85bb119960abaf57fb3e53e"
+  }
+}

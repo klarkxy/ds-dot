@@ -1,0 +1,16 @@
+import { runCli, type CliExecutable } from "@klarkxy/dsh-plugin-kit/cli-process";
+export interface GhProbe {
+    executable: CliExecutable;
+    version: string;
+}
+export interface GhDeps {
+    run?: typeof runCli;
+    pathDirs?: string[];
+    platform?: NodeJS.Platform;
+}
+export declare const MIN_GH_VERSION: readonly [number, number, number];
+export declare function parseGhVersion(stdout: string): [number, number, number] | null;
+export declare function belowFloor(version: [number, number, number]): boolean;
+export declare function findGh(deps?: GhDeps): Promise<CliExecutable | null>;
+export declare function probeGh(deps: GhDeps, signal: AbortSignal): Promise<GhProbe | null>;
+//# sourceMappingURL=gh.d.ts.map

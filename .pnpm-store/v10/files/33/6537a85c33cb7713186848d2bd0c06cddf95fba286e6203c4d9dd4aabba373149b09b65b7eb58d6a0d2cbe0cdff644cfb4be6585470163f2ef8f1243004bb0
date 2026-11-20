@@ -1,0 +1,1018 @@
+import { _ as viewScope, a as choiceValue, f as resolve, g as viewInputs, o as hasInputs, r as asText, s as inputDefault, u as mathDefaults } from "./core2.js";
+import { isSourceItem, isStepItem } from "./contracts.js";
+import { a as LinkIcon, c as english, i as InfoIcon, l as keyLetter, n as CopyIcon, o as Segmented, r as DotsIcon, s as TableIcon, t as CheckIcon } from "./ui.js";
+import { t as WidgetChart } from "./chart.js";
+import { Fragment, Suspense, lazy, useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
+import { jsx, jsxs } from "react/jsx-runtime";
+//#region src/rich-lazy.tsx
+const MathView = lazy(() => import("./math.js").then((module) => ({ default: module.MathView })));
+const FlowView = lazy(() => import("./flow.js").then((module) => ({ default: module.FlowView })));
+const ExploreView = lazy(() => import("./explore.js").then((module) => ({ default: module.ExploreView })));
+const MapView = lazy(() => import("./map.js").then((module) => ({ default: module.MapView })));
+function RichNode(props) {
+	const { node, t = english } = props;
+	const Component = node.type === "math" ? MathView : node.type === "flow" ? FlowView : node.type === "explore" ? ExploreView : node.type === "map" ? MapView : null;
+	if (!Component) return null;
+	return /* @__PURE__ */ jsx(Suspense, {
+		fallback: /* @__PURE__ */ jsx("div", {
+			className: "dvui-tool-loading",
+			role: "status",
+			children: t("Composing interface…")
+		}),
+		children: /* @__PURE__ */ jsx(Component, { ...props })
+	});
+}
+//#endregion
+//#region src/widget.tsx
+const directAnswer = (ctx) => ctx.onSubmit !== void 0 || ctx.onFillDraft === void 0;
+const TONES = [
+	"good",
+	"warn",
+	"bad"
+];
+const CALLOUT_TONES = [
+	"info",
+	"good",
+	"warn",
+	"bad"
+];
+const optionsOf = (node) => Array.isArray(node.options) ? node.options : [];
+const fieldsOf = (node) => Array.isArray(node.fields) ? node.fields : [];
+const sourcesOf = (node) => (Array.isArray(node.items) ? node.items : []).filter(isSourceItem);
+const stepsOf = (node) => (Array.isArray(node.items) ? node.items : []).filter(isStepItem);
+const cellText = (value) => value === null || value === void 0 ? "" : typeof value === "object" ? JSON.stringify(value) : asText(value);
+const NUMERIC_CELL = /^[-+]?[\d.,]+\s?(%|[a-zA-Z]{1,4})?$/;
+function hasType(node, types) {
+	return types.has(node.type) || Array.isArray(node.children) && node.children.some((child) => hasType(child, types));
+}
+const answerValues = (answer, node) => answer != null && answer.action === node.id ? answer.values : void 0;
+const withUnit = (value, unit) => `${asText(value)}${unit ? ` ${unit}` : ""}`;
+const grouped = (value) => typeof value === "number" && Number.isFinite(value) ? value.toLocaleString("en-US", { maximumFractionDigits: 6 }) : asText(value);
+function ActionButton({ primary = false, className = "", children, host: Host, ...props }) {
+	const classes = `${primary ? "dvui-submit" : "dvui-button"} ${className}`;
+	return Host ? /* @__PURE__ */ jsx(Host, {
+		variant: primary ? "primary" : "ghost",
+		size: "sm",
+		className: classes,
+		...props,
+		children
+	}) : /* @__PURE__ */ jsx("button", {
+		type: props.type ?? "button",
+		className: classes,
+		...props,
+		children
+	});
+}
+function FallbackMarkdown({ text }) {
+	return /* @__PURE__ */ jsx("span", { children: text });
+}
+function OptionsInput({ node, ctx, t }) {
+	const [picked, setPicked] = useState([]);
+	const options = optionsOf(node);
+	const multi = node.multi === true;
+	const staged = multi || ctx.onFillDraft !== void 0;
+	const choose = (label) => {
+		if (!ctx.editable) return;
+		if (multi) setPicked((current) => current.includes(label) ? current.filter((item) => item !== label) : [...current, label]);
+		else if (staged) setPicked([label]);
+		else ctx.onSubmit?.(node.id, { selected: [label] });
+	};
+	const values = () => ({ selected: picked });
+	const onKey = (event) => {
+		const index = event.key.toUpperCase().charCodeAt(0) - 65;
+		if (index >= 0 && index < options.length && !event.ctrlKey && !event.metaKey && !event.altKey) {
+			event.preventDefault();
+			choose(options[index].label);
+		}
+	};
+	return /* @__PURE__ */ jsxs(Fragment, { children: [/* @__PURE__ */ jsx("div", {
+		className: "dvui-options",
+		role: "group",
+		"aria-label": t("Options"),
+		onKeyDown: onKey,
+		children: options.map((option, index) => {
+			const selected = staged && picked.includes(option.label);
+			return /* @__PURE__ */ jsxs("button", {
+				type: "button",
+				className: "dvui-option",
+				disabled: !ctx.editable,
+				"aria-pressed": staged ? selected : void 0,
+				"aria-keyshortcuts": keyLetter(index).toLowerCase(),
+				onClick: () => choose(option.label),
+				children: [
+					/* @__PURE__ */ jsx("span", {
+						className: "dvui-key",
+						"aria-hidden": "true",
+						children: keyLetter(index)
+					}),
+					/* @__PURE__ */ jsxs("span", {
+						className: "dvui-option-body",
+						children: [/* @__PURE__ */ jsx("span", {
+							className: "dvui-option-label",
+							children: option.label
+						}), option.description ? /* @__PURE__ */ jsx("span", {
+							className: "dvui-option-desc",
+							children: option.description
+						}) : null]
+					}),
+					selected ? /* @__PURE__ */ jsx("span", {
+						className: "dvui-check",
+						children: /* @__PURE__ */ jsx(CheckIcon, {})
+					}) : null
+				]
+			}, option.label);
+		})
+	}), staged ? /* @__PURE__ */ jsxs("div", {
+		className: "dvui-actions",
+		children: [ctx.onFillDraft ? /* @__PURE__ */ jsx(ActionButton, {
+			host: ctx.ButtonComponent,
+			disabled: ctx.fillLocked || picked.length === 0,
+			onClick: () => ctx.onFillDraft?.(node.id, values()),
+			children: t("Fill composer")
+		}) : null, directAnswer(ctx) ? /* @__PURE__ */ jsx(ActionButton, {
+			host: ctx.ButtonComponent,
+			primary: true,
+			disabled: ctx.answerLocked || picked.length === 0,
+			onClick: () => ctx.onSubmit?.(node.id, values()),
+			children: t("Submit")
+		}) : null]
+	}) : null] });
+}
+function SettledOptions({ node, answer, t }) {
+	const selected = answerValues(answer, node)?.selected;
+	const chosen = Array.isArray(selected) ? selected : [];
+	return /* @__PURE__ */ jsx("div", {
+		className: "dvui-options",
+		role: "group",
+		"aria-label": t("Your answer"),
+		children: optionsOf(node).map((option) => /* @__PURE__ */ jsxs("div", {
+			className: "dvui-option",
+			children: [/* @__PURE__ */ jsxs("span", {
+				className: "dvui-option-body",
+				children: [/* @__PURE__ */ jsx("span", {
+					className: "dvui-option-label",
+					children: option.label
+				}), option.description ? /* @__PURE__ */ jsx("span", {
+					className: "dvui-option-desc",
+					children: option.description
+				}) : null]
+			}), chosen.includes(option.label) ? /* @__PURE__ */ jsx("span", {
+				className: "dvui-check",
+				role: "img",
+				"aria-label": t("Selected"),
+				children: /* @__PURE__ */ jsx(CheckIcon, {})
+			}) : null]
+		}, option.label))
+	});
+}
+function ConfirmInput({ node, ctx, t }) {
+	return /* @__PURE__ */ jsxs("div", {
+		className: "dvui-actions",
+		children: [
+			ctx.onFillDraft ? /* @__PURE__ */ jsx(ActionButton, {
+				host: ctx.ButtonComponent,
+				disabled: ctx.fillLocked,
+				onClick: () => ctx.onFillDraft?.(node.id, { confirmed: true }),
+				children: t("Fill composer")
+			}) : null,
+			directAnswer(ctx) ? /* @__PURE__ */ jsx(ActionButton, {
+				host: ctx.ButtonComponent,
+				disabled: ctx.answerLocked,
+				onClick: () => ctx.onSubmit?.(node.id, { confirmed: false }),
+				children: node.cancelLabel ?? t("Cancel")
+			}) : null,
+			directAnswer(ctx) ? /* @__PURE__ */ jsx(ActionButton, {
+				host: ctx.ButtonComponent,
+				primary: true,
+				disabled: ctx.answerLocked,
+				onClick: () => ctx.onSubmit?.(node.id, { confirmed: true }),
+				children: node.confirmLabel ?? t("Confirm")
+			}) : null
+		]
+	});
+}
+function SettledConfirm({ node, answer, t }) {
+	const confirmed = answerValues(answer, node)?.confirmed;
+	if (typeof confirmed !== "boolean") return /* @__PURE__ */ jsx(ConfirmInput, {
+		node,
+		ctx: { answerLocked: true },
+		t
+	});
+	return /* @__PURE__ */ jsx("span", {
+		className: "dvui-badge",
+		children: confirmed ? node.confirmLabel ?? t("Confirm") : node.cancelLabel ?? t("Cancel")
+	});
+}
+function FormInput({ node, ctx, t }) {
+	const fields = fieldsOf(node);
+	const [draft, setDraft] = useState(() => Object.fromEntries(fields.map((field) => [field.id, field.value ?? ""])));
+	const values = () => ({ fields: Object.fromEntries(fields.map((field) => [field.id, field.readOnly === true ? field.value ?? "" : draft[field.id] ?? ""])) });
+	const act = ctx.onSubmit !== void 0 ? ctx.onSubmit : ctx.onFillDraft;
+	const submit = () => {
+		if (ctx.editable) act?.(node.id, values());
+	};
+	const cancel = () => {
+		if (ctx.editable) ctx.onSubmit?.(node.id, { canceled: true });
+	};
+	return /* @__PURE__ */ jsxs("form", {
+		className: "dvui-form",
+		onSubmit: (event) => {
+			event.preventDefault();
+			submit();
+		},
+		children: [fields.map((field) => {
+			const readOnly = field.readOnly === true;
+			const val = readOnly ? field.value ?? "" : draft[field.id] ?? "";
+			const shared = {
+				className: "dvui-input",
+				value: val,
+				autoComplete: "off",
+				spellCheck: false,
+				readOnly: !ctx.editable || readOnly,
+				"aria-label": field.label,
+				placeholder: field.placeholder,
+				onChange: (event) => {
+					if (!readOnly) setDraft((current) => ({
+						...current,
+						[field.id]: event.target.value
+					}));
+				}
+			};
+			return /* @__PURE__ */ jsxs("label", {
+				className: "dvui-field",
+				children: [/* @__PURE__ */ jsx("span", {
+					className: "dvui-field-label",
+					children: field.label
+				}), field.multiline === true ? /* @__PURE__ */ jsx("textarea", {
+					...shared,
+					rows: Math.min(10, Math.max(3, (val.match(/\n/g)?.length ?? 0) + 1)),
+					onKeyDown: (event) => {
+						if (event.key !== "Enter" || !event.metaKey && !event.ctrlKey || event.nativeEvent.isComposing) return;
+						event.preventDefault();
+						submit();
+					}
+				}) : /* @__PURE__ */ jsx("input", {
+					...shared,
+					type: "text",
+					onKeyDown: (event) => {
+						if (event.key !== "Enter" || event.nativeEvent.isComposing) return;
+						event.preventDefault();
+						submit();
+					}
+				})]
+			}, field.id);
+		}), /* @__PURE__ */ jsxs("div", {
+			className: "dvui-actions",
+			children: [
+				node.cancelLabel && directAnswer(ctx) ? /* @__PURE__ */ jsx(ActionButton, {
+					host: ctx.ButtonComponent,
+					disabled: ctx.answerLocked,
+					onClick: cancel,
+					children: node.cancelLabel
+				}) : null,
+				ctx.onFillDraft && ctx.onSubmit ? /* @__PURE__ */ jsx(ActionButton, {
+					host: ctx.ButtonComponent,
+					disabled: ctx.fillLocked,
+					onClick: () => ctx.onFillDraft?.(node.id, values()),
+					children: t("Fill composer")
+				}) : null,
+				ctx.onSubmit ? /* @__PURE__ */ jsx(ActionButton, {
+					host: ctx.ButtonComponent,
+					primary: true,
+					type: "submit",
+					disabled: ctx.answerLocked,
+					children: node.submitLabel ?? t("Submit")
+				}) : ctx.onFillDraft ? /* @__PURE__ */ jsx(ActionButton, {
+					host: ctx.ButtonComponent,
+					primary: true,
+					type: "submit",
+					disabled: ctx.fillLocked,
+					children: t("Fill composer")
+				}) : null
+			]
+		})]
+	});
+}
+function SettledForm({ node, answer, t }) {
+	const sent = answerValues(answer, node);
+	if (sent === void 0) return /* @__PURE__ */ jsx("div", {
+		className: "dvui-form",
+		children: fieldsOf(node).map((field) => /* @__PURE__ */ jsxs("div", {
+			className: "dvui-field",
+			children: [/* @__PURE__ */ jsx("span", {
+				className: "dvui-field-label",
+				children: field.label
+			}), /* @__PURE__ */ jsx("span", {
+				className: "dvui-option-desc",
+				children: field.value || field.placeholder || ""
+			})]
+		}, field.id))
+	});
+	const label = sent.canceled === true ? node.cancelLabel ?? t("Cancel") : node.submitLabel ?? t("Submit");
+	return /* @__PURE__ */ jsx("div", {
+		className: "dvui-actions",
+		children: /* @__PURE__ */ jsx("span", {
+			className: "dvui-badge",
+			children: label
+		})
+	});
+}
+function WidgetTable({ node, lookup }) {
+	const columns = Array.isArray(node.columns) ? node.columns : [];
+	const rows = (Array.isArray(node.rows) ? node.rows : []).map((row) => (Array.isArray(row) ? row : []).map((cell) => resolve(cell, lookup, "")));
+	const numeric = columns.map((_, index) => {
+		const cells = rows.map((row) => row[index]).filter((cell) => cell !== void 0 && cell !== "");
+		return cells.length > 0 && cells.every((cell) => typeof cell === "number" || typeof cell === "string" && NUMERIC_CELL.test(cell.trim()));
+	});
+	return /* @__PURE__ */ jsx("div", {
+		className: "dvui-table",
+		children: /* @__PURE__ */ jsxs("table", { children: [/* @__PURE__ */ jsx("thead", { children: /* @__PURE__ */ jsx("tr", { children: columns.map((column, index) => /* @__PURE__ */ jsx("th", {
+			scope: "col",
+			className: numeric[index] ? "dvui-num" : void 0,
+			children: column.label
+		}, column.key ?? index)) }) }), /* @__PURE__ */ jsx("tbody", { children: rows.map((row, rowIndex) => /* @__PURE__ */ jsx("tr", { children: columns.map((column, index) => /* @__PURE__ */ jsx("td", {
+			className: numeric[index] ? "dvui-num" : void 0,
+			children: cellText(row[index])
+		}, column.key ?? index)) }, rowIndex)) })] })
+	});
+}
+function WidgetProgress({ node, lookup, t }) {
+	let percent;
+	if (node.percent !== void 0) percent = Number(resolve(node.percent, lookup, 0));
+	else {
+		const max = Number(resolve(node.max, lookup, 0));
+		percent = max > 0 ? Number(resolve(node.value, lookup, 0)) / max * 100 : 0;
+	}
+	percent = Math.max(0, Math.min(100, Number.isFinite(percent) ? percent : 0));
+	const tone = resolve(node.tone, lookup);
+	const right = node.valueLabel !== void 0 ? asText(resolve(node.valueLabel, lookup, "")) : `${Math.round(percent)}%`;
+	return /* @__PURE__ */ jsxs("div", {
+		className: "dvui-progress",
+		"data-tone": TONES.includes(String(tone)) ? String(tone) : void 0,
+		children: [/* @__PURE__ */ jsxs("span", {
+			className: "dvui-progress-label",
+			children: [/* @__PURE__ */ jsx("span", { children: node.label }), /* @__PURE__ */ jsx("span", { children: right })]
+		}), /* @__PURE__ */ jsx("div", {
+			className: "dvui-progress-track",
+			role: "progressbar",
+			"aria-valuenow": Math.round(percent),
+			"aria-valuemin": 0,
+			"aria-valuemax": 100,
+			"aria-label": node.label ?? t("Progress"),
+			"aria-valuetext": right,
+			children: /* @__PURE__ */ jsx("div", {
+				className: "dvui-progress-fill",
+				style: { width: `${percent}%` }
+			})
+		})]
+	});
+}
+function WidgetMetric({ node, lookup }) {
+	const tone = resolve(node.tone, lookup);
+	const caption = node.caption === void 0 ? "" : asText(resolve(node.caption, lookup, ""));
+	return /* @__PURE__ */ jsxs("div", {
+		className: "dvui-metric",
+		"data-tone": TONES.includes(String(tone)) ? String(tone) : void 0,
+		children: [
+			/* @__PURE__ */ jsx("span", {
+				className: "dvui-metric-label",
+				children: node.label
+			}),
+			/* @__PURE__ */ jsx("span", {
+				className: "dvui-metric-value",
+				children: asText(resolve(node.value, lookup, "—"))
+			}),
+			caption !== "" ? /* @__PURE__ */ jsx("span", {
+				className: "dvui-caption",
+				children: caption
+			}) : null
+		]
+	});
+}
+function WidgetCallout({ node, lookup, Markdown, labels }) {
+	const tone = resolve(node.tone, lookup);
+	return /* @__PURE__ */ jsxs("div", {
+		className: "dvui-callout",
+		"data-tone": CALLOUT_TONES.includes(String(tone)) ? String(tone) : "info",
+		children: [/* @__PURE__ */ jsx("span", {
+			className: "dvui-callout-icon",
+			"aria-hidden": "true",
+			children: /* @__PURE__ */ jsx(InfoIcon, {})
+		}), /* @__PURE__ */ jsx("div", { children: /* @__PURE__ */ jsx(Markdown, {
+			text: asText(resolve(node.text, lookup, "")),
+			labels,
+			variant: "compact"
+		}) })]
+	});
+}
+function WidgetSources({ node, t }) {
+	return /* @__PURE__ */ jsx("div", {
+		className: "dvui-sources",
+		role: "list",
+		"aria-label": t("Sources"),
+		children: sourcesOf(node).map((item, index) => /* @__PURE__ */ jsxs("a", {
+			role: "listitem",
+			className: "dvui-source",
+			href: item.url,
+			target: "_blank",
+			rel: "noopener noreferrer",
+			title: item.url,
+			children: [/* @__PURE__ */ jsx(LinkIcon, {}), item.label]
+		}, `${item.url}-${index}`))
+	});
+}
+const STEP_DOT = {
+	done: { background: "var(--dsw-alias-state-success-primary)" },
+	active: {
+		background: "var(--dsw-alias-state-business-primary)",
+		boxShadow: "0 0 0 3px color-mix(in srgb, var(--dsw-alias-state-business-primary) 20%, transparent)"
+	},
+	blocked: { background: "var(--dsw-alias-state-error-primary)" },
+	pending: { boxShadow: "inset 0 0 0 1.5px var(--dsw-alias-border-l3)" }
+};
+const STEP_LABEL = {
+	active: {
+		color: "var(--dsw-alias-label-primary)",
+		fontWeight: 600
+	},
+	blocked: { color: "var(--dsw-alias-state-error-primary)" },
+	pending: { color: "var(--dsw-alias-label-secondary)" },
+	done: { color: "var(--dsw-alias-label-secondary)" }
+};
+function WidgetSteps({ node, lookup, t }) {
+	const items = stepsOf(node);
+	return /* @__PURE__ */ jsx("ol", {
+		className: "dvui-steps",
+		role: "list",
+		"aria-label": t("Steps"),
+		"aria-live": "polite",
+		style: {
+			display: "flex",
+			flexDirection: "column",
+			gap: 2,
+			margin: 0,
+			padding: 0,
+			listStyle: "none"
+		},
+		children: items.map((item, index) => {
+			const status = resolve(item.status, lookup, "pending");
+			const state = typeof status === "string" && status in STEP_DOT ? status : "pending";
+			const detail = item.detail === void 0 ? "" : asText(resolve(item.detail, lookup, ""));
+			const last = index === items.length - 1;
+			return /* @__PURE__ */ jsxs("li", {
+				className: "dvui-step",
+				"data-status": state,
+				"aria-current": state === "active" ? "step" : void 0,
+				style: {
+					display: "flex",
+					gap: 10,
+					minWidth: 0
+				},
+				children: [/* @__PURE__ */ jsxs("span", {
+					"aria-hidden": "true",
+					style: {
+						flex: "none",
+						width: 12,
+						display: "flex",
+						flexDirection: "column",
+						alignItems: "center"
+					},
+					children: [/* @__PURE__ */ jsx("span", { style: {
+						flex: "none",
+						width: 9,
+						height: 9,
+						marginTop: 6,
+						borderRadius: "50%",
+						...STEP_DOT[state]
+					} }), last ? null : /* @__PURE__ */ jsx("span", { style: {
+						flex: "1 1 auto",
+						width: 1.5,
+						minHeight: 8,
+						margin: "2px 0 -2px",
+						background: "var(--dsw-alias-border-l2)"
+					} })]
+				}), /* @__PURE__ */ jsxs("span", {
+					style: {
+						flex: "1 1 auto",
+						minWidth: 0,
+						display: "flex",
+						flexDirection: "column",
+						gap: 1,
+						paddingBottom: last ? 0 : 10
+					},
+					children: [/* @__PURE__ */ jsx("span", {
+						style: {
+							fontSize: 13,
+							lineHeight: "20px",
+							fontWeight: 500,
+							overflowWrap: "anywhere",
+							...STEP_LABEL[state]
+						},
+						children: item.label
+					}), detail !== "" ? /* @__PURE__ */ jsx("span", {
+						className: "dvui-option-desc",
+						children: detail
+					}) : null]
+				})]
+			}, `${item.label}-${index}`);
+		})
+	});
+}
+function InputHead({ id, label, value }) {
+	return /* @__PURE__ */ jsxs("div", {
+		className: "dvui-input-head",
+		children: [/* @__PURE__ */ jsx("label", {
+			htmlFor: id,
+			className: "dvui-input-label",
+			children: label
+		}), value !== void 0 ? /* @__PURE__ */ jsx("output", {
+			htmlFor: id,
+			className: "dvui-input-value",
+			children: value
+		}) : null]
+	});
+}
+const numericBound = (bound) => typeof bound === "number" && Number.isFinite(bound) ? bound : typeof bound === "string" && bound.trim() !== "" && Number.isFinite(Number(bound)) ? Number(bound) : void 0;
+function SliderInput({ node, ctx }) {
+	const id = useId();
+	const value = Number(ctx.values[node.id]);
+	const min = numericBound(resolve(node.min, ctx.lookup, void 0));
+	const max = numericBound(resolve(node.max, ctx.lookup, void 0));
+	const percent = min !== void 0 && max !== void 0 && max > min ? (value - min) / (max - min) * 100 : 0;
+	return /* @__PURE__ */ jsxs("div", {
+		className: "dvui-input-row",
+		children: [/* @__PURE__ */ jsx(InputHead, {
+			id,
+			label: node.label,
+			value: withUnit(grouped(value), node.unit)
+		}), /* @__PURE__ */ jsx("input", {
+			id,
+			type: "range",
+			className: "dvui-range",
+			min,
+			max,
+			step: node.step ?? "any",
+			value,
+			disabled: ctx.locked,
+			style: { "--_dvui-fill": `${percent}%` },
+			onChange: (event) => ctx.setInput(node.id, Number(event.target.value))
+		})]
+	});
+}
+function NumberInput({ node, ctx }) {
+	const id = useId();
+	const [draft, setDraft] = useState(null);
+	const value = ctx.values[node.id];
+	const min = numericBound(resolve(node.min, ctx.lookup, void 0));
+	const max = numericBound(resolve(node.max, ctx.lookup, void 0));
+	return /* @__PURE__ */ jsxs("div", {
+		className: "dvui-input-row",
+		children: [/* @__PURE__ */ jsx(InputHead, {
+			id,
+			label: node.label
+		}), /* @__PURE__ */ jsxs("span", {
+			className: "dvui-number",
+			children: [/* @__PURE__ */ jsx("input", {
+				id,
+				className: "dvui-input",
+				type: "number",
+				inputMode: "decimal",
+				value: draft ?? asText(value),
+				min,
+				max,
+				step: node.step ?? "any",
+				disabled: ctx.locked,
+				onChange: (event) => {
+					const raw = event.target.value;
+					setDraft(raw);
+					const next = Number(raw);
+					if (raw.trim() === "" || !Number.isFinite(next) || min !== void 0 && next < min || max !== void 0 && next > max) return;
+					ctx.setInput(node.id, next);
+				},
+				onBlur: () => setDraft(null)
+			}), node.unit ? /* @__PURE__ */ jsx("span", {
+				className: "dvui-unit",
+				children: node.unit
+			}) : null]
+		})]
+	});
+}
+function ChoiceInput({ node, ctx }) {
+	const labelId = useId();
+	const options = optionsOf(node);
+	const current = ctx.values[node.id];
+	const side = options.length <= 4 && options.every((option) => [...option.label].length <= 14);
+	return /* @__PURE__ */ jsxs("div", {
+		className: "dvui-input-row",
+		children: [/* @__PURE__ */ jsx("span", {
+			className: "dvui-input-label",
+			id: labelId,
+			children: node.label
+		}), side ? /* @__PURE__ */ jsx(Segmented, {
+			label: node.label ?? "",
+			value: options.findIndex((option) => choiceValue(option) === current),
+			className: "dvui-choice-seg",
+			children: options.map((option) => /* @__PURE__ */ jsx("button", {
+				type: "button",
+				"aria-pressed": choiceValue(option) === current,
+				disabled: ctx.locked,
+				onClick: () => ctx.setInput(node.id, choiceValue(option)),
+				children: option.label
+			}, option.label))
+		}) : /* @__PURE__ */ jsx("div", {
+			className: "dvui-radios",
+			role: "radiogroup",
+			"aria-labelledby": labelId,
+			children: options.map((option) => /* @__PURE__ */ jsxs("button", {
+				type: "button",
+				role: "radio",
+				className: "dvui-radio",
+				"aria-checked": choiceValue(option) === current,
+				disabled: ctx.locked,
+				onClick: () => ctx.setInput(node.id, choiceValue(option)),
+				children: [/* @__PURE__ */ jsx("span", {
+					className: "dvui-radio-dot",
+					"aria-hidden": "true"
+				}), option.label]
+			}, option.label))
+		})]
+	});
+}
+function ToggleInput({ node, ctx }) {
+	const on = ctx.values[node.id] === true;
+	return /* @__PURE__ */ jsxs("div", {
+		className: "dvui-toggle",
+		children: [/* @__PURE__ */ jsx("span", {
+			className: "dvui-input-label",
+			children: node.label
+		}), /* @__PURE__ */ jsx("button", {
+			type: "button",
+			role: "switch",
+			className: "dvui-switch",
+			"aria-checked": on,
+			"aria-label": node.label,
+			disabled: ctx.locked,
+			onClick: () => ctx.setInput(node.id, !on),
+			children: /* @__PURE__ */ jsx("span", {
+				className: "dvui-switch-knob",
+				"aria-hidden": "true"
+			})
+		})]
+	});
+}
+function WidgetNode({ node, ctx, Markdown, labels, t }) {
+	const { lookup } = ctx;
+	switch (node.type) {
+		case "stack":
+		case "row": return /* @__PURE__ */ jsx("div", {
+			className: node.type === "row" ? "dvui-row" : "dvui-stack",
+			children: (node.children ?? []).map((child, index) => /* @__PURE__ */ jsx(WidgetNode, {
+				node: child,
+				ctx,
+				Markdown,
+				labels,
+				t
+			}, child.id ?? `${child.type}-${index}`))
+		});
+		case "text": {
+			const text = /* @__PURE__ */ jsx(Markdown, {
+				text: asText(resolve(node.text, lookup, "")),
+				labels,
+				variant: "compact"
+			});
+			return node.tone === "muted" ? /* @__PURE__ */ jsx("div", {
+				className: "dvui-muted",
+				children: text
+			}) : text;
+		}
+		case "metric": return /* @__PURE__ */ jsx(WidgetMetric, {
+			node,
+			lookup
+		});
+		case "table": return /* @__PURE__ */ jsx(WidgetTable, {
+			node,
+			lookup
+		});
+		case "chart": return /* @__PURE__ */ jsx(WidgetChart, {
+			node,
+			lookup,
+			registerChart: ctx.registerChart,
+			refreshCharts: ctx.refreshCharts,
+			t
+		});
+		case "progress": return /* @__PURE__ */ jsx(WidgetProgress, {
+			node,
+			lookup,
+			t
+		});
+		case "callout": return /* @__PURE__ */ jsx(WidgetCallout, {
+			node,
+			lookup,
+			Markdown,
+			labels
+		});
+		case "sources": return /* @__PURE__ */ jsx(WidgetSources, {
+			node,
+			t
+		});
+		case "steps": return /* @__PURE__ */ jsx(WidgetSteps, {
+			node,
+			lookup,
+			t
+		});
+		case "slider": return /* @__PURE__ */ jsx(SliderInput, {
+			node,
+			ctx
+		});
+		case "number": return /* @__PURE__ */ jsx(NumberInput, {
+			node,
+			ctx
+		});
+		case "choice": return /* @__PURE__ */ jsx(ChoiceInput, {
+			node,
+			ctx
+		});
+		case "toggle": return /* @__PURE__ */ jsx(ToggleInput, {
+			node,
+			ctx
+		});
+		case "submit": return ctx.settled ? null : /* @__PURE__ */ jsxs("div", {
+			className: "dvui-actions",
+			children: [ctx.onFillDraft ? /* @__PURE__ */ jsx(ActionButton, {
+				host: ctx.ButtonComponent,
+				disabled: ctx.fillLocked,
+				onClick: () => ctx.onFillDraft?.(node.id, {}),
+				children: directAnswer(ctx) ? t("Fill composer") : node.label || t("Fill composer")
+			}) : null, directAnswer(ctx) ? /* @__PURE__ */ jsx(ActionButton, {
+				host: ctx.ButtonComponent,
+				primary: true,
+				disabled: ctx.answerLocked,
+				onClick: () => ctx.onSubmit?.(node.id, {}),
+				children: node.label || t("Send")
+			}) : null]
+		});
+		case "options": return ctx.settled || !ctx.onSubmit && !ctx.onFillDraft ? /* @__PURE__ */ jsx(SettledOptions, {
+			node,
+			answer: ctx.answer,
+			t
+		}) : /* @__PURE__ */ jsx(OptionsInput, {
+			node,
+			ctx,
+			t
+		});
+		case "confirm": return ctx.settled || !ctx.onSubmit && !ctx.onFillDraft ? /* @__PURE__ */ jsx(SettledConfirm, {
+			node,
+			answer: ctx.answer,
+			t
+		}) : /* @__PURE__ */ jsx(ConfirmInput, {
+			node,
+			ctx,
+			t
+		});
+		case "form": return ctx.settled || !ctx.onSubmit && !ctx.onFillDraft ? /* @__PURE__ */ jsx(SettledForm, {
+			node,
+			answer: ctx.answer,
+			t
+		}) : /* @__PURE__ */ jsx(FormInput, {
+			node,
+			ctx,
+			t
+		});
+		case "math":
+		case "flow":
+		case "explore":
+		case "map": return /* @__PURE__ */ jsx(RichNode, {
+			node,
+			lookup,
+			setInput: ctx.setInput,
+			editable: ctx.editable,
+			t
+		});
+		default: return null;
+	}
+}
+function WidgetView({ view, onSubmit, onFillDraft, settled = false, answer = null, busy = false, ButtonComponent, registerChart, refreshCharts, t = english, labels = {
+	code: {
+		copyLabel: "Copy",
+		copiedLabel: "Copied"
+	},
+	footnotes: "Footnotes"
+}, Markdown = FallbackMarkdown, values: controlled, onValuesChange }) {
+	const inputs = useMemo(() => viewInputs(view), [view]);
+	const [localValues, setLocalValues] = useState(() => Object.fromEntries(inputs.map((node) => [node.id, inputDefault(node)])));
+	const supplied = controlled ?? localValues;
+	const values = useMemo(() => Object.fromEntries(inputs.map((node) => [node.id, supplied && Object.hasOwn(supplied, node.id) ? supplied[node.id] : inputDefault(node)])), [inputs, supplied]);
+	const valueRef = useRef(values);
+	valueRef.current = values;
+	const changeRef = useRef(onValuesChange);
+	changeRef.current = onValuesChange;
+	const setInput = useCallback((id, value) => {
+		const next = { ...valueRef.current };
+		const math = inputs.find((node) => node.type === "math" && node.mathPoints?.some((point) => `${point.id}X` === id || `${point.id}Y` === id));
+		const point = math?.mathPoints?.find((item) => `${item.id}X` === id || `${item.id}Y` === id);
+		if (math?.id && point) {
+			const previous = next[math.id] !== null && typeof next[math.id] === "object" && !Array.isArray(next[math.id]) ? next[math.id] : mathDefaults(math);
+			const pair = Array.isArray(previous[point.id]) ? [...previous[point.id]] : [point.x, point.y];
+			pair[`${point.id}X` === id ? 0 : 1] = value;
+			next[math.id] = {
+				...previous,
+				[point.id]: pair
+			};
+		} else next[id] = value;
+		valueRef.current = next;
+		setLocalValues(next);
+		changeRef.current?.(next);
+	}, [inputs]);
+	const sent = answer?.values?.inputs;
+	const current = settled && sent !== null && typeof sent === "object" ? {
+		...values,
+		...sent
+	} : values;
+	const withInputs = (extra) => inputs.length > 0 ? {
+		...extra,
+		inputs: current
+	} : extra;
+	const submit = onSubmit === void 0 ? void 0 : (action, extra) => onSubmit(action, withInputs(extra));
+	const fill = onFillDraft === void 0 ? void 0 : (action, extra) => onFillDraft(action, withInputs(extra));
+	const ctx = {
+		onSubmit: submit,
+		onFillDraft: fill,
+		settled,
+		answer,
+		busy,
+		editable: !settled && !busy && (onSubmit !== void 0 || fill !== void 0 || hasInputs(view)),
+		lookup: viewScope(view, current),
+		values: current,
+		ButtonComponent,
+		locked: settled || busy,
+		answerLocked: settled || busy || onSubmit === void 0,
+		fillLocked: settled || busy || fill === void 0,
+		setInput,
+		registerChart,
+		refreshCharts
+	};
+	return /* @__PURE__ */ jsx(WidgetNode, {
+		node: view,
+		ctx,
+		Markdown,
+		labels,
+		t
+	});
+}
+function useChartHandles() {
+	const [, bump] = useState(0);
+	const charts = useRef(/* @__PURE__ */ new Map());
+	const refreshCharts = useCallback(() => bump((value) => value + 1), []);
+	const registerChart = useCallback((key, handle) => {
+		charts.current.set(key, handle);
+		refreshCharts();
+		return () => {
+			charts.current.delete(key);
+			refreshCharts();
+		};
+	}, [refreshCharts]);
+	return {
+		charts: [...charts.current.values()],
+		registerChart,
+		refreshCharts
+	};
+}
+function ViewMenu({ charts, t }) {
+	const [open, setOpen] = useState(false);
+	const root = useRef(null);
+	useEffect(() => {
+		if (!open) return void 0;
+		const away = (event) => {
+			if (!root.current?.contains(event.target)) setOpen(false);
+		};
+		const key = (event) => {
+			if (event.key === "Escape") setOpen(false);
+		};
+		document.addEventListener("pointerdown", away, true);
+		document.addEventListener("keydown", key);
+		return () => {
+			document.removeEventListener("pointerdown", away, true);
+			document.removeEventListener("keydown", key);
+		};
+	}, [open]);
+	return /* @__PURE__ */ jsxs("div", {
+		ref: root,
+		className: "dvui-tools",
+		"data-open": open ? "" : void 0,
+		children: [/* @__PURE__ */ jsx("button", {
+			type: "button",
+			className: "dvui-more",
+			"aria-label": t("Chart options"),
+			"aria-haspopup": "menu",
+			"aria-expanded": open,
+			onClick: () => setOpen((value) => !value),
+			children: /* @__PURE__ */ jsx(DotsIcon, {})
+		}), open ? /* @__PURE__ */ jsx("div", {
+			className: "dvui-menu",
+			role: "menu",
+			children: charts.map((chart, index) => /* @__PURE__ */ jsxs(Fragment, { children: [
+				charts.length > 1 ? /* @__PURE__ */ jsx("div", {
+					className: "dvui-menu-label",
+					children: chart.label ?? t("Chart {n}", { n: index + 1 })
+				}) : null,
+				/* @__PURE__ */ jsxs("button", {
+					type: "button",
+					role: "menuitem",
+					onClick: () => {
+						setOpen(false);
+						chart.toggleTable();
+					},
+					children: [/* @__PURE__ */ jsx(TableIcon, {}), chart.asTable ? t("View as chart") : t("View as table")]
+				}),
+				/* @__PURE__ */ jsxs("button", {
+					type: "button",
+					role: "menuitem",
+					onClick: () => {
+						setOpen(false);
+						chart.copy();
+					},
+					children: [/* @__PURE__ */ jsx(CopyIcon, {}), t("Copy data")]
+				})
+			] }, `${chart.label}-${index}`))
+		}) : null]
+	});
+}
+function WidgetCard({ title = "", view, onSubmit, onFillDraft, onDismiss, busy = false, settled = false, answer = null, t = english, labels, Markdown, localOnly = false, localNote, ButtonComponent, values, onValuesChange }) {
+	const titleId = useId();
+	const { charts, registerChart, refreshCharts } = useChartHandles();
+	const framed = hasType(view, /* @__PURE__ */ new Set([
+		"slider",
+		"number",
+		"choice",
+		"toggle",
+		"options",
+		"confirm",
+		"form",
+		"submit",
+		"math"
+	]));
+	return /* @__PURE__ */ jsxs("div", {
+		className: `dvui-view ${framed ? "dvui-framed" : "dvui-bare"}${settled ? " dvui-settled" : ""}`,
+		role: "group",
+		"aria-labelledby": title ? titleId : void 0,
+		"aria-label": title ? void 0 : t("View"),
+		"aria-busy": busy || void 0,
+		children: [
+			title || onDismiss || charts.length > 0 ? /* @__PURE__ */ jsxs("div", {
+				className: "dvui-head",
+				children: [
+					/* @__PURE__ */ jsx("p", {
+						className: "dvui-title",
+						id: titleId,
+						children: title
+					}),
+					charts.length > 0 ? /* @__PURE__ */ jsx(ViewMenu, {
+						charts,
+						t
+					}) : null,
+					onDismiss ? /* @__PURE__ */ jsx("button", {
+						type: "button",
+						className: "dvui-dismiss",
+						"aria-label": t("Dismiss view"),
+						onClick: onDismiss,
+						disabled: busy,
+						children: "×"
+					}) : null
+				]
+			}) : null,
+			/* @__PURE__ */ jsx("div", {
+				className: "dvui-body",
+				children: /* @__PURE__ */ jsx(WidgetView, {
+					view,
+					onSubmit,
+					onFillDraft,
+					settled,
+					answer,
+					busy,
+					ButtonComponent,
+					registerChart,
+					refreshCharts,
+					t,
+					labels,
+					Markdown,
+					values,
+					onValuesChange
+				})
+			}),
+			localOnly && hasType(view, /* @__PURE__ */ new Set([
+				"options",
+				"confirm",
+				"form",
+				"submit"
+			])) ? /* @__PURE__ */ jsx("p", {
+				className: "dvui-local-note",
+				role: "note",
+				children: localNote ?? t("Local preview only; this card does not send an answer.")
+			}) : null
+		]
+	});
+}
+//#endregion
+export { WidgetCard, WidgetView };
+
+//# sourceMappingURL=widget.js.map

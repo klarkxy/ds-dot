@@ -1,0 +1,131 @@
+import { A as ViewSnapshot, c as HOST_SERVICE, g as RpcResult, m as PendingView, n as DeepViewHost } from "./contracts2.js";
+import { ContextFormed, createUserMessage } from "@deepseek-ai/dsh-llm";
+import { Context } from "@deepseek-ai/cordis";
+import { IncomingMessage, ServerResponse } from "node:http";
+//#region ../dsh-plugin-kit/src/contracts.d.ts
+/** Public, browser-safe contracts. Host implementations stay in their owning packages. */
+type ProducerSourceKind = `plugin:${string}`;
+type ProducerMessageSource = {
+  kind: ProducerSourceKind;
+  plugin: string;
+} & ContextFormed;
+/**
+ * V4 sessions persist the producing extension in `kind`; the retired generic
+ * `plugin` wrapper is not admitted. Each feature plugin declares its own kind.
+ */
+declare module '@deepseek-ai/dsh-llm' {
+  interface MessageSourceMap {
+    [kind: ProducerSourceKind]: ProducerMessageSource;
+  }
+}
+//#endregion
+//#region ../dsh-plugin-kit/src/log-shared.d.ts
+type PluginLogLevel = 'debug' | 'info' | 'warn' | 'error' | 'fault';
+type PluginLogScalar = string | number | boolean | null;
+type PluginLogContext = Record<string, PluginLogScalar | undefined>;
+interface PluginLogInput {
+  level: PluginLogLevel;
+  event: string;
+  message: string;
+  context?: PluginLogContext;
+  error?: unknown;
+}
+interface PluginLogger {
+  readonly source: string;
+  readonly file: string | null;
+  readonly lastWriteError: string | null;
+  debug(event: string, message: string, context?: PluginLogContext): boolean;
+  info(event: string, message: string, context?: PluginLogContext): boolean;
+  warn(event: string, message: string, error?: unknown, context?: PluginLogContext): boolean;
+  error(event: string, message: string, error?: unknown, context?: PluginLogContext): boolean;
+  fault(event: string, message: string, error?: unknown, context?: PluginLogContext): boolean;
+  write(input: PluginLogInput): boolean;
+  child(context: PluginLogContext): PluginLogger;
+}
+//#endregion
+//#region ../dsh-plugin-kit/src/host-rpc.d.ts
+interface HostRpcContext {
+  webServer: {
+    register(route: {
+      kind: 'prefix';
+      path: string;
+      handler(req: IncomingMessage, res: ServerResponse): void | Promise<void>;
+    }): () => void;
+  };
+  connection: {
+    requestRejection?: (request: IncomingMessage) => number | undefined;
+  };
+}
+//#endregion
+//#region src/index.d.ts
+declare const name = "deep-view";
+declare const inject: readonly ["tools", "systemPrompt", "skills", "sessionController", "sessions", "agents", "connection", "webServer"];
+declare module '@deepseek-ai/cordis' {
+  interface Context {
+    [HOST_SERVICE]: DeepViewHost;
+  }
+}
+declare function resolveSessionId(redirects: ReadonlyMap<string, string>, sessionId: string): string;
+declare function handoffPendingSession(pending: Map<string, PendingView>, redirects: Map<string, string>, fromSessionId: string, toSessionId: string): boolean;
+type AgentLike = {
+  id: string;
+  session: unknown;
+  followup(message: ReturnType<typeof createUserMessage>): void;
+};
+type Host = Context & HostRpcContext & {
+  tools: {
+    get(name: string, scope?: object): unknown;
+    register(definition: Record<string, unknown>): () => void;
+  };
+  systemPrompt: {
+    context(contribution: {
+      name: string;
+      order: number;
+      required?: boolean;
+      interpolate?: boolean;
+      text: string | ((context: {
+        agent?: {
+          session?: unknown;
+        };
+      }) => string);
+    }): () => void;
+  };
+  skills: {
+    register(skill: {
+      name: string;
+      description: string;
+      whenToUse: string;
+      content: string;
+      source: string;
+      invocation: {
+        modelInvocable: boolean;
+        userInvocable: boolean;
+      };
+    }): () => void;
+  };
+  agents: {
+    get(id: string): AgentLike | undefined;
+    list?(): AgentLike[];
+    roots?(): AgentLike[];
+  };
+  sessionController: {
+    resolveAgent(id: string): Promise<{
+      agent?: AgentLike;
+      error?: {
+        message?: string;
+      };
+    }>;
+  };
+  sessions: {
+    flush(session: unknown): Promise<boolean>;
+  };
+  logger?: {
+    warn(message: string, ...args: unknown[]): void;
+  };
+};
+declare function createShowViewTool(host: Host, pending: Map<string, PendingView>, makeId?: () => string, logger?: PluginLogger, latest?: Map<string, ViewSnapshot>): Record<string, unknown>;
+declare function createRpc(host: Host, pending: Map<string, PendingView>, redirects?: ReadonlyMap<string, string>, logger?: PluginLogger): (endpoint: string, payload: unknown, signal: AbortSignal) => Promise<RpcResult>;
+declare function apply(ctx: Context): Promise<void>;
+//#endregion
+export { apply, createRpc, createShowViewTool, handoffPendingSession, inject, name, resolveSessionId };
+//# sourceMappingURL=index.d.ts.map

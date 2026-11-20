@@ -1,0 +1,39 @@
+import { n as MODEL_ROUTE_ROLE, r as modelRouteMarker } from "./marker.js";
+import Schema from "@deepseek-ai/schemastery";
+//#region src/schemastery.ts
+/**
+* Optional schemastery binding for the model-route contract. Schemastery is
+* the host's native config-schema library; this entry stays an optional peer
+* so browser-only consumers never load it.
+*/
+function base() {
+	return Schema.object({
+		provider: Schema.string().default(""),
+		model: Schema.string().default(""),
+		reasoningEffort: Schema.string()
+	});
+}
+/**
+* Schemastery field schema for a ModelRoute config entry, marked through the
+* custom `x-model-route` metadata key. Defaults mirror defaultModelRoute():
+* empty means "follow the host default model".
+*/
+function modelRouteSchemastery(meta) {
+	const schema = base();
+	schema.meta = {
+		...schema.meta,
+		...modelRouteMarker(meta)
+	};
+	return schema;
+}
+/**
+* Same field, marked through schemastery's official renderer-role channel
+* (`role('model-route', meta)`) for projectors that drop unknown meta keys.
+*/
+function modelRouteRoleSchemastery(meta) {
+	return base().role(MODEL_ROUTE_ROLE, meta ?? {});
+}
+//#endregion
+export { modelRouteRoleSchemastery, modelRouteSchemastery };
+
+//# sourceMappingURL=schemastery.js.map

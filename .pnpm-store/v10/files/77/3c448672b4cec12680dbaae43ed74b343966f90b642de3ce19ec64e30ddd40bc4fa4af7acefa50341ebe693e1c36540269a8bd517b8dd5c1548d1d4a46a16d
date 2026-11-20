@@ -1,0 +1,27 @@
+import { ModelSettingsChangesIdentity } from "./contracts.js";
+import { MODEL_SETTINGS_CHANGED_EVENT, ModelSettingsChange } from "./model-settings.js";
+import { ModelSettingsChangeFrame } from "./model-settings-client.js";
+import { TypertRemoteService } from "@deepseek-ai/dsh-typert-protocol";
+import { Context } from "@deepseek-ai/cordis";
+//#region src/model-settings-changes.d.ts
+interface ChangeEvents {
+  on(name: typeof MODEL_SETTINGS_CHANGED_EVENT, callback: (change: ModelSettingsChange) => void): () => void;
+  on(name: 'settings/document-updated', callback: (ns: string, revision: number) => void): () => void;
+}
+/** Attach first, then yield ready: commits during a consumer's baseline read
+ * remain queued. Coalescing revisions never invents a settings snapshot.
+ * `ownerNs` keeps one plugin's stream to its own settings; omit it to forward every namespace. */
+declare function watchModelSettingsChanges(events: ChangeEvents, signal: AbortSignal, ownerNs?: string): AsyncGenerator<ModelSettingsChangeFrame>;
+/** One owner's invalidation stream, registered on the calling plugin fiber.
+ * Nothing here is stored in a module-level singleton. */
+declare class ModelSettingsChangesController extends TypertRemoteService {
+  private readonly lifetime;
+  private readonly ownerNs;
+  constructor(ctx: Context, identity: ModelSettingsChangesIdentity, ownerNs?: string);
+  watch(signal: AbortSignal): AsyncIterable<ModelSettingsChangeFrame>;
+}
+/** Register this owner's controller. `ownerNs` limits the stream to that settings namespace. */
+declare function createModelSettingsChanges(ctx: Context, identity: ModelSettingsChangesIdentity, ownerNs?: string): ModelSettingsChangesController;
+//#endregion
+export { ModelSettingsChangesController, createModelSettingsChanges, watchModelSettingsChanges };
+//# sourceMappingURL=model-settings-changes.d.ts.map

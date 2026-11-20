@@ -1,0 +1,67 @@
+//#region src/domain.ts
+/**
+* Open table-only plugin state using the host's lossless legacy bootstrap.
+* The JSON backend treats unsupported/malformed legacy files as absent in
+* per-record layout; the probe below opens `single` with compatibleVersions
+* emptied so a legacy stamp reports `version-mismatch` (whether or not the
+* installed backend accepts compatible stamps in single layout, which
+* storage-json began doing at 0.2.2). Probe an empty result so persistent
+* settings cannot silently become defaults.
+* A populated per-record tree is authoritative; the retained legacy source
+* is an initial backup, not a current-data rollback after subsequent writes.
+*/
+async function openCompatibleDomain(open, spec, options) {
+	const log = options?.logger;
+	const domainName = options?.domainName ?? (typeof spec.name === "string" ? spec.name : "plugin-domain");
+	const perRecord = {
+		...spec,
+		layout: "per-record"
+	};
+	const domain = await open(perRecord);
+	let populated = false;
+	try {
+		populated = Object.keys(spec.tables).some((table) => !domain.table(table).entries().next().done);
+	} finally {
+		if (!populated) await domain.close();
+	}
+	if (populated) {
+		log?.debug("domain.opened", "Opened populated per-record storage domain.", {
+			domain: domainName,
+			version: spec.version
+		});
+		return domain;
+	}
+	let mismatch;
+	for (const version of /* @__PURE__ */ new Set([spec.version, ...spec.compatibleVersions ?? []])) try {
+		await (await open({
+			...spec,
+			layout: "single",
+			version,
+			compatibleVersions: []
+		})).close();
+		log?.info("domain.probed", "Opened storage domain after legacy probe.", {
+			domain: domainName,
+			probedVersion: version,
+			targetVersion: spec.version
+		});
+		return open(perRecord);
+	} catch (error) {
+		if (!error || typeof error !== "object" || !("code" in error) || error.code !== "version-mismatch") {
+			log?.error("domain.open-failed", "Storage domain open failed during legacy probe.", error, {
+				domain: domainName,
+				probedVersion: version
+			});
+			throw error;
+		}
+		mismatch = error;
+	}
+	log?.error("domain.version-mismatch", "Storage domain version is incompatible.", mismatch, {
+		domain: domainName,
+		targetVersion: spec.version
+	});
+	throw mismatch;
+}
+//#endregion
+export { openCompatibleDomain };
+
+//# sourceMappingURL=domain.js.map

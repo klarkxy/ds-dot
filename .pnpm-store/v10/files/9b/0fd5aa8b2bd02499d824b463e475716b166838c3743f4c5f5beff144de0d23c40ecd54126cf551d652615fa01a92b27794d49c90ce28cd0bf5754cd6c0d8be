@@ -1,0 +1,34 @@
+import { ReactNode } from "react";
+import { MODEL_PICKER_ANCHOR_SLOT, MODEL_PICKER_FACTORY, ModelPickerAnchorProps, ModelPickerAnchorProps as ModelPickerAnchorProps$1, ModelPickerLeadingItem, ModelPickerProps, ModelPickerProps as ModelPickerProps$1, ModelPickerStatus } from "@klarkxy/dsh-model-route/model-picker";
+import { RenderFactorySlot, RenderFactorySlot as RenderFactorySlot$1 } from "@deepseek-ai/dsh-client-ui-slots";
+//#region src/model-picker.d.ts
+/**
+ * The trigger every consumer used to hand its own ModelMenu, rebuilt as the
+ * factory's `anchor` local component: identical classes and chevron, the menu
+ * state coming from the occurrence's props instead of local open state.
+ *
+ * `ariaLabel` and `title` are the whole accessible name and tooltip (the
+ * caller formats "field: current route" itself because the factory's resolved
+ * caption may intentionally be a short name). The component identity stays
+ * put across label changes — a new function would unmount the trigger, and
+ * its cleanup would close a menu that `closeOnPick={false}` is keeping open.
+ * The latest label, title, and `onClose` are read from refs.
+ */
+declare function useModelMenuAnchor(ariaLabel: string, title?: string, onClose?: () => void): (props: ModelPickerAnchorProps$1) => ReactNode;
+/**
+ * Render the shared model picker while it is registered; `options.fallback`
+ * whenever it is not (plugin absent, disabled, or unloaded).
+ *
+ * `options.anchor` is optional: the factory ships a default trigger, so only
+ * consumers that need their own chrome (custom aria-label, tooltip, class)
+ * pass one built with {@link useModelMenuAnchor}. The returned node is never
+ * assumed to be the factory's own output — a defensive `?? fallback` covers a
+ * renderer that yields null for an unregistered definition.
+ */
+declare function renderModelPicker(renderFactorySlot: RenderFactorySlot$1 | undefined, props: ModelPickerProps$1, options: {
+  readonly anchor?: (props: ModelPickerAnchorProps$1) => ReactNode;
+  readonly fallback: ReactNode;
+}): ReactNode;
+//#endregion
+export { MODEL_PICKER_ANCHOR_SLOT, MODEL_PICKER_FACTORY, type ModelPickerAnchorProps, type ModelPickerLeadingItem, type ModelPickerProps, type ModelPickerStatus, type RenderFactorySlot, renderModelPicker, useModelMenuAnchor };
+//# sourceMappingURL=model-picker.d.ts.map

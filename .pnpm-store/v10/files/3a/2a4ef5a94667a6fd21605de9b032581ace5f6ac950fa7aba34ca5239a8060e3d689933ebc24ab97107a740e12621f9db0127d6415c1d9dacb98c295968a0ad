@@ -1,0 +1,54 @@
+//#region src/marker.ts
+/**
+* The schema marker a feature plugin puts on a model-route config field so a
+* hub can find it without heuristics. The marker is an accelerator, not a
+* requirement: detectModelFields also recognizes the bare ModelRoute shape.
+*
+* Two marking channels exist because host projection fidelity differs per
+* schema library:
+*
+* - **extra key** — a custom `x-model-route` property on the schema node's
+*   metadata. Preferred, but a projector may drop unknown keys.
+* - **renderer role** — schemastery's official `.role('model-route', meta)`
+*   channel, which form renderers already understand and projectors are more
+*   likely to keep.
+*
+* The reader accepts both, at the node top level and inside the cordis
+* metadata bag (`x-cordis`), so consumers stay correct across projections.
+*/
+const MODEL_ROUTE_MARKER = "x-model-route";
+const MODEL_ROUTE_ROLE = "model-route";
+/** The object to merge into a schema library's metadata slot. */
+function modelRouteMarker(meta) {
+	return { [MODEL_ROUTE_MARKER]: meta ?? {} };
+}
+function asMeta(value) {
+	if (value === true) return {};
+	if (!value || typeof value !== "object" || Array.isArray(value)) return void 0;
+	return value;
+}
+/** Read the marker off a projected JSON-schema node; undefined when absent. */
+function readModelRouteMarker(node) {
+	if (!node || typeof node !== "object" || Array.isArray(node)) return void 0;
+	const record = node;
+	const direct = asMeta(record[MODEL_ROUTE_MARKER]);
+	if (direct) return direct;
+	const meta = record.meta;
+	if (meta && typeof meta === "object" && !Array.isArray(meta)) {
+		const bag = meta;
+		const fromMeta = asMeta(bag[MODEL_ROUTE_MARKER]);
+		if (fromMeta) return fromMeta;
+		if (bag.role === "model-route") return asMeta(bag.extra) ?? {};
+	}
+	const bag = record["x-cordis"];
+	if (bag && typeof bag === "object" && !Array.isArray(bag)) {
+		const fromBag = asMeta(bag[MODEL_ROUTE_MARKER]);
+		if (fromBag) return fromBag;
+		if (bag.role === "model-route") return asMeta(bag.extra) ?? {};
+	}
+	if (record.role === "model-route") return asMeta(record.extra) ?? {};
+}
+//#endregion
+export { readModelRouteMarker as i, MODEL_ROUTE_ROLE as n, modelRouteMarker as r, MODEL_ROUTE_MARKER as t };
+
+//# sourceMappingURL=marker.js.map

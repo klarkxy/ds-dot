@@ -1,0 +1,7 @@
+import { CHAT_EVENTS_SLOT, producerMessageSource, projectIdFromCwd } from "./contracts.js";
+import { RotatingPluginLogger, createPluginLogger, currentPluginLogContext, installPluginLogger, nextPluginOperationId, pluginLogDirectory, pluginLogStep, pluginLogSyncStep, readPluginLogTail, withPluginLogContext } from "./logger.js";
+import { registerHostRpc } from "./host-rpc.js";
+import { openCompatibleDomain } from "./domain.js";
+import { AuxiliaryContextTooLargeError, buildAuxiliaryUserText, packAuxiliaryContext } from "./auxiliary-context.js";
+import { callLlmText, resolveFeatureModel } from "./llm-call.js";
+export { AuxiliaryContextTooLargeError, CHAT_EVENTS_SLOT, RotatingPluginLogger, buildAuxiliaryUserText, callLlmText, createPluginLogger, currentPluginLogContext, installPluginLogger, nextPluginOperationId, openCompatibleDomain, packAuxiliaryContext, pluginLogDirectory, pluginLogStep, pluginLogSyncStep, producerMessageSource, projectIdFromCwd, readPluginLogTail, registerHostRpc, resolveFeatureModel, withPluginLogContext };

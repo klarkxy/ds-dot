@@ -1,0 +1,74 @@
+import { i as checkShownView, m as validateViewAnswer } from "./core2.js";
+import { isRecord } from "./contracts.js";
+import { legacyAnswer } from "./answer-text.js";
+//#region src/answers.ts
+/** Read visible, durable user/steering messages only, including inherited history. */
+function replyAnswers(snapshot) {
+	const answers = /* @__PURE__ */ new Map();
+	let cards = /* @__PURE__ */ new Map();
+	const collect = (block) => {
+		const meta = block.meta;
+		if (block.kind === "tool-result" && !block.isError && isRecord(meta) && meta.owner === "dsh-deep-view" && meta.awaitReply === true && typeof meta.viewId === "string") {
+			const shown = checkShownView(meta.title, meta.view);
+			if (!("error" in shown)) {
+				const revision = typeof meta.revision === "number" && Number.isSafeInteger(meta.revision) && meta.revision > 0 ? meta.revision : 1;
+				if (revision >= (cards.get(meta.viewId)?.revision ?? 0)) cards.set(meta.viewId, {
+					id: meta.viewId,
+					title: shown.title,
+					view: shown.view,
+					revision
+				});
+			}
+		}
+		for (const child of block.subCalls ?? []) collect(child);
+	};
+	for (const key of snapshot.order) {
+		const node = snapshot.nodes.get(key);
+		if (node?.kind === "tool-call" && node.data?.root) collect(node.data.root);
+		if (node?.kind !== "user" && node?.kind !== "steering") continue;
+		const source = node.data?.source;
+		if (!isRecord(source) || source.kind !== "user") continue;
+		if (source.deepView === void 0) {
+			const text = node.data?.content?.filter(isRecord).filter((block) => block.type === "text").map((block) => block.text).join("") ?? "";
+			const candidates = [...cards.values()].map((card) => ({
+				card,
+				answer: legacyAnswer(card, text)
+			})).filter((candidate) => candidate.answer !== null);
+			if (candidates.length === 1 && !answers.has(candidates[0].answer.id)) {
+				const [{ card, answer }] = candidates;
+				answers.set(card.id, {
+					...answer,
+					revision: card.revision
+				});
+			}
+		}
+		cards = /* @__PURE__ */ new Map();
+		if (!isRecord(source.deepView)) continue;
+		const meta = source.deepView;
+		if (meta.owner !== "dsh-deep-view" || meta.version !== 1 || !isRecord(meta.answer)) continue;
+		const answer = meta.answer;
+		if (typeof answer.id !== "string" || typeof answer.action !== "string" || !isRecord(answer.values)) continue;
+		if (!answers.has(answer.id)) answers.set(answer.id, answer);
+	}
+	return answers;
+}
+function checkedAnswer(answer, id, view, revision) {
+	if (!answer || !id || answer.id !== id || revision !== void 0 && (answer.revision ?? 1) !== revision) return null;
+	const values = validateViewAnswer(view, answer.action, answer.values);
+	return values.error === void 0 ? {
+		id,
+		action: answer.action,
+		values,
+		...answer.revision !== void 0 ? { revision: answer.revision } : {}
+	} : null;
+}
+function sameAnswers(left, right) {
+	return left.size === right.size && [...left].every(([id, answer]) => {
+		const next = right.get(id);
+		return next === answer || next?.action === answer.action && (next.revision ?? 1) === (answer.revision ?? 1) && JSON.stringify(next.values) === JSON.stringify(answer.values);
+	});
+}
+//#endregion
+export { checkedAnswer, replyAnswers, sameAnswers };
+
+//# sourceMappingURL=answers.js.map

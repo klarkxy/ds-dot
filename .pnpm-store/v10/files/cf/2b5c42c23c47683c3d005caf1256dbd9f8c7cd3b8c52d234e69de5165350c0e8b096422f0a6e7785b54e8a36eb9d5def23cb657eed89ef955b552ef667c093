@@ -1,0 +1,34 @@
+import { d as PluginLogger } from "./log-shared2.js";
+//#region src/domain.d.ts
+type PluginDomainSpec = {
+  name?: string;
+  version: number;
+  compatibleVersions?: readonly number[];
+  layout?: 'single' | 'per-record';
+  tables: Record<string, unknown>;
+  global?: never;
+};
+type PluginDomainHandle = {
+  table(name: string): {
+    entries(): IterableIterator<[unknown, unknown]>;
+  };
+  close(): Promise<void>;
+};
+/**
+ * Open table-only plugin state using the host's lossless legacy bootstrap.
+ * The JSON backend treats unsupported/malformed legacy files as absent in
+ * per-record layout; the probe below opens `single` with compatibleVersions
+ * emptied so a legacy stamp reports `version-mismatch` (whether or not the
+ * installed backend accepts compatible stamps in single layout, which
+ * storage-json began doing at 0.2.2). Probe an empty result so persistent
+ * settings cannot silently become defaults.
+ * A populated per-record tree is authoritative; the retained legacy source
+ * is an initial backup, not a current-data rollback after subsequent writes.
+ */
+declare function openCompatibleDomain<S extends PluginDomainSpec, D extends PluginDomainHandle>(open: (spec: S) => Promise<D>, spec: S, options?: {
+  logger?: PluginLogger;
+  domainName?: string;
+}): Promise<D>;
+//#endregion
+export { openCompatibleDomain };
+//# sourceMappingURL=domain.d.ts.map

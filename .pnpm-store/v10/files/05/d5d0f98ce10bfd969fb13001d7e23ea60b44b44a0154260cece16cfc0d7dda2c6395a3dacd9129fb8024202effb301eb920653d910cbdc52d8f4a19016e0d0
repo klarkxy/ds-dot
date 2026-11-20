@@ -1,0 +1,536 @@
+import { AUXILIARY_MODEL_CHANGES_IDENTITY, AUXILIARY_MODEL_CHANNEL, AUXILIARY_MODEL_NS } from "./contracts.js";
+import { createModelSettingsSubscriber, modelSettingsChangesRemote } from "./model-settings-client.js";
+import { registerSessionSettingsItem } from "./client-utils.js";
+import { renderModelPicker, useModelMenuAnchor } from "./model-picker.js";
+import { officialUiCss } from "./official-ui.js";
+import { modelMenuEffortLabel, modelMenuEffortOptions, parseModelMenuChoices, readModelCatalog } from "@klarkxy/dsh-model-route";
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { Button, IconChevronDownOutlineRegular } from "@deepseek-ai/dsh-client-ui-primitives";
+import { jsx, jsxs } from "react/jsx-runtime";
+import { ModelCatalogStatus, ModelMenu, modelMenuCss, useModelCatalog } from "@klarkxy/dsh-model-route/ui";
+//#region src/auxiliary-model-client.tsx
+const AUXILIARY_MODEL_PACKAGE = "@klarkxy/dsh-plugin-kit";
+const AUXILIARY_MODEL_SEAT_ID = "auxiliary-model";
+const AUXILIARY_MODEL_SEAT_ORDER = 55;
+/** Private Cordis rendezvous; every bundled copy resolves the same root service. */
+const AUXILIARY_MODEL_CARD_SERVICE = "dshAuxiliaryModelSettingsCard";
+/** Theme-token-only stylesheet: officialUiCss scope plus the shared ModelMenu recipe. */
+const auxiliaryModelCss = `${officialUiCss("ams-root")}${modelMenuCss}
+.ams-root .ams-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; min-width: 0; }
+`;
+const auxiliaryCopy = {
+	zh: {
+		title: "默认辅助模型",
+		help: "各辅助功能（如标题生成、摘要）没有单独指定模型时使用的模型；仅影响声明使用它的功能。",
+		model: "辅助模型",
+		modelDefault: "跟随会话或宿主默认",
+		modelHint: "不选择模型时，各功能按自己的规则决定对话模型。",
+		effortDefault: "跟随模型默认",
+		loading: "正在读取设置…",
+		failed: "无法读取模型设置。",
+		stale: "设置已被其他窗口更新，请刷新后重试。",
+		saveFailed: "保存失败，原设置未更改。请重试。",
+		saved: "已保存。",
+		retry: "重试",
+		refresh: "刷新设置",
+		syncUnavailable: "自动刷新不可用，请手动刷新设置。"
+	},
+	en: {
+		title: "Default Auxiliary Model",
+		help: "The model used by auxiliary features (such as title generation or summarizing) that do not name their own model; only features that opted in are affected.",
+		model: "Auxiliary model",
+		modelDefault: "Follow session or host default",
+		modelHint: "With no model selected, each feature follows its own rules for the conversation model.",
+		effortDefault: "Follow model default",
+		loading: "Loading settings…",
+		failed: "Could not load model settings.",
+		stale: "Settings were changed elsewhere; refresh and retry.",
+		saveFailed: "Save failed; the previous setting was not changed. Try again.",
+		saved: "Saved.",
+		retry: "Retry",
+		refresh: "Refresh settings",
+		syncUnavailable: "Automatic refresh unavailable; refresh settings manually."
+	}
+};
+/** A failed RPC keeps its code so the card can translate known rejections. */
+var AuxiliaryRpcError = class extends Error {
+	code;
+	constructor(code, message) {
+		super(message);
+		this.code = code;
+		this.name = "AuxiliaryRpcError";
+	}
+};
+/** Host UI language, following live switches with the host's English fallback. */
+function useAuxiliaryLocale(client) {
+	const subscribe = useCallback((listener) => client.locale?.subscribe(listener) ?? (() => {}), [client]);
+	const snapshot = useCallback(() => client.locale?.getSnapshot().active ?? "en", [client]);
+	return String(useSyncExternalStore(subscribe, snapshot, snapshot)).startsWith("zh") ? "zh" : "en";
+}
+function isAbort(error) {
+	return error instanceof Error && (error.name === "AbortError" || /abort|cancel/i.test(error.message));
+}
+function isStaleRejection(error) {
+	if (!(error instanceof AuxiliaryRpcError)) return false;
+	return error.code === "stale" || error.code === "auxiliary-model/conflict" || /changed|revision|reload|stale|conflict/i.test(error.message);
+}
+async function callAuxiliaryRpc(client, endpoint, payload = {}) {
+	const result = await client.connection.rpc.call(AUXILIARY_MODEL_CHANNEL, endpoint, payload);
+	if (!result || result.ok !== true) {
+		const error = result && "error" in result ? result.error : void 0;
+		throw new AuxiliaryRpcError(error?.code ?? "unknown", error?.message ?? `RPC ${endpoint} failed`);
+	}
+	return result.value;
+}
+/**
+* The shared card. All state comes from the shared host service over the
+* plugin-kit RPC channel; the card only renders the stored row.
+*/
+function AuxiliaryModelCard({ client, subscribe, renderFactorySlot }) {
+	const language = useAuxiliaryLocale(client);
+	const text = auxiliaryCopy[language];
+	const [settings, setSettings] = useState();
+	const loadCatalog = useCallback(() => readModelCatalog(client), [client]);
+	const subscribeCatalog = useCallback((change) => client.connection.generation?.subscribe(change), [client]);
+	const catalogState = useModelCatalog(loadCatalog, { subscribe: subscribeCatalog });
+	const { refresh: refreshCatalog } = catalogState;
+	const choices = parseModelMenuChoices(catalogState.catalog, settings?.model ?? void 0);
+	const [menuOpen, setMenuOpen] = useState(false);
+	const [error, setError] = useState("");
+	const [note, setNote] = useState(false);
+	const [busy, setBusy] = useState(false);
+	const [syncError, setSyncError] = useState("");
+	const operation = useRef({
+		epoch: 0,
+		active: false,
+		reading: false,
+		writing: false,
+		pending: false
+	});
+	const refreshRef = useRef(() => {});
+	const refresh = () => {
+		const state = operation.current;
+		if (!state.active) return;
+		if (state.reading || state.writing) {
+			state.pending = true;
+			return;
+		}
+		state.pending = false;
+		state.reading = true;
+		setBusy(true);
+		const epoch = state.epoch;
+		callAuxiliaryRpc(client, "defaults.get").then((next) => {
+			if (state.active && state.epoch === epoch && !state.pending) {
+				setSettings(next);
+				setError("");
+			}
+		}).catch((reason) => {
+			if (state.active && state.epoch === epoch && !state.pending && !isAbort(reason)) setError("failed");
+		}).finally(() => {
+			if (!state.active || state.epoch !== epoch) return;
+			state.reading = false;
+			setBusy(false);
+			if (state.pending) refreshRef.current();
+		});
+	};
+	refreshRef.current = refresh;
+	useEffect(() => {
+		const state = operation.current;
+		state.epoch++;
+		state.active = true;
+		state.reading = false;
+		state.writing = false;
+		state.pending = false;
+		setBusy(false);
+		setSettings(void 0);
+		setError("");
+		setNote(false);
+		refreshRef.current();
+		return () => {
+			state.active = false;
+			state.epoch++;
+		};
+	}, [client]);
+	useEffect(() => {
+		setSyncError("");
+		let live = true;
+		let stop;
+		try {
+			stop = subscribe?.(() => {
+				if (live) {
+					setSyncError("");
+					refreshCatalog();
+					refreshRef.current();
+				}
+			}, (message) => {
+				if (live) setSyncError(message);
+			});
+		} catch {
+			if (live) setSyncError("Model settings sync service unavailable");
+		}
+		return () => {
+			live = false;
+			try {
+				stop?.();
+			} catch {}
+		};
+	}, [subscribe, refreshCatalog]);
+	const save = useCallback((model) => {
+		const state = operation.current;
+		if (!settings || !state.active || state.writing || state.reading) return;
+		state.writing = true;
+		const epoch = state.epoch;
+		setBusy(true);
+		setNote(false);
+		setError("");
+		callAuxiliaryRpc(client, "defaults.set", {
+			model: model ?? {
+				provider: "",
+				model: ""
+			},
+			expectedRevision: settings.revision
+		}).then((next) => {
+			if (state.active && state.epoch === epoch) {
+				setSettings(next);
+				setNote(true);
+				refreshCatalog();
+			}
+		}).catch((reason) => {
+			if (state.active && state.epoch === epoch) setError(isStaleRejection(reason) ? "stale" : "saveFailed");
+		}).finally(() => {
+			if (!state.active || state.epoch !== epoch) return;
+			state.writing = false;
+			setBusy(false);
+			if (state.pending) refreshRef.current();
+		});
+	}, [
+		client,
+		settings,
+		refreshCatalog
+	]);
+	const locked = busy;
+	const current = settings?.model ?? {
+		provider: "",
+		model: ""
+	};
+	const follow = !current.provider || !current.model;
+	const selected = follow ? void 0 : choices.find((item) => item.provider === current.provider && item.model === current.model);
+	const efforts = follow ? [] : modelMenuEffortOptions(selected, current.reasoningEffort);
+	const currentLabel = follow ? text.modelDefault : selected?.label ?? `${current.provider} / ${current.model}`;
+	const selectedEffort = efforts.find((item) => item.id === (current.reasoningEffort || ""));
+	const effortName = selectedEffort ? modelMenuEffortLabel(selectedEffort, language) : void 0;
+	const anchor = useModelMenuAnchor(`${text.model}: ${settings ? currentLabel : ""}`, void 0, () => setMenuOpen(false));
+	if (!settings) return /* @__PURE__ */ jsxs("section", {
+		className: "ams-root dsh-ui-card",
+		"data-testid": "auxiliary-model-settings",
+		children: [
+			/* @__PURE__ */ jsx("span", {
+				className: "dsh-ui-heading",
+				children: text.title
+			}),
+			/* @__PURE__ */ jsx("p", {
+				className: "dsh-ui-help",
+				children: text.help
+			}),
+			error ? /* @__PURE__ */ jsx("p", {
+				role: "alert",
+				className: "dsh-ui-error",
+				children: text[error]
+			}) : /* @__PURE__ */ jsx("p", {
+				role: "status",
+				className: "dsh-ui-hint",
+				children: text.loading
+			}),
+			syncError && /* @__PURE__ */ jsx("p", {
+				role: "status",
+				className: "dsh-ui-hint",
+				children: text.syncUnavailable
+			}),
+			/* @__PURE__ */ jsx("div", {
+				className: "dsh-ui-actions",
+				children: /* @__PURE__ */ jsx(Button, {
+					variant: "ghost",
+					size: "sm",
+					disabled: locked,
+					onClick: () => refreshRef.current(),
+					children: text.retry
+				})
+			})
+		]
+	});
+	return /* @__PURE__ */ jsxs("section", {
+		className: "ams-root dsh-ui-card",
+		"data-testid": "auxiliary-model-settings",
+		children: [
+			/* @__PURE__ */ jsx("span", {
+				className: "dsh-ui-heading",
+				children: text.title
+			}),
+			/* @__PURE__ */ jsx("p", {
+				className: "dsh-ui-help",
+				children: text.help
+			}),
+			/* @__PURE__ */ jsxs("div", {
+				className: "dsh-ui-field",
+				children: [
+					/* @__PURE__ */ jsx("span", {
+						className: "dsh-ui-label",
+						children: text.model
+					}),
+					/* @__PURE__ */ jsx(ModelCatalogStatus, {
+						state: catalogState,
+						locale: language
+					}),
+					renderModelPicker(renderFactorySlot, {
+						locale: language,
+						disabled: locked,
+						busy: locked,
+						onOpenChange: (next) => setMenuOpen(next && !locked),
+						listClassName: "ams-root ams-menu-portal",
+						choices,
+						selected: follow ? void 0 : {
+							provider: current.provider,
+							model: current.model
+						},
+						onPick: (picked) => save({
+							provider: picked.provider,
+							model: picked.model
+						}),
+						leading: [{
+							id: "default",
+							label: text.modelDefault,
+							selected: follow
+						}],
+						onPickLeading: () => save(null),
+						efforts,
+						selectedEffort: current.reasoningEffort || "",
+						onPickEffort: (effort) => save(follow ? null : {
+							provider: current.provider,
+							model: current.model,
+							...effort ? { reasoningEffort: effort } : {}
+						}),
+						triggerLabel: currentLabel,
+						triggerEffortLabel: !follow && efforts.length ? effortName ?? text.effortDefault : void 0,
+						modelLabel: text.model,
+						modelValue: currentLabel,
+						defaultEffortLabel: text.effortDefault
+					}, {
+						anchor,
+						fallback: /* @__PURE__ */ jsx(ModelMenu, {
+							locale: language,
+							open: menuOpen && !locked,
+							onOpenChange: (next) => setMenuOpen(next && !locked),
+							listClassName: "ams-root ams-menu-portal",
+							anchor: /* @__PURE__ */ jsxs("button", {
+								type: "button",
+								className: "dsh-model-menu-trigger",
+								disabled: locked,
+								"aria-label": `${text.model}: ${currentLabel}`,
+								children: [
+									/* @__PURE__ */ jsx("span", {
+										className: "dsh-model-menu-triggerLabel",
+										children: currentLabel
+									}),
+									!follow && efforts.length ? /* @__PURE__ */ jsx("span", {
+										className: "dsh-model-menu-triggerEffort",
+										children: effortName ?? text.effortDefault
+									}) : null,
+									/* @__PURE__ */ jsx(IconChevronDownOutlineRegular, { className: `dsh-model-menu-chevron${menuOpen && !locked ? " dsh-model-menu-chevronOpen" : ""}` })
+								]
+							}),
+							choices,
+							selected: follow ? void 0 : {
+								provider: current.provider,
+								model: current.model
+							},
+							onPick: (picked) => save({
+								provider: picked.provider,
+								model: picked.model
+							}),
+							leading: [{
+								id: "default",
+								label: text.modelDefault,
+								selected: follow
+							}],
+							onPickLeading: () => save(null),
+							efforts,
+							selectedEffort: current.reasoningEffort || "",
+							onPickEffort: (effort) => save(follow ? null : {
+								provider: current.provider,
+								model: current.model,
+								...effort ? { reasoningEffort: effort } : {}
+							}),
+							modelLabel: text.model,
+							modelValue: currentLabel,
+							defaultEffortLabel: text.effortDefault
+						})
+					}),
+					/* @__PURE__ */ jsx("span", {
+						className: "dsh-ui-hint",
+						children: text.modelHint
+					})
+				]
+			}),
+			/* @__PURE__ */ jsxs("div", {
+				className: "ams-row",
+				children: [
+					syncError && /* @__PURE__ */ jsx("p", {
+						role: "status",
+						className: "dsh-ui-hint",
+						children: text.syncUnavailable
+					}),
+					error && /* @__PURE__ */ jsx("p", {
+						role: "alert",
+						className: "dsh-ui-error",
+						children: text[error]
+					}),
+					note && /* @__PURE__ */ jsx("p", {
+						role: "status",
+						className: "dsh-ui-notice",
+						children: text.saved
+					}),
+					error || syncError ? /* @__PURE__ */ jsx(Button, {
+						variant: "ghost",
+						size: "sm",
+						disabled: locked,
+						onClick: () => refreshRef.current(),
+						children: text.refresh
+					}) : null
+				]
+			})
+		]
+	});
+}
+const AUXILIARY_MODEL_WATCH_COORDINATOR = "dshAuxiliaryModelWatchCoordinator";
+function acquireWatchCoordinator(root) {
+	const existing = root.get(AUXILIARY_MODEL_WATCH_COORDINATOR, false);
+	if (existing) return existing;
+	let unprovide;
+	const coordinator = {
+		tail: Promise.resolve(),
+		active: 0,
+		mount() {
+			coordinator.active += 1;
+			const previousTail = coordinator.tail;
+			const lease = {
+				closed: false,
+				done() {
+					if (lease.closed) return;
+					lease.closed = true;
+					coordinator.active -= 1;
+					const owned = lease.fiber;
+					lease.fiber = void 0;
+					coordinator.tail = coordinator.tail.then(() => Promise.resolve(owned?.dispose()).catch(() => {}));
+					coordinator.tail.then(() => {
+						if (coordinator.active > 0) return;
+						try {
+							if (root.get(AUXILIARY_MODEL_WATCH_COORDINATOR, false) === coordinator) Promise.resolve(unprovide?.()).catch(() => {});
+						} catch {}
+					});
+				},
+				fiber: void 0
+			};
+			previousTail.then(() => {
+				if (lease.closed) return;
+				try {
+					lease.fiber = root.inject(["remote"], (injected) => {
+						const scope = injected;
+						const mounting = scope.remote.$mount(modelSettingsChangesRemote(AUXILIARY_MODEL_PACKAGE, AUXILIARY_MODEL_CHANGES_IDENTITY));
+						mounting.catch(() => {});
+						scope.effect(() => async () => {
+							await (await mounting.catch(() => void 0))?.();
+						});
+					});
+				} catch {}
+			});
+			return lease;
+		}
+	};
+	unprovide = root.provide(AUXILIARY_MODEL_WATCH_COORDINATOR, coordinator);
+	return coordinator;
+}
+/**
+* Acquire the root-owned card service, creating it on first use. One counter
+* covers participants, the seat wait and the change-stream mount: the last
+* release removes the wait, then the watch contribution, then the provider
+* itself synchronously (Cordis deletes the impl before its async disposer
+* awaits), so a later acquire sees a clean get() miss and can re-establish.
+*/
+function acquireAuxiliaryModelCard(root, ctx) {
+	const existing = root.get(AUXILIARY_MODEL_CARD_SERVICE, false);
+	if (existing) return existing;
+	let users = 0;
+	let styleElement;
+	let stopItem;
+	let unprovide;
+	const watchLease = acquireWatchCoordinator(root).mount();
+	const subscriber = createModelSettingsSubscriber(ctx.root, AUXILIARY_MODEL_PACKAGE, AUXILIARY_MODEL_CHANGES_IDENTITY, (ns) => ns === AUXILIARY_MODEL_NS);
+	const render = (props) => /* @__PURE__ */ jsx(AuxiliaryModelCard, {
+		client: root,
+		subscribe: subscriber.subscribe,
+		renderFactorySlot: props.renderFactorySlot
+	});
+	const service = {
+		retain() {
+			users += 1;
+			if (styleElement === void 0 && typeof document !== "undefined") {
+				styleElement = document.createElement("style");
+				styleElement.setAttribute("data-plugin", "dsh-auxiliary-model-shared");
+				styleElement.textContent = auxiliaryModelCss;
+				document.head.appendChild(styleElement);
+			}
+			if (!stopItem) stopItem = registerSessionSettingsItem(ctx.root, {
+				id: AUXILIARY_MODEL_SEAT_ID,
+				order: 55
+			}, render);
+		},
+		release() {
+			if (users <= 0) return;
+			users -= 1;
+			if (users > 0) return;
+			stopItem?.();
+			stopItem = void 0;
+			styleElement?.remove();
+			styleElement = void 0;
+			watchLease.done();
+			try {
+				Promise.resolve(unprovide?.()).catch(() => {});
+			} catch {}
+			unprovide = void 0;
+		}
+	};
+	unprovide = root.provide(AUXILIARY_MODEL_CARD_SERVICE, service);
+	return service;
+}
+/**
+* Show the shared "default auxiliary model" card while the calling plugin is
+* enabled.
+*
+* `ctx` is the plugin's own client context: the card itself is retained on the
+* shared root context for as long as any participant lives, so an arbitrary
+* subset of enabled plugins yields the same single card. The mount's slot wait
+* and the change-stream contribution are owned by the root service — the first
+* participant's unload cannot take the card down. Returns a disposer; it may
+* be invoked by both ctx.effect and an explicit caller and releases at most
+* once, so a double call cannot unbalance the shared refcount.
+*/
+function registerAuxiliaryModelSettings(ctx) {
+	const root = ctx.root;
+	const service = acquireAuxiliaryModelCard(root, ctx);
+	try {
+		service.retain();
+	} catch (error) {
+		service.release();
+		throw error;
+	}
+	let disposed = false;
+	return () => {
+		if (disposed) return;
+		disposed = true;
+		service.release();
+	};
+}
+//#endregion
+export { AUXILIARY_MODEL_SEAT_ID, AUXILIARY_MODEL_SEAT_ORDER, AuxiliaryModelCard, auxiliaryModelCss, registerAuxiliaryModelSettings };
+
+//# sourceMappingURL=auxiliary-model-client.js.map

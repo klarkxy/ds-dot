@@ -1,0 +1,180 @@
+import { RpcResult } from "@klarkxy/dsh-plugin-kit/contracts";
+//#region src/contracts.d.ts
+type RpcResult$1<T = unknown> = RpcResult<T>;
+declare const PLUGIN_NAME = "@klarkxy/dsh-deep-view";
+declare const RPC_CHANNEL = "/dsh-deep-view";
+declare const VIEW_OWNER = "dsh-deep-view";
+declare const HOST_SERVICE = "dshDeepView";
+type DeepViewHost = {
+  /** Move an open card and route stale session lookups to a replacement root session. */
+  handoffSession(fromSessionId: string, toSessionId: string): boolean;
+};
+type Scalar = string | number | boolean;
+type Formula = {
+  '=': string;
+};
+type Value = Scalar | Formula;
+type ChoiceOption = {
+  label: string;
+  value?: Scalar;
+};
+type StepStatus = 'done' | 'active' | 'pending' | 'blocked';
+type SourceItem = {
+  label: string;
+  url: string;
+};
+type StepItem = {
+  label: string;
+  detail?: Value;
+  status?: Value;
+};
+type FormField = {
+  id: string;
+  label: string;
+  placeholder?: string;
+  value?: string;
+  multiline?: boolean;
+  readOnly?: boolean;
+};
+type MathPoint = {
+  id: string;
+  label?: string;
+  x: number;
+  y: number;
+  constrain?: 'free' | 'horizontal' | 'vertical';
+};
+type MathCurve = {
+  label?: string;
+  expression: string;
+};
+type FlowNode = {
+  id: string;
+  label: string;
+  detail?: string;
+  x: number;
+  y: number;
+  tone?: 'neutral' | 'accent' | 'success' | 'warn' | 'bad';
+};
+type FlowEdge = {
+  id: string;
+  source: string;
+  target: string;
+  label?: string;
+};
+type ExploreDatum = Record<string, Scalar>;
+type MapLocation = {
+  id: string;
+  label: string;
+  detail?: string;
+  coordinates: [number, number];
+};
+type MapRoute = {
+  label?: string;
+  coordinates: [number, number][];
+};
+type ViewBinding = {
+  id: string;
+  value: unknown;
+  kind?: 'input' | 'math' | 'flow' | 'explore' | 'map';
+  node?: ViewNode;
+};
+declare function isSourceItem(item: SourceItem | StepItem): item is SourceItem;
+declare function isStepItem(item: SourceItem | StepItem): item is StepItem;
+type ViewNode = {
+  type: 'stack' | 'row' | 'text' | 'metric' | 'table' | 'chart' | 'progress' | 'callout' | 'sources' | 'steps' | 'slider' | 'number' | 'choice' | 'toggle' | 'options' | 'confirm' | 'form' | 'submit' | 'math' | 'flow' | 'explore' | 'map';
+  id?: string;
+  children?: ViewNode[];
+  let?: Record<string, string>;
+  text?: Value;
+  label?: string;
+  value?: Value;
+  tone?: Value;
+  caption?: Value;
+  columns?: {
+    key: string;
+    label: string;
+  }[];
+  rows?: Value[][];
+  kind?: 'bar' | 'hbar' | 'line' | 'area' | 'donut';
+  categories?: Scalar[];
+  series?: {
+    name?: string;
+    values: (number | Formula)[];
+  }[];
+  unit?: string;
+  percent?: Value;
+  max?: Value;
+  valueLabel?: Value;
+  items?: SourceItem[] | StepItem[];
+  min?: number;
+  step?: number;
+  options?: ChoiceOption[] | {
+    label: string;
+    description?: string;
+  }[];
+  multi?: boolean;
+  confirmLabel?: string;
+  cancelLabel?: string;
+  fields?: FormField[];
+  submitLabel?: string;
+  /** Interactive math: point ids expose `<id>X` and `<id>Y` bindings. */
+  mathPoints?: MathPoint[];
+  curves?: MathCurve[];
+  domain?: [number, number];
+  range?: [number, number];
+  /** Node graph: id receives the selected node id. */
+  nodes?: FlowNode[];
+  edges?: FlowEdge[];
+  /** Bounded data exploration: id receives selected category values or an x/y interval. */
+  data?: ExploreDatum[];
+  xKey?: string;
+  yKey?: string;
+  colorKey?: string;
+  select?: 'point' | 'interval';
+  /** Map: id receives the selected location id. */
+  center?: [number, number];
+  zoom?: number;
+  locations?: MapLocation[];
+  routes?: MapRoute[];
+};
+type ShownView = {
+  title: string;
+  view: ViewNode;
+  interactive: boolean;
+  revision?: number;
+};
+type ViewFailure = {
+  error: string;
+};
+type ViewSnapshot = ShownView & {
+  id: string;
+  sessionId: string;
+  callId?: string;
+  revision: number;
+};
+type PendingView = ViewSnapshot;
+type ViewAnswer = {
+  id: string;
+  action: string;
+  values: Record<string, unknown>;
+  revision?: number;
+};
+/** Stored on the same user message as its readable answer, outside model text. */
+type ViewAnswerMetadata = {
+  owner: typeof VIEW_OWNER;
+  version: 1;
+  answer: ViewAnswer;
+};
+type ViewPresentation = {
+  owner: typeof VIEW_OWNER;
+  viewId?: string;
+  title: string;
+  view: ViewNode;
+  interactive: boolean;
+  awaitReply: boolean;
+  revision?: number;
+};
+declare function isRecord(value: unknown): value is Record<string, unknown>;
+//#endregion
+export { ViewSnapshot as A, Value as C, ViewFailure as D, ViewBinding as E, isSourceItem as M, isStepItem as N, ViewNode as O, VIEW_OWNER as S, ViewAnswerMetadata as T, Scalar as _, FlowNode as a, StepItem as b, HOST_SERVICE as c, MathCurve as d, MathPoint as f, RpcResult$1 as g, RPC_CHANNEL as h, FlowEdge as i, isRecord as j, ViewPresentation as k, MapLocation as l, PendingView as m, DeepViewHost as n, FormField as o, PLUGIN_NAME as p, ExploreDatum as r, Formula as s, ChoiceOption as t, MapRoute as u, ShownView as v, ViewAnswer as w, StepStatus as x, SourceItem as y };
+//# sourceMappingURL=contracts2.d.ts.map

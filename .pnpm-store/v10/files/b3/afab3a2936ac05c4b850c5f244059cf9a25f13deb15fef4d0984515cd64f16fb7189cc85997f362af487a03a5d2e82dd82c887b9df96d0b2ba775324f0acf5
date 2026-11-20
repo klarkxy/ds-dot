@@ -1,0 +1,18 @@
+//#region src/contracts.ts
+const PLUGIN_NAME = "@klarkxy/dsh-deep-view";
+const RPC_CHANNEL = "/dsh-deep-view";
+const VIEW_OWNER = "dsh-deep-view";
+const HOST_SERVICE = "dshDeepView";
+function isSourceItem(item) {
+	return item !== null && typeof item === "object" && "url" in item;
+}
+function isStepItem(item) {
+	return item !== null && typeof item === "object" && !("url" in item);
+}
+function isRecord(value) {
+	return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+//#endregion
+export { HOST_SERVICE, PLUGIN_NAME, RPC_CHANNEL, VIEW_OWNER, isRecord, isSourceItem, isStepItem };
+
+//# sourceMappingURL=contracts.js.map

@@ -1,0 +1,41 @@
+import { RpcResult } from "./contracts.js";
+import { d as PluginLogger } from "./log-shared2.js";
+import { IncomingMessage, ServerResponse } from "node:http";
+//#region src/host-rpc.d.ts
+interface HostRpcContext {
+  webServer: {
+    register(route: {
+      kind: 'prefix';
+      path: string;
+      handler(req: IncomingMessage, res: ServerResponse): void | Promise<void>;
+    }): () => void;
+  };
+  connection: {
+    requestRejection?: (request: IncomingMessage) => number | undefined;
+  };
+}
+type Rejection = {
+  status: number;
+  body?: string;
+};
+interface HostRpcTransportOptions {
+  maxBodyBytes?: number;
+  isEndpoint?: (endpoint: string) => boolean;
+  caseInsensitiveContentType?: boolean;
+  emptyBodyAsNull?: boolean;
+  beforeBody?: (request: IncomingMessage, endpoint: string) => Rejection | undefined;
+  errorBody?: (status: number, error?: unknown) => string | undefined;
+  logger?: PluginLogger;
+}
+interface HostRpcOptions extends HostRpcTransportOptions {
+  requirePayload?: boolean;
+}
+/** The shared authenticated HTTP boundary. Each plugin still owns its RPC envelope semantics. */
+declare function registerHostRpcTransport(ctx: HostRpcContext, channel: string, dispatch: (endpoint: string, body: unknown, signal: AbortSignal, response: ServerResponse) => void | Promise<void>, options?: HostRpcTransportOptions): () => void;
+/** Write the native Connection response envelope after a plugin has handled a request. */
+declare function sendHostRpcResponse(response: ServerResponse, rpcId: string, result: unknown, noStore?: boolean): void;
+/** Safe host RPC registration. Missing requestRejection fails closed. */
+declare function registerHostRpc<R extends RpcResult = RpcResult>(ctx: HostRpcContext, channel: string, call: (endpoint: string, payload: unknown, signal: AbortSignal) => Promise<R>, options?: HostRpcOptions): () => void;
+//#endregion
+export { HostRpcContext, HostRpcOptions, HostRpcTransportOptions, registerHostRpc, registerHostRpcTransport, sendHostRpcResponse };
+//# sourceMappingURL=host-rpc.d.ts.map

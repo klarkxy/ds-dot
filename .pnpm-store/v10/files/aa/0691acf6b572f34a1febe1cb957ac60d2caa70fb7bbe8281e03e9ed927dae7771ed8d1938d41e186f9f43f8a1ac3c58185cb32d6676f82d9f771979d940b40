@@ -1,0 +1,15 @@
+import { O as ViewNode, w as ViewAnswer } from "./contracts2.js";
+//#region src/answer-text.d.ts
+type Card = {
+  id: string;
+  title: string;
+  view: ViewNode;
+};
+declare function answerText(card: Pick<Card, 'title' | 'view'>, action: string, values: Record<string, unknown>): string;
+/** Legacy messages have no metadata. Restore only unambiguous, fully validated
+ * answers that reproduce the exact text written by this plugin. Never guess
+ * from ordinary prose, and never modify the stored message. */
+declare function legacyAnswer(card: Card, text: string): ViewAnswer | null;
+//#endregion
+export { answerText, legacyAnswer };
+//# sourceMappingURL=answer-text.d.ts.map

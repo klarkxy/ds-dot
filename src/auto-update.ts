@@ -238,6 +238,16 @@ export class AutoUpdater {
     // Before the call the manager may not let settle: on restart, own version
     // decides whether the swap took effect.
     await this.save({ ...this.deps.store.updateStatus, pending: { from, to, at: this.deps.now() } })
+    // A supersede that landed during the write must not install: drop the marker.
+    if (this.disposed || gen !== this.generation) {
+      const status = this.deps.store.updateStatus
+      const kept: UpdateStatus = {
+        ...status?.lastCheckAt !== undefined ? { lastCheckAt: status.lastCheckAt } : {},
+        ...status?.lastResult ? { lastResult: status.lastResult } : {},
+      }
+      await this.save(Object.keys(kept).length > 0 ? kept : undefined)
+      return undefined
+    }
     let outcome: UpdateOutcome
     try {
       outcome = await manager.updateBundle(PACKAGE_NAME, to, { registry: list.registry })
@@ -250,8 +260,9 @@ export class AutoUpdater {
     return { kind: 'failed', at: this.deps.now(), from: outcome.from, to: outcome.to, message: errorText(outcome.result.error) ?? `update ${application}` }
   }
 
-  /** True once dot is quiet; false when superseded, disposed or turned off. */
+  /** True once dot is quiet; false when the check was superseded or disposed. */
   private waitQuiet(gen: number): Promise<boolean> {
+    if (this.disposed || gen !== this.generation) return Promise.resolve(false)
     if (this.deps.isQuiet()) return Promise.resolve(true)
     return new Promise(resolve => {
       const arm = () => {
@@ -260,7 +271,7 @@ export class AutoUpdater {
       }
       const poll = () => {
         this.quietCancel = undefined
-        if (this.disposed || gen !== this.generation || this.deps.settings().autoUpdate === false) { resolve(false); return }
+        if (this.disposed || gen !== this.generation) { resolve(false); return }
         if (this.deps.isQuiet()) { resolve(true); return }
         arm()
       }

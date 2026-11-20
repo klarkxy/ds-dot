@@ -591,6 +591,7 @@ export class DotService {
       this.batcher.take()
       this.releaseChildSeals()
       this.reminders.refresh()
+      this.updates.settingsChanged()
       this.homeRegistered = false
       this.ensuring = undefined
       this.requestedSegment = undefined

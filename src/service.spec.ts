@@ -1841,6 +1841,15 @@ describe('factory reset', () => {
     expect(h.store.dotSessionId).not.toBe(dot)
   })
 
+  it('re-arms the daily update check when the reset restores auto-update', async () => {
+    const h = setup()
+    await h.service.ensureDot()
+    await h.service.confirmFactoryReset(h.service.previewFactoryReset().token)
+    // The restored default turns auto-update back on and books the missed-noon check.
+    expect(h.store.settings.autoUpdate).toBe(true)
+    expect(h.delays()).toContain(180_000)
+  })
+
   it('resets an unsent reservation without trying to stop its placeholder session', async () => {
     const home = mkdtempSync(join(tmpdir(), 'dsh-dot-reset-unsent-'))
     const h = setup(undefined, undefined, home)

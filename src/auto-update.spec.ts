@@ -261,4 +261,56 @@ describe('AutoUpdater checks', () => {
     await flush()
     expect(h.clock.delays()).toEqual([180_000])
   })
+
+  it('never installs when the switch turns off while the version list is in flight', async () => {
+    const { manager, calls } = fakeManager()
+    let resolveList: ((list: UpdateVersionList) => void) | undefined
+    manager.listVersions = () => new Promise(resolve => { resolveList = resolve })
+    const h = harness({ manager })
+    const checking = h.updater.checkNow()
+    await flush()
+    h.settings.autoUpdate = false
+    h.updater.settingsChanged()
+    resolveList!({ status: 'listed', installed: '0.3.0', registry: null, versions: [version('0.3.1')] })
+    await checking
+    expect(calls.updatedTo).toBeUndefined()
+    expect(h.store.updateStatus?.pending).toBeUndefined()
+  })
+
+  it('never installs when a supersede lands inside the pending write', async () => {
+    const { manager, calls } = fakeManager()
+    const h = harness({ manager })
+    const original = h.store.setUpdateStatus.bind(h.store)
+    let resolveWrite: (() => void) | undefined
+    let intercepted = false
+    h.store.setUpdateStatus = next => {
+      if (!intercepted && next?.pending) {
+        intercepted = true
+        return new Promise<void>(resolve => { resolveWrite = () => { void original(next).then(resolve) } })
+      }
+      return original(next)
+    }
+    const checking = h.updater.checkNow()
+    await flush()
+    expect(resolveWrite).toBeDefined()
+    h.updater.dispose()
+    resolveWrite!()
+    await checking
+    expect(calls.updatedTo).toBeUndefined()
+    expect(h.store.updateStatus?.pending).toBeUndefined()
+  })
+
+  it('finishes a manual check started while auto update is off', async () => {
+    const { manager, calls } = fakeManager()
+    const h = harness({ manager, quiet: false, settings: { autoUpdate: false } })
+    const checking = h.updater.checkNow()
+    await flush()
+    expect(h.clock.delays()).toEqual([60_000])
+    h.quiet.value = true
+    h.clock.fire()
+    const status = await checking
+    expect(calls.updatedTo).toBe('0.3.1')
+    expect(status.lastResult).toMatchObject({ kind: 'updated', from: '0.3.0', to: '0.3.1' })
+    expect(h.clock.delays()).toEqual([])
+  })
 })

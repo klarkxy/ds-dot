@@ -572,4 +572,34 @@ export const chatCss = settingsCss + `
 }
 .dsh-dot-chat .dsh-dot-retry-btn:hover:not(:disabled) { background: var(--dsw-alias-interactive-bg-active); }
 .dsh-dot-chat .dsh-dot-retry-btn:disabled { opacity: 0.55; cursor: default; }
+.dsh-dot-chat .dsh-dot-approval-card {
+  display: flex; flex-direction: column; gap: 8px;
+  margin: 16px 0; padding: 12px 14px;
+  border-radius: var(--dsw-radius-md); background: var(--dsw-alias-bg-layer-1);
+  box-shadow: var(--dsw-elevation-stroke);
+}
+.dsh-dot-chat .dsh-dot-approval-card .dvui-view { margin: 0; padding: 0; border: 0; gap: 8px; }
+.dsh-dot-chat .dsh-dot-approval-summary { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.dsh-dot-chat .dsh-dot-approval-head { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.dsh-dot-chat .dsh-dot-approval-desc { margin: 0; font-size: 14px; line-height: 22px; color: var(--dsw-alias-label-primary); overflow-wrap: anywhere; }
+.dsh-dot-chat .dsh-dot-approval-why { margin: 0; font-size: 12px; line-height: 18px; color: var(--dsw-alias-label-secondary); overflow-wrap: anywhere; }
+.dsh-dot-chat .dsh-dot-approval-meta { margin: 0; font-size: 12px; line-height: 18px; color: var(--dsw-alias-label-tertiary); overflow-wrap: anywhere; }
+.dsh-dot-chat .dsh-dot-approval-raw {
+  margin: 0; max-height: 160px; overflow-y: auto;
+  font-size: 12px; line-height: 18px; color: var(--dsw-alias-label-secondary);
+  white-space: pre-wrap; overflow-wrap: anywhere;
+}
+.dsh-dot-chat .dsh-dot-approval-card .dsh-dot-approval-detail {
+  margin-top: 0; border-radius: 0; background: transparent; box-shadow: none;
+}
+.dsh-dot-chat .dsh-dot-approval-card .dsh-dot-approval-toggle { width: auto; padding: 0; }
+.dsh-dot-chat .dsh-dot-approval-card .dsh-dot-approval-toggle::before { content: '▸'; color: var(--dsw-alias-label-tertiary); }
+.dsh-dot-chat .dsh-dot-approval-card .dsh-dot-approval-toggle[aria-expanded='true']::before { content: '▾'; }
+.dsh-dot-chat .dsh-dot-approval-card .dsh-dot-approval-body { padding: 6px 0 2px; border-top: 0; }
+.dsh-dot-chat .dsh-dot-approval-card .dsh-dot-approval-missing { margin-top: 0; background: transparent; padding: 0; }
+.dsh-dot-chat .dsh-dot-approval-card[data-expired] .dsh-dot-approval-summary,
+.dsh-dot-chat .dsh-dot-approval-card[data-expired] .dsh-dot-approval-detail { opacity: 0.55; }
+.dsh-dot-chat .dsh-dot-approval-card[data-expired] .dvui-actions { display: none; }
+.dsh-dot-chat .dsh-dot-card-status { margin: 4px 0 0; font-size: 12px; line-height: 18px; color: var(--dsw-alias-label-tertiary); }
+.dsh-dot-chat .dsh-dot-card-status[data-tone='error'] { color: var(--dsw-alias-label-error); }
 `

@@ -166,6 +166,9 @@ export interface TaskRecord {
 
 export type PendingKind = 'approval' | 'question'
 
+/** Prefix of the token fencing requester-supplied approval text; a random suffix closes the pair. */
+export const APPROVAL_FENCE_PREFIX = 'dot-approval-untrusted-'
+
 export interface ApprovalDetail {
   readonly requestId: string
   readonly sessionId: string

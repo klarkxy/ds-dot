@@ -444,6 +444,9 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
           return { ok: true, value: await service.selfSettings.decide(typeof id === 'string' ? id : '', field(payload, 'allow') === true) }
         }
         case 'segment.new': return { ok: true, value: await service.newSegment() }
+        case 'keepalive': {
+          return { ok: true, value: service.keepaliveInfo() }
+        }
         case 'trajectory': {
           const id = await ensureDot()
           return { ok: true, value: host.dotTrajectory(id) }

@@ -303,15 +303,38 @@ describe('capability application', () => {
     const registered: CapabilityToolDef[] = []
     const released: string[] = []
     const restricted: string[][] = []
+    // Live restrict layers intersect: a global name is visible only while
+    // every live restrict's allow list contains it. Scoped registrations stay.
+    const restricts: ReadonlySet<string>[] = []
     const ctx = {
       tools: {
-        register(def: CapabilityToolDef) { registered.push(def); return () => released.push(def.name) },
-        restrict(filter: { allow: readonly string[] }) { restricted.push([...filter.allow]); return () => restricted.push(['<released>']) },
-        schemas() { return [...defs.definitions(), ...registered] },
+        register(def: CapabilityToolDef) {
+          if (registered.some(row => row.name === def.name)) throw new Error(`duplicate tool "${def.name}" in scope`)
+          registered.push(def)
+          return () => {
+            const index = registered.indexOf(def)
+            if (index >= 0) registered.splice(index, 1)
+            released.push(def.name)
+          }
+        },
+        restrict(filter: { allow: readonly string[] }) {
+          restricted.push([...filter.allow])
+          const live = new Set(filter.allow)
+          restricts.push(live)
+          return () => {
+            const index = restricts.indexOf(live)
+            if (index >= 0) restricts.splice(index, 1)
+            restricted.push(['<released>'])
+          }
+        },
+        schemas() {
+          const globals = defs.definitions().filter(row => restricts.every(allow => allow.has(row.name)))
+          return [...globals, ...registered]
+        },
       },
       on(_event: string, listener: () => void) { listeners.add(listener); return () => listeners.delete(listener) },
     }
-    return { ctx, listeners, registered, released, restricted, fire: () => { for (const listener of [...listeners]) listener() } }
+    return { ctx, listeners, registered, released, restricted, restricts, fire: () => { for (const listener of [...listeners]) listener() } }
   }
 
   it('adds unconditional grants to the allow list and skips absent names', async () => {
@@ -341,9 +364,11 @@ describe('capability application', () => {
     env.fire()
     expect(env.released).toEqual(['cond_tool'])
 
-    // Re-applying releases the previous restrict and copies.
+    // Re-applying releases the previous restrict and copies first, then
+    // installs the fresh mask (defs are empty here, so the allow list is too).
     await caps.applyToAgent(env.ctx as never, agent as never)
-    expect(env.restricted.at(-1)).toEqual(['<released>'])
+    expect(env.restricted.at(-2)).toEqual(['<released>'])
+    expect(env.restricted.at(-1)).toEqual([])
     caps.releaseAgent('dot-1')
     expect(caps.appliedFor('dot-1')).toBeUndefined()
   })
@@ -366,6 +391,83 @@ describe('capability application', () => {
     expect(applied.has('hidden_tool')).toBe(false)
     expect(caps.appliedFor('dot-1')?.has('hidden_tool')).toBe(false)
     caps.releaseAgent('dot-1')
+  })
+
+  it('re-applies a grant change in place: an off→auto plain tool becomes visible and applied', async () => {
+    const tools = fakeTools(['mcp__s__a'])
+    const settings = { current: settingsWith({}) }
+    const caps = new DotCapabilities({
+      tools: () => tools,
+      mcpManager: () => ({ list: () => [{ name: 's' }] }),
+      pluginManager: () => ({ listBundles: async () => [] }),
+      settings: () => settings.current,
+      locked: LOCKED,
+    })
+    const agent = { session: { id: 'dot-1' } }
+    const env = agentCtx(tools)
+    const first = await caps.applyToAgent(env.ctx as never, agent as never)
+    expect(first.size).toBe(0)
+    expect(env.ctx.tools.schemas().map(row => row.name)).toEqual([])
+
+    // An untouched segment takes the grant change in place: the previous
+    // restrict must lift before the new mask reads the scope.
+    settings.current = settingsWith({ 'mcp:s': 'auto' })
+    const second = await caps.applyToAgent(env.ctx as never, agent as never)
+    expect(second.get('mcp__s__a')?.grant).toBe('auto')
+    expect(env.ctx.tools.schemas().map(row => row.name)).toEqual(['mcp__s__a'])
+    expect(caps.appliedFor('dot-1')?.get('mcp__s__a')?.grant).toBe('auto')
+  })
+
+  it('re-applies a conditional grant in place: the scoped copy re-registers and stays applied', async () => {
+    const tools = fakeTools(['cond_tool'], ['cond_tool'])
+    const caps = new DotCapabilities({
+      tools: () => tools,
+      mcpManager: () => undefined,
+      pluginManager: () => ({ listBundles: async () => [] }),
+      settings: () => settingsWith({ 'tool:cond_tool': 'auto' }),
+      locked: LOCKED,
+    })
+    caps.owners.set('cond_tool', {})
+    const agent = { session: { id: 'dot-1' } }
+    const env = agentCtx(tools)
+    await caps.applyToAgent(env.ctx as never, agent as never)
+    expect(env.registered.map(row => row.name)).toEqual(['cond_tool'])
+
+    const second = await caps.applyToAgent(env.ctx as never, agent as never)
+    expect(second.get('cond_tool')?.grant).toBe('auto')
+    // The first copy was released and exactly one copy lives now.
+    expect(env.released).toEqual(['cond_tool'])
+    expect(env.registered.map(row => row.name)).toEqual(['cond_tool'])
+    expect(env.ctx.tools.schemas().map(row => row.name)).toEqual(['cond_tool'])
+    expect(caps.appliedFor('dot-1')?.get('cond_tool')?.grant).toBe('auto')
+  })
+
+  it('falls back to the locked allow list when an apply throws partway', async () => {
+    const tools = fakeTools(['dot_read', 'cond_tool'], ['cond_tool'])
+    const caps = new DotCapabilities({
+      tools: () => tools,
+      mcpManager: () => undefined,
+      pluginManager: () => ({ listBundles: async () => [] }),
+      settings: () => settingsWith({ 'tool:cond_tool': 'auto' }),
+      locked: LOCKED,
+    })
+    caps.owners.set('cond_tool', {})
+    const agent = { session: { id: 'dot-1' } }
+    const env = agentCtx(tools)
+    // The copy registers fine; installing the mask then throws.
+    let failRestrict = true
+    const baseRestrict = env.ctx.tools.restrict.bind(env.ctx.tools)
+    env.ctx.tools.restrict = (filter: { allow: readonly string[] }) => {
+      if (failRestrict) { failRestrict = false; throw new Error('scope rejected the mask') }
+      return baseRestrict(filter)
+    }
+    const applied = await caps.applyToAgent(env.ctx as never, agent as never)
+    expect(applied.size).toBe(0)
+    expect(caps.appliedFor('dot-1')?.size).toBe(0)
+    // Nothing acquired leaks: the copy is disposed and only the locked mask lives.
+    expect(env.released).toEqual(['cond_tool'])
+    expect(env.restricted.at(-1)).toEqual(['dot_read'])
+    expect(env.ctx.tools.schemas().map(row => row.name)).toEqual(['dot_read'])
   })
 
   it('reuses the bundle row mapping for 30s and refetches after tools/change invalidation', async () => {

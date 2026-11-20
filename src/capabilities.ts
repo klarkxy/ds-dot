@@ -491,40 +491,61 @@ export class DotCapabilities {
       return applied
     }
     const grants = await this.resolve()
-    // Names the agent scope cannot show stay unapplied even when granted:
-    // restrict filters them out, and the gate must not report them applied.
-    let visible: ReadonlySet<string> | undefined
-    try { visible = new Set(ctx.tools.schemas(agent).map(row => row.name)) } catch { visible = new Set() }
-    const copies: Array<{ name: string; def: CapabilityToolDef; dispose: () => void }> = []
-    const allow = [...this.deps.locked]
-    for (const [name, resolved] of grants) {
-      const def = tools.get(name)
-      if (def === undefined) continue
-      if (tools.executable(name) !== undefined) {
-        allow.push(name)
-        if (visible.has(name)) applied.set(name, resolved)
-      } else {
-        try {
-          const dispose = ctx.tools.register({ ...(def as CapabilityToolDef & Record<string, unknown>), [SCOPED_COPY]: true })
-          copies.push({ name, def, dispose })
-          applied.set(name, resolved)
-        } catch { /* a name the scope cannot take stays off */ continue }
+    try {
+      // The previous apply of this session releases first, synchronously:
+      // its restrict masks the new allow list while it lives, and its scoped
+      // copies collide with re-registrations under the same names.
+      this.releaseAgent(sessionId)
+      // Names the agent scope cannot show stay unapplied even when granted:
+      // restrict filters them out, and the gate must not report them applied.
+      let visible: ReadonlySet<string> | undefined
+      try { visible = new Set(ctx.tools.schemas(agent).map(row => row.name)) } catch { visible = new Set() }
+      const copies: Array<{ name: string; def: CapabilityToolDef; dispose: () => void }> = []
+      const allow = [...this.deps.locked]
+      for (const [name, resolved] of grants) {
+        const def = tools.get(name)
+        if (def === undefined) continue
+        if (tools.executable(name) !== undefined) {
+          allow.push(name)
+          if (visible.has(name)) applied.set(name, resolved)
+        } else {
+          try {
+            const dispose = ctx.tools.register({ ...(def as CapabilityToolDef & Record<string, unknown>), [SCOPED_COPY]: true })
+            copies.push({ name, def, dispose })
+            applied.set(name, resolved)
+          } catch { /* a name the scope cannot take stays off */ continue }
+        }
       }
-    }
-    releases.push(restrictInheritedTools(agentCtx, allow, agent))
-    // Drop a copy once the global definition it shadows is gone or replaced.
-    if (copies.length > 0) {
-      releases.push(ctx.on('tools/change', () => {
-        for (let index = copies.length - 1; index >= 0; index--) {
-          const copy = copies[index]!
-          if (tools.get(copy.name) === copy.def) continue
-          copies.splice(index, 1)
+      // Releasing this apply also drops every scoped copy it registered;
+      // leftover copies would collide with the next application under the
+      // same names even though their grant no longer resolves.
+      releases.push(() => {
+        for (const copy of copies.splice(0)) {
           try { copy.dispose() } catch { /* gone with its scope */ }
         }
-      }))
+      })
+      releases.push(restrictInheritedTools(agentCtx, allow, agent))
+      // Drop a copy once the global definition it shadows is gone or replaced.
+      if (copies.length > 0) {
+        releases.push(ctx.on('tools/change', () => {
+          for (let index = copies.length - 1; index >= 0; index--) {
+            const copy = copies[index]!
+            if (tools.get(copy.name) === copy.def) continue
+            copies.splice(index, 1)
+            try { copy.dispose() } catch { /* gone with its scope */ }
+          }
+        }))
+      }
+    } catch {
+      // A half-applied change must not leak its copies or widen the scope:
+      // drop whatever was acquired and fall back to the locked-only mask.
+      finish()
+      try { releases.push(restrictInheritedTools(agentCtx, [...this.deps.locked], agent)) } catch { /* the scope is gone entirely */ }
+      const failed: AppliedState = { applied: new Map(), release: finish }
+      this.agents.set(sessionId, failed)
+      return failed.applied
     }
     const state: AppliedState = { applied, release: finish }
-    if (this.agents.has(sessionId)) this.releaseAgent(sessionId)
     this.agents.set(sessionId, state)
     return applied
   }

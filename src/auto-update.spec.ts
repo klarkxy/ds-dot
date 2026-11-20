@@ -300,6 +300,39 @@ describe('AutoUpdater checks', () => {
     expect(h.store.updateStatus?.pending).toBeUndefined()
   })
 
+  it('leaves the pending marker of a newer check alone when a superseded check backs out', async () => {
+    const { manager } = fakeManager()
+    let resolveUpdate: ((outcome: Awaited<ReturnType<PluginManagerLike['updateBundle']>>) => void) | undefined
+    manager.updateBundle = () => new Promise(resolve => { resolveUpdate = resolve })
+    const h = harness({ manager })
+    const original = h.store.setUpdateStatus.bind(h.store)
+    let resolveWrite: (() => void) | undefined
+    let intercepted = false
+    h.store.setUpdateStatus = next => {
+      if (!intercepted && next?.pending) {
+        intercepted = true
+        const write = original(next)
+        return new Promise<void>(resolve => { resolveWrite = () => { void write.then(resolve) } })
+      }
+      return original(next)
+    }
+    const first = h.updater.checkNow()
+    await flush()
+    expect(resolveWrite).toBeDefined()
+    h.settings.autoUpdate = false
+    h.updater.settingsChanged()
+    h.now.value += 1
+    const second = h.updater.checkNow()
+    await flush()
+    const newer = h.store.updateStatus?.pending
+    expect(newer).toMatchObject({ to: '0.3.1' })
+    resolveWrite!()
+    await first
+    expect(h.store.updateStatus?.pending).toBe(newer)
+    resolveUpdate!({ from: '0.3.0', to: '0.3.1', step: 'install', result: { application: 'applied' } } as never)
+    await second
+  })
+
   it('finishes a manual check started while auto update is off', async () => {
     const { manager, calls } = fakeManager()
     const h = harness({ manager, quiet: false, settings: { autoUpdate: false } })

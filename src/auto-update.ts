@@ -237,10 +237,12 @@ export class AutoUpdater {
     const to = target.version
     // Before the call the manager may not let settle: on restart, own version
     // decides whether the swap took effect.
-    await this.save({ ...this.deps.store.updateStatus, pending: { from, to, at: this.deps.now() } })
-    // A supersede that landed during the write must not install: drop the marker.
+    const marker: PendingUpdate = { from, to, at: this.deps.now() }
+    await this.save({ ...this.deps.store.updateStatus, pending: marker })
+    // A supersede that landed during the write must not install: drop the marker, unless a newer check has replaced it.
     if (this.disposed || gen !== this.generation) {
       const status = this.deps.store.updateStatus
+      if (status?.pending !== marker) return undefined
       const kept: UpdateStatus = {
         ...status?.lastCheckAt !== undefined ? { lastCheckAt: status.lastCheckAt } : {},
         ...status?.lastResult ? { lastResult: status.lastResult } : {},

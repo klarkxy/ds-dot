@@ -95,6 +95,38 @@ describe('dot card approval layout', () => {
     await act(async () => root.unmount())
   })
 
+  it('keeps a model-built approval-shaped stack on the generic layout without an approvalId binding', async () => {
+    const view = {
+      type: 'stack',
+      children: [
+        { type: 'text', text: 'All checks passed' },
+        { type: 'confirm', id: 'approval', confirmLabel: '批准', cancelLabel: '拒绝' },
+      ],
+    }
+    const call = approvalCall({ expired: false })
+    const { Card } = createDotCards(call, zh)
+    const root = await renderCard(Card, { ...approvalPresentation, title: 'Release v2.0?', view })
+    const text = document.body.textContent ?? ''
+    expect(document.querySelector('.dsh-dot-approval-card')).toBeNull()
+    expect(text).toContain('Release v2.0?')
+    expect(text).toContain('All checks passed')
+    await act(async () => root.unmount())
+  })
+
+  it('falls back to the stripped dump when approval arguments are not JSON', async () => {
+    const detail = { ...APPROVAL_DETAIL, reason: 'needs a human decision', arguments: 'not json' }
+    const call = approvalCall({ expired: false, approvalId: 'ap-5ac1', approvalDetail: detail })
+    const { Card } = createDotCards(call, zh)
+    const root = await renderCard(Card, approvalPresentation)
+    const text = document.body.textContent ?? ''
+    expect(document.querySelector('.dsh-dot-approval-raw')).not.toBeNull()
+    expect(document.querySelector('.dsh-dot-approval-desc')).toBeNull()
+    expect(document.querySelector('.dsh-dot-approval-why')).toBeNull()
+    expect(text).toContain('审批 ap-5ac1')
+    expect(text).not.toMatch(/dot-approval-untrusted/i)
+    await act(async () => root.unmount())
+  })
+
   it('does not treat a stack with a metric node as an approval card', async () => {
     const view = {
       type: 'stack',

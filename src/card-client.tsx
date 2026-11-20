@@ -70,7 +70,7 @@ function ApprovalSummary({ detail, dump, locale }: { detail: ApprovalDetail | nu
   const why = approvalReason(detail, display.reason)
   const dir = display.cwd
   const sandbox = permissionLabel(locale, display.permission)
-  const designed = detail != null && Boolean(command || display.description || why || dir || sandbox)
+  const designed = args !== undefined && Boolean(command || display.description || why || dir || sandbox)
   return (
     <div className="dsh-dot-approval-summary">
       <div className="dsh-dot-approval-head">
@@ -253,12 +253,21 @@ export function createDotCards(call: (endpoint: string, payload: unknown) => Pro
     if (!valid) return <div className="dvui-root" role="alert">{dict.invalid}</div>
     // An expired card is still shown (not settled/hidden) but its submit is disabled.
     const canAnswer = valid.interactive && pending && !expired && answer === null && !notifyPending
-    const approval = isApprovalView(valid.view)
+    // The approval layout requires the shape AND card.detail binding the view to an approval;
+    // a model-built lookalike stack keeps the generic layout but still loses fence tags.
+    const approvalShape = isApprovalView(valid.view)
+    const approval = approvalShape && (approvalDetail !== undefined || detailMissing)
     const dump = approval ? approvalDumpText(valid.view) : ''
     // checkedAnswer keeps validating against valid.view; only the widget loses the model dump.
-    const shownView = approval && Array.isArray(valid.view.children)
-      ? { ...valid.view, children: valid.view.children.filter(child => child.type !== 'text') }
-      : valid.view
+    const shownView = !approvalShape || !Array.isArray(valid.view.children) ? valid.view
+      : approval
+        ? { ...valid.view, children: valid.view.children.filter(child => child.type !== 'text') }
+        : {
+            ...valid.view,
+            children: valid.view.children.map(child => child.type === 'text' && typeof child.text === 'string'
+              ? { ...child, text: child.text.replace(APPROVAL_FENCE, '') }
+              : child),
+          }
     const localNote = expired && !answer ? uiT(loc, 'cardsHint') : dict.local
     const detailPanel = (approvalDetail !== undefined || detailMissing) && (
       <ApprovalDetailPanel detail={approvalDetail} locale={loc} missing={detailMissing} />

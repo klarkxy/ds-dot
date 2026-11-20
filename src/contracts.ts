@@ -362,7 +362,10 @@ export interface DotUsageOffset extends DotContextUsage {
   readonly sessionId: string
 }
 
-/** The cache-keepalive setting of the model dot's next request would run on. */
+/**
+ * The cache-keepalive setting Settings currently edits: the live session's
+ * model while a ping is armed, otherwise the next-request model.
+ */
 export interface KeepaliveInfo {
   readonly provider: string
   readonly model: string

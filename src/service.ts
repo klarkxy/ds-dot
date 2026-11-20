@@ -28,7 +28,7 @@ import { approvalDisplay, parseNotice } from './chat-format.ts'
 import { cardText } from './cards.ts'
 import { NoticeBatcher, formatNotices, formatNoticeDisplay, realTimer, type Notice, type Timer } from './batcher.ts'
 import { ZERO_USAGE, addUsage, combineUsage, netSegmentUsage, usageFromEvents } from './context.ts'
-import { PRESET_ID, TOOL, type BoardView, type DotContextSections, type DotContextUsage, type DotContextView, type FactoryResetPreview, type FactoryResetResult, type KnowledgeView, type ModelChoice, type PendingKind, type PendingQuestionItem, type ReflectionRun, type RolloverReason, type RuleConfig, type TrajectoryView } from './contracts.ts'
+import { PRESET_ID, TOOL, type BoardView, type DotContextSections, type DotContextUsage, type DotContextView, type FactoryResetPreview, type FactoryResetResult, type KeepaliveInfo, type KnowledgeView, type ModelChoice, type PendingKind, type PendingQuestionItem, type ReflectionRun, type RolloverReason, type RuleConfig, type TrajectoryView } from './contracts.ts'
 import { SUMMARY_INSTRUCTION, SUMMARY_MAX_TOKENS, buildHandoff, type Handoff } from './handoff.ts'
 import { READ_ROWS_DEFAULT, READ_ROWS_MAX, SEARCH_LIMIT_DEFAULT, SEARCH_LIMIT_MAX, SEARCH_SESSIONS_MAX, formatRead, formatSearch, historyRows, queryTerms, searchRows, windowRows, type SessionHits } from './history.ts'
 import { type DotHost, type WorkspaceRow } from './host.ts'
@@ -46,7 +46,7 @@ import { ReflectionRunner } from './reflection.ts'
 import { ReminderClock } from './reminders.ts'
 import { routeRequest } from './rules.ts'
 import { ScheduleInputError, describeTiming, scheduleLines, type ScheduleInput } from './schedule.ts'
-import { KEEPALIVE_MAX_PINGS, cacheTtlMinutes, keepaliveIntervalMs } from './keepalive.ts'
+import { KEEPALIVE_MAX_PINGS, cacheTtlMinutes, defaultCacheTtl, keepaliveIntervalMs } from './keepalive.ts'
 import { IDLE_MIN_TOKENS, openingText, reasonAfterTurn, reasonBeforeDelivery, type Segment } from './segments.ts'
 import type { DotStore } from './store.ts'
 import { factoryResetArchiveIds, factoryResetCounts, factoryResetStopGap, factoryResetTokenError, issueFactoryResetToken, type FactoryResetStopEvidence } from './factory-reset.ts'
@@ -440,6 +440,23 @@ export class DotService {
       // A new TTL moves the armed ping without resetting the stretch's count.
       if (this.keepalive) this.scheduleKeepalive(this.keepalive)
     }).catch(error => { this.options.log?.(`dsh-dot: settings not applied to dot's session: ${messageOf(error)}`) })
+  }
+
+  /**
+   * The model Settings edits for cache TTL. While a ping is armed this is the
+   * live session's model, so 0 pauses the stretch that is actually paying.
+   * Otherwise it is the next-request model.
+   */
+  keepaliveInfo(): KeepaliveInfo | undefined {
+    const armed = this.keepalive
+    const model = (armed && this.host.sessionModel?.(armed.sessionId)) || this.host.dotModel()
+    if (!model) return undefined
+    return {
+      provider: model.provider,
+      model: model.model,
+      minutes: cacheTtlMinutes(this.store.settings, model.provider, model.model),
+      defaultMinutes: defaultCacheTtl(model.provider, model.model),
+    }
   }
 
   /**

@@ -589,6 +589,34 @@ describe('DotService cache keepalive', () => {
     expect(h.delays()).not.toContain(2_880_000)
   })
 
+  it('pauses the session-model ping when the displayed TTL is set to 0 after a mid-turn switch', async () => {
+    const h = setup()
+    h.setDotModel({ provider: 'p', model: 'deepseek-v4' })
+    h.setSessionModel({ provider: 'p', model: 'claude-9' })
+    await arm(h)
+    expect(h.delays()).toContain(240_000)
+    const displayed = h.service.keepaliveInfo()
+    expect(displayed).toMatchObject({ provider: 'p', model: 'claude-9' })
+    // Writing 0 only to the next-request model must not pause the live ping.
+    await h.store.setSettings({ ...h.store.settings, cacheTtl: { 'p/deepseek-v4': 0 } })
+    await h.service.settingsChanged()
+    expect(h.delays()).toContain(240_000)
+    const key = `${displayed!.provider}/${displayed!.model}`
+    await h.store.setSettings({ ...h.store.settings, cacheTtl: { [key]: 0 } })
+    await h.service.settingsChanged()
+    expect(h.delays()).not.toContain(240_000)
+    await tick(h)
+    expect(h.pings).toEqual([])
+  })
+
+  it('shows the next-request model in Settings when no keepalive is armed', async () => {
+    const h = setup()
+    h.setDotModel({ provider: 'p', model: 'deepseek-v4' })
+    h.setSessionModel({ provider: 'p', model: 'claude-9' })
+    await h.service.ensureDot()
+    expect(h.service.keepaliveInfo()).toMatchObject({ provider: 'p', model: 'deepseek-v4' })
+  })
+
   it('does not arm without a running task', async () => {
     const h = setup()
     const dot = await h.service.ensureDot()

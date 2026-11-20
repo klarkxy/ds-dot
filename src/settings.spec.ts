@@ -113,6 +113,25 @@ describe('patchSettings', () => {
     expect(parseSettings(next).reflection).toBe(false)
   })
 
+  it('stores per-model cache TTL overrides and refuses bad values', () => {
+    const next = patchSettings(DEFAULT_SETTINGS, { cacheTtl: { 'p/base': 12, 'x/deepseek-v4': 0 } })
+    expect(next.cacheTtl).toEqual({ 'p/base': 12, 'x/deepseek-v4': 0 })
+    expect(parseSettings(next).cacheTtl).toEqual(next.cacheTtl)
+    expect(() => patchSettings(DEFAULT_SETTINGS, { cacheTtl: { 'p/base': -1 } })).toThrow(/cacheTtl/)
+    expect(() => patchSettings(DEFAULT_SETTINGS, { cacheTtl: { 'p/base': 1441 } })).toThrow(/cacheTtl/)
+    expect(() => patchSettings(DEFAULT_SETTINGS, { cacheTtl: { 'p/base': 1.5 } })).toThrow(/cacheTtl/)
+    expect(() => patchSettings(DEFAULT_SETTINGS, { cacheTtl: { '': 5 } })).toThrow(/cacheTtl/)
+    expect(() => patchSettings(DEFAULT_SETTINGS, { cacheTtl: null })).toThrow(/cacheTtl/)
+    const tooMany = Object.fromEntries(Array.from({ length: 201 }, (_, index) => [`p/m${index}`, 5]))
+    expect(() => patchSettings(DEFAULT_SETTINGS, { cacheTtl: tooMany })).toThrow(/cacheTtl/)
+  })
+
+  it('ignores a malformed stored cache TTL map field by field', () => {
+    expect(parseSettings({ cacheTtl: { 'p/base': 'soon' } }).cacheTtl).toBeUndefined()
+    expect(parseSettings({ cacheTtl: 'yes' }).cacheTtl).toBeUndefined()
+    expect(parseSettings({ cacheTtl: { 'p/base': 30 } }).cacheTtl).toEqual({ 'p/base': 30 })
+  })
+
   it('keeps every setting unlocked by default and saves individual locks', () => {
     expect(parseSettings(undefined).locks).toBeUndefined()
     const next = patchSettings(DEFAULT_SETTINGS, { locks: { model: true, agreements: false } })

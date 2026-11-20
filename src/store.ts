@@ -223,6 +223,11 @@ export class DotStore {
     return this.write('state', STATE_KEY, this.state)
   }
 
+  /** Usage of a keepalive ping joins the carried totals: it never appears in any segment's log. */
+  addUsageCarry(usage: DotContextUsage): Promise<void> {
+    return this.setDot({ usageCarry: addUsage(this.state.usageCarry, usage) })
+  }
+
   /** Refresh the frozen inputs of a segment dot has not replied in yet. */
   refreezeSegment(patch: Pick<Segment, 'persona' | 'model' | 'agreements' | 'cognition'>): Promise<void> {
     const segment = this.segment

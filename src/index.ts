@@ -442,6 +442,9 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
         case 'segment.new': return { ok: true, value: await service.newSegment() }
         case 'update.status': return { ok: true, value: service.updateStatus() ?? null }
         case 'update.check': return { ok: true, value: await service.checkUpdates() }
+        case 'keepalive': {
+          return { ok: true, value: service.keepaliveInfo() }
+        }
         case 'trajectory': {
           const id = await ensureDot()
           return { ok: true, value: host.dotTrajectory(id) }

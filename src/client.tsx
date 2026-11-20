@@ -15,7 +15,7 @@ import { CHAT_ROOT, ChatPanel, chatCss, type CardComponent, type ChatApi } from 
 import { contextCss } from './context-panel.tsx'
 import { personaCss } from './persona-panel.tsx'
 import { trajectoryCss } from './trajectory-panel.tsx'
-import { PLUGIN_NAME, RPC_CHANNEL, type BoardView, type ChatSnapshot, type DotContextView, type DotSettings, type FactoryResetPreview, type FactoryResetResult, type KnowledgeView, type ReflectionRun, type SettingProposal, type TrajectoryView } from './contracts.ts'
+import { PLUGIN_NAME, RPC_CHANNEL, type BoardView, type ChatSnapshot, type DotContextView, type DotSettings, type FactoryResetPreview, type FactoryResetResult, type KeepaliveInfo, type KnowledgeView, type ReflectionRun, type SettingProposal, type TrajectoryView } from './contracts.ts'
 import type { UpdateStatus } from './auto-update.ts'
 import { copyLocale, t, type CopyLocale } from './ui-copy.ts'
 import { DotIcon } from './whale.tsx'
@@ -84,6 +84,7 @@ export function apply(ctx: Context): void {
     newSegment: () => call<string>('segment.new'),
     updateStatus: signal => call<UpdateStatus | null>('update.status', {}, signal),
     updateCheck: () => call<UpdateStatus>('update.check'),
+    keepalive: signal => call<KeepaliveInfo | undefined>('keepalive', {}, signal),
     knowledge: signal => call<KnowledgeView>('knowledge', {}, signal),
     setAgreements: text => call<KnowledgeView>('agreements.set', { text }),
     undoAgreements: () => call<KnowledgeView>('agreements.undo'),

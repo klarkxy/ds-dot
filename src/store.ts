@@ -140,7 +140,7 @@ export class DotStore {
   }
 
   addCard(card: import('./card-state.ts').DotCardRecord): Promise<void> {
-    const updated = [...this.cards.map(row => row.answer ? row : { ...row, expired: true }), card]
+    const updated = [...this.cards.map(row => row.answer || row.keepAlive ? row : { ...row, expired: true }), card]
     if (updated.length <= MAX_STORED_CARDS) {
       return this.setDot({ cardSequence: card.number, cards: updated })
     }
@@ -154,8 +154,8 @@ export class DotStore {
   }
 
   expireCards(keepId?: string): Promise<void> {
-    if (!this.cards.some(card => !card.expired && !card.answer && card.id !== keepId)) return Promise.resolve()
-    return this.setDot({ cards: this.cards.map(card => card.answer || card.id === keepId ? card : { ...card, expired: true }) })
+    if (!this.cards.some(card => !card.expired && !card.answer && !card.keepAlive && card.id !== keepId)) return Promise.resolve()
+    return this.setDot({ cards: this.cards.map(card => card.answer || card.keepAlive || card.id === keepId ? card : { ...card, expired: true }) })
   }
 
   /** Mark one unanswered card expired — a human request that ended without an answer. */
@@ -210,7 +210,7 @@ export class DotStore {
       dotSessionId: next.sessionId,
       segment: next,
       pastSegments: past,
-      ...(moved ? { cards: this.cards.map(card => card.answer ? card : { ...card, expired: true }) } : {}),
+      ...(moved ? { cards: this.cards.map(card => card.answer || card.keepAlive ? card : { ...card, expired: true }) } : {}),
     }
     this.changed()
     return this.write('state', STATE_KEY, this.state)

@@ -19,6 +19,8 @@ export interface DotCardRecord {
   readonly answer?: ViewAnswer
   /** When the card was presented; orders synthetic feed rows where the call waits. */
   readonly shownAt?: number
+  /** An approval card whose request settles it: later cards and bulk expiry leave it live. */
+  readonly keepAlive?: true
 }
 export type DotCardPresentation = ViewPresentation & { dotCard?: { number: number; expired?: boolean } }
 
@@ -34,7 +36,10 @@ export class DotCards {
     const number = this.store.cardSequence + 1
     const id = `dot-card-${number}`
     const approvalDetail = approvalId ? this.store.approvalDetails.find(row => row.requestId === approvalId) : undefined
-    const record: DotCardRecord = { id, number, sessionId, callId, title: shown.title, view: shown.view, expired: false, shownAt: this.now(), ...(approvalId ? { approvalId } : {}), ...(approvalDetail ? { approvalDetail } : {}) }
+    // Approval calls wait on their card, so a parallel or later card must not
+    // expire it; the request's own settlement (or a restart sweep) does.
+    const keepAlive = callId.startsWith('capability:') || callId.startsWith('install:')
+    const record: DotCardRecord = { id, number, sessionId, callId, title: shown.title, view: shown.view, expired: false, shownAt: this.now(), ...(keepAlive ? { keepAlive: true as const } : {}), ...(approvalId ? { approvalId } : {}), ...(approvalDetail ? { approvalDetail } : {}) }
     await this.store.addCard(record)
     return { ...base, viewId: id, dotCard: { number } }
   }

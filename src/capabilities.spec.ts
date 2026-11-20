@@ -558,9 +558,12 @@ describe('service-level capability gate', () => {
     const host = {
       isRunning: () => false,
       modelKey: () => undefined,
+      syncModel: () => {},
       readEvents: async () => [],
       dotContext: async () => ({ live: true, compactions: 0 }),
       say: async () => {},
+      resumeDot: async () => true,
+      createWorkspace: async () => ({ id: 'w1', title: 'home', path: '/tmp/dot-cap-test' }),
     }
     const service = new DotService({ host: host as never, store, homeDir: '/tmp/dot-cap-test', capabilities: caps })
     const apply = async () => caps.applyToAgent({
@@ -664,6 +667,63 @@ describe('service-level capability gate', () => {
     await store.setSettings(settingsWith({ 'tool:extra_tool': 'off' }))
     await answer
     await expect(pending).resolves.toMatchObject({ kind: 'deny' })
+  })
+
+  it('keeps parallel capability asks live until each settles', async () => {
+    const { store, service, apply } = serviceHarness({ 'tool:extra_tool': 'ask', 'tool:other_tool': 'ask' }, undefined, ['extra_tool', 'other_tool'])
+    await store.beginSegment({ sessionId: 'dot-1', startedAt: 1, persona: '' })
+    await apply()
+
+    const first = service.capabilityGate({ name: 'extra_tool' })
+    const second = service.capabilityGate({ name: 'other_tool' })
+    await new Promise(resolve => setImmediate(resolve))
+    await new Promise(resolve => setImmediate(resolve))
+    const asks = service.pending.list().filter(row => row.kind === 'approval')
+    expect(asks).toHaveLength(2)
+    const cardOf = (requestId: string) => store.cards.find(row => row.approvalId === requestId)!
+    // Presenting the second card must not expire the first.
+    expect(store.cards.filter(row => row.keepAlive === true && !row.expired)).toHaveLength(2)
+
+    await service.answerCard(cardOf(asks[1]!.id).id, 'approval', { confirmed: true })
+    await expect(second).resolves.toBe('next')
+    expect(cardOf(asks[0]!.id).expired).toBe(false)
+    await service.answerCard(cardOf(asks[0]!.id).id, 'approval', { confirmed: false })
+    await expect(first).resolves.toMatchObject({ kind: 'deny' })
+  })
+
+  it('keeps a waiting ask live while a normal human message lands', async () => {
+    const { store, service, apply } = serviceHarness({ 'tool:extra_tool': 'ask' })
+    await store.beginSegment({ sessionId: 'dot-1', startedAt: 1, persona: '' })
+    await apply()
+
+    const pending = service.capabilityGate({ name: 'extra_tool' })
+    await new Promise(resolve => setImmediate(resolve))
+    const request = service.pending.list().find(row => row.kind === 'approval')
+    const card = store.cards.find(row => row.approvalId === request!.id)!
+    // The post-delivery bulk expiry used to take the waiting card with it.
+    await service.say('an unrelated message')
+    expect(store.cards.find(row => row.id === card.id)?.expired).toBe(false)
+    await service.answerCard(card.id, 'approval', { confirmed: true })
+    await expect(pending).resolves.toBe('next')
+  })
+
+  it('expires a leftover keep-alive card whose request did not survive a restart', async () => {
+    const { store, service, apply } = serviceHarness({ 'tool:extra_tool': 'ask' })
+    await store.beginSegment({ sessionId: 'dot-1', startedAt: 1, persona: '' })
+    await apply()
+    void service.capabilityGate({ name: 'extra_tool' })
+    await new Promise(resolve => setImmediate(resolve))
+    const card = store.cards.find(row => row.keepAlive === true)!
+    expect(card.expired).toBe(false)
+
+    // A fresh service over the same store has no live pending requests, so
+    // reconciliation expires the card the dead request left behind.
+    const restarted = new DotService({
+      host: { isRunning: () => false, modelKey: () => undefined, readEvents: async () => [], dotContext: async () => ({ live: true, compactions: 0 }), say: async () => {} } as never,
+      store, homeDir: '/tmp/dot-cap-test', capabilities: (service as unknown as { options: { capabilities: unknown } }).options.capabilities as never,
+    })
+    await restarted.reconcile()
+    expect(store.cards.find(row => row.id === card.id)?.expired).toBe(true)
   })
 
   it('proposes grant changes through the settings flow and refuses locked shapes', async () => {
@@ -800,6 +860,25 @@ describe('propose_install', () => {
     expect(installs[0]!.options?.expected).toEqual({ name: 'dsh-x', version: '1.2.3' })
     expect(installs[0]!.options?.requestId).toBe(request!.id)
     expect(installs[0]!.options?.enabled).toBe(true)
+    expect(notes.some(text => text.includes('Installed dsh-x@1.2.3'))).toBe(true)
+  })
+
+  it('keeps two parallel install proposals answerable until each settles', async () => {
+    const { store, service, notes } = harness(pm())
+    await store.beginSegment({ sessionId: 'dot-1', startedAt: 1, persona: '' })
+    await service.proposeInstall({ spec: 'dsh-x', version: '1.2.3', reason: 'need x' })
+    await service.proposeInstall({ spec: 'dsh-y', version: '2.0.0', reason: 'need y' })
+    const cards = store.cards.filter(row => row.callId.startsWith('install:'))
+    expect(cards).toHaveLength(2)
+    // The second proposal's card must not expire the first one.
+    expect(cards.every(card => card.keepAlive === true && !card.expired)).toBe(true)
+
+    await service.answerCard(cards[1]!.id, 'approval', { confirmed: false })
+    await tick()
+    expect(notes.some(text => text.includes('declined'))).toBe(true)
+    expect(store.cards.find(row => row.id === cards[0]!.id)?.expired).toBe(false)
+    await service.answerCard(cards[0]!.id, 'approval', { confirmed: true })
+    await tick()
     expect(notes.some(text => text.includes('Installed dsh-x@1.2.3'))).toBe(true)
   })
 

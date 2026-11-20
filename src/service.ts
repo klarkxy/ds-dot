@@ -1115,6 +1115,14 @@ export class DotService {
   reconcile(): Promise<void> { return this.track(() => this.reconcileNow()) }
 
   private async reconcileNow(): Promise<void> {
+    // Pending requests do not survive a restart, so a keep-alive approval card
+    // left behind by one can never be answered again; expire it up front.
+    const live = new Set(this.pending.list().map(row => row.id))
+    for (const card of this.store.cards) {
+      if (card.keepAlive !== true || card.answer || card.expired) continue
+      if (card.approvalId !== undefined && live.has(card.approvalId)) continue
+      await this.store.expireCard(card.id).catch(error => this.options.log?.(`dsh-dot: stale approval card expiry was not saved: ${messageOf(error)}`))
+    }
     for (const run of this.store.work.occupying()) {
       if (this.closing) return
       await reconcileRun(this.store.work, this.runHost(), run.id, this.now()).catch(error => {

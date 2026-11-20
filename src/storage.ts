@@ -117,6 +117,7 @@ const cardSchema = z.object({
   approvalDetail: z.object({ requestId: z.string(), sessionId: z.string(), callerSessionId: z.string().optional(), callId: z.string().optional(), toolName: z.string(), reason: z.string().optional(), arguments: z.string().optional() }).optional(),
   notificationPending: z.boolean().optional(),
   answer: z.object({ id: z.string(), action: z.string(), values: z.record(z.string(), z.unknown()) }).optional(),
+  keepAlive: z.literal(true).optional(),
 })
 
 const updateStatusSchema = z.object({

@@ -12,8 +12,8 @@ importers:
   .:
     dependencies:
       '@klarkxy/dsh-deep-view':
-        specifier: ^0.3.0
-        version: 0.3.0(2270344a8e6b3df4d4c159a3f3718aaa)
+        specifier: ^0.3.4
+        version: 0.3.4(2270344a8e6b3df4d4c159a3f3718aaa)
       '@klarkxy/dsh-dev-index':
         specifier: '>=0.3.2'
         version: 0.3.2(56fbc1b7da5d19d4140df80369bf972b)
@@ -835,8 +835,8 @@ packages:
   '@juggle/resize-observer@3.4.0':
     resolution: {integrity: sha512-dfLbk+PwWvFzSxwk3n5ySL0hfBog779o8h68wK/7/APo/7cgyWp5jcXockbxdk5kFRkbeXWm4Fbi9FrdN381sA==}
 
-  '@klarkxy/dsh-deep-view@0.3.0':
-    resolution: {integrity: sha512-TMLlhMITBxB28jFGQsneKRhYs1UAR+mgzkjF2j173CoLnZx7nvaUlYM52PxTl66fgzVPfg6R5mJQ4+XYJmc1hw==}
+  '@klarkxy/dsh-deep-view@0.3.4':
+    resolution: {integrity: sha512-UdA3/9emQ2JObo7dywp7oepiqfSLMQXP3CgpaVSuUrzhQvhnkArZSwHWgJ2xCuPPUu8GZ8MMDWXPcc8pCu5vhQ==}
     engines: {dsh: '>=0.2.2-rc.3', node: '>=22'}
     peerDependencies:
       '@deepseek-ai/cordis': '>=4.0.4'
@@ -3143,7 +3143,7 @@ snapshots:
 
   '@juggle/resize-observer@3.4.0': {}
 
-  '@klarkxy/dsh-deep-view@0.3.0(2270344a8e6b3df4d4c159a3f3718aaa)':
+  '@klarkxy/dsh-deep-view@0.3.4(2270344a8e6b3df4d4c159a3f3718aaa)':
     dependencies:
       '@klarkxy/dsh-plugin-kit': 0.8.1(ce9eb62d9113aa39bd512a3051503f6d)
       '@xyflow/react': 12.12.1(@types/react-dom@18.3.7(@types/react@18.3.31))(@types/react@18.3.31)(react-dom@18.3.1(react@18.3.1))(react@18.3.1)

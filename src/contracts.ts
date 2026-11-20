@@ -259,6 +259,8 @@ export interface DotSettings {
   readonly taskPermission: TaskPermission
   /** Whether dot may run her own background reflection pass. */
   readonly reflection: boolean
+  /** Whether dot checks daily for a newer published version of itself and hot-updates. */
+  readonly autoUpdate: boolean
   readonly idleCheckMinutes: number
   /** Prompt-cache TTL overrides by `provider/model` key, in minutes; 0 turns keepalive off for that model. */
   readonly cacheTtl?: Readonly<Record<string, number>>
@@ -277,6 +279,7 @@ export const DEFAULT_SETTINGS: DotSettings = {
   taskModels: { mode: 'all', list: [] },
   taskPermission: 'workspace-write',
   reflection: true,
+  autoUpdate: true,
   idleCheckMinutes: 10,
 }
 

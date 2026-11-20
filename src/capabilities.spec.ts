@@ -998,4 +998,29 @@ describe('capability card ordering', () => {
     expect(rows.map(row => row.key)).toEqual(['capability:b', 'capability:a', 'capability:c'])
     expect(rows.map(row => row.at)).toEqual([100, 200, Number.MAX_SAFE_INTEGER])
   })
+
+  it('keeps an answered segment-1 card row, with its answer, after the feed moves to segment 2', async () => {
+    const store = new DotStore(undefined)
+    await store.addCard({ id: 'c1', number: 1, sessionId: 's1', callId: 'capability:a', title: 't', view: { type: 'stack', children: [] }, expired: false, shownAt: 200 })
+    await store.setCardAnswer('c1', { id: 'c1', action: 'approval', values: { confirmed: true } })
+    const host = { isRunning: () => false, dotEvents: () => [], readEvents: async () => [] }
+    const feed = new ChatFeed(host as never, store)
+    feed.attach('s1')
+    feed.attach('s2', [{ sessionId: 's1', startedAt: 100, endedAt: 300, reason: 'manual' }])
+    await new Promise(resolve => setImmediate(resolve))
+
+    const snapshot = feed.snapshot()!
+    const items = snapshot.items
+    const cardRow = items.find(item => item.key === 'capability:a')
+    const marker = items.findIndex(item => item.kind === 'segment' && item.key === 'segment:s1')
+    expect(cardRow).toBeDefined()
+    expect(marker).toBeGreaterThan(-1)
+    expect(items.indexOf(cardRow!)).toBeLessThan(marker)
+    expect(snapshot.answers?.['c1']).toMatchObject({ action: 'approval' })
+
+    // A card whose record predates shownAt lands just before the segment marker.
+    await store.addCard({ id: 'c2', number: 2, sessionId: 's1', callId: 'capability:old', title: 't', view: { type: 'stack', children: [] }, expired: true })
+    const placed = feed.snapshot()!.items.find(item => item.key === 'capability:old')
+    expect(placed?.at).toBe(299)
+  })
 })

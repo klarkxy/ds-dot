@@ -14,7 +14,7 @@ afterEach(() => { document.body.innerHTML = '<div id="root"></div>' })
 
 const zh = { getSnapshot: () => ({ active: 'zh-CN' }), subscribe: () => () => {} }
 
-const ARGS = '{"command":"pnpm install --prefer-offline","description":"Install dependencies in PR worktree","justification":"esbuild postinstall needs write access","run_in_background":true,"sandbox_permissions":"danger-full-access","timeoutMs":600000,"workdir":"H:\\\\Code\\\\dsh-plugins\\\\.agents\\\\worktrees\\\\pr-24-review"}'
+const ARGS = '{"command":"pnpm install --prefer-offline","description":"Install dependencies in PR worktree","justification":"esbuild postinstall needs write access","run_in_background":true,"sandbox_permissions":"danger-full-access","timeoutMs":600000,"workdir":"C:\\\\work\\\\pr-24-review"}'
 const DUMP = [
   '审批 ap-5ac1',
   '会话: session-15fc',
@@ -67,6 +67,7 @@ describe('dot card approval layout', () => {
     expect(text).toContain('pr-24-review')
     expect(text).toContain('esbuild postinstall needs write access')
     expect(text).not.toContain('dot-approval-untrusted')
+    expect(document.querySelector('.dsh-dot-approval-summary [title]')).toBeNull()
     const approve = [...document.querySelectorAll('button')].find(button => button.textContent === '批准')!
     const deny = [...document.querySelectorAll('button')].find(button => button.textContent === '拒绝')!
     expect(approve.className).toContain('dsh-stub-button--primary')
@@ -110,6 +111,25 @@ describe('dot card approval layout', () => {
     expect(document.querySelector('.dsh-dot-approval-card')).toBeNull()
     expect(text).toContain('Release v2.0?')
     expect(text).toContain('All checks passed')
+    await act(async () => root.unmount())
+  })
+
+  it('renders an argv-array command joined by spaces', async () => {
+    const detail = { ...APPROVAL_DETAIL, arguments: '{"command":["git","status","--short"],"workdir":"C:\\\\work\\\\repo"}' }
+    const call = approvalCall({ expired: false, approvalId: 'ap-5ac1', approvalDetail: detail })
+    const { Card } = createDotCards(call, zh)
+    const root = await renderCard(Card, approvalPresentation)
+    expect(document.querySelector('.dsh-dot-cmd')!.textContent).toBe('git status --short')
+    await act(async () => root.unmount())
+  })
+
+  it('falls back to the stripped dump when arguments exceed the parse limit', async () => {
+    const detail = { ...APPROVAL_DETAIL, arguments: `{"command":"git status","padding":"${'x'.repeat(100_001)}"}` }
+    const call = approvalCall({ expired: false, approvalId: 'ap-5ac1', approvalDetail: detail })
+    const { Card } = createDotCards(call, zh)
+    const root = await renderCard(Card, approvalPresentation)
+    expect(document.querySelector('.dsh-dot-approval-raw')).not.toBeNull()
+    expect(document.querySelector('.dsh-dot-cmd')).toBeNull()
     await act(async () => root.unmount())
   })
 

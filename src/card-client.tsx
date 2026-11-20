@@ -19,7 +19,10 @@ const translationKeys = new Map(Object.entries(uiEn).map(([key, english]) => [en
 
 const CardButton: ButtonHost = props => <Button {...props} />
 
-const APPROVAL_FENCE = new RegExp(`</?${APPROVAL_FENCE_PREFIX}[0-9a-f-]+>`, 'gi')
+const escapeRegExp = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+const APPROVAL_FENCE = new RegExp(`</?${escapeRegExp(APPROVAL_FENCE_PREFIX)}[0-9a-f-]+>`, 'gi')
+/** Arguments beyond this size skip JSON parsing; the full text stays in the details panel. */
+const APPROVAL_ARGS_PARSE_LIMIT = 100_000
 
 /** The approval card the server sends is a stack of text dumps plus a confirm node named 'approval'. */
 function isApprovalView(node: ViewNode): boolean {
@@ -62,7 +65,7 @@ function approvalReason(detail: ApprovalDetail | null | undefined, justification
 /** Structured summary of a pending approval, parsed from the stored request arguments. */
 function ApprovalSummary({ detail, dump, locale }: { detail: ApprovalDetail | null | undefined; dump: string; locale: CopyLocale }) {
   const args = useMemo<unknown>(() => {
-    if (detail?.arguments === undefined) return undefined
+    if (detail?.arguments === undefined || detail.arguments.length > APPROVAL_ARGS_PARSE_LIMIT) return undefined
     try { return JSON.parse(detail.arguments) } catch { return undefined }
   }, [detail?.arguments])
   const display = approvalDisplay(args)
@@ -84,7 +87,7 @@ function ApprovalSummary({ detail, dump, locale }: { detail: ApprovalDetail | nu
           {command ? <pre className="dsh-dot-cmd">{command}</pre> : null}
           {dir || sandbox ? (
             <p className="dsh-dot-approval-meta">
-              {dir ? <span title={dir}>{uiT(locale, 'approvalDir')} {folderName(dir) ?? dir}</span> : null}
+              {dir ? <span>{uiT(locale, 'approvalDir')} {folderName(dir) ?? dir}</span> : null}
               {dir && sandbox ? ' · ' : null}
               {sandbox ? <span>{uiT(locale, 'approvalSandbox')} {sandbox}</span> : null}
             </p>
@@ -259,6 +262,9 @@ export function createDotCards(call: (endpoint: string, payload: unknown) => Pro
     const approval = approvalShape && (approvalDetail !== undefined || detailMissing)
     const dump = approval ? approvalDumpText(valid.view) : ''
     // checkedAnswer keeps validating against valid.view; only the widget loses the model dump.
+    // For a bound approval card every text child is the server's model-facing fenced
+    // dump (see presentCard in src/service.ts), so the widget drops them all and the
+    // summary — or the stripped fallback — shows their content instead.
     const shownView = !approvalShape || !Array.isArray(valid.view.children) ? valid.view
       : approval
         ? { ...valid.view, children: valid.view.children.filter(child => child.type !== 'text') }

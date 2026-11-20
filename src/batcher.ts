@@ -2,7 +2,7 @@
 import type { NoticeEntry, ParsedNotice } from './chat-format.ts'
 export interface Notice {
   readonly sessionId: string
-  readonly kind: 'turn-end' | 'error' | 'approval' | 'question' | 'task-human' | 'idle-check'
+  readonly kind: 'turn-end' | 'error' | 'approval' | 'question' | 'task-human' | 'idle-check' | 'inbox'
   readonly text: string
   readonly display?: NoticeEntry
   readonly at: number
@@ -48,6 +48,9 @@ export class NoticeBatcher {
     this.items = this.items.filter(entry => !predicate(entry.notice))
     if (!this.items.length) { this.retryAt = 0; this.options.onEmpty?.() }
     this.armGrace()
+  }
+  some(predicate: (notice: Notice) => boolean): boolean {
+    return this.items.some(entry => predicate(entry.notice))
   }
   /** Called on idle; the entry timer also batches arrivals for 1.5 seconds. */
   wake(): void { if (this.items.length) this.schedule(0) }
@@ -130,6 +133,7 @@ export function formatNotices(items: readonly Notice[], ready: readonly string[]
   const groups: Array<[string, (notice: Notice) => boolean]> = [
     ['Requests waiting for you:', item => item.kind === 'approval' || item.kind === 'question'],
     ['Errors:', item => item.kind === 'error'],
+    ['External events:', item => item.kind === 'inbox'],
     ['Tasks:', item => !['approval', 'question', 'error'].includes(item.kind) && (!!item.changeId || item.kind === 'task-human' || item.kind === 'idle-check')],
     ['Watched sessions:', item => !item.changeId && item.kind === 'turn-end'],
   ]

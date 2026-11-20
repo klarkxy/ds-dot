@@ -685,6 +685,7 @@ const NOTICE_TAG_TONE: Record<Exclude<NoticeEntry['kind'], 'reminder'>, TagTone>
   error: 'danger',
   'task-human': 'info',
   'idle-check': 'quiet',
+  inbox: 'info',
 }
 
 function noticeTagLabel(locale: CopyLocale, kind: Exclude<NoticeEntry['kind'], 'reminder'>): string {
@@ -695,6 +696,7 @@ function noticeTagLabel(locale: CopyLocale, kind: Exclude<NoticeEntry['kind'], '
     case 'error': return t(locale, 'error')
     case 'task-human': return t(locale, 'taskHuman')
     case 'idle-check': return t(locale, 'idleCheck')
+    case 'inbox': return t(locale, 'inboxEvent')
   }
 }
 

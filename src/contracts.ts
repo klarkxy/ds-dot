@@ -169,6 +169,9 @@ export type PendingKind = 'approval' | 'question'
 /** Prefix of the token fencing requester-supplied approval text; a random suffix closes the pair. */
 export const APPROVAL_FENCE_PREFIX = 'dot-approval-untrusted-'
 
+/** Prefix of the token fencing external event text in inbox notices; a random suffix closes the pair. */
+export const INBOX_FENCE_PREFIX = 'dot-inbox-untrusted-'
+
 export interface ApprovalDetail {
   readonly requestId: string
   readonly sessionId: string
@@ -288,6 +291,8 @@ export interface FactoryResetPreview {
   readonly schedules: number
   readonly proposals: number
   readonly cards: number
+  /** Pending and delivered external events in the inbox table. */
+  readonly inbox: number
   readonly ownedSessions: number
   readonly pastSegments: number
   readonly reflections: number
@@ -437,6 +442,43 @@ export interface TrajectoryView {
   /** Turns left out before the shown window. */
   readonly earlier: number
 }
+
+// ---- external events (inbox) ---------------------------------------------
+
+/** One external event normalized for dot's inbox, independent of the ingress. */
+export interface InboxEventInput {
+  /** Provider kind, e.g. 'github'. */
+  readonly source: string
+  /** The configured source this delivery came through. */
+  readonly sourceId: string
+  readonly deliveryId: string
+  /** e.g. 'pull_request.opened', 'workflow_run.completed', 'push'. */
+  readonly type: string
+  /** Coalescing key, e.g. 'owner/repo#123', 'owner/repo@refs/heads/main', 'owner/repo:workflow:<name>@<branch>'. */
+  readonly subject: string
+  /** One line, clipped. */
+  readonly title: string
+  readonly actor?: string
+  readonly url?: string
+  /** Short detail, whitespace collapsed. */
+  readonly summary: string
+  readonly receivedAt: number
+}
+
+/** A stored inbox row: one pending record per subject, merged deliveries folded in. */
+export interface InboxRecord extends InboxEventInput {
+  /** Deterministic from source+sourceId+deliveryId of the first event for this pending subject. */
+  readonly id: string
+  /** Delivery ids folded into this record, newest last, capped so merged duplicates are still caught. */
+  readonly deliveryIds: readonly string[]
+  /** Events merged into this pending record. */
+  readonly count: number
+  readonly status: 'pending' | 'delivered'
+  readonly updatedAt: number
+  readonly deliveredAt?: number
+}
+
+export type InboxSubmitResult = 'stored' | 'merged' | 'duplicate'
 
 // ---- dot's own chat, drawn by the plugin -------------------------------
 

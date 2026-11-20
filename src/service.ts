@@ -131,6 +131,8 @@ export class DotService {
   private readonly retryingCardNotifications = new Set<string>()
   /** Install proposals waiting on the human; in-memory only — a restart never resumes one. */
   private readonly pendingInstalls = new Map<string, { name: string; version: string; spec: string; reason: string; cardId?: string }>()
+  /** Open capability asks, so a settings change that revokes the grant settles them before the human answers. */
+  private readonly openCapabilityAsks = new Map<string, { readonly chain: readonly string[]; readonly withdraw: () => void }>()
   /** Decision wakes already queued in this process. The durable mark is notifiedAt. */
   private readonly decisionWakes = new Set<string>()
   private readonly childRefreshers = new Set<() => void>()
@@ -428,8 +430,16 @@ export class DotService {
     const live = caps.liveGrant(entry.chain)
     if (live !== 'ask' && live !== 'auto') return { kind: 'deny', reason: `The extra capability ${exec.name} is off.` }
     if (live === 'auto') return 'next'
-    const allowed = await this.askCapabilityApproval(exec)
-    return allowed ? 'next' : { kind: 'deny', reason: `The human declined ${exec.name}.` }
+    const allowed = await this.askCapabilityApproval(exec, entry.chain)
+    if (!allowed) return { kind: 'deny', reason: `The human declined ${exec.name}.` }
+    // The human approved, but the grant may have been revoked while the card
+    // was open — or in the instant after they answered. Re-resolve the live
+    // state; an approval only counts while the grant still exists.
+    const reapplied = caps.appliedFor(dot)?.get(exec.name)
+    if (!reapplied) return { kind: 'deny', reason: `The extra capability ${exec.name} was not applied to this segment.` }
+    const still = caps.liveGrant(reapplied.chain)
+    if (still !== 'ask' && still !== 'auto') return { kind: 'deny', reason: `The extra capability ${exec.name} is off.` }
+    return 'next'
   }
 
   /**
@@ -438,7 +448,7 @@ export class DotService {
    * signal of the waiting call withdraws the request, and the card is expired
    * when it ends unanswered.
    */
-  private async askCapabilityApproval(exec: { readonly name: string; readonly callId?: string; readonly arguments?: unknown; readonly signal?: AbortSignal }): Promise<boolean> {
+  private async askCapabilityApproval(exec: { readonly name: string; readonly callId?: string; readonly arguments?: unknown; readonly signal?: AbortSignal }, chain: readonly string[]): Promise<boolean> {
     const sessionId = this.store.dotSessionId
     if (!sessionId || this.closing) return false
     const args = exec.arguments === undefined ? undefined : typeof exec.arguments === 'string' ? exec.arguments : JSON.stringify(exec.arguments)
@@ -451,6 +461,7 @@ export class DotService {
       humanRequired: true,
     })
     if (!this.pending.get(opened.id)) return false
+    this.openCapabilityAsks.set(opened.id, { chain, withdraw: opened.withdraw })
     let cardId: string | undefined
     try {
       await this.saveApprovalDetail({ requestId: opened.id, sessionId, ...(exec.callId !== undefined ? { callId: exec.callId } : {}), toolName: exec.name, ...(args !== undefined ? { arguments: args } : {}) })
@@ -462,10 +473,12 @@ export class DotService {
       cardId = presentation.viewId
     } catch (error) {
       this.options.log?.(`dsh-dot: capability approval card failed: ${messageOf(error)}`)
+      this.openCapabilityAsks.delete(opened.id)
       opened.withdraw()
       return false
     }
     const answer = await opened.settled
+    this.openCapabilityAsks.delete(opened.id)
     if (cardId !== undefined && answer === undefined) await this.store.expireCard(cardId).catch(error => this.options.log?.(`dsh-dot: capability card expiry was not saved: ${messageOf(error)}`))
     return answer?.kind === 'approval' && answer.allow === true
   }
@@ -686,6 +699,20 @@ export class DotService {
   settingsChanged(): Promise<void> {
     this.armIdleCheck()
     this.updates.settingsChanged()
+    // A grant revoked while its approval card waits settles the ask at once:
+    // the call denies and the card expires through the unanswered path. This
+    // runs outside the serial lane so a queued settings write cannot stall
+    // withdrawal behind itself.
+    const caps = this.options.capabilities
+    if (caps) {
+      for (const [id, ask] of [...this.openCapabilityAsks]) {
+        const grant = caps.liveGrant(ask.chain)
+        if (grant !== 'ask' && grant !== 'auto') {
+          this.openCapabilityAsks.delete(id)
+          ask.withdraw()
+        }
+      }
+    }
     return this.serial(async () => {
       const dot = this.store.dotSessionId
       if (!dot) return

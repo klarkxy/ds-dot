@@ -631,6 +631,41 @@ describe('service-level capability gate', () => {
     expect(deadCard).toBeDefined()
   })
 
+  it('settles an open capability ask to deny when the grant is revoked while the card waits', async () => {
+    const { store, service, apply } = serviceHarness({ 'tool:extra_tool': 'ask' })
+    await store.beginSegment({ sessionId: 'dot-1', startedAt: 1, persona: '' })
+    await apply()
+
+    const pending = service.capabilityGate({ name: 'extra_tool' })
+    await new Promise(resolve => setImmediate(resolve))
+    const request = service.pending.list().find(row => row.kind === 'approval')
+    const card = store.cards.find(row => row.approvalId === request!.id)
+    expect(card?.expired).toBe(false)
+
+    // Revoke, then let the settings change withdraw the open ask.
+    await store.setSettings(settingsWith({ 'tool:extra_tool': 'off' }))
+    await service.settingsChanged()
+    await expect(pending).resolves.toMatchObject({ kind: 'deny' })
+    expect(service.pending.list().find(row => row.kind === 'approval')).toBeUndefined()
+    expect(store.cards.find(row => row.id === card!.id)?.expired).toBe(true)
+  })
+
+  it('denies an approved ask when the grant is revoked between the answer and the recheck', async () => {
+    const { store, service, apply } = serviceHarness({ 'tool:extra_tool': 'ask' })
+    await store.beginSegment({ sessionId: 'dot-1', startedAt: 1, persona: '' })
+    await apply()
+
+    const pending = service.capabilityGate({ name: 'extra_tool' })
+    await new Promise(resolve => setImmediate(resolve))
+    const request = service.pending.list().find(row => row.kind === 'approval')
+    const card = store.cards.find(row => row.approvalId === request!.id)
+    // Revoke after the human answered but before the gate re-reads the grant.
+    const answer = service.answerCard(card!.id, 'approval', { confirmed: true })
+    await store.setSettings(settingsWith({ 'tool:extra_tool': 'off' }))
+    await answer
+    await expect(pending).resolves.toMatchObject({ kind: 'deny' })
+  })
+
   it('proposes grant changes through the settings flow and refuses locked shapes', async () => {
     const { store, service, apply } = serviceHarness({})
     await store.beginSegment({ sessionId: 'dot-1', startedAt: 1, persona: '' })

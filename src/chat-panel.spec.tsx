@@ -223,9 +223,8 @@ describe('ChatPanel activity and notice cards', () => {
     expect(document.body.textContent).toContain('#4 · Expired')
     // A card beside text no longer swallows the text.
     expect(document.body.textContent).toContain('duplicate prose')
-    const confirm = [...document.querySelectorAll<HTMLButtonElement>('.dvui-root button')].find(button => button.textContent === 'Confirm')!
-    expect(confirm).toBeDefined()
-    // Expired cards are shown but cannot be submitted; the button must be absent or disabled.
+    // Expired cards are closed: the button must be absent or disabled.
+    const confirm = [...document.querySelectorAll<HTMLButtonElement>('.dvui-root button')].find(button => button.textContent === 'Confirm')
     expect(confirm == null || confirm.disabled).toBe(true)
     // card.answer must NOT be called for an expired card.
     expect(call).not.toHaveBeenCalledWith('card.answer', expect.anything())

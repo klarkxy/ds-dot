@@ -282,6 +282,8 @@ export function createDotCards(call: (endpoint: string, payload: unknown) => Pro
       <WidgetCard title={approval ? '' : valid.title} view={shownView}
         onSubmit={canAnswer ? submit : undefined} busy={busy} answer={answer}
         settled={answer !== null || (valid.interactive && !pending && answer === null) || notifyPending}
+        closed={expired && !answer}
+        embedded={approval}
         localOnly={valid.interactive && (!pending || expired) && answer === null && !notifyPending}
         localNote={localNote} t={t} labels={labels} Markdown={MarkdownText} ButtonComponent={CardButton} />
     )

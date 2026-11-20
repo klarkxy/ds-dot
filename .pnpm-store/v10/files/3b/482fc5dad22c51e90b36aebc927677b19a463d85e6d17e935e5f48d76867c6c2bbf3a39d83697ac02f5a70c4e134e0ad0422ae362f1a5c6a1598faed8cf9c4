@@ -1,4 +1,0 @@
-import type { PluginLogger } from "@klarkxy/dsh-plugin-kit/log-shared";
-import { DocsClient } from "./docs.js";
-export declare function docsTool(client: DocsClient, logger?: PluginLogger): import("@deepseek-ai/dsh-tools").ToolDefinition;
-//# sourceMappingURL=docs-tools.d.ts.map

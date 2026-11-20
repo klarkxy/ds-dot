@@ -1,6 +1,0 @@
-{
-  "meta": {
-    "title": "Model picker",
-    "description": "Searchable model selection with a reasoning-effort slider in the composer; other plugins can reuse the same picker."
-  }
-}

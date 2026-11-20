@@ -1,4 +1,0 @@
-export declare const OFFICIAL_LLMS_TXT = "https://deepseek-harness.github.io/deepseek-harness/llms.txt";
-export declare const OFFICIAL_REPOSITORY = "https://github.com/deepseek-ai/deepseek-harness";
-export declare const CREATOR_GUIDANCE: string;
-//# sourceMappingURL=creator-guidance.d.ts.map

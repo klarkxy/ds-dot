@@ -1,5 +1,0 @@
-import type { PluginLogger } from "@klarkxy/dsh-plugin-kit/log-shared";
-import type { GitHubClient } from "./github.js";
-import { PluginRegistry } from "./registry.js";
-export declare function pluginsTool(client: PluginRegistry, github?: GitHubClient, logger?: PluginLogger): import("@deepseek-ai/dsh-tools").ToolDefinition;
-//# sourceMappingURL=registry-tools.d.ts.map

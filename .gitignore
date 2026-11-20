@@ -6,3 +6,5 @@ lib/
 workspace/
 .ghcache/
 .playwright-cli/
+.pnpm-store/
+.agents/scratch/

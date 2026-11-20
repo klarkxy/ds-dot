@@ -1,9 +1,0 @@
-//#region src/model-picker.ts
-/** Registered Factory name — the `renderFactorySlot`/`registerFactory` key. */
-const MODEL_PICKER_FACTORY = "klarkxy.model-picker";
-/** The one caller-selectable local position: the trigger rendered in place. */
-const MODEL_PICKER_ANCHOR_SLOT = "anchor";
-//#endregion
-export { MODEL_PICKER_ANCHOR_SLOT, MODEL_PICKER_FACTORY };
-
-//# sourceMappingURL=model-picker.js.map

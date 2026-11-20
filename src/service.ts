@@ -618,27 +618,29 @@ export class DotService {
     }
     const sessionId = this.store.dotSessionId
     if (!sessionId) return
+    // The proposal id rides in the text: a notice keyed by requestId would be
+    // dropped with the just-settled pending request instead of reaching dot.
     if (!(answer.kind === 'approval' && answer.allow === true)) {
-      this.notify({ sessionId, kind: 'turn-end', requestId, text: `The human declined installing ${name}@${version}.`, at: this.now() }, true)
+      this.notify({ sessionId, kind: 'turn-end', text: `Install proposal ${requestId}: the human declined installing ${name}@${version}.`, at: this.now() }, true)
       return
     }
     const pm = this.options.capabilities?.pluginManager()
     if (typeof pm?.installBundle !== 'function') {
-      this.notify({ sessionId, kind: 'turn-end', requestId, text: `Approved install of ${name}@${version} cannot run: this host cannot install plugins.`, at: this.now() }, true)
+      this.notify({ sessionId, kind: 'turn-end', text: `Install proposal ${requestId}: approved install of ${name}@${version} cannot run: this host cannot install plugins.`, at: this.now() }, true)
       return
     }
     let text: string
     try {
       const result = await pm.installBundle(spec, { enabled: true, expected: { name, version }, requestId })
       if (result.error !== undefined || result.application === 'failed' || result.application === 'cancelled' || result.changed !== true) {
-        text = `The human approved installing ${name}@${version}, but the install failed: ${result.error?.code ?? result.application}${result.error?.diagnostic ? ` — ${clip(result.error.diagnostic, 400)}` : ''}`
+        text = `Install proposal ${requestId}: the human approved installing ${name}@${version}, but the install failed: ${result.error?.code ?? result.application}${result.error?.diagnostic ? ` — ${clip(result.error.diagnostic, 400)}` : ''}`
       } else {
-        text = `Installed ${result.bundle ?? name}@${result.version ?? version} — the human approved the install. Its tools now appear in dot_capabilities (action=list) and stay off until granted; grants apply from the next segment.`
+        text = `Install proposal ${requestId}: Installed ${result.bundle ?? name}@${result.version ?? version} — the human approved the install. Its tools now appear in dot_capabilities (action=list) and stay off until granted; grants apply from the next segment.`
       }
     } catch (error) {
-      text = `The human approved installing ${name}@${version}, but the install failed: ${messageOf(error)}`
+      text = `Install proposal ${requestId}: the human approved installing ${name}@${version}, but the install failed: ${messageOf(error)}`
     }
-    this.notify({ sessionId, kind: 'turn-end', requestId, text, at: this.now() }, true)
+    this.notify({ sessionId, kind: 'turn-end', text, at: this.now() }, true)
   }
 
   presentCard(shown: ShownView, callId: string, approvalId?: string) {

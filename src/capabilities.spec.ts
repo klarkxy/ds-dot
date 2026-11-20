@@ -803,14 +803,25 @@ describe('propose_install', () => {
       settings: () => store.settings,
       locked: LOCKED,
     })
+    const relayed: string[] = []
     const service = new DotService({
-      host: { isRunning: () => false, modelKey: () => undefined, readEvents: async () => [], dotContext: async () => ({ live: true, compactions: 0 }), say: async () => {} } as never,
+      host: {
+        isRunning: () => false,
+        modelKey: () => undefined,
+        syncModel: () => {},
+        readEvents: async () => [],
+        dotContext: async () => ({ live: true, compactions: 0 }),
+        say: async () => {},
+        resumeDot: async () => true,
+        createWorkspace: async () => ({ id: 'w1', title: 'home', path: '/tmp/dot-cap-test' }),
+        relay: async (_dot: string, _from: string, text: string) => { relayed.push(text) },
+      } as never,
       store, homeDir: '/tmp/dot-cap-test', capabilities: caps,
     })
     const notes: string[] = []
     const original = service.notify.bind(service)
     service.notify = (notice, urgent) => { notes.push(notice.text); original(notice, urgent) }
-    return { store, service, notes }
+    return { store, service, notes, relayed }
   }
   const tick = async (n = 3) => { for (let i = 0; i < n; i++) await new Promise(resolve => setImmediate(resolve)) }
 
@@ -880,6 +891,36 @@ describe('propose_install', () => {
     await service.answerCard(cards[0]!.id, 'approval', { confirmed: true })
     await tick()
     expect(notes.some(text => text.includes('Installed dsh-x@1.2.3'))).toBe(true)
+  })
+
+  it('delivers the install outcome to the host with the proposal id in the text', async () => {
+    const settle = async (h: ReturnType<typeof harness>, approve: boolean) => {
+      await h.service.proposeInstall({ spec: 'dsh-x', version: '1.2.3', reason: 'need x' })
+      const request = h.service.pending.list().find(row => row.kind === 'approval')!
+      const card = h.store.cards.find(row => row.approvalId === request.id)!
+      await h.service.answerCard(card.id, 'approval', { confirmed: approve })
+      await tick()
+      await h.service.flushNotices()
+      return request.id
+    }
+
+    const ok = harness(pm())
+    await store0(ok.service)
+    const okId = await settle(ok, true)
+    expect(ok.relayed.at(-1)).toContain(`Install proposal ${okId}`)
+    expect(ok.relayed.at(-1)).toContain('Installed dsh-x@1.2.3')
+
+    const failed = harness(pm({ installBundle: async () => { throw new Error('registry down') } }))
+    await store0(failed.service)
+    const failedId = await settle(failed, true)
+    expect(failed.relayed.at(-1)).toContain(`Install proposal ${failedId}`)
+    expect(failed.relayed.at(-1)).toContain('registry down')
+
+    const declined = harness(pm())
+    await store0(declined.service)
+    const declinedId = await settle(declined, false)
+    expect(declined.relayed.at(-1)).toContain(`Install proposal ${declinedId}`)
+    expect(declined.relayed.at(-1)).toContain('declined')
   })
 
   it('installs an official on-demand row through its pinned installTarget and skips inspection', async () => {

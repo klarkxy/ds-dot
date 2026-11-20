@@ -564,6 +564,7 @@ describe('service-level capability gate', () => {
       say: async () => {},
       resumeDot: async () => true,
       createWorkspace: async () => ({ id: 'w1', title: 'home', path: '/tmp/dot-cap-test' }),
+      reapplyCapabilities: () => apply(),
     }
     const service = new DotService({ host: host as never, store, homeDir: '/tmp/dot-cap-test', capabilities: caps })
     const apply = async () => caps.applyToAgent({
@@ -727,27 +728,25 @@ describe('service-level capability gate', () => {
   })
 
   it('proposes grant changes through the settings flow and refuses locked shapes', async () => {
-    const { store, service, apply } = serviceHarness({})
+    const { store, caps, service, apply } = serviceHarness({})
     await store.beginSegment({ sessionId: 'dot-1', startedAt: 1, persona: '' })
     await apply()
     await expect(service.proposeCapability({ selector: 'junk', grant: 'auto', reason: 'why' })).rejects.toThrow(/selector/)
     await expect(service.proposeCapability({ selector: 'host', grant: 'auto', reason: 'why' })).rejects.toThrow(/host-wide|per-tool/)
     await expect(service.proposeCapability({ selector: 'tool:web_search', grant: 'auto', reason: 'why' })).rejects.toThrow(/locked/)
-    // decideNow awaits settingsChanged(), which re-enters the serial lane a
-    // decide call already holds; the live-apply hook is stubbed here so the
-    // test stays on the grant write (pre-existing lane re-entry, not the
-    // capability path).
-    service.settingsChanged = async () => {}
     const prefixMessage = await service.proposeCapability({ selector: 'prefix:team', grant: 'ask', reason: 'cluster' })
     expect(prefixMessage).toContain('Proposal')
     await service.selfSettings.decide(store.settingProposals.at(-1)!.id, true)
-    const message = await service.proposeCapability({ selector: 'tool:future_tool', grant: 'ask', reason: 'I need it' })
+    const message = await service.proposeCapability({ selector: 'tool:extra_tool', grant: 'ask', reason: 'I need it' })
     expect(message).toContain('Proposal')
     const proposal = store.settingProposals.at(-1)
     expect(proposal?.field).toBe('capabilities')
     const decided = await service.selfSettings.decide(proposal!.id, true)
     expect(decided).toContain('Approved')
-    expect(store.settings.capabilities.grants).toEqual({ 'prefix:team': 'ask', 'tool:future_tool': 'ask' })
+    expect(store.settings.capabilities.grants).toEqual({ 'prefix:team': 'ask', 'tool:extra_tool': 'ask' })
+    // Approving runs the real settingsChanged(): an untouched segment re-applies
+    // grants in place, so the tool lands in the applied set without a rollover.
+    expect(caps.appliedFor('dot-1')?.get('extra_tool')?.grant).toBe('ask')
     // A locked capabilities field refuses proposals.
     await store.setSettings({ ...store.settings, locks: { capabilities: true } })
     await expect(service.proposeCapability({ selector: 'tool:x', grant: 'auto', reason: 'why' })).rejects.toThrow(/locked/)
@@ -769,7 +768,6 @@ describe('service-level capability gate', () => {
     await apply()
     const text = await service.listCapabilities()
     expect(text).toContain('HIGH RISK')
-    service.settingsChanged = async () => {}
     // A tool: auto grant that would self-escalate carries the warning into the proposal card.
     await service.proposeCapability({ selector: 'tool:bash', grant: 'auto', reason: 'run shell' })
     expect(store.settingProposals.at(-1)?.reason).toMatch(/Warning:.*bash/)

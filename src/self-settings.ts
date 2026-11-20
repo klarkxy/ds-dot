@@ -83,16 +83,20 @@ export class SelfSettings {
   }
 
   async decide(id: string, allow: boolean): Promise<string> {
-    return this.dot.serialSettings(() => this.decideNow(id, allow))
+    const result = await this.dot.serialSettings(() => this.decideNow(id, allow))
+    // settingsChanged queues on the same serial lane decideNow ran in, so it
+    // can only be awaited after that lane work has returned.
+    if (result.changed) await this.dot.settingsChanged()
+    return result.message
   }
 
-  private async decideNow(id: string, allow: boolean): Promise<string> {
+  private async decideNow(id: string, allow: boolean): Promise<{ message: string; changed: boolean }> {
     const proposal = this.dot.store.settingProposal(id)
     if (!proposal) throw new DotError('dot/unknown-proposal', `no waiting settings proposal ${id}`)
     const field = lockedField(this.dot.store.settings, proposal.field)!
     if (!allow) {
       await this.dot.store.deleteSettingProposal(id)
-      return `Declined ${id}; no settings changed.`
+      return { message: `Declined ${id}; no settings changed.`, changed: false }
     }
     const locale = this.dot.locale ?? 'zh'
     const knowledge = await this.dot.knowledgeView()
@@ -105,9 +109,8 @@ export class SelfSettings {
       throw new DotError('dot/proposal-failed', messageOf(error))
     }
     await this.dot.store.deleteSettingProposal(id)
-    // Agreements already reach dot before the next message; other settings keep the live-apply path.
-    if (field !== 'agreements') await this.dot.settingsChanged()
     const now = field === 'agreements' ? (await this.dot.knowledgeView()).agreements.text || null : valueOf(this.dot.store.settings, field, '', locale)
-    return `Approved ${id}; ${field} is now ${textOf(now)}.`
+    // Agreements already reach dot before the next message; other fields apply through settingsChanged.
+    return { message: `Approved ${id}; ${field} is now ${textOf(now)}.`, changed: field !== 'agreements' }
   }
 }

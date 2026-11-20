@@ -7,7 +7,7 @@
 import { defineDomain, domainTable } from '@deepseek-ai/dsh-storage-domain'
 import { z } from 'zod'
 import type { ViewNode } from '@klarkxy/dsh-deep-view/contracts'
-import { SETTING_FIELDS, type CognitionVersion, type DotContextUsage, type DotUsageOffset, type ReflectionRun, type ScheduleRecord, type SettingProposal, type TaskRecord } from './contracts.ts'
+import { SETTING_FIELDS, type CognitionVersion, type DotContextUsage, type DotUsageOffset, type InboxRecord, type ReflectionRun, type ScheduleRecord, type SettingProposal, type TaskRecord } from './contracts.ts'
 import type { UpdateStatus } from './auto-update.ts'
 import type { PastSegment, Segment } from './segments.ts'
 import { changeSchema, inputSchema, runSchema, storedVerificationSchema } from './work.ts'
@@ -244,12 +244,36 @@ export function parsePeerDelivery(value: unknown): PeerDelivery | undefined {
   return parsed.success ? parsed.data : undefined
 }
 
+const inboxRecordSchema = z.object({
+  id: z.string().min(1),
+  source: z.string().min(1),
+  sourceId: z.string().min(1),
+  deliveryId: z.string().min(1),
+  deliveryIds: z.array(z.string().min(1)),
+  type: z.string().min(1),
+  subject: z.string(),
+  title: z.string(),
+  actor: z.string().optional(),
+  url: z.string().optional(),
+  summary: z.string(),
+  count: z.number().int().positive(),
+  status: z.enum(['pending', 'delivered']),
+  receivedAt: z.number(),
+  updatedAt: z.number(),
+  deliveredAt: z.number().optional(),
+})
+
+export function parseInboxRecord(value: unknown): InboxRecord | undefined {
+  const parsed = inboxRecordSchema.safeParse(value)
+  return parsed.success ? parsed.data as InboxRecord : undefined
+}
+
 export const dotDomain = defineDomain({
   name: 'klarkxy_dsh_dot',
-  // v1-v6 rows still open: read schemas strip keys they no longer declare and
-  // the removed `tickets` table is simply never read.
-  version: 6,
-  compatibleVersions: [1, 2, 3, 4, 5],
+  // v7 adds inbox rows; v1–v6 rows still open: read schemas strip keys they no
+  // longer declare and the removed `tickets` table is simply never read.
+  version: 7,
+  compatibleVersions: [1, 2, 3, 4, 5, 6],
   tables: {
     state: domainTable<string, DotState>(stateSchema),
     tasks: domainTable<string, StoredTaskRecord>(storedTaskSchema),
@@ -260,6 +284,7 @@ export const dotDomain = defineDomain({
     runs: domainTable(runSchema),
     verifications: domainTable(storedVerificationSchema),
     peers: domainTable<string, PeerDelivery>(peerDeliverySchema),
+    inbox: domainTable<string, InboxRecord>(inboxRecordSchema),
   },
 })
 

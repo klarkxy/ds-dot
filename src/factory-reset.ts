@@ -24,7 +24,7 @@ export interface FactoryResetSource {
   dotSessionId?: string
 }
 
-export function factoryResetCounts(source: FactoryResetSource): FactoryResetCounts {
+export function factoryResetCounts(source: FactoryResetSource, inbox = 0): FactoryResetCounts {
   return {
     tasks: source.list().length,
     changes: source.work.listChanges().length,
@@ -32,6 +32,7 @@ export function factoryResetCounts(source: FactoryResetSource): FactoryResetCoun
     schedules: source.schedules.length,
     proposals: source.settingProposals.length,
     cards: source.cards.length,
+    inbox,
     ownedSessions: source.ownedSessionIds().length,
     pastSegments: source.pastSegments.length,
     reflections: source.reflections.length,
@@ -87,6 +88,7 @@ export function formatFactoryResetPreview(preview: FactoryResetPreview): string 
     `${preview.schedules} reminder(s)`,
     `${preview.proposals} setting proposal(s)`,
     `${preview.cards} card(s)`,
+    `${preview.inbox} inbox event(s)`,
     `${preview.pastSegments} past segment(s)`,
     `${preview.reflections} reflection run(s)`,
     preview.hasAgreements ? 'agreements will be cleared' : 'no agreements',

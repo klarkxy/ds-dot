@@ -26,6 +26,8 @@ import { COMPACTION_POLICY, PLUGIN_NAME, PRESET_ID, RPC_CHANNEL, SERVICE_NAME, t
 import { CHAT_SAY_BODY_BYTES, checkChatImages } from './chat-images.ts'
 import { ChatFeed } from './feed.ts'
 import { bindHost } from './host.ts'
+import { InboxLedger } from './inbox.ts'
+import { installInboxIngress } from './inbox-github.ts'
 import { clip } from './ledger.ts'
 import { detachNative } from './native.ts'
 import { PeerLedger } from './peer.ts'
@@ -35,7 +37,7 @@ import { REFLECTION_INSTRUCTIONS, REFLECTION_PRESET_ID } from './reflection.ts'
 import { APPROVAL_GRACE_MS, DotError, DotService, messageOf } from './service.ts'
 import { configI18n } from './i18n/index.ts'
 import { patchSettings } from './settings.ts'
-import { dotDomain, parsePeerDelivery, parseTask } from './storage.ts'
+import { dotDomain, parseInboxRecord, parsePeerDelivery, parseTask } from './storage.ts'
 import { DotStore, type DotDomainHandle } from './store.ts'
 import { copyLocale, fillText, t } from './ui-copy.ts'
 
@@ -110,6 +112,7 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
     host,
     store,
     peers: new PeerLedger(domain.table('peers'), parsePeerDelivery),
+    inbox: new InboxLedger(domain.table('inbox'), parseInboxRecord),
     homeDir: config.homeDir?.trim() || join(process.env.DSH_HOME?.trim() || join(homedir(), '.dsh'), 'dot'),
     log,
     trace: logger,
@@ -146,6 +149,8 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
     return sessionId
   }
   ctx.provide(SERVICE_NAME, service)
+  // Optional webhook ingress: only while the host provides webhookRuntime.
+  installInboxIngress(ctx, service, log)
   ctx.effect(() => () => {
     unfollow()
     unpending()

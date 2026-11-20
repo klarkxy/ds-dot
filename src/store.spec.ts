@@ -14,6 +14,7 @@ function fakeDomain(seed: Record<string, Record<string, unknown>> = {}) {
     runs: new Map(Object.entries(seed.runs ?? {})),
     verifications: new Map(Object.entries(seed.verifications ?? {})),
     peers: new Map(Object.entries(seed.peers ?? {})),
+    inbox: new Map(Object.entries(seed.inbox ?? {})),
   }
   const puts: string[] = []
   const domain: DotDomainHandle = {

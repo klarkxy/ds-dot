@@ -87,6 +87,24 @@ describe('normalizeGithub', () => {
     expect(event.title).not.toMatch(/\n/)
   })
 
+  it('keeps distinct long workflow subjects that share a 199-character prefix', () => {
+    const repo = { full_name: 'acme/distributed-platform-integration-tests', default_branch: 'main', html_url: 'https://gh/acme/distributed-platform-integration-tests' }
+    const name = 'Build and test all supported operating systems with database compatibility and integration coverage'
+    const base = { action: 'completed', sender: { login: 'bob' }, repository: repo }
+    const run = (branch: string) => ({
+      name, head_branch: branch, head_sha: 'def456abc123', run_number: 9,
+      conclusion: 'failure', html_url: 'https://gh/acme/distributed-platform-integration-tests/actions/runs/9', actor: { login: 'bob' },
+    })
+    const linux = normalizeGithub(delivery('workflow_run', { ...base, workflow_run: run('feature/add-backward-compatible-external-event-processing-with-durable-inbox-storage-linux') }))!
+    const windows = normalizeGithub(delivery('workflow_run', { ...base, workflow_run: run('feature/add-backward-compatible-external-event-processing-with-durable-inbox-storage-windows') }))!
+    expect(linux.subject.length).toBeGreaterThan(200)
+    expect(windows.subject.length).toBeGreaterThan(200)
+    expect(linux.subject.slice(0, 199)).toBe(windows.subject.slice(0, 199))
+    expect(linux.subject).not.toBe(windows.subject)
+    expect(linux.subject.endsWith('-linux')).toBe(true)
+    expect(windows.subject.endsWith('-windows')).toBe(true)
+  })
+
   it('drops check_run deliveries entirely', () => {
     const payload = { action: 'completed', check_run: { conclusion: 'failure', name: 'lint' }, repository: REPO }
     expect(normalizeGithub(delivery('check_run', payload))).toBeUndefined()

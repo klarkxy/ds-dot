@@ -260,6 +260,16 @@ describe('dot inbox', () => {
     expect(ledger.list().find(row => row.sourceId === 'primary')).toMatchObject({ count: 1, title: 'Add feature' })
   })
 
+  it('does not merge pending rows whose subjects only share a long prefix', async () => {
+    const ledger = new InboxLedger(memoryInboxTable(), parseInboxRecord)
+    const prefix = 'acme/distributed-platform-integration-tests:workflow:Build and test all supported operating systems with database compatibility and integration coverage@feature/add-backward-compatible-external-event-processing-with-durable-inbox-storage-'
+    expect(prefix.length).toBeGreaterThan(199)
+    expect(await ledger.submit(event({ deliveryId: 'd-linux', subject: `${prefix}linux` }), 1)).toMatchObject({ result: 'stored' })
+    expect(await ledger.submit(event({ deliveryId: 'd-windows', subject: `${prefix}windows` }), 2)).toMatchObject({ result: 'stored' })
+    expect(ledger.list()).toHaveLength(2)
+    expect(ledger.list().map(row => row.subject).sort()).toEqual([`${prefix}linux`, `${prefix}windows`].sort())
+  })
+
   it('relays at most 20 inbox records per flush and picks up the rest next', async () => {
     const home = mkdtempSync(join(tmpdir(), 'dot-inbox-cap-'))
     const domain = memoryDomain()

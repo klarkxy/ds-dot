@@ -99,8 +99,9 @@ const rec = (value: unknown): Record<string, unknown> | undefined =>
   value !== null && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : undefined
 const str = (value: unknown): string => typeof value === 'string' ? value : ''
 const num = (value: unknown): number | undefined => typeof value === 'number' && Number.isFinite(value) ? value : undefined
+const flatten = (text: string): string => text.replace(/\s+/g, ' ').trim()
 const clip = (text: string, max: number): string => {
-  const flat = text.replace(/\s+/g, ' ').trim()
+  const flat = flatten(text)
   return flat.length <= max ? flat : `${flat.slice(0, max - 1)}…`
 }
 const shortSha = (value: unknown): string | undefined => {
@@ -163,7 +164,10 @@ export function normalizeGithub(delivery: VerifiedWebhookDelivery): InboxEventIn
     sourceId,
     deliveryId,
     receivedAt: num(delivery.receivedAt) ?? 0,
-    subject: clip(view.subject, TITLE_MAX),
+    // Flatten untrusted whitespace so a workflow name cannot inject notice
+    // lines, but do not clip: subject is the coalesce key and two long names
+    // that share a prefix must stay distinct.
+    subject: flatten(view.subject),
   }
 }
 

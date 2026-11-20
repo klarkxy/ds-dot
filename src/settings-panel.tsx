@@ -6,7 +6,7 @@ import { groupModelMenuChoices, modelMenuShortName, parseModelMenuChoices, type 
 import { renderModelPicker, type RenderFactorySlot } from '@klarkxy/dsh-plugin-kit/model-picker'
 import { Button, Checkbox, IconSearchOutlineRegular, Input, SegmentedTabs, type SegmentedTab } from '@deepseek-ai/dsh-client-ui-primitives'
 import { createContext, useCallback, useContext, useEffect, useId, useMemo, useState, type ReactNode } from 'react'
-import { type ApprovalMode, type DotSettings, type FactoryResetPreview, type FactoryResetResult, type ModelChoice, type SettingField, type SettingProposal, type TakeoverMode, type TaskModelRule, type TaskPermission } from './contracts.ts'
+import { type ApprovalMode, type DotSettings, type FactoryResetPreview, type FactoryResetResult, type KeepaliveInfo, type ModelChoice, type SettingField, type SettingProposal, type TakeoverMode, type TaskModelRule, type TaskPermission } from './contracts.ts'
 import { factoryResetScope, t, type CopyLocale, type TextKey } from './ui-copy.ts'
 
 /** null on model, persona or address goes back to the default. */
@@ -15,6 +15,8 @@ export type SaveNotice = { readonly kind: 'saved' } | { readonly kind: 'error'; 
 
 export interface SettingsApi {
   setSettings(patch: SettingsPatch): Promise<DotSettings>
+  /** The provider/model dot's next request would run on and its cache TTL; absent without keepalive UI. */
+  keepalive?(signal: AbortSignal): Promise<KeepaliveInfo | undefined>
   /** Raw host model catalog; parsed here. */
   models(): Promise<unknown>
   settingProposals(signal: AbortSignal): Promise<SettingProposal[]>
@@ -203,7 +205,7 @@ function Proposals({ locale, api, choices, refresh, onDecided, onCountChange }: 
 const IDLE_CHECK_MAX = 1440
 
 /** Minutes between routine checks; saved when the field loses focus, and a value the host would refuse goes back to the saved one. */
-function IdleCheckInput({ locale, value, onCommit }: { locale: CopyLocale; value: number; onCommit: (minutes: number) => void }) {
+function IdleCheckInput({ locale, value, onCommit, label, unit }: { locale: CopyLocale; value: number; onCommit: (minutes: number) => void; label?: string; unit?: string }) {
   const [draft, setDraft] = useState(String(value))
   useEffect(() => { setDraft(String(value)) }, [value])
   const commit = () => {
@@ -221,13 +223,13 @@ function IdleCheckInput({ locale, value, onCommit }: { locale: CopyLocale; value
         min={0}
         max={IDLE_CHECK_MAX}
         step={1}
-        aria-label={t(locale, 'sIdleCheck')}
+        aria-label={label ?? t(locale, 'sIdleCheck')}
         value={draft}
         onChange={event => setDraft(event.target.value)}
         onBlur={commit}
         onKeyDown={event => { if (event.key === 'Enter') event.currentTarget.blur() }}
       />
-      <span className="dsh-ui-meta">{t(locale, 'sIdleCheckUnit')}</span>
+      <span className="dsh-ui-meta">{unit ?? t(locale, 'sIdleCheckUnit')}</span>
     </div>
   )
 }
@@ -342,6 +344,17 @@ export function SettingsPanel({ locale, api, settings, onSaved, onStatusChange, 
   const models = useModels(api)
   const [status, setStatus] = useState<SaveNotice>()
   const [modelFilter, setModelFilter] = useState('')
+  const [keepalive, setKeepalive] = useState<KeepaliveInfo>()
+  const [keepaliveRefresh, setKeepaliveRefresh] = useState(0)
+  useEffect(() => {
+    if (!api.keepalive) return
+    const life = new AbortController()
+    api.keepalive(life.signal).then(
+      info => { if (!life.signal.aborted) setKeepalive(info) },
+      () => { if (!life.signal.aborted) setKeepalive(undefined) },
+    )
+    return () => { life.abort() }
+  }, [api, keepaliveRefresh])
   const reportStatus = useCallback((next: SaveNotice | undefined) => {
     setStatus(next)
     onStatusChange?.(next)
@@ -349,7 +362,7 @@ export function SettingsPanel({ locale, api, settings, onSaved, onStatusChange, 
   const save = useCallback((patch: SettingsPatch) => {
     reportStatus(undefined)
     api.setSettings(patch).then(
-      next => { onSaved(next); reportStatus({ kind: 'saved' }) },
+      next => { onSaved(next); reportStatus({ kind: 'saved' }); if ('model' in patch || 'cacheTtl' in patch) setKeepaliveRefresh(value => value + 1) },
       failure => reportStatus({ kind: 'error', message: failure instanceof Error ? failure.message : String(failure) }),
     )
   }, [api, onSaved, reportStatus])
@@ -433,6 +446,25 @@ export function SettingsPanel({ locale, api, settings, onSaved, onStatusChange, 
               </select>
             ),
           })}
+          {keepalive ? (
+            <div className="dsh-dot-keepalive">
+              <span className="dsh-ui-label">{t(locale, 'sCacheTtl')}</span>
+              <IdleCheckInput
+                locale={locale}
+                label={t(locale, 'sCacheTtl')}
+                unit={t(locale, 'sCacheTtlUnit')}
+                value={settings.cacheTtl?.[`${keepalive.provider}/${keepalive.model}`] ?? keepalive.minutes}
+                onCommit={minutes => {
+                  const key = `${keepalive.provider}/${keepalive.model}`
+                  const next = { ...settings.cacheTtl }
+                  if (minutes === keepalive.defaultMinutes) delete next[key]
+                  else next[key] = minutes
+                  save({ cacheTtl: next })
+                }}
+              />
+              <span className="dsh-ui-help">{t(locale, 'sCacheTtlDesc').replace('{key}', `${keepalive.provider}/${keepalive.model}`).replace('{n}', String(keepalive.defaultMinutes))}</span>
+            </div>
+          ) : null}
         </Field>
         <Field label={t(locale, 'sReflection')} help={t(locale, 'sReflectionDesc')} {...lock('reflection')}>
           <SegmentedChoice locale={locale} label={t(locale, 'sReflection')} value={settings.reflection ? 'on' : 'off'} options={['on', 'off']} labelKeyOf={opt => `sReflection_${opt}`} onChange={next => save({ reflection: next === 'on' })} />
@@ -587,6 +619,7 @@ export const settingsCss = `
 .dsh-dot-chat .dsh-dot-model-item:hover { background: var(--dsw-alias-interactive-bg-hover); }
 .dsh-dot-chat .dsh-dot-idle-check { display: flex; align-items: center; gap: 8px; }
 .dsh-dot-chat .dsh-dot-idle-input { width: 96px; flex: 0 0 auto; }
+.dsh-dot-chat .dsh-dot-keepalive { display: flex; flex-direction: column; gap: 4px; margin-top: 8px; }
 .dsh-dot-chat .dsh-dot-factory { margin-top: 8px; padding-top: 16px; border-top: 0.5px solid var(--dsw-alias-border-l2); }
 .dsh-dot-chat .dsh-dot-factory-preview { display: flex; flex-direction: column; gap: 8px; margin: 8px 0; padding: 10px 12px; border-radius: var(--dsw-radius-md); background: var(--dsw-alias-bg-layer-1); box-shadow: var(--dsw-elevation-stroke); }
 .dsh-dot-chat .dsh-dot-factory-preview ul { margin: 0; padding-left: 18px; font-size: 12px; line-height: 18px; color: var(--dsw-alias-label-secondary); }

@@ -26,9 +26,9 @@ import { DotCards, cardAnswerText, type DotCardRecord } from './card-state.ts'
 import { checkChatImages, type ChatImage } from './chat-images.ts'
 import { approvalDisplay, parseNotice } from './chat-format.ts'
 import { cardText } from './cards.ts'
-import { NoticeBatcher, formatNotices, formatNoticeDisplay, type Notice, type Timer } from './batcher.ts'
+import { NoticeBatcher, formatNotices, formatNoticeDisplay, realTimer, type Notice, type Timer } from './batcher.ts'
 import { ZERO_USAGE, addUsage, combineUsage, netSegmentUsage, usageFromEvents } from './context.ts'
-import { PRESET_ID, TOOL, type BoardView, type DotContextSections, type DotContextUsage, type DotContextView, type FactoryResetPreview, type FactoryResetResult, type KnowledgeView, type ModelChoice, type PendingKind, type PendingQuestionItem, type ReflectionRun, type RolloverReason, type RuleConfig, type TrajectoryView } from './contracts.ts'
+import { PRESET_ID, TOOL, type BoardView, type DotContextSections, type DotContextUsage, type DotContextView, type FactoryResetPreview, type FactoryResetResult, type KeepaliveInfo, type KnowledgeView, type ModelChoice, type PendingKind, type PendingQuestionItem, type ReflectionRun, type RolloverReason, type RuleConfig, type TrajectoryView } from './contracts.ts'
 import { SUMMARY_INSTRUCTION, SUMMARY_MAX_TOKENS, buildHandoff, type Handoff } from './handoff.ts'
 import { READ_ROWS_DEFAULT, READ_ROWS_MAX, SEARCH_LIMIT_DEFAULT, SEARCH_LIMIT_MAX, SEARCH_SESSIONS_MAX, formatRead, formatSearch, historyRows, queryTerms, searchRows, windowRows, type SessionHits } from './history.ts'
 import { type DotHost, type WorkspaceRow } from './host.ts'
@@ -46,7 +46,8 @@ import { ReflectionRunner } from './reflection.ts'
 import { ReminderClock } from './reminders.ts'
 import { routeRequest } from './rules.ts'
 import { ScheduleInputError, describeTiming, scheduleLines, type ScheduleInput } from './schedule.ts'
-import { openingText, reasonAfterTurn, reasonBeforeDelivery, type Segment } from './segments.ts'
+import { KEEPALIVE_MAX_PINGS, cacheTtlMinutes, defaultCacheTtl, keepaliveIntervalMs } from './keepalive.ts'
+import { IDLE_MIN_TOKENS, openingText, reasonAfterTurn, reasonBeforeDelivery, type Segment } from './segments.ts'
 import type { DotStore } from './store.ts'
 import { factoryResetArchiveIds, factoryResetCounts, factoryResetStopGap, factoryResetTokenError, issueFactoryResetToken, type FactoryResetStopEvidence } from './factory-reset.ts'
 import { formatWorkspaceFiles, listWorkspaceFiles as listWorkspaceTree, readWorkspaceText, WORKSPACE_LIST_MAX } from './workspace-inspect.ts'
@@ -122,6 +123,11 @@ export class DotService {
   private readonly childReleases = new Map<string, () => void>()
   private resetArmed?: { readonly token: string; readonly expiresAt: number }
   private currentLocale: CopyLocale | undefined
+  private readonly timer: Timer
+  /** The armed cache-keepalive of the current idle stretch; lastAt is the last turn end or ping. */
+  private keepalive?: { readonly sessionId: string; pings: number; lastAt: number; handle?: unknown }
+  /** The last successful cache ping, scoped to the dot session it warmed. */
+  private lastKeepaliveAt?: { readonly sessionId: string; readonly at: number }
   readonly cards: DotCards
   /** The single background reflection pass; the reminder clock ticks its gate. */
   readonly reflection: ReflectionRunner
@@ -130,6 +136,7 @@ export class DotService {
     this.currentLocale = options.locale ?? options.store.uiLocale
     this.cards = new DotCards(options.store, options.log)
     this.now = options.now ?? Date.now
+    this.timer = options.timer ?? realTimer
     this.pending = new PendingHub(this.now)
     this.pending.onChange(() => { void this.pruneApprovalDetails() })
     this.selfSettings = new SelfSettings(this)
@@ -430,7 +437,26 @@ export class DotService {
       if (!dot) return
       await this.dueBeforeDelivery(dot)
       this.applyModel(dot)
+      // A new TTL moves the armed ping without resetting the stretch's count.
+      if (this.keepalive) this.scheduleKeepalive(this.keepalive)
     }).catch(error => { this.options.log?.(`dsh-dot: settings not applied to dot's session: ${messageOf(error)}`) })
+  }
+
+  /**
+   * The model Settings edits for cache TTL. While a ping is armed this is the
+   * live session's model, so 0 pauses the stretch that is actually paying.
+   * Otherwise it is the next-request model.
+   */
+  keepaliveInfo(): KeepaliveInfo | undefined {
+    const armed = this.keepalive
+    const model = (armed && this.host.sessionModel?.(armed.sessionId)) || this.host.dotModel()
+    if (!model) return undefined
+    return {
+      provider: model.provider,
+      model: model.model,
+      minutes: cacheTtlMinutes(this.store.settings, model.provider, model.model),
+      defaultMinutes: defaultCacheTtl(model.provider, model.model),
+    }
   }
 
   /**
@@ -444,12 +470,16 @@ export class DotService {
     this.armIdleCheck()
     return this.serial(async () => {
       if (!this.isDot(sessionId) || !this.store.segment || this.host.isRunning(sessionId)) return
-      const replies = transcriptRows(await this.host.readEvents(sessionId)).filter(row => row.role === 'dot')
-      const latest = replies.at(-1)
+      const events = await this.host.readEvents(sessionId)
+      const latest = transcriptRows(events).filter(row => row.role === 'dot').at(-1)
       if (latest) await this.store.noteConversation(latest.at, true)
       const requested = this.requestedSegment
       const reason: RolloverReason | undefined = requested ? 'dot-requested' : reasonAfterTurn(await this.host.dotContext(sessionId))
-      if (!reason) return
+      if (!reason) {
+        this.armKeepalive(sessionId, this.repliedInEvents(events).replied)
+        return
+      }
+      this.cancelKeepalive()
       await this.rollover(sessionId, reason)
       this.requestedSegment = undefined
     }).catch(error => { this.options.log?.(`dsh-dot: segment check failed: ${messageOf(error)}`) })
@@ -541,6 +571,8 @@ export class DotService {
         )
       }
       this.idleChecker.cancel()
+      this.cancelKeepalive()
+      this.lastKeepaliveAt = undefined
       const archived: string[] = []
       const archiveFailed: { sessionId: string; message: string }[] = []
       for (const sessionId of archiveIds) {
@@ -707,6 +739,79 @@ export class DotService {
       this.idleSince ??= this.now()
       this.idleChecker.arm(this.store.settings.idleCheckMinutes, Math.max(0, this.now() - this.idleSince))
     } else this.idleChecker.cancel()
+  }
+
+  /**
+   * Provider caches die long before the 2h idle rollover, so a dot waiting on
+   * running tasks pings its own session prefix to keep the cache warm. Every
+   * finished turn re-arms from scratch; each tick re-checks the conditions.
+   */
+  private armKeepalive(dot: string, replied: boolean): void {
+    this.cancelKeepalive()
+    if (this.closing || !replied || this.host.isRunning(dot)) return
+    if (!this.store.list().some(task => task.status === 'running')) return
+    if (!this.host.sessionModel?.(dot)) return
+    const armed: NonNullable<DotService['keepalive']> = { sessionId: dot, pings: 0, lastAt: this.now() }
+    this.keepalive = armed
+    this.scheduleKeepalive(armed)
+  }
+
+  private cancelKeepalive(): void {
+    if (this.keepalive?.handle !== undefined) this.timer.clear(this.keepalive.handle)
+    this.keepalive = undefined
+  }
+
+  /**
+   * Arm the next ping from the TTL in force right now — a settings change can
+   * move it without touching the stretch's ping count. A 0 TTL leaves the
+   * record standing so turning it back on resumes the stretch.
+   */
+  private scheduleKeepalive(armed: NonNullable<DotService['keepalive']>): void {
+    if (armed.handle !== undefined) this.timer.clear(armed.handle)
+    armed.handle = undefined
+    if (this.keepalive !== armed) return
+    const model = this.host.sessionModel?.(armed.sessionId)
+    const intervalMs = model ? keepaliveIntervalMs(cacheTtlMinutes(this.store.settings, model.provider, model.model)) : undefined
+    if (intervalMs === undefined) return
+    armed.handle = this.timer.set(() => { armed.handle = undefined; this.keepaliveTick(armed) }, Math.max(0, armed.lastAt + intervalMs - this.now()))
+  }
+
+  private keepaliveTick(armed: NonNullable<DotService['keepalive']>): void {
+    if (this.keepalive !== armed) return
+    void this.serial(async () => {
+      if (this.keepalive !== armed) return
+      const holds = this.store.dotSessionId === armed.sessionId && this.store.segment?.sessionId === armed.sessionId
+        && !this.host.isRunning(armed.sessionId) && this.store.list().some(task => task.status === 'running')
+      if (!holds) { this.cancelKeepalive(); return }
+      const model = this.host.sessionModel?.(armed.sessionId)
+      const intervalMs = model ? keepaliveIntervalMs(cacheTtlMinutes(this.store.settings, model.provider, model.model)) : undefined
+      // A TTL turned off mid-stretch pauses the pings; the record survives.
+      if (intervalMs === undefined) return
+      if (armed.pings >= KEEPALIVE_MAX_PINGS) {
+        this.cancelKeepalive()
+        const view = await this.host.dotContext(armed.sessionId)
+        // The cache is still warm: the handoff note rides it into the new segment.
+        if (this.store.segment?.sessionId === armed.sessionId && !this.host.isRunning(armed.sessionId) && (view.usedTokens ?? 0) >= IDLE_MIN_TOKENS) {
+          const next = await this.rollover(armed.sessionId, 'idle-expired')
+          if (next !== armed.sessionId) {
+            this.emit({ event: DOT_TRACE.keepaliveRollover, message: 'The warm idle segment was left for a fresh one.', sessionId: armed.sessionId })
+          }
+        }
+        return
+      }
+      let usage: DotContextUsage | undefined
+      await this.host.ping(armed.sessionId, seen => { usage = addUsage(usage, seen) })
+      if (usage) await this.store.addUsageCarry(usage)
+      armed.lastAt = this.now()
+      this.lastKeepaliveAt = { sessionId: armed.sessionId, at: armed.lastAt }
+      armed.pings += 1
+      this.emit({ event: DOT_TRACE.keepalivePing, message: 'Kept the prompt cache warm.', sessionId: armed.sessionId, data: { pings: armed.pings } })
+      this.scheduleKeepalive(armed)
+    }).catch(error => {
+      this.options.log?.(`dsh-dot: cache keepalive failed: ${messageOf(error)}`)
+      this.emit({ event: DOT_TRACE.keepaliveFailed, level: 'warn', message: 'A cache keepalive ping failed.', sessionId: armed.sessionId })
+      if (this.keepalive === armed) this.cancelKeepalive()
+    })
   }
   reconcile(): Promise<void> { return this.track(() => this.reconcileNow()) }
 
@@ -1368,6 +1473,7 @@ export class DotService {
     this.closing = true
     this.batcher.dispose()
     this.idleChecker.cancel()
+    this.cancelKeepalive()
     this.reminders.dispose()
     this.pending.dispose()
     this.disposal = (async () => {
@@ -2581,6 +2687,8 @@ export class DotService {
     const segment = this.store.segment
     if (!segment || segment.sessionId !== dot || this.host.isRunning(dot)) return undefined
     const { replied, lastReplyAt } = this.repliedInEvents(await this.host.readEvents(dot))
+    // A recent cache ping also keeps the segment warm: the idle clock counts from it too.
+    const lastActiveAt = Math.max(lastReplyAt ?? 0, this.lastKeepaliveAt?.sessionId === dot ? this.lastKeepaliveAt.at : 0)
     if (this.requestedSegment) return 'dot-requested'
     const wanted = await this.frozen()
     const seenAgreements = segment.agreementsSeen ?? segment.agreements ?? ''
@@ -2596,7 +2704,7 @@ export class DotService {
     return reasonBeforeDelivery({
       replied,
       now: this.now(),
-      ...lastReplyAt === undefined ? {} : { lastReplyAt },
+      ...lastActiveAt > 0 ? { lastReplyAt: lastActiveAt } : {},
       ...view.usedTokens === undefined ? {} : { usedTokens: view.usedTokens },
       persona: wanted.persona,
       frozenPersona: segment.persona,

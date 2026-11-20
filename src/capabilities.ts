@@ -251,6 +251,18 @@ export function buildCatalog(input: CatalogInput): { readonly locked: readonly s
     entries.add(entryId)
     ownedEntries.set(bundle, entries)
   }
+  // A bundle with an explicit `plugin:<bundle>#<entry>` grant keeps the entry
+  // level even when it is the only tool-owning entry, so the granted selector
+  // stays a live chain node instead of collapsing into the bundle row.
+  const grantedEntryBundles = new Set<string>()
+  for (const selector of Object.keys(input.grants)) {
+    if (!selector.startsWith(SELECTOR.plugin)) continue
+    const hash = selector.indexOf('#')
+    if (hash < 0) continue
+    const bundle = selector.slice(SELECTOR.plugin.length, hash)
+    const entryId = selector.slice(hash + 1)
+    if (ownedEntries.get(bundle)?.has(entryId)) grantedEntryBundles.add(bundle)
+  }
   const unattributed: MutableTool[] = []
   const byBundle = new Map<string, MutableGroup>()
   const childGroups = new Map<string, MutableGroup>()
@@ -259,7 +271,7 @@ export function buildCatalog(input: CatalogInput): { readonly locked: readonly s
     if (entryId === undefined) { unattributed.push(row(def)); continue }
     const bundle = bundleOf.get(entryId) ?? entryId
     const pluginId = pluginSelector(bundle)
-    if ((ownedEntries.get(bundle)?.size ?? 0) > 1) {
+    if ((ownedEntries.get(bundle)?.size ?? 0) > 1 || grantedEntryBundles.has(bundle)) {
       // bundle → entry → tool nesting when more than one entry owns tools.
       let parent = byBundle.get(bundle)
       if (parent === undefined) {

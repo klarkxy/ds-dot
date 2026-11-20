@@ -91,6 +91,26 @@ describe('capability catalog', () => {
     expect(parent?.children?.map(child => [child.id, child.tools.length])).toEqual([['plugin:plug#e1', 1], ['plugin:plug#e2', 2]])
   })
 
+  it('keeps the entry selector for a single tool-owning entry that carries an explicit grant', () => {
+    const defs = fakeTools(['pt_a']).defs
+    const input = {
+      defs,
+      owners: new Map([['pt_a', { entryId: 'e1' }]]),
+      bundles: [{ name: 'plug', rows: [{ entryId: 'e1' }] }],
+    }
+    const view = buildCatalog(catalogInput({ ...input, grants: { 'plugin:plug': 'auto', 'plugin:plug#e1': 'off' } }))
+    const plug = view.groups.find(group => group.id === 'plugin:plug')
+    expect(plug?.tools).toEqual([])
+    const entry = plug?.children?.find(child => child.id === 'plugin:plug#e1')
+    expect(entry?.tools.map(tool => tool.name)).toEqual(['pt_a'])
+
+    // The entry selector sits between the tool and bundle in the chain, so an
+    // explicit entry grant overrides the bundle grant instead of being lost.
+    expect([...resolveGrants({ 'plugin:plug': 'auto', 'plugin:plug#e1': 'off' }, view.groups)]).toEqual([])
+    const asked = [...resolveGrants({ 'plugin:plug': 'auto', 'plugin:plug#e1': 'ask' }, view.groups)]
+    expect(asked.map(([name, row]) => [name, row.grant])).toEqual([['pt_a', 'ask']])
+  })
+
   it('keeps unattributed tools under host and entries without a bundle as their own plugin group', () => {
     const defs = fakeTools(['loose', 'extra_tool']).defs
     const view = buildCatalog(catalogInput({

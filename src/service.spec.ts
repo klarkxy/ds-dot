@@ -11,6 +11,7 @@ import { readSnapshot, saveSnapshot } from './artifacts.ts'
 import * as artifacts from './artifacts.ts'
 import { launchReservedRun } from './execution.ts'
 import { agreementsSection } from './memory.ts'
+import { PACKAGE_NAME, type PluginManagerLike } from './auto-update.ts'
 import { DotStore, type DotDomainHandle } from './store.ts'
 
 /** Manual timer: tests fire scheduled callbacks explicitly. */
@@ -168,17 +169,18 @@ function fakeHost() {
   }
 }
 
-function setup(settings?: Partial<DotSettings>, trace?: { info: (event: string, message: string, context?: Record<string, unknown>) => boolean; debug: (event: string, message: string, context?: Record<string, unknown>) => boolean; warn: (event: string, message: string, error?: unknown, context?: Record<string, unknown>) => boolean }, homeDir = join(tmpdir(), 'dsh-dot-spec')) {
+function setup(settings?: Partial<DotSettings>, trace?: { info: (event: string, message: string, context?: Record<string, unknown>) => boolean; debug: (event: string, message: string, context?: Record<string, unknown>) => boolean; warn: (event: string, message: string, error?: unknown, context?: Record<string, unknown>) => boolean }, homeDir = join(tmpdir(), 'dsh-dot-spec'), extra: { pluginManager?: () => unknown } = {}) {
   const fake = fakeHost()
   const clock = manualTimer()
   const store = new DotStore(undefined)
   // Reflection is off unless a test asks for it, so the reminder clock's periodic
-  // check does not start background passes in unrelated tests.
+  // check does not start background passes in unrelated tests; self-update is off
+  // likewise so its clock stays out of timer assertions.
   // Relay tests cover untracked sessions, so they opt into scope=all.
   // A fresh install defaults to tracked; see DEFAULT_SETTINGS.
-  void store.setSettings({ ...DEFAULT_SETTINGS, reflection: false, idleCheckMinutes: 0, scope: 'all', ...settings })
+  void store.setSettings({ ...DEFAULT_SETTINGS, reflection: false, idleCheckMinutes: 0, autoUpdate: false, scope: 'all', ...settings })
   let at = 1000
-  const service = new DotService({ host: fake.host, store, homeDir, approvalGraceMs: 0, timer: clock.timer, now: () => at, ...(trace ? { trace } : {}) })
+  const service = new DotService({ host: fake.host, store, homeDir, approvalGraceMs: 0, timer: clock.timer, now: () => at, ...(trace ? { trace } : {}), ...(extra.pluginManager ? { pluginManager: extra.pluginManager } : {}) })
   return { ...fake, ...clock, store, service, advance: (ms: number) => { at += ms } }
 }
 
@@ -2077,6 +2079,49 @@ describe('factory reset', () => {
     expect(h.store.settings.approvals).toBe(DEFAULT_SETTINGS.approvals)
     expect(h.store.dotSessionId).toBeTruthy()
     expect(h.store.dotSessionId).not.toBe(dot)
+  })
+
+  it('re-arms the daily update check when the reset restores auto-update', async () => {
+    const h = setup()
+    await h.service.ensureDot()
+    await h.service.confirmFactoryReset(h.service.previewFactoryReset().token)
+    // The restored default turns auto-update back on and books the missed-noon check.
+    expect(h.store.settings.autoUpdate).toBe(true)
+    expect(h.delays()).toContain(180_000)
+  })
+
+  it('does not install a quiet-waited update onto a factory-reset store', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'dsh-dot-reset-update-'))
+    const calls: { updatedTo?: string } = {}
+    const manager: PluginManagerLike = {
+      listBundles: async () => [{ name: PACKAGE_NAME, version: '0.3.0', update: 'registry' }],
+      listVersions: async () => ({ status: 'listed', installed: '0.3.0', registry: 'https://registry.test', versions: [{ version: '0.3.1', prerelease: false, bundle: true }] }),
+      updateBundle: async (_name, to) => {
+        calls.updatedTo = to
+        return { from: '0.3.0', to, result: { application: 'applied' } }
+      },
+    }
+    const h = setup({ autoUpdate: true }, undefined, home, { pluginManager: () => manager })
+    try {
+      const dot = await h.service.ensureDot()
+      h.running.add(dot)
+      // Reset must be allowed to stop the session, while isQuiet still sees it running
+      // so the in-flight check is in its quiet wait.
+      h.host.stopActivity = async sessionId => {
+        h.calls.push(`stop-activity ${sessionId}`)
+        return { cancelAccepted: true, queueCleared: true, idle: true, jobsSettled: true as const }
+      }
+      const checking = h.service.checkUpdates()
+      await new Promise<void>(resolve => setTimeout(resolve, 0))
+      expect(h.delays()).toContain(60_000)
+      await h.service.confirmFactoryReset(h.service.previewFactoryReset().token)
+      expect(h.delays()).not.toContain(60_000)
+      await checking
+      expect(calls.updatedTo).toBeUndefined()
+    } finally {
+      await h.service.dispose()
+      rmSync(home, { recursive: true, force: true })
+    }
   })
 
   it('resets an unsent reservation without trying to stop its placeholder session', async () => {

@@ -37,6 +37,7 @@ import { clip, ledgerSummary } from './ledger.ts'
 import { directoriesConflict } from './lock.ts'
 import { IdleChecker, idleCandidates } from './idle-check.ts'
 import { ACCEPTED_DELIVERY_HINT, IDLE_SILENCE_HINT } from './task-hints.ts'
+import { AutoUpdater, type PluginManagerLike, type UpdateStatus } from './auto-update.ts'
 import { DOT_TRACE, emitDotTrace, type DotTraceInput } from './trace.ts'
 import type { RunAccess, RunKind, ChangePriority } from './contracts.ts'
 import { AGREEMENTS_MAX_CHARS, COGNITION_MAX_CHARS, KnowledgeError, addEntry, agreementNotesBlock, agreementsSection, cognitionSection, normalizeAgreements, normalizeCognition, removeEntry } from './memory.ts'
@@ -80,6 +81,8 @@ export interface DotServiceOptions {
   readonly peers?: PeerLedger
   /** Durable inbox rows. Absent only in tests that never submit one. */
   readonly inbox?: InboxLedger
+  /** The host's plugin-manager service, looked up lazily; absent in tests and hosts without it. */
+  readonly pluginManager?: () => unknown
 
 }
 
@@ -130,6 +133,7 @@ export class DotService {
   private readonly childReleases = new Map<string, () => void>()
   private resetArmed?: { readonly token: string; readonly expiresAt: number }
   private currentLocale: CopyLocale | undefined
+  private readonly updates: AutoUpdater
   private readonly timer: Timer
   /** The armed cache-keepalive of the current idle stretch; lastAt is the last turn end or ping. */
   private keepalive?: { readonly sessionId: string; pings: number; lastAt: number; handle?: unknown }
@@ -188,6 +192,19 @@ export class DotService {
       onPeriodic: () => { void this.reflection.tick().catch(() => undefined) },
       ...options.timer ? { timer: options.timer } : {},
       ...options.log ? { log: options.log } : {},
+    })
+    this.updates = new AutoUpdater({
+      manager: () => options.pluginManager?.() as PluginManagerLike | undefined,
+      store: options.store,
+      settings: () => options.store.settings,
+      isQuiet: () => {
+        const dot = this.store.dotSessionId
+        return !this.closing && (dot === undefined || !this.host.isRunning(dot)) && this.batcher.size === 0 && this.pending.list().length === 0
+      },
+      now: this.now,
+      timer: options.timer ?? realTimer,
+      ...options.log ? { log: options.log } : {},
+      emit: input => this.emit(input),
     })
   }
 
@@ -442,6 +459,7 @@ export class DotService {
    */
   settingsChanged(): Promise<void> {
     this.armIdleCheck()
+    this.updates.settingsChanged()
     return this.serial(async () => {
       const dot = this.store.dotSessionId
       if (!dot) return
@@ -565,6 +583,19 @@ export class DotService {
       const error = factoryResetTokenError(this.resetArmed, token, this.now())
       this.resetArmed = undefined
       if (error) throw new DotError('dot/invalid', error)
+      // Cancel before sessions stop or the store is wiped: those both make
+      // isQuiet true and would otherwise let a waiting check install.
+      this.updates.interrupt()
+      try {
+        return await this.runFactoryReset()
+      } catch (failure) {
+        this.updates.settingsChanged()
+        throw failure
+      }
+    })
+  }
+
+  private async runFactoryReset(): Promise<FactoryResetResult> {
       const archiveIds = factoryResetArchiveIds(this.store)
       // The ownership list includes confirmed and uncertain host calls, but not
       // placeholder ids belonging to reservations that never reached the host.
@@ -616,6 +647,7 @@ export class DotService {
       this.batcher.take()
       this.releaseChildSeals()
       this.reminders.refresh()
+      this.updates.settingsChanged()
       this.homeRegistered = false
       this.ensuring = undefined
       this.requestedSegment = undefined
@@ -635,7 +667,6 @@ export class DotService {
         data: { archived: archived.length, archiveFailed: archiveFailed.length },
       })
       return { archived, archiveFailed, sessionId, at: this.now() }
-    })
   }
 
   /** Queue, agent idle, and owned jobs — the same facts finishSettled needs. Missing proof is UNKNOWN. */
@@ -731,6 +762,10 @@ export class DotService {
 
   board(): BoardView { return this.store.board(this.pending.list()) }
 
+  /** Self-update bookkeeping for the settings panel. */
+  updateStatus(): UpdateStatus | undefined { return this.store.updateStatus }
+  checkUpdates(): Promise<UpdateStatus> { return this.updates.checkNow() }
+
   /**
    * Let reminders come due. Called once dot's preset is registered: a reminder
    * that fires earlier could not reopen dot's session and would take it for lost.
@@ -738,6 +773,7 @@ export class DotService {
   startReminders(): void {
     if (this.closing) return
     this.reminders.start()
+    this.updates.start()
     void this.reconcile().catch(error => this.options.log?.(`dsh-dot: reconciliation failed: ${messageOf(error)}`))
   }
 
@@ -1499,6 +1535,7 @@ export class DotService {
     this.idleChecker.cancel()
     this.cancelKeepalive()
     this.reminders.dispose()
+    this.updates.dispose()
     this.pending.dispose()
     this.disposal = (async () => {
       await this.reflection.dispose()

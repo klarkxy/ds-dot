@@ -24,6 +24,7 @@ const FIELDS = {
   }).strict(),
   taskPermission: z.enum(['workspace-write', 'danger-full-access', 'default']),
   reflection: z.boolean(),
+  autoUpdate: z.boolean(),
   idleCheckMinutes: z.number().int().min(0).max(1440),
   cacheTtl: z.record(z.string().trim().min(1).max(400), z.number().int().min(0).max(CACHE_TTL_MAX_MINUTES))
     .refine(map => Object.keys(map).length <= CACHE_TTL_MAX_ENTRIES),

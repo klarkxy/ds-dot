@@ -12,6 +12,13 @@ describe('parseSettings', () => {
     expect(() => patchSettings(DEFAULT_SETTINGS, { idleCheckMinutes: -1 })).toThrow()
     expect(() => patchSettings(DEFAULT_SETTINGS, { idleCheckMinutes: 1.5 })).toThrow()
   })
+  it('defaults auto update on and round-trips a boolean', () => {
+    expect(parseSettings({}).autoUpdate).toBe(true)
+    expect(parseSettings({ autoUpdate: false }).autoUpdate).toBe(false)
+    expect(parseSettings({ autoUpdate: 'no' }).autoUpdate).toBe(true)
+    expect(patchSettings(DEFAULT_SETTINGS, { autoUpdate: false }).autoUpdate).toBe(false)
+    expect(() => patchSettings(DEFAULT_SETTINGS, { autoUpdate: 'no' })).toThrow()
+  })
   it('fills defaults and keeps each valid field on its own', () => {
     expect(parseSettings(undefined)).toEqual(DEFAULT_SETTINGS)
     const parsed = parseSettings({ approvals: 'deny', questions: 'nonsense', taskPermission: 'inherit', approvalAllowlist: ['read'], notifyQuietSeconds: 30, awayMinutes: 20, model: { provider: 'p', model: 'm' } })

@@ -49,6 +49,9 @@ function fakeHost() {
   let summaryFails = false
   let catalogFails = false
   let presetsFail = false
+  let pingFails = false
+  let dotModel: { provider: string; model: string } | undefined = { provider: 'p', model: 'base' }
+  const pings: string[] = []
   const reflectionHooks: { promptHook?: (sessionId: string, text: string) => void | Promise<void> } = {}
   const host: DotHost = {
     listWorkspaces: () => [...workspaces],
@@ -124,6 +127,13 @@ function fakeHost() {
       onUsage?.({ input: 15, cacheRead: 25, cacheWrite: 0, output: 10 })
       return 'NOTE FROM DOT'
     },
+    async ping(sessionId, onUsage) {
+      calls.push(`ping ${sessionId}`)
+      pings.push(sessionId)
+      if (pingFails) throw new Error('provider offline')
+      onUsage?.({ input: 5, cacheRead: 90, cacheWrite: 0, output: 1 })
+    },
+    dotModel: () => dotModel,
     handoffView(fromSessionId, toSessionId) {
       calls.push(`handoff-view ${fromSessionId} ${toSessionId}`)
     },
@@ -142,10 +152,12 @@ function fakeHost() {
     async dispose() {},
   }
   return {
-    host, calls, timeline, said, relayed, workspaces, lost, events, running, unreadable, reflectionHooks,
+    host, calls, timeline, said, relayed, workspaces, lost, events, running, unreadable, reflectionHooks, pings,
     failPermission: () => { permissionWorks = false },
     setContext: (next: DotContextView) => { context = next },
     setModel: (next: string | undefined) => { model = next },
+    setDotModel: (next: { provider: string; model: string } | undefined) => { dotModel = next },
+    failPing: () => { pingFails = true },
     failCreate: (fails: boolean) => { createFails = fails },
     failSummary: () => { summaryFails = true },
     failCatalog: () => { catalogFails = true },
@@ -464,6 +476,139 @@ describe('DotService segments', () => {
     const next = h.store.dotSessionId!
     expect(h.calls.filter(call => call.startsWith('say '))).toEqual([`say ${next} one`, `say ${next} two`])
     expect(h.store.pastSegments).toHaveLength(1)
+  })
+})
+
+describe('DotService cache keepalive', () => {
+  /** A replied segment plus one running task is what arms the ping schedule. */
+  const arm = async (h: ReturnType<typeof setup>) => {
+    const dot = await h.service.ensureDot()
+    h.events.set(dot, [human('a', 10), reply('b', 20)])
+    await h.store.track({ sessionId: 'task1', origin: 'watched', title: 'watched', goal: 'g', cwd: '/w', at: 1 })
+    await h.store.apply({ type: 'status', sessionId: 'task1', status: 'running', at: 2 }, [])
+    await h.service.onDotIdle(dot)
+    return dot
+  }
+  /** Fire the manual timer, then let the serial lane finish the tick. */
+  const tick = async (h: ReturnType<typeof setup>) => {
+    h.fire()
+    await new Promise(resolve => setTimeout(resolve, 0))
+  }
+
+  it('pings the session prefix at 80% of the cache TTL and counts the usage', async () => {
+    const h = setup()
+    const dot = await arm(h)
+    expect(h.delays()).toContain(240_000)
+    await tick(h)
+    expect(h.pings).toEqual([dot])
+    // The ping is replayed outside the log: nothing joins the segment.
+    expect(h.events.get(dot)).toHaveLength(2)
+    expect(h.store.usageCarry).toEqual({ input: 5, cacheRead: 90, cacheWrite: 0, output: 1 })
+    await tick(h)
+    expect(h.pings).toEqual([dot, dot])
+    expect(h.store.usageCarry).toEqual({ input: 10, cacheRead: 180, cacheWrite: 0, output: 2 })
+  })
+
+  it('reads the interval from a per-model TTL override', async () => {
+    const h = setup({ cacheTtl: { 'p/base': 10 } })
+    await arm(h)
+    expect(h.delays()).toContain(480_000)
+  })
+
+  it('disables the keepalive when the override is 0', async () => {
+    const h = setup({ cacheTtl: { 'p/base': 0 } })
+    await arm(h)
+    expect(h.delays()).not.toContain(240_000)
+    await tick(h)
+    expect(h.pings).toEqual([])
+  })
+
+  it('does not arm without a running task', async () => {
+    const h = setup()
+    const dot = await h.service.ensureDot()
+    h.events.set(dot, [human('a', 10), reply('b', 20)])
+    await h.store.track({ sessionId: 'task1', origin: 'watched', title: 'watched', goal: 'g', cwd: '/w', at: 1 })
+    await h.service.onDotIdle(dot)
+    expect(h.delays()).not.toContain(240_000)
+    await tick(h)
+    expect(h.pings).toEqual([])
+  })
+
+  it('stops when dot is running at the tick', async () => {
+    const h = setup()
+    const dot = await arm(h)
+    h.running.add(dot)
+    await tick(h)
+    expect(h.pings).toEqual([])
+    h.running.delete(dot)
+    await tick(h)
+    expect(h.pings).toEqual([])
+  })
+
+  it('stops when the running task ends before the tick', async () => {
+    const h = setup()
+    const dot = await arm(h)
+    await h.store.apply({ type: 'status', sessionId: 'task1', status: 'idle', at: 3 }, [])
+    await tick(h)
+    expect(h.pings).toEqual([])
+  })
+
+  it('stops after a failed ping instead of retrying the stretch', async () => {
+    const h = setup()
+    const dot = await arm(h)
+    h.failPing()
+    await tick(h)
+    expect(h.pings).toEqual([dot])
+    await tick(h)
+    expect(h.pings).toEqual([dot])
+  })
+
+  it('rolls the warm segment over after the eighth ping when it is large enough', async () => {
+    const h = setup()
+    const dot = await arm(h)
+    h.setContext({ live: true, compactions: 0, contextWindow: 128_000, usedTokens: 40_000, rolloverAt: 70_000 })
+    for (let i = 0; i < 8; i++) await tick(h)
+    expect(h.pings).toHaveLength(8)
+    expect(h.store.dotSessionId).toBe(dot)
+    await tick(h)
+    expect(h.store.dotSessionId).not.toBe(dot)
+    expect(h.store.segment?.reason).toBe('idle-expired')
+    await tick(h)
+    expect(h.pings).toHaveLength(8)
+  })
+
+  it('stops after the eighth ping when the segment is too small to roll over', async () => {
+    const h = setup()
+    const dot = await arm(h)
+    h.setContext({ live: true, compactions: 0, usedTokens: 10_000 })
+    for (let i = 0; i < 8; i++) await tick(h)
+    expect(h.pings).toHaveLength(8)
+    await tick(h)
+    expect(h.store.dotSessionId).toBe(dot)
+    await tick(h)
+    expect(h.pings).toHaveLength(8)
+  })
+
+  it('does not roll a delivery over while the last ping is still fresh', async () => {
+    const h = setup()
+    const dot = await arm(h)
+    h.setContext({ live: true, compactions: 0, contextWindow: 128_000, usedTokens: 40_000, rolloverAt: 70_000 })
+    h.advance(3 * 60 * 60_000)
+    await tick(h)
+    expect(h.pings).toEqual([dot])
+    await h.service.say('still there')
+    expect(h.store.dotSessionId).toBe(dot)
+    expect(h.calls).toContain(`say ${dot} still there`)
+  })
+
+  it('rolls a stale idle segment over at delivery when no ping refreshed it', async () => {
+    const h = setup()
+    const dot = await arm(h)
+    h.setContext({ live: true, compactions: 0, contextWindow: 128_000, usedTokens: 40_000, rolloverAt: 70_000 })
+    h.advance(3 * 60 * 60_000)
+    await h.service.say('again')
+    expect(h.store.dotSessionId).not.toBe(dot)
+    expect(h.store.segment?.reason).toBe('idle-expired')
   })
 })
 

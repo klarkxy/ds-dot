@@ -186,6 +186,8 @@ function makeFakeHost() {
     async releaseDot() {},
     async readEvents(sessionId) { return events.get(sessionId) ?? [] },
     async summarize() { return 'HANDOFF NOTE' },
+    async ping() {},
+    dotModel: () => undefined,
     modelKey: () => undefined,
     async say(sessionId, text) { said.push({ sessionId, text }) },
     async stop() {},

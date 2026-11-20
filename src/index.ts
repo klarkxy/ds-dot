@@ -27,6 +27,8 @@ import { CHAT_SAY_BODY_BYTES, checkChatImages } from './chat-images.ts'
 import { ChatFeed } from './feed.ts'
 import { DotCapabilities, type CapabilityPluginManager, type CapabilityTools } from './capabilities.ts'
 import { bindHost } from './host.ts'
+import { InboxLedger } from './inbox.ts'
+import { installInboxIngress } from './inbox-github.ts'
 import { clip } from './ledger.ts'
 import { detachNative } from './native.ts'
 import { PeerLedger } from './peer.ts'
@@ -36,7 +38,7 @@ import { REFLECTION_INSTRUCTIONS, REFLECTION_PRESET_ID } from './reflection.ts'
 import { APPROVAL_GRACE_MS, DotError, DotService, messageOf } from './service.ts'
 import { configI18n } from './i18n/index.ts'
 import { patchSettings } from './settings.ts'
-import { dotDomain, parsePeerDelivery, parseTask } from './storage.ts'
+import { dotDomain, parseInboxRecord, parsePeerDelivery, parseTask } from './storage.ts'
 import { DotStore, type DotDomainHandle } from './store.ts'
 import { DOT_INHERITED_ALLOW } from './tools.ts'
 import { copyLocale, fillText, t } from './ui-copy.ts'
@@ -120,6 +122,7 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
     store,
     capabilities,
     peers: new PeerLedger(domain.table('peers'), parsePeerDelivery),
+    inbox: new InboxLedger(domain.table('inbox'), parseInboxRecord),
     homeDir: config.homeDir?.trim() || join(process.env.DSH_HOME?.trim() || join(homedir(), '.dsh'), 'dot'),
     log,
     trace: logger,
@@ -161,6 +164,8 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
   ctx.effect(() => capabilities.installAttribution(), 'dot.capabilities-attribution')
   // A tool set change can mean a bundle came or went; refetch row mapping on the next catalog read.
   ctx.effect(() => (ctx as unknown as { on(name: string, listener: () => void): () => void }).on('tools/change', () => capabilities.invalidateBundles()), 'dot.capabilities-bundles')
+  // Optional webhook ingress: only while the host provides webhookRuntime.
+  installInboxIngress(ctx, service, log)
   ctx.effect(() => () => {
     unfollow()
     unpending()

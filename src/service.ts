@@ -28,9 +28,10 @@ import { approvalDisplay, parseNotice } from './chat-format.ts'
 import { cardText } from './cards.ts'
 import { NoticeBatcher, formatNotices, formatNoticeDisplay, realTimer, type Notice, type Timer } from './batcher.ts'
 import { ZERO_USAGE, addUsage, combineUsage, netSegmentUsage, usageFromEvents } from './context.ts'
-import { PRESET_ID, TOOL, type BoardView, type DotContextSections, type DotContextUsage, type DotContextView, type FactoryResetPreview, type FactoryResetResult, type KeepaliveInfo, type KnowledgeView, type ModelChoice, type PendingKind, type PendingQuestionItem, type ReflectionRun, type RolloverReason, type RuleConfig, type TrajectoryView } from './contracts.ts'
+import { PRESET_ID, TOOL, type BoardView, type DotContextSections, type DotContextUsage, type DotContextView, type FactoryResetPreview, type FactoryResetResult, type InboxEventInput, type InboxRecord, type InboxSubmitResult, type KeepaliveInfo, type KnowledgeView, type ModelChoice, type PendingKind, type PendingQuestionItem, type ReflectionRun, type RolloverReason, type RuleConfig, type TrajectoryView } from './contracts.ts'
 import { SUMMARY_INSTRUCTION, SUMMARY_MAX_TOKENS, buildHandoff, type Handoff } from './handoff.ts'
 import { READ_ROWS_DEFAULT, READ_ROWS_MAX, SEARCH_LIMIT_DEFAULT, SEARCH_LIMIT_MAX, SEARCH_SESSIONS_MAX, formatRead, formatSearch, historyRows, queryTerms, searchRows, windowRows, type SessionHits } from './history.ts'
+import { InboxLedger, inboxNotice, memoryInboxTable } from './inbox.ts'
 import { type DotHost, type WorkspaceRow } from './host.ts'
 import { clip, ledgerSummary } from './ledger.ts'
 import { directoriesConflict } from './lock.ts'
@@ -49,6 +50,7 @@ import { routeRequest } from './rules.ts'
 import { ScheduleInputError, describeTiming, scheduleLines, type ScheduleInput } from './schedule.ts'
 import { KEEPALIVE_MAX_PINGS, cacheTtlMinutes, defaultCacheTtl, keepaliveIntervalMs } from './keepalive.ts'
 import { EMPTY_CAPABILITIES_SIGNATURE, IDLE_MIN_TOKENS, openingText, reasonAfterTurn, reasonBeforeDelivery, type Segment } from './segments.ts'
+import { parseInboxRecord } from './storage.ts'
 import type { DotStore } from './store.ts'
 import { factoryResetArchiveIds, factoryResetCounts, factoryResetStopGap, factoryResetTokenError, issueFactoryResetToken, type FactoryResetStopEvidence } from './factory-reset.ts'
 import { formatWorkspaceFiles, listWorkspaceFiles as listWorkspaceTree, readWorkspaceText, WORKSPACE_LIST_MAX } from './workspace-inspect.ts'
@@ -82,6 +84,8 @@ export interface DotServiceOptions {
   readonly peers?: PeerLedger
   /** Optional extra-capability layer; absent in tests that never grant one. */
   readonly capabilities?: DotCapabilities
+  /** Durable inbox rows. Absent only in tests that never submit one. */
+  readonly inbox?: InboxLedger
   /** The host's plugin-manager service, looked up lazily; absent in tests and hosts without it. */
   readonly pluginManager?: () => unknown
 }
@@ -96,6 +100,8 @@ const FAILED_ROUND_LIMIT = 3
 export const HOME_TITLE = 'Dorothy'
 /** The middle of the recommended 8–12 second window; profile config may override it. */
 export const APPROVAL_GRACE_MS = 10_000
+/** At most this many distinct inbox records ride one delivered batch; the rest stay pending for the next flush. */
+const INBOX_NOTICES_PER_DELIVERY = 20
 
 /** npm package name (scope optional); install proposals accept no paths, urls, or git specs. */
 const NPM_NAME = /^(?:@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]{0,213}$/i
@@ -117,6 +123,7 @@ export class DotService {
   private readonly batcher: NoticeBatcher
   private readonly idleChecker: IdleChecker
   private readonly reminders: ReminderClock
+  private readonly inbox: InboxLedger
   private ensuring: Promise<string> | undefined
   private homeRegistered = false
   private lane: Promise<unknown> = Promise.resolve()
@@ -151,6 +158,7 @@ export class DotService {
 
   constructor(private readonly options: DotServiceOptions) {
     this.currentLocale = options.locale ?? options.store.uiLocale
+    this.inbox = options.inbox ?? new InboxLedger(memoryInboxTable(), parseInboxRecord)
     this.cards = new DotCards(options.store, options.log, () => this.now())
     this.now = options.now ?? Date.now
     this.timer = options.timer ?? realTimer
@@ -397,6 +405,8 @@ export class DotService {
         this.batcher.restore(this.liveNotices(notices))
         throw error
       }
+      await this.ackInboxWakes(notices).catch(error => this.options.log?.(`dsh-dot: inbox event was not marked delivered: ${messageOf(error)}`))
+      this.recoverInbox()
       // Delivery already succeeded: a bookkeeping failure must never requeue
       // carried notices or invite the human to send the same answer twice.
       if (agreementNotes) await this.store.clearAgreementNotes().catch(error => this.options.log?.(`dsh-dot: agreement note was not cleared: ${messageOf(error)}`))
@@ -821,7 +831,7 @@ export class DotService {
     const issued = issueFactoryResetToken(this.now())
     this.resetArmed = issued
     return {
-      ...factoryResetCounts(this.store),
+      ...factoryResetCounts(this.store, this.inbox.list().length),
       token: issued.token,
       expiresAt: issued.expiresAt,
       archiveSessionIds: factoryResetArchiveIds(this.store),
@@ -887,6 +897,7 @@ export class DotService {
       // retried with its original session ownership and cleanup scope still known.
       try {
         await this.options.peers?.clear()
+        await this.inbox.clear()
         wipeArtifacts(this.options.homeDir)
       } catch (failure) {
         throw new DotError('dot/reset-incomplete', `Factory reset is incomplete: sessions were stopped and archived, but cleanup failed (${messageOf(failure)}). Some files may already have been removed; Dorothy's records and settings are retained. Request a new preview to retry.`)
@@ -1137,6 +1148,7 @@ export class DotService {
     }
     if (this.canIdleCheck()) this.idleChecker.run()
     this.recoverDecisionWakes()
+    this.recoverInbox()
     this.armIdleCheck()
   }
   /** The human removed a reminder in the board. */
@@ -1774,6 +1786,18 @@ export class DotService {
     emitDotTrace(this.options.trace, input)
   }
 
+  /**
+   * One external event for dot's inbox. Dedupe, subject coalescing and the
+   * durable row all live in the ledger; this only queues the notice the
+   * batcher will deliver. It never opens or resumes a session.
+   */
+  async submitInbox(input: InboxEventInput): Promise<InboxSubmitResult> {
+    const done = await this.serial(() => this.inbox.submit(input, this.now()))
+    // queueInboxNotice itself skips a record that already has a queued notice.
+    if (done.record) this.queueInboxNotice(done.record)
+    return done.result
+  }
+
   flushNotices(): Promise<void> { return this.batcher.drain() }
 
   dispose(): Promise<void> {
@@ -1810,6 +1834,8 @@ export class DotService {
         this.batcher.restore(this.liveNotices(notices))
         throw error
       }
+      await this.ackInboxWakes(notices).catch(error => this.options.log?.(`dsh-dot: inbox event was not marked delivered: ${messageOf(error)}`))
+      this.recoverInbox()
     })
   }
 
@@ -1826,6 +1852,9 @@ export class DotService {
       if (this.host.isRunning(dot)) throw new Error('dot is running')
       await this.host.relay(dot, live[0]!.sessionId, this.formatQueuedNotices(live), undefined, undefined, formatNoticeDisplay(live))
       await this.ackDecisionWakes(live).catch(error => this.options.log?.(`dsh-dot: decision wake was not marked: ${messageOf(error)}`))
+      await this.ackInboxWakes(live).catch(error => this.options.log?.(`dsh-dot: inbox event was not marked delivered: ${messageOf(error)}`))
+      // Inbox records skipped by the per-batch cap get queued for the next flush.
+      this.recoverInbox()
       this.emit({ event: DOT_TRACE.noticeDelivered, message: `Delivered ${live.length} notice(s).`, sessionId: dot, data: { count: live.length, kinds: live.map(item => item.kind).join(',') } })
     })
   }
@@ -1835,7 +1864,30 @@ export class DotService {
   }
 
   private liveNotices(items: readonly Notice[]): Notice[] {
-    return items.filter(item => item.requestId === undefined || this.pending.get(item.requestId) !== undefined)
+    const live: Notice[] = []
+    const inboxSeen = new Set<string>()
+    let inboxKept = 0
+    for (const item of items) {
+      if (item.requestId !== undefined && this.pending.get(item.requestId) === undefined) continue
+      if (item.kind === 'inbox') {
+        // Recovery can queue a second notice for one pending record; first copy wins.
+        if (item.wakeKey !== undefined) {
+          if (inboxSeen.has(item.wakeKey)) continue
+          inboxSeen.add(item.wakeKey)
+        }
+        // The notice text is rebuilt here so a merged record shows its latest event.
+        const record = item.wakeKey === undefined ? undefined : this.inbox.get(item.wakeKey)
+        // Skipped records stay pending and are re-queued after this batch lands.
+        if (record === undefined || record.status !== 'pending' || inboxKept >= INBOX_NOTICES_PER_DELIVERY) continue
+        inboxKept += 1
+        const sessionId = this.store.dotSessionId ?? item.sessionId
+        const notice = inboxNotice(record)
+        live.push({ ...item, sessionId, text: notice.text, display: { kind: 'inbox', sessionId, summary: notice.display } })
+        continue
+      }
+      live.push(item)
+    }
+    return live
   }
 
   /** Deliveries and segment changes run one at a time, so a message never lands in a segment that is being left. */
@@ -2692,6 +2744,33 @@ export class DotService {
       if (!changeId || !verificationId || !subjectKey || !Number.isFinite(at)) continue
       await this.store.work.markDecisionNotified(changeId, { verificationId, subjectKey, at }, this.now())
     }
+  }
+
+  /** Pending inbox rows re-queue one notice each after a restart, like undelivered wakes do. */
+  private recoverInbox(): void {
+    for (const record of this.inbox.list()) {
+      if (record.status === 'pending') this.queueInboxNotice(record)
+    }
+  }
+
+  private queueInboxNotice(record: InboxRecord): void {
+    if (this.batcher.some(item => item.kind === 'inbox' && item.wakeKey === record.id)) return
+    const sessionId = this.store.dotSessionId ?? ''
+    const notice = inboxNotice(record)
+    this.notify({
+      sessionId,
+      kind: 'inbox',
+      wakeKey: record.id,
+      at: this.now(),
+      text: notice.text,
+      display: { kind: 'inbox', sessionId, summary: notice.display },
+    })
+  }
+
+  /** Inbox rows the delivered batch carried become delivered; a failed relay leaves them pending. */
+  private async ackInboxWakes(items: readonly Notice[]): Promise<void> {
+    const ids = items.filter(item => item.kind === 'inbox' && item.wakeKey !== undefined).map(item => item.wakeKey!)
+    if (ids.length > 0) await this.inbox.markDelivered(ids, this.now())
   }
 
   /** Continue one reserved run. Omitting access does not choose a different run, and it does not lower that run's scope. */

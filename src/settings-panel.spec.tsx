@@ -163,7 +163,7 @@ describe('factory reset', () => {
       setSettings: async (patch: Partial<DotSettings>) => { current = { ...current, ...patch } as DotSettings; return current },
       previewFactoryReset: async () => ({
         token: 'tok-1', expiresAt: Date.now() + 60_000,
-        tasks: 2, tickets: 1, changes: 3, runs: 1, schedules: 0, proposals: 0, cards: 0,
+        tasks: 2, changes: 3, runs: 1, schedules: 0, proposals: 0, cards: 0, inbox: 0,
         ownedSessions: 1, pastSegments: 0, reflections: 0, hasAgreements: true, hasCognition: false,
         archiveSessionIds: ['s-owned'],
       }),
@@ -201,7 +201,7 @@ describe('factory reset', () => {
       setSettings: async (patch: Partial<DotSettings>) => { current = { ...current, ...patch } as DotSettings; return current },
       previewFactoryReset: async () => ({
         token: 'tok-2', expiresAt: Date.now() + 60_000,
-        tasks: 1, tickets: 0, changes: 1, runs: 1, schedules: 0, proposals: 0, cards: 0,
+        tasks: 1, changes: 1, runs: 1, schedules: 0, proposals: 0, cards: 0, inbox: 0,
         ownedSessions: 1, pastSegments: 0, reflections: 0, hasAgreements: false, hasCognition: false,
         archiveSessionIds: ['writer-1'],
       }),

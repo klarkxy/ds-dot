@@ -31,7 +31,7 @@ export interface QuestionRow {
 
 export type NoticeEntry =
   | {
-      readonly kind: 'approval' | 'question' | 'turn-end' | 'error' | 'task-human' | 'idle-check'
+      readonly kind: 'approval' | 'question' | 'turn-end' | 'error' | 'task-human' | 'idle-check' | 'inbox'
       readonly sessionId: string
       readonly requestId?: string
       readonly subject?: string
@@ -66,7 +66,7 @@ export interface ParsedNotice {
 const NOTICE_HEAD = /^\[dot notice\]/i
 const REMINDER_PREFIX = /^\[dot reminder\]/i
 const MODEL_FOOTER = /^Do what each one asks now\./
-const SESSION_BULLET = /^- (approval|question|turn-end|error|task-human|idle-check)\s*·\s*([^:]+):\s*(.*)$/
+const SESSION_BULLET = /^- (approval|question|turn-end|error|task-human|idle-check|inbox)\s*·\s*([^:]+):\s*(.*)$/
 const REMINDER_BULLET = /^- (\S+)\s+"([^"]+)"\s*\(([^)]*)\):\s*(.*)$/
 const REQUEST_HEAD = /^(\S+)\s*·\s*(?:approval|question) from (?:task "(.+?)"|untracked session(?: in (.+?))?)\s*·\s*"(.*)"$/
 const CHANGE_REQUEST_HEAD = /^(\S+) for task (\S+) "(.*?)": (?:approval|question)\s*·\s*"(.*)"$/
@@ -310,7 +310,7 @@ export function parseNotice(text: string): ParsedNotice {
     }
     if (MODEL_FOOTER.test(trimmed)) continue
     if (/^Ready to start(?: \(highest priority first\))?:$/.test(trimmed)) { skippingReady = true; continue }
-    if (/^(Requests waiting for you|Errors|Tasks|Watched sessions):$/.test(trimmed)) { skippingReady = false; continue }
+    if (/^(Requests waiting for you|Errors|External events|Tasks|Watched sessions):$/.test(trimmed)) { skippingReady = false; continue }
     if (skippingReady) continue
     if (line.startsWith('- ')) {
       rawItems.push({ section, head: line, sublines: [] })
@@ -344,7 +344,7 @@ export function parseNotice(text: string): ParsedNotice {
       stray.push([item.head.replace(/^- /, ''), ...item.sublines].join('\n').trim())
       continue
     }
-    const kind = sm[1] as 'approval' | 'question' | 'turn-end' | 'error' | 'task-human' | 'idle-check'
+    const kind = sm[1] as 'approval' | 'question' | 'turn-end' | 'error' | 'task-human' | 'idle-check' | 'inbox'
     const sessionId = sm[2]!.trim()
     const headline = sm[3]!.trim()
 
@@ -397,6 +397,12 @@ export function parseNotice(text: string): ParsedNotice {
       continue
     }
 
+    if (kind === 'inbox') {
+      // The event detail rides the indented subline; keep it with the headline.
+      entries.push({ kind, sessionId, summary: [headline, ...item.sublines.map(row => row.trim())].filter(Boolean).join('\n') })
+      continue
+    }
+
     entries.push({ kind, sessionId, summary: headline })
   }
 
@@ -425,7 +431,7 @@ export function summarizeNotice(parsed: ParsedNotice, locale: CopyLocale, tasks:
     } else if (first.kind === 'error') {
       lead = `${badge.label} · ${t(locale, 'error')}`
     } else {
-      const label = first.kind === 'task-human' ? 'taskHuman' : 'idleCheck'
+      const label = first.kind === 'inbox' ? 'inboxEvent' : first.kind === 'task-human' ? 'taskHuman' : 'idleCheck'
       lead = `${badge.label} · ${t(locale, label)}`
     }
   }

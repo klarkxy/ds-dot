@@ -465,7 +465,7 @@ export interface InboxEventInput {
   readonly receivedAt: number
 }
 
-/** A stored inbox row: one pending record per subject, merged deliveries folded in. */
+/** A stored inbox row: one pending record per source+sourceId+subject, merged deliveries folded in. */
 export interface InboxRecord extends InboxEventInput {
   /** Deterministic from source+sourceId+deliveryId of the first event for this pending subject. */
   readonly id: string

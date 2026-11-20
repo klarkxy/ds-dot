@@ -1,10 +1,9 @@
 /**
  * GitHub webhook ingress. The upstream @deepseek-ai/dsh-webhook runtime is an
  * optional host service, so its few shapes are declared here structurally
- * instead of importing the package. The one rule never opens a session:
- * every accepted delivery is normalized into dot's inbox and `run` returns
- * null. Normalization is defensive — a malformed payload is dropped, never
- * thrown back into the runtime.
+ * instead of importing the package. The one rule never opens a session.
+ * Malformed payloads are dropped and `run` returns null; persist failures
+ * retry then reject so a failed write is not treated as an acknowledgement.
  */
 import type { Context } from '@deepseek-ai/cordis'
 import type { InboxEventInput } from './contracts.ts'
@@ -31,11 +30,32 @@ export interface WebhookRuntimeLike {
 }
 
 export const INBOX_RULE_ID = 'ds-dot/inbox' as WebhookRuleId
+/** Persist attempts before the ingress treats storage failure as a failed run. */
+export const INBOX_PERSIST_ATTEMPTS = 3
 
 type InboxHost = Context & { webhookRuntime?: WebhookRuntimeLike }
 
 interface InboxSubmitter {
   submitInbox(event: InboxEventInput): Promise<unknown>
+}
+
+async function persistInboxEvent(
+  service: InboxSubmitter,
+  event: InboxEventInput,
+  deliveryId: string | undefined,
+  log?: (message: string) => void,
+): Promise<void> {
+  let last: unknown
+  for (let attempt = 1; attempt <= INBOX_PERSIST_ATTEMPTS; attempt++) {
+    try {
+      await service.submitInbox(event)
+      return
+    } catch (error) {
+      last = error
+      log?.(`dsh-dot: inbox event ${deliveryId} was not stored (attempt ${attempt}/${INBOX_PERSIST_ATTEMPTS}): ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+  throw last instanceof Error ? last : new Error(String(last))
 }
 
 /**
@@ -54,16 +74,15 @@ export function installInboxIngress(ctx: Context, service: InboxSubmitter, log?:
         id: INBOX_RULE_ID,
         kind: 'github',
         async run(delivery) {
+          let event: InboxEventInput | undefined
           try {
-            const event = normalizeGithub(delivery)
-            if (event !== undefined) {
-              await service.submitInbox(event).catch(error => {
-                log?.(`dsh-dot: inbox event ${delivery?.deliveryId} was not stored: ${error instanceof Error ? error.message : String(error)}`)
-              })
-            }
+            event = normalizeGithub(delivery)
           } catch (error) {
             log?.(`dsh-dot: inbox delivery ${delivery?.deliveryId} could not be handled: ${error instanceof Error ? error.message : String(error)}`)
+            return null
           }
+          if (event === undefined) return null
+          await persistInboxEvent(service, event, delivery?.deliveryId, log)
           return null
         },
       })
@@ -144,6 +163,7 @@ export function normalizeGithub(delivery: VerifiedWebhookDelivery): InboxEventIn
     sourceId,
     deliveryId,
     receivedAt: num(delivery.receivedAt) ?? 0,
+    subject: clip(view.subject, TITLE_MAX),
   }
 }
 

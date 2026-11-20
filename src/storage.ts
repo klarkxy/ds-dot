@@ -8,6 +8,7 @@ import { defineDomain, domainTable } from '@deepseek-ai/dsh-storage-domain'
 import { z } from 'zod'
 import type { ViewNode } from '@klarkxy/dsh-deep-view/contracts'
 import { SETTING_FIELDS, type CognitionVersion, type DotContextUsage, type DotUsageOffset, type ReflectionRun, type ScheduleRecord, type SettingProposal, type TaskRecord } from './contracts.ts'
+import type { UpdateStatus } from './auto-update.ts'
 import type { PastSegment, Segment } from './segments.ts'
 import { changeSchema, inputSchema, runSchema, storedVerificationSchema } from './work.ts'
 
@@ -116,6 +117,18 @@ const cardSchema = z.object({
   answer: z.object({ id: z.string(), action: z.string(), values: z.record(z.string(), z.unknown()) }).optional(),
 })
 
+const updateStatusSchema = z.object({
+  lastCheckAt: z.number().optional(),
+  lastResult: z.object({
+    kind: z.enum(['updated', 'up-to-date', 'not-updatable', 'unavailable', 'restart-required', 'failed']),
+    at: z.number(),
+    from: z.string().optional(),
+    to: z.string().optional(),
+    message: z.string().optional(),
+  }).optional(),
+  pending: z.object({ from: z.string().min(1), to: z.string().min(1), at: z.number() }).optional(),
+})
+
 const stateSchema = z.object({
   cardSequence: z.number().int().nonnegative().optional(),
   cards: z.array(cardSchema).optional(),
@@ -149,6 +162,7 @@ const stateSchema = z.object({
   usageOffset: usageOffsetSchema.optional(),
   /** When the human last restored factory settings. Survives the wipe as the audit. */
   lastFactoryResetAt: z.number().optional(),
+  update: updateStatusSchema.optional(),
 })
 
 const proposalValueSchema = z.union([z.string(), z.number(), z.boolean(), z.null(), z.record(z.string(), z.unknown()), z.array(z.unknown())])
@@ -204,6 +218,8 @@ export interface DotState {
   readonly usageOffset?: DotUsageOffset
   /** When the human last restored factory settings. */
   readonly lastFactoryResetAt?: number
+  /** Self-update bookkeeping: last check, its outcome, an apply still in flight. */
+  readonly update?: UpdateStatus
 }
 
 export function parseSettingProposal(value: unknown): SettingProposal | undefined {

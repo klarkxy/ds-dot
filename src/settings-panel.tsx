@@ -7,7 +7,8 @@ import { renderModelPicker, type RenderFactorySlot } from '@klarkxy/dsh-plugin-k
 import { Button, Checkbox, IconSearchOutlineRegular, Input, SegmentedTabs, type SegmentedTab } from '@deepseek-ai/dsh-client-ui-primitives'
 import { createContext, useCallback, useContext, useEffect, useId, useMemo, useState, type ReactNode } from 'react'
 import { type ApprovalMode, type CapabilityCatalogView, type CapabilityGrant, type CapabilityGroupView, type DotSettings, type FactoryResetPreview, type FactoryResetResult, type KeepaliveInfo, type ModelChoice, type SettingField, type SettingProposal, type TakeoverMode, type TaskModelRule, type TaskPermission } from './contracts.ts'
-import { factoryResetScope, t, type CopyLocale, type TextKey } from './ui-copy.ts'
+import type { UpdateResult, UpdateStatus } from './auto-update.ts'
+import { factoryResetScope, formatWhen, t, type CopyLocale, type TextKey } from './ui-copy.ts'
 
 /** null on model, persona or address goes back to the default. */
 export type SettingsPatch = { readonly [K in keyof DotSettings]?: K extends 'model' ? ModelChoice | null : K extends 'persona' | 'address' ? string | null : DotSettings[K] }
@@ -26,6 +27,8 @@ export interface SettingsApi {
   settings(signal: AbortSignal): Promise<DotSettings>
   previewFactoryReset?(): Promise<FactoryResetPreview>
   confirmFactoryReset?(token: string): Promise<FactoryResetResult>
+  updateStatus?(signal: AbortSignal): Promise<UpdateStatus | null>
+  updateCheck?(): Promise<UpdateStatus>
 }
 
 const LocaleContext = createContext<CopyLocale>('zh')
@@ -395,6 +398,45 @@ function SegmentedChoice<T extends string>({ locale, label, value, options, labe
   )
 }
 
+const UPDATE_RESULT_KEY: Record<UpdateResult['kind'], TextKey> = {
+  updated: 'sUpdateResult_updated',
+  'up-to-date': 'sUpdateResult_upToDate',
+  'not-updatable': 'sUpdateResult_notUpdatable',
+  unavailable: 'sUpdateResult_unavailable',
+  'restart-required': 'sUpdateResult_restartRequired',
+  failed: 'sUpdateResult_failed',
+}
+
+/** Last self-update check with its outcome, and a manual check button. */
+function AutoUpdateLine({ locale, api }: { locale: CopyLocale; api: SettingsApi }) {
+  const [status, setStatus] = useState<UpdateStatus | null>()
+  const [busy, setBusy] = useState(false)
+  useEffect(() => {
+    const life = new AbortController()
+    api.updateStatus!(life.signal).then(
+      next => { if (!life.signal.aborted) setStatus(next) },
+      () => { if (!life.signal.aborted) setStatus(null) },
+    )
+    return () => life.abort()
+  }, [api])
+  const check = () => {
+    if (busy || !api.updateCheck) return
+    setBusy(true)
+    api.updateCheck().then(next => { setStatus(next); setBusy(false) }, () => setBusy(false))
+  }
+  const result = status?.lastResult
+  const resultText = status?.pending ? t(locale, 'sUpdatePending').replace('{to}', status.pending.to)
+    : result ? t(locale, UPDATE_RESULT_KEY[result.kind]).replace('{from}', result.from ?? '').replace('{to}', result.to ?? '').replace('{message}', result.message ?? '')
+    : ''
+  const line = status?.lastCheckAt ? `${t(locale, 'sUpdateLastCheck').replace('{at}', formatWhen(status.lastCheckAt))}${resultText ? ` · ${resultText}` : ''}` : resultText
+  return (
+    <div className="dsh-dot-update">
+      {line ? <span className="dsh-ui-meta">{line}</span> : null}
+      <Button variant="ghost" size="sm" disabled={busy || !api.updateCheck} onClick={check}>{busy ? t(locale, 'sUpdateChecking') : t(locale, 'sUpdateCheck')}</Button>
+    </div>
+  )
+}
+
 function FactoryResetField({ locale, api, onSaved }: { locale: CopyLocale; api: SettingsApi; onSaved: (next: DotSettings) => void }) {
   const [preview, setPreview] = useState<FactoryResetPreview>()
   const [busy, setBusy] = useState(false)
@@ -604,6 +646,10 @@ export function SettingsPanel({ locale, api, settings, onSaved, onStatusChange, 
         <Field label={t(locale, 'sReflection')} help={t(locale, 'sReflectionDesc')} {...lock('reflection')}>
           <SegmentedChoice locale={locale} label={t(locale, 'sReflection')} value={settings.reflection ? 'on' : 'off'} options={['on', 'off']} labelKeyOf={opt => `sReflection_${opt}`} onChange={next => save({ reflection: next === 'on' })} />
         </Field>
+        <Field label={t(locale, 'sAutoUpdate')} help={t(locale, 'sAutoUpdateDesc')}>
+          <SegmentedChoice locale={locale} label={t(locale, 'sAutoUpdate')} value={settings.autoUpdate ? 'on' : 'off'} options={['on', 'off']} labelKeyOf={opt => `sAutoUpdate_${opt}`} onChange={next => save({ autoUpdate: next === 'on' })} />
+          {api.updateStatus ? <AutoUpdateLine locale={locale} api={api} /> : null}
+        </Field>
         </div>
       </div>
       <div className="dsh-dot-pane-section">
@@ -766,6 +812,7 @@ export const settingsCss = `
 .dsh-dot-chat .dsh-dot-model-item { display: flex; align-items: center; gap: 8px; padding: 4px 6px; border-radius: var(--dsw-radius-sm); font-size: 13px; line-height: 20px; cursor: pointer; }
 .dsh-dot-chat .dsh-dot-model-item:hover { background: var(--dsw-alias-interactive-bg-hover); }
 .dsh-dot-chat .dsh-dot-idle-check { display: flex; align-items: center; gap: 8px; }
+.dsh-dot-chat .dsh-dot-update { display: flex; align-items: center; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
 .dsh-dot-chat .dsh-dot-idle-input { width: 96px; flex: 0 0 auto; }
 .dsh-dot-chat .dsh-dot-keepalive { display: flex; flex-direction: column; gap: 4px; margin-top: 8px; }
 .dsh-dot-chat .dsh-dot-factory { margin-top: 8px; padding-top: 16px; border-top: 0.5px solid var(--dsw-alias-border-l2); }

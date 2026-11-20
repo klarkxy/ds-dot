@@ -124,6 +124,7 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
     log,
     trace: logger,
     approvalGraceMs: Number.isFinite(config.approvalGraceMs) ? Math.max(0, Math.min(60_000, config.approvalGraceMs!)) : APPROVAL_GRACE_MS,
+    pluginManager: () => ctx.get('pluginManager' as never),
   })
   sealOwned = agent => service.sealAgent(agent)
   void service.sealExisting()
@@ -455,6 +456,8 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
           return { ok: true, value: await service.selfSettings.decide(typeof id === 'string' ? id : '', field(payload, 'allow') === true) }
         }
         case 'segment.new': return { ok: true, value: await service.newSegment() }
+        case 'update.status': return { ok: true, value: service.updateStatus() ?? null }
+        case 'update.check': return { ok: true, value: await service.checkUpdates() }
         case 'keepalive': {
           return { ok: true, value: service.keepaliveInfo() }
         }

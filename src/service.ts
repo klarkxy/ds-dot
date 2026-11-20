@@ -58,7 +58,7 @@ import { stamp, transcriptRows, type TranscriptRow } from './transcript.ts'
 import type { RawEvent } from './chat.ts'
 import { SelfSettings } from './self-settings.ts'
 import { approvalCardCopy, copyLocale, t, type CopyLocale } from './i18n/index.ts'
-import type { DotCapabilities } from './capabilities.ts'
+import { HIGH_RISK_TOOLS, resolveGrants, type DotCapabilities } from './capabilities.ts'
 import type { CapabilityCatalogView, CapabilityGrant, CapabilityGroupView } from './contracts.ts'
 import type { GateVerdict } from './tool-scope.ts'
 
@@ -127,7 +127,7 @@ export class DotService {
   private requestedSegment?: { focus?: string }
   private readonly retryingCardNotifications = new Set<string>()
   /** Install proposals waiting on the human; in-memory only — a restart never resumes one. */
-  private readonly pendingInstalls = new Map<string, { name: string; version: string; reason: string; cardId?: string }>()
+  private readonly pendingInstalls = new Map<string, { name: string; version: string; spec: string; reason: string; cardId?: string }>()
   /** Decision wakes already queued in this process. The durable mark is notifiedAt. */
   private readonly decisionWakes = new Set<string>()
   private readonly childRefreshers = new Set<() => void>()
@@ -481,7 +481,7 @@ export class DotService {
         if (tool.missing === true) { lines.push(`${indent}  ${tool.name} — UNAVAILABLE (grant kept)`); continue }
         let effective: string | undefined
         for (const selector of [`tool:${tool.name}`, ...chain]) { if (grants[selector] !== undefined) { effective = grants[selector]; break } }
-        const flags = [tool.conditional ? 'conditional (Creator-only gate bypassed while granted)' : '', applied?.has(tool.name) ? `applied=${applied.get(tool.name)?.grant}` : 'not applied this segment'].filter(Boolean).join(', ')
+        const flags = [tool.conditional ? 'conditional (when-gate bypassed while granted)' : '', tool.highRisk === true ? 'HIGH RISK (runs unapproved and unsandboxed)' : '', applied?.has(tool.name) ? `applied=${applied.get(tool.name)?.grant}` : 'not applied this segment'].filter(Boolean).join(', ')
         lines.push(`${indent}  ${tool.name} — grant=${effective ?? 'off'}${flags ? ` (${flags})` : ''}`)
       }
       for (const child of group.children ?? []) row(child, chain, `${indent}  `)
@@ -500,12 +500,20 @@ export class DotService {
     const caps = this.options.capabilities
     if (!caps) throw new DotError('dot/invalid', 'no capability catalog exists on this host')
     const selector = input.selector.trim()
-    if (selector === 'host') throw new DotError('dot/invalid', 'unattributed tools are granted one by one with tool:<name>; there is no host-wide grant')
-    if (!/^(tool|mcp|plugin):/.test(selector)) throw new DotError('dot/invalid', 'selector must be tool:<name>, mcp:<server>, or plugin:<bundle>[#<entry>]')
+    if (selector === 'host') throw new DotError('dot/invalid', 'unattributed tools are granted one by one with tool:<name> or prefix:<segment>; there is no host-wide grant')
+    if (!/^(tool|mcp|plugin|prefix):/.test(selector)) throw new DotError('dot/invalid', 'selector must be tool:<name>, mcp:<server>, plugin:<bundle>[#<entry>], or prefix:<segment>')
     if (selector.startsWith('tool:') && caps.locked.includes(selector.slice(5))) throw new DotError('dot/invalid', `${selector.slice(5)} is a locked dot tool; it is always on and cannot be granted`)
     if (!['off', 'ask', 'auto'].includes(input.grant)) throw new DotError('dot/invalid', 'grant must be off, ask, or auto')
     const grants = { ...this.store.settings.capabilities?.grants, [selector]: input.grant }
-    return this.selfSettings.propose({ field: 'capabilities', value: { grants }, reason: input.reason })
+    let reason = input.reason
+    if (input.grant === 'auto') {
+      // Warn the human when the merged grants would let a self-escalating tool
+      // run unapproved and unsandboxed; the proposal still stands.
+      const { groups } = await caps.catalog()
+      const risky = [...resolveGrants(grants, groups)].filter(([name, resolved]) => resolved.grant === 'auto' && HIGH_RISK_TOOLS.has(name)).map(([name]) => name).sort()
+      if (risky.length > 0) reason = `${reason}\nWarning: this makes ${risky.join(', ')} run automatically — no approval and no sandbox.`
+    }
+    return this.selfSettings.propose({ field: 'capabilities', value: { grants }, reason })
   }
 
   /**
@@ -513,27 +521,43 @@ export class DotService {
    * the human-only card's answer settles the pending request and settleInstall
    * runs the install (or reports the decline) through the notice channel.
    */
-  async proposeInstall(input: { readonly spec: string; readonly version: string; readonly reason: string }): Promise<string> {
+  async proposeInstall(input: { readonly spec: string; readonly version?: string; readonly reason: string }): Promise<string> {
     const pm = this.options.capabilities?.pluginManager()
     if (typeof pm?.inspect !== 'function' || typeof pm.installBundle !== 'function') throw new DotError('dot/invalid', 'this host cannot install plugins')
     const name = input.spec.trim()
-    const version = input.version.trim()
+    const given = input.version?.trim() ?? ''
     if (!NPM_NAME.test(name)) throw new DotError('dot/invalid', `${name || 'spec'} is not an npm package name`)
-    if (!EXACT_VERSION.test(version)) throw new DotError('dot/invalid', `version must be exact, e.g. 1.2.3; got "${version}"`)
     const sessionId = this.store.dotSessionId
     if (!sessionId) throw new DotError('dot/invalid', 'dot has no session yet')
     let bundles
     try { bundles = await pm.listBundles() } catch (error) { throw new DotError('dot/unavailable', `cannot check installed bundles: ${messageOf(error)}`) }
     const existing = bundles.find(bundle => bundle.name === name)
     if (existing?.installed === true) throw new DotError('dot/invalid', `${name} is already installed`)
-    if (existing !== undefined && (existing.official === true || existing.readOnlyReason !== undefined)) throw new DotError('dot/invalid', `${name} is a protected bundle managed by the host`)
-    let inspection
-    try { inspection = await pm.inspect(`${name}@${version}`) } catch (error) { throw new DotError('dot/unavailable', `inspection failed: ${messageOf(error)}`) }
-    if (inspection.status === 'refused') throw new DotError('dot/invalid', `${name}@${version} refused (${inspection.problem}): ${inspection.reason}`)
-    if (inspection.bundle === false) throw new DotError('dot/invalid', `${name}@${version} declares no dsh bundle`)
-    const description = inspection.status === 'accepted' ? inspection.description : undefined
+    if (existing?.readOnlyReason !== undefined) throw new DotError('dot/invalid', `${name} is a protected bundle managed by the host`)
+    // An official on-demand row already pins the exact spec and version the
+    // host offers; anything else official stays off-limits to dot.
+    const official = existing?.official === true ? existing.installTarget : undefined
+    if (existing !== undefined && existing.official === true && official === undefined) throw new DotError('dot/invalid', `${name} is a protected bundle managed by the host`)
+    let spec: string
+    let version: string
+    let description: string | undefined
+    if (official !== undefined) {
+      if (given !== '' && given !== official.version) throw new DotError('dot/invalid', `the official ${name} build is ${official.version}; got "${given}"`)
+      spec = official.spec
+      version = official.version
+      description = existing?.description
+    } else {
+      if (!EXACT_VERSION.test(given)) throw new DotError('dot/invalid', `version must be exact, e.g. 1.2.3; got "${given || 'none'}"`)
+      version = given
+      spec = `${name}@${version}`
+      let inspection
+      try { inspection = await pm.inspect(spec) } catch (error) { throw new DotError('dot/unavailable', `inspection failed: ${messageOf(error)}`) }
+      if (inspection.status === 'refused') throw new DotError('dot/invalid', `${spec} refused (${inspection.problem}): ${inspection.reason}`)
+      if (inspection.bundle === false) throw new DotError('dot/invalid', `${spec} declares no dsh bundle`)
+      description = inspection.status === 'accepted' ? inspection.description : undefined
+    }
     const opened = this.pending.open({ kind: 'approval', sessionId, subject: `${name}@${version}`, detail: input.reason, humanRequired: true })
-    const meta: { name: string; version: string; reason: string; cardId?: string } = { name, version, reason: input.reason }
+    const meta: { name: string; version: string; spec: string; reason: string; cardId?: string } = { name, version, spec, reason: input.reason }
     this.pendingInstalls.set(opened.id, meta)
     try {
       await this.saveApprovalDetail({ requestId: opened.id, sessionId, toolName: `${TOOL.capabilities}:propose_install`, reason: input.reason, arguments: `${name}@${version}` })
@@ -557,7 +581,7 @@ export class DotService {
     const meta = this.pendingInstalls.get(requestId)
     if (!meta) return
     this.pendingInstalls.delete(requestId)
-    const { name, version } = meta
+    const { name, version, spec } = meta
     if (answer === undefined) {
       if (meta.cardId !== undefined) await this.store.expireCard(meta.cardId).catch(error => this.options.log?.(`dsh-dot: install card expiry was not saved: ${messageOf(error)}`))
       return
@@ -575,7 +599,7 @@ export class DotService {
     }
     let text: string
     try {
-      const result = await pm.installBundle(`${name}@${version}`, { enabled: true, expected: { name, version }, requestId })
+      const result = await pm.installBundle(spec, { enabled: true, expected: { name, version }, requestId })
       if (result.error !== undefined || result.application === 'failed' || result.application === 'cancelled' || result.changed !== true) {
         text = `The human approved installing ${name}@${version}, but the install failed: ${result.error?.code ?? result.application}${result.error?.diagnostic ? ` — ${clip(result.error.diagnostic, 400)}` : ''}`
       } else {

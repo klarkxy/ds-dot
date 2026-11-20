@@ -1,24 +1,22 @@
 /**
- * dot's optional extra tools: registration attribution, the grant catalog the
- * settings view draws, grant resolution, and the per-agent application of
- * granted tools.
- *
- * Attribution: ToolsService records a tool's registering scope but never
- * exposes it, so `register` is wrapped on the raw service. Cordis service
- * methods run with the caller's context as `this.ctx`, so a call made through
- * a plugin's `ctx.tools` tells us the plugin's fiber; the loader links fibers
- * to entries (`fiber.parent[Entry.key]`), and entry ids match
- * `pluginManager.listBundles()` row `entryId`s. Tools registered before the
- * wrapper, or through contexts that reach no entry, stay unattributed.
+ * dot's optional extra tools: the grant catalog the settings view draws,
+ * grant resolution, and the per-agent application of granted tools. Tool
+ * registration attribution lives in ./attribution.ts, which also ships as an
+ * early loader row; this module only reads its shared owners map.
  */
 import type { CapabilityGrant, CapabilityGroupView, CapabilityToolView, DotSettings } from './contracts.ts'
+import { installToolAttribution, SCOPED_COPY, sharedAttribution, type ToolOwner } from './attribution.ts'
 import { restrictInheritedTools } from './tool-scope.ts'
+
+export { installToolAttribution, SCOPED_COPY } from './attribution.ts'
+export type { ToolOwner } from './attribution.ts'
 
 /** Selector prefixes a grant row may use. */
 export const SELECTOR = {
   tool: 'tool:',
   mcp: 'mcp:',
   plugin: 'plugin:',
+  prefix: 'prefix:',
   host: 'host',
 } as const
 
@@ -26,21 +24,20 @@ export const toolSelector = (name: string): string => `${SELECTOR.tool}${name}`
 export const mcpSelector = (server: string): string => `${SELECTOR.mcp}${server}`
 export const pluginSelector = (bundle: string): string => `${SELECTOR.plugin}${bundle}`
 export const entrySelector = (bundle: string, entryId: string): string => `${SELECTOR.plugin}${bundle}#${entryId}`
+export const prefixSelector = (segment: string): string => `${SELECTOR.prefix}${segment}`
+
+/**
+ * Host tools whose rc5 self-escalation short-circuits under dot's
+ * danger-full-access session: they run unsandboxed with no host approval, so
+ * dot's own grant is the only control. Catalog rows and the grant UI flag
+ * them, and `auto` asks the human to confirm once more.
+ */
+export const HIGH_RISK_TOOLS: ReadonlySet<string> = new Set(['plugin_manager', 'bash', 'pwsh', 'write', 'edit', 'apply_patch'])
 
 /** DeepSeek function-name contract shared with the MCP public-name derivation. */
 const MCP_INVALID_CHARS = /[^A-Za-z0-9_-]/g
 /** Hashed MCP names keep the normalized prefix only up to this many characters. */
 const MCP_PREFIX_MAX = 64 - 12 - 1
-
-/** Cordis `symbols.original`. A service proxy mints a new function on every read. */
-const CORDIS_ORIGINAL = Symbol.for('cordis.original')
-/** `Entry.key` from the vendored loader: the entry a context runs under. */
-const ENTRY_KEY = Symbol.for('cordis.entry')
-/**
- * Marks a scoped copy registered by applyToAgent, so the attribution wrapper
- * leaves the source registration's owner alone instead of crediting dot.
- */
-export const SCOPED_COPY = Symbol('dsh-dot.scoped-copy')
 
 export interface CapabilityToolDef {
   readonly name: string
@@ -60,6 +57,9 @@ export interface CapabilityBundle {
   readonly installed?: boolean
   readonly enabled?: boolean
   readonly readOnlyReason?: string
+  readonly description?: string
+  /** Official on-demand rows carry the exact spec and version the host offers. */
+  readonly installTarget?: { readonly spec: string; readonly version: string }
   readonly rows: readonly { readonly entryId?: string }[]
 }
 
@@ -89,63 +89,6 @@ export interface CapabilityDeps {
   pluginManager(): CapabilityPluginManager | undefined
   settings(): DotSettings
   readonly locked: readonly string[]
-}
-
-/** Loader entry attribution of one registered tool, or undefined for an unattributed registration. */
-export interface ToolOwner { readonly entryId?: string }
-
-interface FiberLike { readonly entry?: { readonly id?: string }; readonly parent?: { readonly fiber?: FiberLike } }
-interface RegisterHost {
-  register(definition: { name?: unknown } & Record<string, unknown>, options?: unknown): () => void
-  [key: symbol]: unknown
-}
-interface CallerThis { readonly ctx?: { readonly fiber?: FiberLike } & Record<symbol, unknown> }
-
-/** Entry id of the entry the calling context runs under; walks parent fibers for nested plugin children. */
-function ownerOf(self: unknown): ToolOwner {
-  const ctx = (self as CallerThis | undefined)?.ctx
-  const direct = ctx?.[ENTRY_KEY] as { readonly id?: string } | undefined
-  if (typeof direct?.id === 'string' && direct.id) return { entryId: direct.id }
-  let fiber = ctx?.fiber
-  for (let hop = 0; hop < 16 && fiber; hop++) {
-    const entry = fiber.entry
-    if (typeof entry?.id === 'string' && entry.id) return { entryId: entry.id }
-    fiber = fiber.parent?.fiber
-  }
-  return {}
-}
-
-/**
- * Wrap `tools.register` on the raw service so every registration records the
- * loader entry of the calling context. Restores the previous method on
- * dispose, only while the wrapper is still installed.
- */
-export function installToolAttribution(tools: object | undefined, owners: Map<string, ToolOwner>): () => void {
-  if (!tools || typeof (tools as { register?: unknown }).register !== 'function') return () => {}
-  const raw = ((tools as Record<symbol, unknown>)[CORDIS_ORIGINAL] ?? tools) as RegisterHost
-  const previous = raw.register
-  if (typeof previous !== 'function') return () => {}
-  const wasOwn = Object.prototype.hasOwnProperty.call(raw, 'register')
-  const wrapped = function (this: unknown, definition: { name?: unknown } & Record<string, unknown>, options?: unknown): () => void {
-    const owner = ownerOf(this)
-    const dispose = previous.call(this, definition, options)
-    const name = typeof definition?.name === 'string' ? definition.name : undefined
-    // A scoped copy keeps the source registration's owner.
-    if (name === undefined || (definition as Record<symbol, unknown>)[SCOPED_COPY] === true) return dispose
-    owners.set(name, owner)
-    let released = false
-    return () => {
-      if (!released) { released = true; owners.delete(name) }
-      return dispose()
-    }
-  }
-  raw.register = wrapped
-  return () => {
-    const record = raw as unknown as Record<string, unknown>
-    if (record.register !== wrapped) return
-    if (wasOwn) record.register = previous
-    else delete record.register
-  }
 }
 
 /** Normalize an MCP server name the way the harness does when it builds public tool names. */
@@ -237,15 +180,28 @@ interface CatalogInput {
   readonly conditional: (name: string) => boolean
 }
 
-interface MutableTool extends CapabilityToolView { description?: string; missing?: boolean; conditional: boolean }
+interface MutableTool extends CapabilityToolView { description?: string; missing?: boolean; conditional: boolean; highRisk?: boolean }
 /** The catalog as buildCatalog assembles it; arrays freeze into the readonly view contract on return. */
 interface MutableGroup {
   id: string
-  kind: 'mcp' | 'plugin' | 'entry' | 'host'
+  kind: 'mcp' | 'plugin' | 'entry' | 'prefix' | 'host'
   label: string
   missing?: boolean
+  highRisk?: boolean
   tools: CapabilityToolView[]
   children?: MutableGroup[]
+}
+
+/** The first name segment a `prefix:` group shares, split at the first `_`, `-` or `.`. */
+function nameSegment(name: string): string | undefined {
+  const match = /[_\-.]/.exec(name)
+  const segment = match === null ? name : name.slice(0, match.index)
+  return segment === '' ? undefined : segment
+}
+
+const riskRow = (tool: MutableTool): MutableTool => {
+  if (HIGH_RISK_TOOLS.has(tool.name)) tool.highRisk = true
+  return tool
 }
 
 /**
@@ -256,7 +212,7 @@ interface MutableGroup {
 export function buildCatalog(input: CatalogInput): { readonly locked: readonly string[]; readonly groups: readonly CapabilityGroupView[] } {
   type G = MutableGroup
   const row = (def: CapabilityToolDef): MutableTool => {
-    const tool: MutableTool = { name: def.name, conditional: input.conditional(def.name) }
+    const tool = riskRow({ name: def.name, conditional: input.conditional(def.name) })
     const description = firstLine(def.description)
     if (description !== undefined) tool.description = description
     return tool
@@ -329,7 +285,25 @@ export function buildCatalog(input: CatalogInput): { readonly locked: readonly s
       parent.tools.push(row(def))
     }
   }
-  if (unattributed.length > 0) groups.push({ id: SELECTOR.host, kind: 'host', label: 'Unattributed', tools: unattributed })
+  // Unattributed tools that share a first name segment nest under a grantable
+  // `prefix:<segment>` child; singletons stay flat in the display-only host group.
+  if (unattributed.length > 0) {
+    const buckets = new Map<string, MutableTool[]>()
+    const flat: MutableTool[] = []
+    for (const tool of unattributed) {
+      const segment = nameSegment(tool.name)
+      if (segment === undefined) { flat.push(tool); continue }
+      const list = buckets.get(segment) ?? []
+      list.push(tool)
+      buckets.set(segment, list)
+    }
+    const children: MutableGroup[] = []
+    for (const [segment, tools] of [...buckets.entries()].sort(([a], [b]) => a.localeCompare(b))) {
+      if (tools.length < 2) { flat.push(...tools); continue }
+      children.push({ id: prefixSelector(segment), kind: 'prefix', label: `${segment}_*`, tools })
+    }
+    groups.push({ id: SELECTOR.host, kind: 'host', label: 'Unattributed', tools: flat, ...(children.length > 0 ? { children } : {}) })
+  }
 
   // Granted selectors that own nothing right now stay visible as missing rows.
   const allGroups = (list: readonly MutableGroup[]): MutableGroup[] => list.flatMap(group => [group, ...allGroups(group.children ?? [])])
@@ -349,6 +323,9 @@ export function buildCatalog(input: CatalogInput): { readonly locked: readonly s
       } else {
         groups.push({ id: selector, kind: 'plugin', label: selector.slice(SELECTOR.plugin.length), missing: true, tools: [] })
       }
+    } else if (selector.startsWith(SELECTOR.prefix)) {
+      if (allGroups(groups).some(group => group.id === selector)) continue
+      groups.push({ id: selector, kind: 'prefix', label: `${selector.slice(SELECTOR.prefix.length)}_*`, missing: true, tools: [] })
     } else if (selector === SELECTOR.host) {
       if (!allGroups(groups).some(group => group.id === SELECTOR.host)) groups.push({ id: SELECTOR.host, kind: 'host', label: 'Unattributed', missing: true, tools: [] })
     } else if (selector.startsWith(SELECTOR.tool)) {
@@ -356,7 +333,7 @@ export function buildCatalog(input: CatalogInput): { readonly locked: readonly s
       if (!name || input.locked.has(name)) continue
       const present = allGroups(groups).some(group => group.tools.some(tool => tool.name === name))
       if (present) continue
-      const missing: MutableTool = { name, conditional: false, missing: true }
+      const missing = riskRow({ name, conditional: false, missing: true })
       const server = mcpGuess(name)
       const owner = server !== undefined ? groups.find(group => group.id === mcpSelector(server)) : undefined
       if (owner !== undefined) owner.tools.push(missing)
@@ -367,6 +344,14 @@ export function buildCatalog(input: CatalogInput): { readonly locked: readonly s
       }
     }
   }
+
+  // A group is high-risk when any tool inside it (however nested) is.
+  const markRisk = (group: MutableGroup): boolean => {
+    const risky = group.tools.some(tool => tool.highRisk === true) || (group.children ?? []).map(markRisk).some(Boolean)
+    if (risky) group.highRisk = true
+    return risky
+  }
+  for (const group of groups) markRisk(group)
 
   return { locked: [...input.locked].sort(), groups }
 }
@@ -395,8 +380,8 @@ interface AgentLike {
 }
 
 export class DotCapabilities {
-  /** Tool name → loader entry attribution, kept by the register wrapper. */
-  readonly owners = new Map<string, ToolOwner>()
+  /** Tool name → loader entry attribution, shared with the early attribution row. */
+  readonly owners: Map<string, ToolOwner> = sharedAttribution().owners
   private readonly agents = new Map<string, AppliedState>()
 
   constructor(private readonly deps: CapabilityDeps) {}
@@ -423,9 +408,16 @@ export class DotCapabilities {
     return rows
   }
 
-  /** Reach the raw ToolsService through the proxy and wrap `register`. */
+  /**
+   * Fallback wrapper for hosts where the `ds-dot/attribution` row did not run;
+   * the shared flag keeps either path from wrapping `register` twice.
+   */
   installAttribution(): () => void {
-    return installToolAttribution(this.deps.tools() as unknown as object | undefined, this.owners)
+    const shared = sharedAttribution()
+    if (shared.wrapped) return () => {}
+    shared.wrapped = true
+    const undo = installToolAttribution(this.deps.tools() as unknown as object | undefined, this.owners)
+    return () => { shared.wrapped = false; undo() }
   }
 
   /** The grants a segment starting now would freeze. */

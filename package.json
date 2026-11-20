@@ -27,6 +27,11 @@
       "import": "./lib/tools.js",
       "default": "./lib/tools.js"
     },
+    "./attribution": {
+      "types": "./lib/attribution.d.ts",
+      "import": "./lib/attribution.js",
+      "default": "./lib/attribution.js"
+    },
     "./reflection": {
       "types": "./lib/reflection.d.ts",
       "import": "./lib/reflection.js",

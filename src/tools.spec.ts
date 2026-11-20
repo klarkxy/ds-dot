@@ -298,7 +298,7 @@ describe('dot tools', () => {
     const root = join(dirname(fileURLToPath(import.meta.url)), '..')
     const rowsOf = (file: string) => [...readFileSync(file, 'utf8').matchAll(/- id: (\S+)\s+name: '([^']+)'/g)].map(match => ({ id: match[1]!, name: match[2]! }))
     const rows = rowsOf(join(root, 'cordis.patch.yml'))
-    expect(rows).toEqual([{ id: 'deep-view', name: '@klarkxy/dsh-deep-view' }, { id: 'dot', name: 'ds-dot' }])
+    expect(rows).toEqual([{ id: 'dot-attribution', name: 'ds-dot/attribution' }, { id: 'deep-view', name: '@klarkxy/dsh-deep-view' }, { id: 'dot', name: 'ds-dot' }])
     const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'))
     // The dependency has to resolve from npm: a link:/file: spec only resolves on
     // the machine that owns that checkout, so a GitHub install would find no Deep View.

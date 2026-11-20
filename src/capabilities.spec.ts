@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import { DEFAULT_SETTINGS, type CapabilityGroupView, type DotSettings } from './contracts.ts'
 import { parseSettings, patchSettings, CAPABILITY_GRANTS_MAX } from './settings.ts'
-import { buildCatalog, capabilitiesSignature, DotCapabilities, installToolAttribution, mcpServerOf, resolveGrants, SCOPED_COPY, type CapabilityPluginManager, type CapabilityTools, type CapabilityToolDef } from './capabilities.ts'
+import { buildCatalog, capabilitiesSignature, DotCapabilities, HIGH_RISK_TOOLS, installToolAttribution, mcpServerOf, resolveGrants, SCOPED_COPY, type CapabilityPluginManager, type CapabilityTools, type CapabilityToolDef } from './capabilities.ts'
+import { sharedAttribution } from './attribution.ts'
 import { reasonBeforeDelivery } from './segments.ts'
 import { gateToolExecution } from './tool-scope.ts'
 import { DotService } from './service.ts'
@@ -102,13 +103,54 @@ describe('capability catalog', () => {
     expect(host?.tools.map(tool => tool.name)).toEqual(['loose'])
   })
 
+  it('nests unattributed tools sharing a name segment under a grantable prefix group', () => {
+    const defs = fakeTools(['team_task_create', 'team_task_list', 'dot-x', 'dot.y', 'apply_patch', 'solo', 'mcp__s__tool', 'owned_tool']).defs
+    const view = buildCatalog(catalogInput({
+      defs,
+      servers: ['s'],
+      owners: new Map([['owned_tool', { entryId: 'e1' }]]),
+      bundles: [{ name: 'p', rows: [{ entryId: 'e1' }] }],
+    }))
+    const host = view.groups.find(group => group.id === 'host')
+    const team = host?.children?.find(child => child.id === 'prefix:team')
+    expect(team?.kind).toBe('prefix')
+    expect(team?.label).toBe('team_*')
+    expect(team?.tools.map(tool => tool.name)).toEqual(['team_task_create', 'team_task_list'])
+    const dot = host?.children?.find(child => child.id === 'prefix:dot')
+    expect(dot?.tools.map(tool => tool.name)).toEqual(['dot-x', 'dot.y'])
+    // Singletons stay flat; MCP and attributed tools never enter host or its prefix groups.
+    expect(host?.tools.map(tool => tool.name).sort()).toEqual(['apply_patch', 'solo'])
+    expect(view.groups.find(group => group.id === 'mcp:s')?.tools.map(tool => tool.name)).toEqual(['mcp__s__tool'])
+    expect(view.groups.find(group => group.id === 'plugin:p')?.tools.map(tool => tool.name)).toEqual(['owned_tool'])
+  })
+
+  it('marks high-risk tools and bubbles the flag onto their groups', () => {
+    const defs = fakeTools(['bash', 'plugin_manager', 'plugin_market', 'plain_tool']).defs
+    const view = buildCatalog(catalogInput({
+      defs,
+      owners: new Map([['bash', { entryId: 'e1' }]]),
+      bundles: [{ name: 'p', rows: [{ entryId: 'e1' }] }],
+    }))
+    const plug = view.groups.find(group => group.id === 'plugin:p')
+    expect(plug?.tools[0]?.highRisk).toBe(true)
+    expect(plug?.highRisk).toBe(true)
+    const host = view.groups.find(group => group.id === 'host')
+    const prefix = host?.children?.find(child => child.id === 'prefix:plugin')
+    expect(prefix?.highRisk).toBe(true)
+    expect(prefix?.tools.find(tool => tool.name === 'plugin_manager')?.highRisk).toBe(true)
+    expect(prefix?.tools.find(tool => tool.name === 'plugin_market')?.highRisk).toBeUndefined()
+    expect(host?.tools.find(tool => tool.name === 'plain_tool')?.highRisk).toBeUndefined()
+    expect(HIGH_RISK_TOOLS.has('apply_patch')).toBe(true)
+  })
+
   it('keeps granted-but-absent selectors as missing rows', () => {
     const view = buildCatalog(catalogInput({
-      grants: { 'mcp:gone': 'auto', 'plugin:gone#e9': 'ask', 'plugin:gone2': 'auto', 'tool:vanished': 'auto' },
+      grants: { 'mcp:gone': 'auto', 'plugin:gone#e9': 'ask', 'plugin:gone2': 'auto', 'prefix:gone': 'auto', 'tool:vanished': 'auto' },
     }))
     expect(view.groups.find(group => group.id === 'mcp:gone')?.missing).toBe(true)
     expect(view.groups.find(group => group.id === 'plugin:gone#e9')?.missing).toBe(true)
     expect(view.groups.find(group => group.id === 'plugin:gone2')?.missing).toBe(true)
+    expect(view.groups.find(group => group.id === 'prefix:gone')?.missing).toBe(true)
     const host = view.groups.find(group => group.id === 'host')
     expect(host?.tools.some(tool => tool.name === 'vanished' && tool.missing === true)).toBe(true)
   })
@@ -153,6 +195,18 @@ describe('grant resolution', () => {
     expect(resolved({ 'tool:loose': 'ask' }, [loose])).toEqual([['loose', 'ask']])
   })
 
+  it('resolves prefix grants only for unattributed tools in that prefix group', () => {
+    const host: CapabilityGroupView = {
+      id: 'host', kind: 'host', label: 'Unattributed',
+      tools: [{ name: 'solo', conditional: false }],
+      children: [{ id: 'prefix:team', kind: 'prefix', label: 'team_*', tools: [{ name: 'team_a', conditional: false }, { name: 'team_b', conditional: false }] }],
+    }
+    expect(resolved({ 'prefix:team': 'auto' }, [host])).toEqual([['team_a', 'auto'], ['team_b', 'auto']])
+    expect(resolved({ 'prefix:team': 'auto', 'tool:team_b': 'ask' }, [host])).toEqual([['team_a', 'auto'], ['team_b', 'ask']])
+    const chain = [...resolveGrants({ 'prefix:team': 'auto' }, [host])].find(([name]) => name === 'team_a')?.[1].chain
+    expect(chain).toEqual(['tool:team_a', 'prefix:team'])
+  })
+
   it('changes the signature only when grants change', () => {
     expect(capabilitiesSignature(settingsWith({ 'plugin:p': 'auto' }))).not.toBe(capabilitiesSignature(settingsWith({})))
     expect(capabilitiesSignature(settingsWith({ 'plugin:p': 'auto' }))).toBe(capabilitiesSignature(settingsWith({ 'plugin:p': 'auto' })))
@@ -192,6 +246,40 @@ describe('tool attribution wrapper', () => {
     undo()
     service.register({ name: 'tool_y' })
     expect(owners.has('tool_y')).toBe(false)
+  })
+
+  it('keeps one wrapper through the shared flag whichever row installs it', () => {
+    const calls: string[] = []
+    const service = { register(this: unknown, def: { name: string }) { calls.push(def.name); return () => {} } }
+    const shared = sharedAttribution()
+    const caps = new DotCapabilities({
+      tools: () => service as never,
+      mcpManager: () => undefined,
+      pluginManager: () => undefined,
+      settings: () => settingsWith({}),
+      locked: LOCKED,
+    })
+    try {
+      // An early attribution row already wrapped register: the fallback backs off.
+      shared.wrapped = true
+      const noop = caps.installAttribution()
+      service.register({ name: 'skipped' })
+      expect(shared.owners.has('skipped')).toBe(false)
+      noop()
+      expect(shared.wrapped).toBe(true)
+      // No row active: the fallback wraps and releases the flag on dispose.
+      shared.wrapped = false
+      const undo = caps.installAttribution()
+      service.register.call({ ctx: { fiber: { entry: { id: 'e1' } } } } as never, { name: 'seen' })
+      expect(shared.owners.get('seen')).toEqual({ entryId: 'e1' })
+      undo()
+      expect(shared.wrapped).toBe(false)
+      expect(service.register({ name: 'late' })).toBeDefined()
+      expect(shared.owners.has('late')).toBe(false)
+    } finally {
+      shared.wrapped = false
+      shared.owners.clear()
+    }
   })
 
   it('does not overwrite the source owner when a marked scoped copy registers', () => {
@@ -333,8 +421,8 @@ describe('execution gate', () => {
 })
 
 describe('service-level capability gate', () => {
-  function serviceHarness(grants: Record<string, 'off' | 'ask' | 'auto'>, pm?: () => CapabilityPluginManager | undefined) {
-    const tools = fakeTools(['extra_tool'])
+  function serviceHarness(grants: Record<string, 'off' | 'ask' | 'auto'>, pm?: () => CapabilityPluginManager | undefined, defs: readonly string[] = ['extra_tool']) {
+    const tools = fakeTools(defs)
     const store = new DotStore(undefined)
     void store.setSettings(settingsWith(grants))
     const caps = new DotCapabilities({
@@ -344,7 +432,7 @@ describe('service-level capability gate', () => {
       settings: () => store.settings,
       locked: LOCKED,
     })
-    caps.owners.set('extra_tool', {})
+    for (const name of defs) caps.owners.set(name, {})
     const host = {
       isRunning: () => false,
       modelKey: () => undefined,
@@ -354,7 +442,7 @@ describe('service-level capability gate', () => {
     }
     const service = new DotService({ host: host as never, store, homeDir: '/tmp/dot-cap-test', capabilities: caps })
     const apply = async () => caps.applyToAgent({
-      tools: { register: () => () => {}, restrict: () => () => {}, schemas: () => [{ name: 'extra_tool' }] },
+      tools: { register: () => () => {}, restrict: () => () => {}, schemas: () => defs.map(name => ({ name })) },
       on: () => () => {},
     } as never, { session: { id: 'dot-1' } } as never)
     return { tools, store, caps, service, apply }
@@ -428,18 +516,21 @@ describe('service-level capability gate', () => {
     await expect(service.proposeCapability({ selector: 'junk', grant: 'auto', reason: 'why' })).rejects.toThrow(/selector/)
     await expect(service.proposeCapability({ selector: 'host', grant: 'auto', reason: 'why' })).rejects.toThrow(/host-wide|per-tool/)
     await expect(service.proposeCapability({ selector: 'tool:web_search', grant: 'auto', reason: 'why' })).rejects.toThrow(/locked/)
-    const message = await service.proposeCapability({ selector: 'tool:future_tool', grant: 'ask', reason: 'I need it' })
-    expect(message).toContain('Proposal')
-    const proposal = store.settingProposals[0]
-    expect(proposal?.field).toBe('capabilities')
     // decideNow awaits settingsChanged(), which re-enters the serial lane a
     // decide call already holds; the live-apply hook is stubbed here so the
     // test stays on the grant write (pre-existing lane re-entry, not the
     // capability path).
     service.settingsChanged = async () => {}
+    const prefixMessage = await service.proposeCapability({ selector: 'prefix:team', grant: 'ask', reason: 'cluster' })
+    expect(prefixMessage).toContain('Proposal')
+    await service.selfSettings.decide(store.settingProposals.at(-1)!.id, true)
+    const message = await service.proposeCapability({ selector: 'tool:future_tool', grant: 'ask', reason: 'I need it' })
+    expect(message).toContain('Proposal')
+    const proposal = store.settingProposals.at(-1)
+    expect(proposal?.field).toBe('capabilities')
     const decided = await service.selfSettings.decide(proposal!.id, true)
     expect(decided).toContain('Approved')
-    expect(store.settings.capabilities.grants).toEqual({ 'tool:future_tool': 'ask' })
+    expect(store.settings.capabilities.grants).toEqual({ 'prefix:team': 'ask', 'tool:future_tool': 'ask' })
     // A locked capabilities field refuses proposals.
     await store.setSettings({ ...store.settings, locks: { capabilities: true } })
     await expect(service.proposeCapability({ selector: 'tool:x', grant: 'auto', reason: 'why' })).rejects.toThrow(/locked/)
@@ -453,6 +544,22 @@ describe('service-level capability gate', () => {
     expect(text).toContain('extra_tool')
     expect(text).toContain('per-tool grants only')
     expect(text).toContain('applied=auto')
+  })
+
+  it('marks high-risk tools in the list and warns on the proposal card for auto grants', async () => {
+    const { store, service, apply } = serviceHarness({}, undefined, ['bash', 'team_a', 'team_b'])
+    await store0(service)
+    await apply()
+    const text = await service.listCapabilities()
+    expect(text).toContain('HIGH RISK')
+    service.settingsChanged = async () => {}
+    // A tool: auto grant that would self-escalate carries the warning into the proposal card.
+    await service.proposeCapability({ selector: 'tool:bash', grant: 'auto', reason: 'run shell' })
+    expect(store.settingProposals.at(-1)?.reason).toMatch(/Warning:.*bash/)
+    await service.selfSettings.decide(store.settingProposals.at(-1)!.id, false)
+    // An ask grant, or an auto grant touching no high-risk tool, warns on nothing.
+    await service.proposeCapability({ selector: 'prefix:team', grant: 'auto', reason: 'cluster' })
+    expect(store.settingProposals.at(-1)?.reason).not.toContain('Warning')
   })
 })
 
@@ -507,6 +614,10 @@ describe('propose_install', () => {
     await store0(official.service)
     await expect(official.service.proposeInstall({ spec: 'dsh-x', version: '1.2.3', reason: 'r' })).rejects.toThrow(/protected/)
 
+    const readOnly = harness(pm({ listBundles: async () => [{ name: 'dsh-x', readOnlyReason: 'management-required', rows: [] }] }))
+    await store0(readOnly.service)
+    await expect(readOnly.service.proposeInstall({ spec: 'dsh-x', version: '1.2.3', reason: 'r' })).rejects.toThrow(/protected/)
+
     const bad = harness(pm())
     await store0(bad.service)
     await expect(bad.service.proposeInstall({ spec: 'https://x', version: '1.2.3', reason: 'r' })).rejects.toThrow(/npm package name/)
@@ -533,6 +644,37 @@ describe('propose_install', () => {
     expect(installs[0]!.options?.requestId).toBe(request!.id)
     expect(installs[0]!.options?.enabled).toBe(true)
     expect(notes.some(text => text.includes('Installed dsh-x@1.2.3'))).toBe(true)
+  })
+
+  it('installs an official on-demand row through its pinned installTarget and skips inspection', async () => {
+    const installs: { spec: string; options?: { expected?: unknown } }[] = []
+    const inspected: string[] = []
+    const row = { name: '@deepseek-ai/dsh-x', official: true, installed: false, enabled: false, description: 'Official X', installTarget: { spec: '@deepseek-ai/dsh-x@0.2.2-rc.5', version: '0.2.2-rc.5' }, rows: [] }
+    const { store, service, notes } = harness(pm({
+      listBundles: async () => [row],
+      inspect: async (spec) => { inspected.push(spec); return { status: 'accepted', bundle: true } },
+      installBundle: async (spec, options) => { installs.push({ spec, options }); return { changed: true, application: 'applied', bundle: '@deepseek-ai/dsh-x', version: '0.2.2-rc.5' } },
+    }))
+    await store.beginSegment({ sessionId: 'dot-1', startedAt: 1, persona: '' })
+    const message = await service.proposeInstall({ spec: '@deepseek-ai/dsh-x', reason: 'need official x' })
+    expect(message).toContain('@deepseek-ai/dsh-x@0.2.2-rc.5')
+    expect(inspected).toHaveLength(0)
+    const card = store.cards.find(row => row.callId.startsWith('install:'))
+    await service.answerCard(card!.id, 'approval', { confirmed: true })
+    await tick()
+    expect(installs).toHaveLength(1)
+    expect(installs[0]!.spec).toBe('@deepseek-ai/dsh-x@0.2.2-rc.5')
+    expect(installs[0]!.options?.expected).toEqual({ name: '@deepseek-ai/dsh-x', version: '0.2.2-rc.5' })
+    expect(notes.some(text => text.includes('Installed @deepseek-ai/dsh-x@0.2.2-rc.5'))).toBe(true)
+  })
+
+  it('refuses a version that disagrees with the official installTarget', async () => {
+    const row = { name: 'dsh-x', official: true, installed: false, installTarget: { spec: 'dsh-x@2.0.0', version: '2.0.0' }, rows: [] }
+    const { service } = harness(pm({ listBundles: async () => [row] }))
+    await store0(service)
+    await expect(service.proposeInstall({ spec: 'dsh-x', version: '1.0.0', reason: 'r' })).rejects.toThrow(/2\.0\.0/)
+    const message = await service.proposeInstall({ spec: 'dsh-x', version: '2.0.0', reason: 'r' })
+    expect(message).toContain('waiting')
   })
 
   it('notifies a decline and reports install failures without installing on reject', async () => {

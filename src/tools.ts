@@ -533,13 +533,13 @@ export function apply(ctx: Context): void {
   // human grants them in Settings > Capabilities, or approves a proposal here.
   tool(defineToolInput({
     name: TOOL.capabilities,
-    description: 'List optional extra capabilities (tools from other plugins and MCP servers) or propose changes. Extras are off by default. action=list shows a tree of selectors (tool:<name>, mcp:<server>, plugin:<bundle>[#<entry>]) with each tool\'s grant, whether it is applied to this segment, conditional (Creator-only), and unavailable state. action=propose queues {selector, grant, reason} for human approval in Settings; grant is off | ask (each call pauses for human approval) | auto (calls run freely). Nothing changes until the human approves, and grants apply only from the next segment. action=propose_install {spec, version, reason} asks the human to install an npm plugin package (exact version); find candidates with dsh_plugins first. To build a new plugin or wire up something like an MCP server, dispatch a dot_task with preset "cordis" instead.',
+    description: 'List optional extra capabilities (tools from other plugins and MCP servers) or propose changes. Extras are off by default. action=list shows a tree of selectors (tool:<name>, mcp:<server>, plugin:<bundle>[#<entry>], prefix:<segment>) with each tool\'s grant, whether it is applied to this segment, conditional, high-risk, and unavailable state. action=propose queues {selector, grant, reason} for human approval in Settings; grant is off | ask (each call pauses for human approval) | auto (calls run freely). Nothing changes until the human approves, and grants apply only from the next segment. action=propose_install {spec, version, reason} asks the human to install a plugin package; to find one use the official plugin_market/plugin_manager tools if the human granted them, else dsh_plugins (version is optional for official catalog bundles, exact otherwise). To build a new plugin or wire up an MCP server, dispatch a dot_task with preset "cordis" — a wrapper plugin can register an MCP server through mcpManager.',
     parameters: {
       action: { type: 'string', enum: ['list', 'propose', 'propose_install'], required: true, description: 'Operation: list the catalog, propose a grant change, or propose installing a plugin.' },
       selector: { type: 'string', description: 'propose: selector id from list output, e.g. tool:<name>, mcp:<server>, plugin:<bundle>, plugin:<bundle>#<entry>.' },
       grant: { type: 'string', enum: ['off', 'ask', 'auto'], description: 'propose: the grant the selector should get.' },
       spec: { type: 'string', description: 'propose_install: npm package name of the plugin to install, e.g. dsh-something or @scope/pkg.' },
-      version: { type: 'string', description: 'propose_install: exact published version, e.g. 1.2.3.' },
+      version: { type: 'string', description: 'propose_install: exact published version, e.g. 1.2.3. Optional only when the bundle is an official on-demand catalog row — its version is already pinned.' },
       reason: { type: 'string', description: 'propose/propose_install: concise human-facing explanation of why this helps.' },
     },
     execute: async (args) => {
@@ -548,7 +548,8 @@ export function apply(ctx: Context): void {
         return dot().proposeCapability({ selector: str(args, 'selector') ?? '', grant: (str(args, 'grant') ?? 'off') as 'off' | 'ask' | 'auto', reason: str(args, 'reason') ?? '' })
       }
       if (action === 'propose_install') {
-        return dot().proposeInstall({ spec: str(args, 'spec') ?? '', version: str(args, 'version') ?? '', reason: str(args, 'reason') ?? '' })
+        const version = str(args, 'version')
+        return dot().proposeInstall({ spec: str(args, 'spec') ?? '', ...(version !== undefined ? { version } : {}), reason: str(args, 'reason') ?? '' })
       }
       return dot().listCapabilities()
     },

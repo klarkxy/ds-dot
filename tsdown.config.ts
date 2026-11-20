@@ -58,9 +58,10 @@ const richViewAlias: NonNullable<UserConfig['plugins']>[number] = {
 
 export default defineConfig([
   {
-    // Three host entries: the plugin itself, the preset row that carries dot's
-    // tools, and the internal reflection preset's tool row.
-    entry: { index: 'src/index.ts', tools: 'src/tools.ts', reflection: 'src/reflection.ts' },
+    // Four host entries: the plugin itself, the preset row that carries dot's
+    // tools, the internal reflection preset's tool row, and the early
+    // attribution row that wraps tools.register before bigger modules land.
+    entry: { index: 'src/index.ts', tools: 'src/tools.ts', reflection: 'src/reflection.ts', attribution: 'src/attribution.ts' },
     format: ['esm'],
     dts: true,
     clean: true,

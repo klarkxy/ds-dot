@@ -37,6 +37,8 @@ export interface Segment {
   /** Handoff block of the system prompt; absent in the very first segment. */
   readonly opening?: string
   readonly handoff?: Handoff
+  /** Extra-capability grants as they read when the segment started, serialized. */
+  readonly capabilities?: string
   /** Why the previous segment ended. */
   readonly reason?: RolloverReason
 }
@@ -64,7 +66,13 @@ export interface DeliveryCheck {
   /** Cognition block as it reads now, and as the segment last accounted for it. */
   readonly cognition?: string
   readonly seenCognition?: string
+  /** Extra-capability grants as they read now, and as the segment froze them. */
+  readonly capabilities?: string
+  readonly frozenCapabilities?: string
 }
+
+/** Segments stored before the capability field existed freeze the same as an empty grant map. */
+export const EMPTY_CAPABILITIES_SIGNATURE = '{}'
 
 /** Checked before every message that reaches dot. */
 export function reasonBeforeDelivery(check: DeliveryCheck): RolloverReason | undefined {
@@ -74,6 +82,7 @@ export function reasonBeforeDelivery(check: DeliveryCheck): RolloverReason | und
   // The human (or a reflection pass) changed a block; dot's own changes are already part of the conversation.
   if ((check.agreements ?? '') !== (check.seenAgreements ?? '')) return 'prompt-changed'
   if ((check.cognition ?? '') !== (check.seenCognition ?? '')) return 'prompt-changed'
+  if ((check.capabilities ?? EMPTY_CAPABILITIES_SIGNATURE) !== (check.frozenCapabilities ?? EMPTY_CAPABILITIES_SIGNATURE)) return 'capabilities-changed'
   if (check.lastReplyAt !== undefined && check.now - check.lastReplyAt >= IDLE_ROLLOVER_MS && (check.usedTokens ?? 0) >= IDLE_MIN_TOKENS) return 'idle-expired'
   return undefined
 }
@@ -88,6 +97,7 @@ const WHY: Record<RolloverReason, string> = {
   'idle-expired': 'the previous session had been idle for a long time',
   'model-switch': 'your model was changed',
   'prompt-changed': 'your persona, agreements, or cognition updated, and the sections above now reflect the current text',
+  'capabilities-changed': 'the human changed which extra capabilities you can use, and your tool list now reflects that',
   'lost': 'the previous session could not be reopened',
   'manual': 'the human started a new segment from the context page',
   'dot-requested': 'you chose to start a new segment',

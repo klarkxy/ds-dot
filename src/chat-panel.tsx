@@ -462,7 +462,7 @@ export function ChatPanel({ locale, api, Card, onOpenSession, renderFactorySlot 
 
 const SEGMENT_REASON: Record<RolloverReason, TextKey> = {
   'context-full': 'segmentWhy_contextFull', 'idle-expired': 'segmentWhy_idle', 'model-switch': 'segmentWhy_model',
-  'prompt-changed': 'segmentWhy_prompt', lost: 'segmentWhy_lost', manual: 'segmentWhy_manual', 'dot-requested': 'segmentWhy_dot',
+  'prompt-changed': 'segmentWhy_prompt', 'capabilities-changed': 'segmentWhy_capabilities', lost: 'segmentWhy_lost', manual: 'segmentWhy_manual', 'dot-requested': 'segmentWhy_dot',
 }
 
 /** Where the conversation moved to a new session segment; opening it says why and when. */

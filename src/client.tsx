@@ -15,7 +15,7 @@ import { CHAT_ROOT, ChatPanel, chatCss, type CardComponent, type ChatApi } from 
 import { contextCss } from './context-panel.tsx'
 import { personaCss } from './persona-panel.tsx'
 import { trajectoryCss } from './trajectory-panel.tsx'
-import { PLUGIN_NAME, RPC_CHANNEL, type BoardView, type ChatSnapshot, type DotContextView, type DotSettings, type FactoryResetPreview, type FactoryResetResult, type KeepaliveInfo, type KnowledgeView, type ReflectionRun, type SettingProposal, type TrajectoryView } from './contracts.ts'
+import { PLUGIN_NAME, RPC_CHANNEL, type BoardView, type CapabilityCatalogView, type ChatSnapshot, type DotContextView, type DotSettings, type FactoryResetPreview, type FactoryResetResult, type KeepaliveInfo, type KnowledgeView, type ReflectionRun, type SettingProposal, type TrajectoryView } from './contracts.ts'
 import { copyLocale, t, type CopyLocale } from './ui-copy.ts'
 import { DotIcon } from './whale.tsx'
 
@@ -80,6 +80,7 @@ export function apply(ctx: Context): void {
     setSettings: patch => call<DotSettings>('settings.set', { patch }),
     settingProposals: signal => call<SettingProposal[]>('settings.proposals', {}, signal),
     decideSetting: (id, allow) => call<string>('settings.decide', { id, allow }),
+    capabilities: signal => call<CapabilityCatalogView>('capabilities.catalog', {}, signal),
     newSegment: () => call<string>('segment.new'),
     keepalive: signal => call<KeepaliveInfo | undefined>('keepalive', {}, signal),
     knowledge: signal => call<KnowledgeView>('knowledge', {}, signal),

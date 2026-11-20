@@ -25,6 +25,7 @@ import type { RawEvent } from './chat.ts'
 import { COMPACTION_POLICY, PLUGIN_NAME, PRESET_ID, RPC_CHANNEL, SERVICE_NAME, type PendingQuestionItem, type TaskRecord } from './contracts.ts'
 import { CHAT_SAY_BODY_BYTES, checkChatImages } from './chat-images.ts'
 import { ChatFeed } from './feed.ts'
+import { DotCapabilities, type CapabilityTools } from './capabilities.ts'
 import { bindHost } from './host.ts'
 import { clip } from './ledger.ts'
 import { detachNative } from './native.ts'
@@ -38,6 +39,7 @@ import { configI18n } from './i18n/index.ts'
 import { patchSettings } from './settings.ts'
 import { dotDomain, parsePeerDelivery, parseTask } from './storage.ts'
 import { DotStore, type DotDomainHandle } from './store.ts'
+import { DOT_INHERITED_ALLOW } from './tools.ts'
 import { copyLocale, fillText, t } from './ui-copy.ts'
 
 export const name = PLUGIN_NAME
@@ -106,10 +108,18 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
   )
   const store = new DotStore(domain, [...domain.table('tasks').entries()].map(([, value]) => parseTask(value)).filter((task): task is TaskRecord => task !== undefined))
   let sealOwned: ((agent: unknown) => void) | undefined
-  const host = bindHost(name => ctx.get(name as never), log, () => store.settings.model, agent => { sealOwned?.(agent) })
+  const capabilities = new DotCapabilities({
+    tools: () => ctx.get('tools' as never) as CapabilityTools | undefined,
+    mcpManager: () => ctx.get('mcpManager' as never) as { list(): readonly { readonly name: string }[] } | undefined,
+    pluginManager: () => ctx.get('pluginManager' as never) as { listBundles(): Promise<readonly { readonly name: string; readonly rows: readonly { readonly entryId?: string }[] }[]> } | undefined,
+    settings: () => store.settings,
+    locked: DOT_INHERITED_ALLOW,
+  })
+  const host = bindHost(name => ctx.get(name as never), log, () => store.settings.model, agent => { sealOwned?.(agent) }, capabilities)
   const service = new DotService({
     host,
     store,
+    capabilities,
     peers: new PeerLedger(domain.table('peers'), parsePeerDelivery),
     homeDir: config.homeDir?.trim() || join(process.env.DSH_HOME?.trim() || join(homedir(), '.dsh'), 'dot'),
     log,
@@ -146,6 +156,11 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
     return sessionId
   }
   ctx.provide(SERVICE_NAME, service)
+  // Wrap tools.register so every extra tool records the loader entry that
+  // registered it; the catalog uses that for plugin attribution.
+  ctx.effect(() => capabilities.installAttribution(), 'dot.capabilities-attribution')
+  // A tool set change can mean a bundle came or went; refetch row mapping on the next catalog read.
+  ctx.effect(() => (ctx as unknown as { on(name: string, listener: () => void): () => void }).on('tools/change', () => capabilities.invalidateBundles()), 'dot.capabilities-bundles')
   ctx.effect(() => () => {
     unfollow()
     unpending()
@@ -435,6 +450,7 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
         case 'stop': { await service.stop(); return { ok: true, value: true } }
         case 'settings': return { ok: true, value: store.settings }
         case 'settings.proposals': return { ok: true, value: store.settingProposals }
+        case 'capabilities.catalog': return { ok: true, value: await service.capabilitiesView() }
         case 'settings.decide': {
           const id = field(payload, 'id')
           return { ok: true, value: await service.selfSettings.decide(typeof id === 'string' ? id : '', field(payload, 'allow') === true) }

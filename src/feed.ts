@@ -148,6 +148,17 @@ export class ChatFeed {
       const card = cards.get(item.presentation.viewId)
       return card ? { ...item, presentation: { ...item.presentation, dotCard: { number: card.number, expired: card.expired } } } : item
     })
+    // Approval cards raised beside tool calls (capability asks, install
+    // proposals) exist only in the card store: no tool event folds into a view
+    // row for them, so each gets a synthetic one placed where it was shown.
+    for (const card of cards.values()) {
+      if (card.sessionId !== sessionId || (!card.callId.startsWith('capability:') && !card.callId.startsWith('install:'))) continue
+      // Records persisted before shownAt keep their old end position.
+      const row: ChatItem = { kind: 'view', key: card.callId, title: card.title, view: card.view, at: card.shownAt ?? Number.MAX_SAFE_INTEGER, presentation: { owner: 'dsh-deep-view', title: card.title, view: card.view, awaitReply: true, viewId: card.id, dotCard: { number: card.number, expired: card.expired } } }
+      const later = items.findIndex(item => item.at > row.at)
+      if (later === -1) items.push(row)
+      else items.splice(later, 0, row)
+    }
     return { ...base, items, answers }
   }
 

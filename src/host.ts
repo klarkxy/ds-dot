@@ -35,6 +35,7 @@ import { REFLECTION_PRESET_ID, REFLECTION_ALLOW } from './reflection.ts'
 import { foldTrajectory } from './trajectory.ts'
 import { restrictInheritedTools } from './tool-scope.ts'
 import { DOT_INHERITED_ALLOW, dotDevIndexReady } from './tools.ts'
+import type { DotCapabilities } from './capabilities.ts'
 
 declare module '@deepseek-ai/dsh-llm' {
   interface MessageSourceMap {
@@ -120,6 +121,8 @@ export interface DotHost {
   handoffView?(fromSessionId: string, toSessionId: string): boolean
   /** Let go of a segment dot has left; its log stays readable. */
   releaseDot(sessionId: string): Promise<void>
+  /** Reapply the extra-capability grants on a live dot agent, for an untouched segment taking a settings change in place. */
+  reapplyCapabilities?(sessionId: string): Promise<void>
   /** The whole log of one of dot's segments, live or stored, oldest first. */
   readEvents(sessionId: string): Promise<RawEvent[]>
   /**
@@ -262,7 +265,7 @@ async function settleOwnedJobs(get: Get, sessionId: string, factsOf: () => Promi
 }
 
 /** @param modelOf - dot's chosen model, read on every model call; undefined follows the host default. */
-export function bindHost(get: Get, log?: (message: string) => void, modelOf?: () => ModelChoice | undefined, seal?: (agent: Agent) => void): DotHost {
+export function bindHost(get: Get, log?: (message: string) => void, modelOf?: () => ModelChoice | undefined, seal?: (agent: Agent) => void, capabilities?: DotCapabilities): DotHost {
   const need = <T,>(name: string): T => {
     const value = get(name) as T | undefined
     if (!value) throw new HostUnavailable(name)
@@ -317,7 +320,8 @@ export function bindHost(get: Get, log?: (message: string) => void, modelOf?: ()
         // scope as `createScope(loopCtx, agent)` — so the supported setup
         // parameter names it, and nothing here has to read a scope tag through
         // a possibly duplicated dsh-scope copy.
-        restrictInheritedTools(agentCtx, allow, agent)
+        if (allow === DOT_INHERITED_ALLOW && capabilities) await capabilities.applyToAgent(agentCtx, agent)
+        else restrictInheritedTools(agentCtx, allow, agent)
       },
     }
   }
@@ -743,11 +747,16 @@ export function bindHost(get: Get, log?: (message: string) => void, modelOf?: ()
       }
     },
     async releaseDot(sessionId) {
+      capabilities?.releaseAgent(sessionId)
       scans.delete(sessionId)
       const handle = handles.get(sessionId)
       if (!handle) return
       handles.delete(sessionId)
       await handle.dispose()
+    },
+    async reapplyCapabilities(sessionId) {
+      const agent = registryAgent(sessionId)
+      if (agent) await capabilities?.applyToAgent(agent.ctx, agent)
     },
     async readEvents(sessionId) {
       const session = registryAgent(sessionId)?.session
@@ -876,6 +885,7 @@ export function bindHost(get: Get, log?: (message: string) => void, modelOf?: ()
       return status !== undefined && status !== 'idle'
     },
     async dispose() {
+      capabilities?.releaseAll()
       const owned = [...handles.values()]
       handles.clear()
       await Promise.allSettled(owned.map(handle => handle.dispose()))

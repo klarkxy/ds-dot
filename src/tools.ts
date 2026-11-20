@@ -91,10 +91,12 @@ export const TASK_ACTIONS = ['create', 'revise', 'dispatch', 'check', 'read', 'l
 
 export function apply(ctx: Context): void {
   installDotWeb(ctx)
-  gateToolExecution(ctx, DOT_INHERITED_ALLOW)
-  devIndexLoad = installDotDevIndex(ctx)
   const host = ctx as ToolHost
   const dot = () => host[SERVICE_NAME]
+  // Names outside the locked set go to the capability layer: granted extras pass
+  // while still granted and applied to the live segment; everything else denies.
+  gateToolExecution(ctx, DOT_INHERITED_ALLOW, exec => dot().capabilityGate(exec))
+  devIndexLoad = installDotDevIndex(ctx)
   // Both sections read what the segment froze when it started, so every request of a segment
   // shares one prompt prefix; a settings edit reaches dot with her next segment. A session
   // that is not the recorded segment (one being set up) reads the live settings.
@@ -525,6 +527,33 @@ export function apply(ctx: Context): void {
     },
     title: 'Settings',
   }), /* read is not exclusively read-only since propose mutates */ false)
+
+  // ── dot_capabilities ────────────────────────────────────────────────────
+  // Extra tools from other plugins and MCP servers are off by default; the
+  // human grants them in Settings > Capabilities, or approves a proposal here.
+  tool(defineToolInput({
+    name: TOOL.capabilities,
+    description: 'List optional extra capabilities (tools from other plugins and MCP servers) or propose changes. Extras are off by default. action=list shows a tree of selectors (tool:<name>, mcp:<server>, plugin:<bundle>[#<entry>]) with each tool\'s grant, whether it is applied to this segment, conditional (Creator-only), and unavailable state. action=propose queues {selector, grant, reason} for human approval in Settings; grant is off | ask (each call pauses for human approval) | auto (calls run freely). Nothing changes until the human approves, and grants apply only from the next segment. action=propose_install {spec, version, reason} asks the human to install an npm plugin package (exact version); find candidates with dsh_plugins first. To build a new plugin or wire up something like an MCP server, dispatch a dot_task with preset "cordis" instead.',
+    parameters: {
+      action: { type: 'string', enum: ['list', 'propose', 'propose_install'], required: true, description: 'Operation: list the catalog, propose a grant change, or propose installing a plugin.' },
+      selector: { type: 'string', description: 'propose: selector id from list output, e.g. tool:<name>, mcp:<server>, plugin:<bundle>, plugin:<bundle>#<entry>.' },
+      grant: { type: 'string', enum: ['off', 'ask', 'auto'], description: 'propose: the grant the selector should get.' },
+      spec: { type: 'string', description: 'propose_install: npm package name of the plugin to install, e.g. dsh-something or @scope/pkg.' },
+      version: { type: 'string', description: 'propose_install: exact published version, e.g. 1.2.3.' },
+      reason: { type: 'string', description: 'propose/propose_install: concise human-facing explanation of why this helps.' },
+    },
+    execute: async (args) => {
+      const action = str(args, 'action')
+      if (action === 'propose') {
+        return dot().proposeCapability({ selector: str(args, 'selector') ?? '', grant: (str(args, 'grant') ?? 'off') as 'off' | 'ask' | 'auto', reason: str(args, 'reason') ?? '' })
+      }
+      if (action === 'propose_install') {
+        return dot().proposeInstall({ spec: str(args, 'spec') ?? '', version: str(args, 'version') ?? '', reason: str(args, 'reason') ?? '' })
+      }
+      return dot().listCapabilities()
+    },
+    title: 'Capabilities',
+  }), false)
 }
 
 /** Shared defaults: text output, serial execution, a generic call card. */

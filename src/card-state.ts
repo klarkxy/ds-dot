@@ -17,12 +17,14 @@ export interface DotCardRecord {
   readonly approvalDetail?: import('./contracts.ts').ApprovalDetail
   readonly notificationPending?: boolean
   readonly answer?: ViewAnswer
+  /** When the card was presented; orders synthetic feed rows where the call waits. */
+  readonly shownAt?: number
 }
 export type DotCardPresentation = ViewPresentation & { dotCard?: { number: number; expired?: boolean } }
 
 export class DotCards {
   private readonly claims = new Set<string>()
-  constructor(private readonly store: DotStore, private readonly log?: (message: string) => void) {}
+  constructor(private readonly store: DotStore, private readonly log?: (message: string) => void, private readonly now: () => number = Date.now) {}
 
   async present(shown: ShownView, callId: string, approvalId?: string): Promise<DotCardPresentation> {
     const base: ViewPresentation = { owner: 'dsh-deep-view', ...shown, awaitReply: shown.interactive }
@@ -32,7 +34,7 @@ export class DotCards {
     const number = this.store.cardSequence + 1
     const id = `dot-card-${number}`
     const approvalDetail = approvalId ? this.store.approvalDetails.find(row => row.requestId === approvalId) : undefined
-    const record: DotCardRecord = { id, number, sessionId, callId, title: shown.title, view: shown.view, expired: false, ...(approvalId ? { approvalId } : {}), ...(approvalDetail ? { approvalDetail } : {}) }
+    const record: DotCardRecord = { id, number, sessionId, callId, title: shown.title, view: shown.view, expired: false, shownAt: this.now(), ...(approvalId ? { approvalId } : {}), ...(approvalDetail ? { approvalDetail } : {}) }
     await this.store.addCard(record)
     return { ...base, viewId: id, dotCard: { number } }
   }

@@ -6,7 +6,7 @@ import { groupModelMenuChoices, modelMenuShortName, parseModelMenuChoices, type 
 import { renderModelPicker, type RenderFactorySlot } from '@klarkxy/dsh-plugin-kit/model-picker'
 import { Button, Checkbox, IconSearchOutlineRegular, Input, SegmentedTabs, type SegmentedTab } from '@deepseek-ai/dsh-client-ui-primitives'
 import { createContext, useCallback, useContext, useEffect, useId, useMemo, useState, type ReactNode } from 'react'
-import { type ApprovalMode, type DotSettings, type FactoryResetPreview, type FactoryResetResult, type KeepaliveInfo, type ModelChoice, type SettingField, type SettingProposal, type TakeoverMode, type TaskModelRule, type TaskPermission } from './contracts.ts'
+import { type ApprovalMode, type CapabilityCatalogView, type CapabilityGrant, type CapabilityGroupView, type DotSettings, type FactoryResetPreview, type FactoryResetResult, type KeepaliveInfo, type ModelChoice, type SettingField, type SettingProposal, type TakeoverMode, type TaskModelRule, type TaskPermission } from './contracts.ts'
 import { factoryResetScope, t, type CopyLocale, type TextKey } from './ui-copy.ts'
 
 /** null on model, persona or address goes back to the default. */
@@ -21,6 +21,8 @@ export interface SettingsApi {
   models(): Promise<unknown>
   settingProposals(signal: AbortSignal): Promise<SettingProposal[]>
   decideSetting(id: string, allow: boolean): Promise<string>
+  /** Extra-capability catalog + what the live segment applied; absent in tests. */
+  capabilities?(signal: AbortSignal): Promise<CapabilityCatalogView>
   settings(signal: AbortSignal): Promise<DotSettings>
   previewFactoryReset?(): Promise<FactoryResetPreview>
   confirmFactoryReset?(token: string): Promise<FactoryResetResult>
@@ -197,6 +199,124 @@ function Proposals({ locale, api, choices, refresh, onDecided, onCountChange }: 
           )
         })}
       </div>
+    </div>
+  )
+}
+
+const GRANT_MODES: readonly [CapabilityGrant, CapabilityGrant, CapabilityGrant] = ['off', 'ask', 'auto']
+
+/**
+ * The off/ask/auto control of one row. A row without its own grant row shows
+ * the value it inherits, dimmed; the clear button removes its own override.
+ */
+function GrantPicker({ locale, label, chain, grants, applied, onPick }: {
+  locale: CopyLocale
+  label: string
+  /** Selectors this row answers to, most specific first; the first owns the write. */
+  chain: readonly string[]
+  grants: Readonly<Record<string, CapabilityGrant>>
+  /** Grant the live segment applied to this tool; compared for the next-segment badge. */
+  applied?: CapabilityGrant | undefined
+  onPick: (selector: string, grant: CapabilityGrant | undefined) => void
+}) {
+  const own = chain[0]
+  let effective: CapabilityGrant = 'off'
+  for (const selector of chain) {
+    const grant = grants[selector]
+    if (grant !== undefined) { effective = grant; break }
+  }
+  const hasOwn = own !== undefined && grants[own] !== undefined
+  return (
+    <span className="dsh-dot-cap-grant" data-inherited={hasOwn ? undefined : ''}>
+      <SegmentedChoice locale={locale} label={label} value={effective} options={GRANT_MODES} labelKeyOf={option => `sCap_${option}` as TextKey} onChange={next => { if (own !== undefined) onPick(own, next) }} />
+      {hasOwn ? <Button variant="ghost" size="sm" className="dsh-dot-cap-clear" onClick={() => { if (own !== undefined) onPick(own, undefined) }}>{t(locale, 'sCapClear')}</Button> : null}
+      {applied !== undefined && applied !== effective ? <span className="dsh-dot-cap-badge">{t(locale, 'sCapNext')}</span> : null}
+    </span>
+  )
+}
+
+/**
+ * The grantable catalog: locked dot tools on top, then MCP servers, plugins
+ * with their entries, and the unattributed rest. Grants save as one whole
+ * `capabilities` patch through the shared settings channel.
+ */
+function Capabilities({ locale, api, grants, onPick }: {
+  locale: CopyLocale
+  api: SettingsApi
+  grants: Readonly<Record<string, CapabilityGrant>>
+  onPick: (selector: string, grant: CapabilityGrant | undefined) => void
+}) {
+  const [view, setView] = useState<CapabilityCatalogView>()
+  const [error, setError] = useState('')
+  useEffect(() => {
+    if (api.capabilities === undefined) return
+    const life = new AbortController()
+    const load = () => api.capabilities!(life.signal).then(
+      next => { setView(next); setError('') },
+      failure => { if (!life.signal.aborted) setError(failure instanceof Error ? failure.message : String(failure)) },
+    )
+    void load()
+    const timer = setInterval(load, 5000)
+    return () => { life.abort(); clearInterval(timer) }
+  }, [api])
+  if (api.capabilities === undefined) return null
+  const applied = view?.applied ?? {}
+  const effectiveFor = (chain: readonly string[]): CapabilityGrant => {
+    for (const selector of chain) { const grant = grants[selector]; if (grant !== undefined) return grant }
+    return 'off'
+  }
+  const groupRows = (group: CapabilityGroupView, parents: readonly string[]): ReactNode => {
+    // The host group is display-only: unattributed tools grant one by one.
+    const chain = group.kind === 'host' ? parents : [group.id, ...parents]
+    const changed = group.tools.some(tool => (applied[tool.name] ?? 'off') !== effectiveFor([`tool:${tool.name}`, ...chain]))
+    const granted = group.tools.some(tool => effectiveFor([`tool:${tool.name}`, ...chain]) !== 'off')
+      || (group.children ?? []).some(child => child.tools.some(tool => effectiveFor([`tool:${tool.name}`, child.id, ...chain]) !== 'off'))
+    const label = group.kind === 'host' ? t(locale, 'sCapHostGroup') : group.label
+    return (
+      <details key={group.id} className="dsh-dot-cap-group" open={granted}>
+        <summary className="dsh-dot-cap-head">
+          <span className="dsh-dot-cap-name">{label}<span className="dsh-dot-cap-id">{group.id}</span></span>
+          {group.missing === true ? <span className="dsh-dot-cap-badge">{t(locale, 'sCapMissing')}</span> : null}
+          {changed ? <span className="dsh-dot-cap-badge">{t(locale, 'sCapNext')}</span> : null}
+          {group.kind === 'host' ? null : (
+            <span className="dsh-dot-cap-control" onClick={event => event.preventDefault()}>
+              <GrantPicker locale={locale} label={label} chain={chain} grants={grants} applied={undefined} onPick={onPick} />
+            </span>
+          )}
+        </summary>
+        <div className="dsh-dot-cap-body">
+          {group.tools.map(tool => {
+            const toolChain = [`tool:${tool.name}`, ...chain]
+            return (
+              <div key={tool.name} className="dsh-dot-cap-row">
+                <span className="dsh-dot-cap-name" title={tool.description}>{tool.name}</span>
+                {tool.missing === true ? <span className="dsh-dot-cap-badge">{t(locale, 'sCapMissing')}</span> : null}
+                {tool.conditional ? <span className="dsh-dot-cap-badge">{t(locale, 'sCapConditional')}</span> : null}
+                <GrantPicker locale={locale} label={tool.name} chain={toolChain} grants={grants} applied={tool.missing === true ? undefined : (applied[tool.name] ?? 'off')} onPick={onPick} />
+              </div>
+            )
+          })}
+          {(group.children ?? []).map(child => groupRows(child, chain))}
+        </div>
+      </details>
+    )
+  }
+  return (
+    <div className="dsh-dot-caps">
+      {error ? <div className="dsh-ui-error" role="alert">{error}</div> : null}
+      {view === undefined ? null : (
+        <>
+          <details className="dsh-dot-cap-group dsh-dot-cap-group--locked">
+            <summary className="dsh-dot-cap-head">
+              <span className="dsh-dot-cap-name">{t(locale, 'sCapLockedTitle')}</span>
+              <span className="dsh-dot-cap-badge dsh-dot-cap-badge--on">{t(locale, 'sCapAlways')}</span>
+            </summary>
+            <div className="dsh-dot-cap-body dsh-dot-cap-locked">{view.locked.map(name => <span key={name} className="dsh-dot-cap-locked-name">{name}</span>)}</div>
+          </details>
+          {view.groups.length === 0 ? <div className="dsh-dot-model-empty">{t(locale, 'sCapEmpty')}</div> : null}
+          {view.groups.map(group => groupRows(group, []))}
+        </>
+      )}
     </div>
   )
 }
@@ -459,6 +579,19 @@ export function SettingsPanel({ locale, api, settings, onSaved, onStatusChange, 
         </div>
       </div>
       <div className="dsh-dot-pane-section">
+        <h3 className="dsh-dot-pane-section-title">{t(locale, 'sCapabilities')}</h3>
+        <div className="dsh-ui-form">
+        <Field label={t(locale, 'sCapabilities')} help={t(locale, 'sCapabilitiesDesc')} {...lock('capabilities')}>
+          <Capabilities locale={locale} api={api} grants={settings.capabilities?.grants ?? {}} onPick={(selector, grant) => {
+            const grants = { ...settings.capabilities?.grants }
+            if (grant === undefined) delete grants[selector]
+            else grants[selector] = grant
+            save({ capabilities: { grants } })
+          }} />
+        </Field>
+        </div>
+      </div>
+      <div className="dsh-dot-pane-section">
         <h3 className="dsh-dot-pane-section-title">{t(locale, 'sTasks')}</h3>
         <div className="dsh-ui-form">
         <Field label={t(locale, 'sTaskModels')} help={taskModelsHelp} helpTone={taskModelsHelp ? 'warn' : undefined} {...lock('taskModels')}>
@@ -592,4 +725,28 @@ export const settingsCss = `
 .dsh-dot-chat .dsh-dot-factory { margin-top: 8px; padding-top: 16px; border-top: 0.5px solid var(--dsw-alias-border-l2); }
 .dsh-dot-chat .dsh-dot-factory-preview { display: flex; flex-direction: column; gap: 8px; margin: 8px 0; padding: 10px 12px; border-radius: var(--dsw-radius-md); background: var(--dsw-alias-bg-layer-1); box-shadow: var(--dsw-elevation-stroke); }
 .dsh-dot-chat .dsh-dot-factory-preview ul { margin: 0; padding-left: 18px; font-size: 12px; line-height: 18px; color: var(--dsw-alias-label-secondary); }
+.dsh-dot-chat .dsh-dot-caps { display: flex; flex-direction: column; gap: 8px; margin-top: 4px; }
+.dsh-dot-chat .dsh-dot-cap-group { border-radius: var(--dsw-radius-md); background: var(--dsw-alias-bg-layer-1); box-shadow: var(--dsw-elevation-stroke); }
+.dsh-dot-chat .dsh-dot-cap-group > summary { list-style: none; }
+.dsh-dot-chat .dsh-dot-cap-group > summary::-webkit-details-marker { display: none; }
+.dsh-dot-chat .dsh-dot-cap-head { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 8px; padding: 8px 12px; cursor: pointer; }
+.dsh-dot-chat .dsh-dot-cap-head .dsh-dot-cap-name { flex-basis: 100%; }
+.dsh-dot-chat .dsh-dot-cap-group--locked .dsh-dot-cap-head { cursor: pointer; }
+.dsh-dot-chat .dsh-dot-cap-name { flex: 1 1 auto; min-width: 0; font-size: 13px; line-height: 20px; color: var(--dsw-alias-label-primary); overflow-wrap: anywhere; }
+.dsh-dot-chat .dsh-dot-cap-id { margin-left: 6px; font-size: 11px; color: var(--dsw-alias-label-tertiary); font-family: var(--ds-font-family-code); }
+.dsh-dot-chat .dsh-dot-cap-control { flex: 0 0 auto; }
+.dsh-dot-chat .dsh-dot-cap-body { display: flex; flex-direction: column; gap: 2px; padding: 0 12px 10px; }
+.dsh-dot-chat .dsh-dot-cap-body .dsh-dot-cap-group { box-shadow: none; background: var(--dsw-alias-bg-layer-2); }
+.dsh-dot-chat .dsh-dot-cap-row { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 8px; padding: 4px 0 4px 8px; }
+.dsh-dot-chat .dsh-dot-cap-row .dsh-dot-cap-name { flex-basis: 100%; }
+.dsh-dot-chat .dsh-dot-cap-grant { display: inline-flex; align-items: center; gap: 6px; flex-shrink: 0; }
+.dsh-dot-chat .dsh-dot-cap-grant[data-inherited] [role='tablist'] { opacity: 0.55; }
+.dsh-dot-chat .dsh-dot-cap-badge {
+  flex-shrink: 0; padding: 1px 6px; border-radius: var(--dsw-radius-sm); font-size: 11px; line-height: 16px;
+  background: var(--dsw-alias-bg-layer-2); color: var(--dsw-alias-label-tertiary);
+}
+.dsh-dot-chat .dsh-dot-cap-badge--on { color: var(--dsw-alias-state-success-primary); }
+.dsh-dot-chat .dsh-dot-cap-clear { flex-shrink: 0; }
+.dsh-dot-chat .dsh-dot-cap-locked { display: flex; flex-wrap: wrap; gap: 4px; }
+.dsh-dot-chat .dsh-dot-cap-locked-name { padding: 1px 6px; border-radius: var(--dsw-radius-sm); background: var(--dsw-alias-bg-layer-2); font-size: 11px; font-family: var(--ds-font-family-code); color: var(--dsw-alias-label-secondary); }
 `

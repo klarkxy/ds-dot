@@ -36,7 +36,7 @@ const storedTaskSchema = z.object({
   unseenTurns: z.number().int().nonnegative(),
 })
 
-const reasonSchema = z.enum(['context-full', 'idle-expired', 'model-switch', 'prompt-changed', 'lost', 'manual', 'dot-requested'])
+const reasonSchema = z.enum(['context-full', 'idle-expired', 'model-switch', 'prompt-changed', 'capabilities-changed', 'lost', 'manual', 'dot-requested'])
 
 const handoffSchema = z.object({
   tier: z.enum(['verbatim', 'summary', 'tail']),
@@ -60,6 +60,8 @@ const segmentSchema = z.object({
   opening: z.string().optional(),
   handoff: handoffSchema.optional(),
   reason: reasonSchema.optional(),
+  /** Extra-capability grant signature as it read when the segment started; old rows predating the field open without it. */
+  capabilities: z.string().optional(),
 })
 
 const pastSegmentSchema = z.object({

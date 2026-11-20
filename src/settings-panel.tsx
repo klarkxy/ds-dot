@@ -479,6 +479,17 @@ export function SettingsPanel({ locale, api, settings, onSaved, onStatusChange, 
   const models = useModels(api)
   const [status, setStatus] = useState<SaveNotice>()
   const [modelFilter, setModelFilter] = useState('')
+  const [keepalive, setKeepalive] = useState<KeepaliveInfo>()
+  const [keepaliveRefresh, setKeepaliveRefresh] = useState(0)
+  useEffect(() => {
+    if (!api.keepalive) return
+    const life = new AbortController()
+    api.keepalive(life.signal).then(
+      info => { if (!life.signal.aborted) setKeepalive(info) },
+      () => { if (!life.signal.aborted) setKeepalive(undefined) },
+    )
+    return () => { life.abort() }
+  }, [api, keepaliveRefresh])
   const reportStatus = useCallback((next: SaveNotice | undefined) => {
     setStatus(next)
     onStatusChange?.(next)
@@ -486,7 +497,7 @@ export function SettingsPanel({ locale, api, settings, onSaved, onStatusChange, 
   const save = useCallback((patch: SettingsPatch) => {
     reportStatus(undefined)
     api.setSettings(patch).then(
-      next => { onSaved(next); reportStatus({ kind: 'saved' }) },
+      next => { onSaved(next); reportStatus({ kind: 'saved' }); if ('model' in patch || 'cacheTtl' in patch) setKeepaliveRefresh(value => value + 1) },
       failure => reportStatus({ kind: 'error', message: failure instanceof Error ? failure.message : String(failure) }),
     )
   }, [api, onSaved, reportStatus])
@@ -570,6 +581,25 @@ export function SettingsPanel({ locale, api, settings, onSaved, onStatusChange, 
               </select>
             ),
           })}
+          {keepalive ? (
+            <div className="dsh-dot-keepalive">
+              <span className="dsh-ui-label">{t(locale, 'sCacheTtl')}</span>
+              <IdleCheckInput
+                locale={locale}
+                label={t(locale, 'sCacheTtl')}
+                unit={t(locale, 'sCacheTtlUnit')}
+                value={settings.cacheTtl?.[`${keepalive.provider}/${keepalive.model}`] ?? keepalive.minutes}
+                onCommit={minutes => {
+                  const key = `${keepalive.provider}/${keepalive.model}`
+                  const next = { ...settings.cacheTtl }
+                  if (minutes === keepalive.defaultMinutes) delete next[key]
+                  else next[key] = minutes
+                  save({ cacheTtl: next })
+                }}
+              />
+              <span className="dsh-ui-help">{t(locale, 'sCacheTtlDesc').replace('{key}', `${keepalive.provider}/${keepalive.model}`).replace('{n}', String(keepalive.defaultMinutes))}</span>
+            </div>
+          ) : null}
         </Field>
         <Field label={t(locale, 'sReflection')} help={t(locale, 'sReflectionDesc')} {...lock('reflection')}>
           <SegmentedChoice locale={locale} label={t(locale, 'sReflection')} value={settings.reflection ? 'on' : 'off'} options={['on', 'off']} labelKeyOf={opt => `sReflection_${opt}`} onChange={next => save({ reflection: next === 'on' })} />
@@ -737,6 +767,7 @@ export const settingsCss = `
 .dsh-dot-chat .dsh-dot-model-item:hover { background: var(--dsw-alias-interactive-bg-hover); }
 .dsh-dot-chat .dsh-dot-idle-check { display: flex; align-items: center; gap: 8px; }
 .dsh-dot-chat .dsh-dot-idle-input { width: 96px; flex: 0 0 auto; }
+.dsh-dot-chat .dsh-dot-keepalive { display: flex; flex-direction: column; gap: 4px; margin-top: 8px; }
 .dsh-dot-chat .dsh-dot-factory { margin-top: 8px; padding-top: 16px; border-top: 0.5px solid var(--dsw-alias-border-l2); }
 .dsh-dot-chat .dsh-dot-factory-preview { display: flex; flex-direction: column; gap: 8px; margin: 8px 0; padding: 10px 12px; border-radius: var(--dsw-radius-md); background: var(--dsw-alias-bg-layer-1); box-shadow: var(--dsw-elevation-stroke); }
 .dsh-dot-chat .dsh-dot-factory-preview ul { margin: 0; padding-left: 18px; font-size: 12px; line-height: 18px; color: var(--dsw-alias-label-secondary); }

@@ -92,6 +92,66 @@ describe('routine check setting', () => {
   })
 })
 
+describe('cache keepalive setting', () => {
+  it('shows the resolved minutes and writes overrides per provider/model', async () => {
+    const saved: Array<Partial<DotSettings>> = []
+    let current: DotSettings = { ...DEFAULT_SETTINGS, cacheTtl: { 'p/base': 12 } }
+    const api = {
+      models: async () => ({ groups: [] }),
+      settings: async () => current,
+      settingProposals: async () => [],
+      decideSetting: async () => 'ok',
+      keepalive: async () => ({ provider: 'p', model: 'base', minutes: current.cacheTtl?.['p/base'] ?? 5, defaultMinutes: 5 }),
+      setSettings: async (patch: Partial<DotSettings>) => { saved.push(patch); current = { ...current, ...patch } as DotSettings; return current },
+    }
+    function Harness() {
+      const [settings, setSettings] = useState<DotSettings>(current)
+      return <SettingsPanel locale="en" api={api as never} settings={settings} onSaved={setSettings} />
+    }
+    const root = createRoot(document.getElementById('root')!)
+    await act(async () => root.render(<Harness />))
+    await act(async () => { await Promise.resolve() })
+    const input = () => document.querySelector<HTMLInputElement>('input[aria-label="Cache lifetime"]')!
+    expect(input().value).toBe('12')
+    expect(document.body.textContent).toContain('p/base')
+
+    // A different value is stored as an override for the current provider/model.
+    await act(async () => { type(input(), '30') })
+    await act(async () => { blur(input()) })
+    expect(saved.at(-1)).toEqual({ cacheTtl: { 'p/base': 30 } })
+
+    // Committing the built-in default removes the key instead of storing it.
+    await act(async () => { type(input(), '5') })
+    await act(async () => { blur(input()) })
+    expect(saved.at(-1)).toEqual({ cacheTtl: {} })
+
+    await act(async () => { await Promise.resolve() })
+    expect(input().value).toBe('5')
+    await act(async () => root.unmount())
+  })
+
+  it('hides the row when the host reports no model', async () => {
+    let current: DotSettings = { ...DEFAULT_SETTINGS }
+    const api = {
+      models: async () => ({ groups: [] }),
+      settings: async () => current,
+      settingProposals: async () => [],
+      decideSetting: async () => 'ok',
+      keepalive: async () => undefined,
+      setSettings: async (patch: Partial<DotSettings>) => { current = { ...current, ...patch } as DotSettings; return current },
+    }
+    function Harness() {
+      const [settings, setSettings] = useState<DotSettings>(current)
+      return <SettingsPanel locale="en" api={api as never} settings={settings} onSaved={setSettings} />
+    }
+    const root = createRoot(document.getElementById('root')!)
+    await act(async () => root.render(<Harness />))
+    await act(async () => { await Promise.resolve() })
+    expect(document.querySelector('input[aria-label="Cache lifetime"]')).toBeNull()
+    await act(async () => root.unmount())
+  })
+})
+
 describe('factory reset', () => {
   it('previews the wipe then confirms with the issued token', async () => {
     const tokens: string[] = []

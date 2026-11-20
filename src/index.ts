@@ -32,7 +32,6 @@ import { detachNative } from './native.ts'
 import { PeerLedger } from './peer.ts'
 import { DOT_INSTRUCTIONS } from './prompt.ts'
 import { installPresetVisibility } from './preset-visibility.ts'
-import { cacheTtlMinutes, defaultCacheTtl } from './keepalive.ts'
 import { REFLECTION_INSTRUCTIONS, REFLECTION_PRESET_ID } from './reflection.ts'
 import { APPROVAL_GRACE_MS, DotError, DotService, messageOf } from './service.ts'
 import { configI18n } from './i18n/index.ts'
@@ -457,8 +456,7 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
         }
         case 'segment.new': return { ok: true, value: await service.newSegment() }
         case 'keepalive': {
-          const model = host.dotModel()
-          return { ok: true, value: model ? { provider: model.provider, model: model.model, minutes: cacheTtlMinutes(store.settings, model.provider, model.model), defaultMinutes: defaultCacheTtl(model.provider, model.model) } : undefined }
+          return { ok: true, value: service.keepaliveInfo() }
         }
         case 'trajectory': {
           const id = await ensureDot()

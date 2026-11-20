@@ -543,6 +543,19 @@ export class DotService {
       const error = factoryResetTokenError(this.resetArmed, token, this.now())
       this.resetArmed = undefined
       if (error) throw new DotError('dot/invalid', error)
+      // Cancel before sessions stop or the store is wiped: those both make
+      // isQuiet true and would otherwise let a waiting check install.
+      this.updates.interrupt()
+      try {
+        return await this.runFactoryReset()
+      } catch (failure) {
+        this.updates.settingsChanged()
+        throw failure
+      }
+    })
+  }
+
+  private async runFactoryReset(): Promise<FactoryResetResult> {
       const archiveIds = factoryResetArchiveIds(this.store)
       // The ownership list includes confirmed and uncertain host calls, but not
       // placeholder ids belonging to reservations that never reached the host.
@@ -611,7 +624,6 @@ export class DotService {
         data: { archived: archived.length, archiveFailed: archiveFailed.length },
       })
       return { archived, archiveFailed, sessionId, at: this.now() }
-    })
   }
 
   /** Queue, agent idle, and owned jobs — the same facts finishSettled needs. Missing proof is UNKNOWN. */

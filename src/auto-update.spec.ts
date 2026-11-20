@@ -346,4 +346,82 @@ describe('AutoUpdater checks', () => {
     expect(status.lastResult).toMatchObject({ kind: 'updated', from: '0.3.0', to: '0.3.1' })
     expect(h.clock.delays()).toEqual([])
   })
+
+  it('keeps the pending marker when the plugin manager is unavailable', async () => {
+    const h = harness()
+    const pending = { from: '0.3.0', to: '0.3.1', at: AFTER_NOON }
+    await h.store.setUpdateStatus({ lastCheckAt: AFTER_NOON, lastResult: { kind: 'up-to-date', at: AFTER_NOON }, pending })
+    h.updater.start()
+    await flush()
+    expect(h.store.updateStatus?.pending).toEqual(pending)
+    expect(h.store.updateStatus?.lastResult).toMatchObject({ kind: 'up-to-date' })
+    expect(h.logs.some(row => row.includes('pending update resolution failed'))).toBe(true)
+    expect(h.clock.delays()).toEqual([180_000])
+  })
+
+  it('retries pending resolution after boot settle when the manager was missing', async () => {
+    const h = harness()
+    const pending = { from: '0.3.0', to: '0.3.1', at: AFTER_NOON }
+    await h.store.setUpdateStatus({ pending })
+    h.updater.start()
+    await flush()
+    expect(h.clock.delays()).toEqual([180_000])
+    const { manager } = fakeManager({ bundles: [{ name: PACKAGE_NAME, version: '0.3.1', update: 'registry' }] })
+    h.mgr.current = manager
+    h.clock.fire()
+    await flush()
+    expect(h.store.updateStatus?.lastResult).toMatchObject({ kind: 'updated', from: '0.3.0', to: '0.3.1' })
+    expect(h.store.updateStatus?.pending).toBeUndefined()
+  })
+
+  it('keeps the pending marker when listing bundles fails', async () => {
+    const { manager } = fakeManager()
+    manager.listBundles = async () => { throw new Error('manager not ACTIVE') }
+    const h = harness({ manager })
+    const pending = { from: '0.3.0', to: '0.3.1', at: AFTER_NOON }
+    await h.store.setUpdateStatus({ pending })
+    h.updater.start()
+    await flush()
+    expect(h.store.updateStatus?.pending).toEqual(pending)
+    expect(h.logs.some(row => row.includes('manager not ACTIVE'))).toBe(true)
+  })
+
+  it('resolves a kept pending marker once the manager is available', async () => {
+    const h = harness()
+    const pending = { from: '0.3.0', to: '0.3.1', at: AFTER_NOON }
+    await h.store.setUpdateStatus({ pending })
+    h.updater.start()
+    await flush()
+    expect(h.store.updateStatus?.pending).toEqual(pending)
+    const { manager } = fakeManager({ bundles: [{ name: PACKAGE_NAME, version: '0.3.1', update: 'registry' }] })
+    h.mgr.current = manager
+    h.updater.start()
+    await flush()
+    expect(h.store.updateStatus?.lastResult).toMatchObject({ kind: 'updated', from: '0.3.0', to: '0.3.1' })
+    expect(h.store.updateStatus?.pending).toBeUndefined()
+  })
+
+  it('does not start a new apply while a pending marker is still unresolved', async () => {
+    const { manager, calls } = fakeManager()
+    manager.listBundles = async () => { throw new Error('manager not ACTIVE') }
+    const h = harness({ manager })
+    const pending = { from: '0.3.0', to: '0.3.1', at: AFTER_NOON }
+    await h.store.setUpdateStatus({ pending })
+    const status = await h.updater.checkNow()
+    expect(status.pending).toEqual(pending)
+    expect(calls.updatedTo).toBeUndefined()
+  })
+
+  it('does not install when an in-flight quiet wait is interrupted then the store goes quiet', async () => {
+    const { manager, calls } = fakeManager()
+    const h = harness({ manager, quiet: false })
+    const checking = h.updater.checkNow()
+    await flush()
+    expect(h.clock.delays()).toEqual([60_000])
+    h.updater.interrupt()
+    h.quiet.value = true
+    h.clock.fire()
+    await checking
+    expect(calls.updatedTo).toBeUndefined()
+  })
 })

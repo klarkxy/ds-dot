@@ -145,7 +145,19 @@ export class AutoUpdater {
   /** Resolve an apply the last process never saw settle, then arm the daily schedule. */
   start(): void {
     if (this.disposed || this.deps.settings().autoUpdate === false) return
-    void this.resolvePending().then(() => this.scheduleNext(), () => this.scheduleNext())
+    void this.resolvePending().then(() => {
+      if (this.disposed) return
+      // Manager may not be ACTIVE yet after a hot-swap; retry once after boot work settles.
+      if (this.deps.store.updateStatus?.pending) {
+        this.clearCheckTimer()
+        this.checkTimer = this.deps.timer.set(() => {
+          this.checkTimer = undefined
+          void this.resolvePending().then(() => this.scheduleNext(), () => this.scheduleNext())
+        }, MISSED_DELAY_MS)
+        return
+      }
+      this.scheduleNext()
+    }, () => this.scheduleNext())
   }
 
   /** An immediate check; one already running is shared. The daily schedule re-arms afterwards. */
@@ -172,6 +184,16 @@ export class AutoUpdater {
       return
     }
     this.start()
+  }
+
+  /**
+   * Drop an in-flight check and its quiet wait without changing the on/off
+   * setting. Factory reset calls this before wiping the store so a wait that
+   * becomes quiet mid-reset cannot install onto empty state.
+   */
+  interrupt(): void {
+    this.supersede()
+    this.clearCheckTimer()
   }
 
   dispose(): void {
@@ -205,6 +227,9 @@ export class AutoUpdater {
   }
 
   private async runCheck(gen: number): Promise<UpdateStatus> {
+    await this.resolvePending()
+    // An unresolved swap (manager not yet ACTIVE) must not start another apply.
+    if (this.deps.store.updateStatus?.pending) return this.deps.store.updateStatus
     const result = await this.evaluate(gen)
     // A check superseded while it waited for quiet leaves the status to the newer check.
     if (result === undefined) return this.deps.store.updateStatus ?? {}
@@ -298,11 +323,7 @@ export class AutoUpdater {
       this.traceResult(result)
     } catch (error) {
       this.deps.log?.(`dsh-dot: pending update resolution failed: ${textOf(error)}`)
-      const kept: UpdateStatus = {
-        ...status?.lastCheckAt !== undefined ? { lastCheckAt: status.lastCheckAt } : {},
-        ...status?.lastResult ? { lastResult: status.lastResult } : {},
-      }
-      await this.save(Object.keys(kept).length > 0 ? kept : undefined)
+      // Leave pending in place so a later start (manager not yet ACTIVE) can still judge the swap.
     }
   }
 

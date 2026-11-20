@@ -90,7 +90,7 @@ export function installToolAttribution(tools: object | undefined, owners: Map<st
     owners.set(name, owner)
     let released = false
     return () => {
-      if (!released) { released = true; owners.delete(name) }
+      if (!released) { released = true; if (owners.get(name) === owner) owners.delete(name) }
       return dispose()
     }
   }

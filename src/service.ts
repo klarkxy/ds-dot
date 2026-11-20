@@ -124,8 +124,8 @@ export class DotService {
   private resetArmed?: { readonly token: string; readonly expiresAt: number }
   private currentLocale: CopyLocale | undefined
   private readonly timer: Timer
-  /** The armed cache-keepalive schedule of the current idle stretch. */
-  private keepalive?: { readonly sessionId: string; readonly intervalMs: number; pings: number; handle?: unknown }
+  /** The armed cache-keepalive of the current idle stretch; lastAt is the last turn end or ping. */
+  private keepalive?: { readonly sessionId: string; pings: number; lastAt: number; handle?: unknown }
   /** The last successful cache ping, scoped to the dot session it warmed. */
   private lastKeepaliveAt?: { readonly sessionId: string; readonly at: number }
   readonly cards: DotCards
@@ -437,6 +437,8 @@ export class DotService {
       if (!dot) return
       await this.dueBeforeDelivery(dot)
       this.applyModel(dot)
+      // A new TTL moves the armed ping without resetting the stretch's count.
+      if (this.keepalive) this.scheduleKeepalive(this.keepalive)
     }).catch(error => { this.options.log?.(`dsh-dot: settings not applied to dot's session: ${messageOf(error)}`) })
   }
 
@@ -731,18 +733,30 @@ export class DotService {
     this.cancelKeepalive()
     if (this.closing || !replied || this.host.isRunning(dot)) return
     if (!this.store.list().some(task => task.status === 'running')) return
-    const model = this.host.dotModel?.()
-    if (!model) return
-    const intervalMs = keepaliveIntervalMs(cacheTtlMinutes(this.store.settings, model.provider, model.model))
-    if (intervalMs === undefined) return
-    const armed: NonNullable<DotService['keepalive']> = { sessionId: dot, intervalMs, pings: 0 }
-    armed.handle = this.timer.set(() => { armed.handle = undefined; this.keepaliveTick(armed) }, intervalMs)
+    if (!this.host.sessionModel?.(dot)) return
+    const armed: NonNullable<DotService['keepalive']> = { sessionId: dot, pings: 0, lastAt: this.now() }
     this.keepalive = armed
+    this.scheduleKeepalive(armed)
   }
 
   private cancelKeepalive(): void {
     if (this.keepalive?.handle !== undefined) this.timer.clear(this.keepalive.handle)
     this.keepalive = undefined
+  }
+
+  /**
+   * Arm the next ping from the TTL in force right now — a settings change can
+   * move it without touching the stretch's ping count. A 0 TTL leaves the
+   * record standing so turning it back on resumes the stretch.
+   */
+  private scheduleKeepalive(armed: NonNullable<DotService['keepalive']>): void {
+    if (armed.handle !== undefined) this.timer.clear(armed.handle)
+    armed.handle = undefined
+    if (this.keepalive !== armed) return
+    const model = this.host.sessionModel?.(armed.sessionId)
+    const intervalMs = model ? keepaliveIntervalMs(cacheTtlMinutes(this.store.settings, model.provider, model.model)) : undefined
+    if (intervalMs === undefined) return
+    armed.handle = this.timer.set(() => { armed.handle = undefined; this.keepaliveTick(armed) }, Math.max(0, armed.lastAt + intervalMs - this.now()))
   }
 
   private keepaliveTick(armed: NonNullable<DotService['keepalive']>): void {
@@ -752,6 +766,10 @@ export class DotService {
       const holds = this.store.dotSessionId === armed.sessionId && this.store.segment?.sessionId === armed.sessionId
         && !this.host.isRunning(armed.sessionId) && this.store.list().some(task => task.status === 'running')
       if (!holds) { this.cancelKeepalive(); return }
+      const model = this.host.sessionModel?.(armed.sessionId)
+      const intervalMs = model ? keepaliveIntervalMs(cacheTtlMinutes(this.store.settings, model.provider, model.model)) : undefined
+      // A TTL turned off mid-stretch pauses the pings; the record survives.
+      if (intervalMs === undefined) return
       if (armed.pings >= KEEPALIVE_MAX_PINGS) {
         this.cancelKeepalive()
         const view = await this.host.dotContext(armed.sessionId)
@@ -767,10 +785,11 @@ export class DotService {
       let usage: DotContextUsage | undefined
       await this.host.ping(armed.sessionId, seen => { usage = addUsage(usage, seen) })
       if (usage) await this.store.addUsageCarry(usage)
-      this.lastKeepaliveAt = { sessionId: armed.sessionId, at: this.now() }
+      armed.lastAt = this.now()
+      this.lastKeepaliveAt = { sessionId: armed.sessionId, at: armed.lastAt }
       armed.pings += 1
       this.emit({ event: DOT_TRACE.keepalivePing, message: 'Kept the prompt cache warm.', sessionId: armed.sessionId, data: { pings: armed.pings } })
-      if (this.keepalive === armed) armed.handle = this.timer.set(() => { armed.handle = undefined; this.keepaliveTick(armed) }, armed.intervalMs)
+      this.scheduleKeepalive(armed)
     }).catch(error => {
       this.options.log?.(`dsh-dot: cache keepalive failed: ${messageOf(error)}`)
       this.emit({ event: DOT_TRACE.keepaliveFailed, level: 'warn', message: 'A cache keepalive ping failed.', sessionId: armed.sessionId })

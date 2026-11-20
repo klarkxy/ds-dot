@@ -137,6 +137,8 @@ export interface DotHost {
   ping(sessionId: string, onUsage?: (usage: DotContextUsage) => void): Promise<void>
   /** The provider and model dot's next request would run on; undefined when none is known. */
   dotModel(): { provider: string; model: string } | undefined
+  /** The provider and model the session's own request header carries — what a replayed prefix would run on. */
+  sessionModel(sessionId: string): { provider: string; model: string } | undefined
   /** The model dot's next segment would run on, as `provider/model@effort`; undefined when none is known. */
   modelKey(): string | undefined
   /** The human's message to dot, optionally carrying notices into the same turn; steers a running turn, starts one when idle. */
@@ -771,6 +773,10 @@ export function bindHost(get: Get, log?: (message: string) => void, modelOf?: ()
       await streamOnPrefix(sessionId, '.', 1, onUsage)
     },
     dotModel: () => wantedModel(),
+    sessionModel(sessionId) {
+      const config = registryAgent(sessionId)?.session.requestHeader()?.config
+      return config?.provider && config.model ? { provider: config.provider, model: config.model } : undefined
+    },
     modelKey() {
       const wanted = wantedModel()
       return wanted ? `${wanted.provider}/${wanted.model}@${wanted.reasoningEffort ?? ''}` : undefined

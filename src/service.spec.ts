@@ -51,6 +51,7 @@ function fakeHost() {
   let presetsFail = false
   let pingFails = false
   let dotModel: { provider: string; model: string } | undefined = { provider: 'p', model: 'base' }
+  let sessionModel: { provider: string; model: string } | undefined = { provider: 'p', model: 'base' }
   const pings: string[] = []
   const reflectionHooks: { promptHook?: (sessionId: string, text: string) => void | Promise<void> } = {}
   const host: DotHost = {
@@ -134,6 +135,7 @@ function fakeHost() {
       onUsage?.({ input: 5, cacheRead: 90, cacheWrite: 0, output: 1 })
     },
     dotModel: () => dotModel,
+    sessionModel: () => sessionModel,
     handoffView(fromSessionId, toSessionId) {
       calls.push(`handoff-view ${fromSessionId} ${toSessionId}`)
     },
@@ -157,6 +159,7 @@ function fakeHost() {
     setContext: (next: DotContextView) => { context = next },
     setModel: (next: string | undefined) => { model = next },
     setDotModel: (next: { provider: string; model: string } | undefined) => { dotModel = next },
+    setSessionModel: (next: { provider: string; model: string } | undefined) => { sessionModel = next },
     failPing: () => { pingFails = true },
     failCreate: (fails: boolean) => { createFails = fails },
     failSummary: () => { summaryFails = true },
@@ -521,6 +524,69 @@ describe('DotService cache keepalive', () => {
     expect(h.delays()).not.toContain(240_000)
     await tick(h)
     expect(h.pings).toEqual([])
+  })
+
+  it('pauses an armed keepalive when the TTL is set to 0, without a rollover', async () => {
+    const h = setup()
+    const dot = await arm(h)
+    h.setContext({ live: true, compactions: 0, contextWindow: 128_000, usedTokens: 40_000, rolloverAt: 70_000 })
+    for (let i = 0; i < 8; i++) await tick(h)
+    expect(h.pings).toHaveLength(8)
+    // A timer still in flight when the TTL was cut must not fire into it.
+    await h.store.setSettings({ ...h.store.settings, cacheTtl: { 'p/base': 0 } })
+    await tick(h)
+    expect(h.pings).toHaveLength(8)
+    expect(h.store.dotSessionId).toBe(dot)
+    await h.service.settingsChanged()
+    expect(h.delays()).not.toContain(240_000)
+  })
+
+  it('moves the next ping when the TTL changes, keeping the ping count', async () => {
+    const h = setup()
+    const dot = await arm(h)
+    h.setContext({ live: true, compactions: 0, contextWindow: 128_000, usedTokens: 40_000, rolloverAt: 70_000 })
+    await tick(h)
+    expect(h.pings).toEqual([dot])
+    h.advance(60_000)
+    await h.store.setSettings({ ...h.store.settings, cacheTtl: { 'p/base': 10 } })
+    await h.service.settingsChanged()
+    // The new timer lands 8 min after the last ping, not 8 min from now.
+    expect(h.delays()).toContain(420_000)
+    for (let i = 0; i < 7; i++) await tick(h)
+    expect(h.pings).toHaveLength(8)
+    await tick(h)
+    expect(h.store.dotSessionId).not.toBe(dot)
+    expect(h.store.segment?.reason).toBe('idle-expired')
+  })
+
+  it('re-arms a paused keepalive from the last activity when the TTL is turned back on', async () => {
+    const h = setup({ cacheTtl: { 'p/base': 0 } })
+    const dot = await arm(h)
+    expect(h.delays()).not.toContain(240_000)
+    h.advance(60_000)
+    await h.store.setSettings({ ...h.store.settings, cacheTtl: { 'p/base': 5 } })
+    await h.service.settingsChanged()
+    // The timer counts from the turn's end, so enabling mid-stretch lands it sooner.
+    expect(h.delays()).toContain(180_000)
+    h.advance(200_000)
+    await h.store.setSettings({ ...h.store.settings, cacheTtl: { 'p/base': 0 } })
+    await h.service.settingsChanged()
+    await h.store.setSettings({ ...h.store.settings, cacheTtl: { 'p/base': 5 } })
+    await h.service.settingsChanged()
+    // Past the boundary the ping is due right away.
+    expect(h.delays()).toContain(0)
+    await tick(h)
+    expect(h.pings).toEqual([dot])
+  })
+
+  it('times the ping off the model the live session actually runs', async () => {
+    const h = setup()
+    h.setDotModel({ provider: 'p', model: 'deepseek-v4' })
+    h.setSessionModel({ provider: 'p', model: 'claude-9' })
+    await arm(h)
+    // The wanted model would give 48 min; the session's own model gives 4.
+    expect(h.delays()).toContain(240_000)
+    expect(h.delays()).not.toContain(2_880_000)
   })
 
   it('does not arm without a running task', async () => {

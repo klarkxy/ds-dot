@@ -63,6 +63,7 @@ function bodyKey(row: RecipeBody & { readonly name?: string }): string {
     name: row.name ?? null,
     goal: row.goal,
     requirements: row.requirements,
+    requirementsFromGoal: requirementsFollowGoal(row),
     constraints: row.constraints ?? null,
     notes: row.notes ?? null,
     deliverableLanguage: row.deliverableLanguage ?? null,

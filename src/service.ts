@@ -1540,6 +1540,7 @@ export class DotService {
       base = {
         goal: material?.goal ?? '',
         requirements: material?.requirements ?? [],
+        ...(material?.requirementsFromGoal !== undefined ? { requirementsFromGoal: material.requirementsFromGoal } : {}),
         ...(material?.constraints ? { constraints: material.constraints } : {}),
         ...(material?.deliverableLanguage ? { deliverableLanguage: material.deliverableLanguage } : {}),
         dir: change.cwd,
@@ -1548,13 +1549,16 @@ export class DotService {
       }
     }
     const body = this.recipeArgsBody(base, args)
+    if (args.requirements !== undefined && body.requirements === undefined) {
+      throw new DotError('dot/invalid', 'requirements must be a JSON array')
+    }
     const requirementsFromGoal = args.requirements === undefined && (base === undefined || requirementsFollowGoal(base))
     const requirements = requirementsFromGoal ? goalRequirements(body.goal) : body.requirements ?? goalRequirements(body.goal)
     if (!body.dir) throw new DotError('dot/invalid', 'save requires an absolute dir (or from_task)')
     const now = this.now()
     let id = ''
     do { id = `rcp-${randomUUID().slice(0, 6)}` } while (this.store.recipe(id))
-    const record: RecipeRecord = { ...body, requirements, ...(requirementsFromGoal ? { requirementsFromGoal: true } : {}), dir: body.dir, id, name, revision: 1, history: [], outcomes: [], createdAt: now, updatedAt: now }
+    const record: RecipeRecord = { ...body, requirements, requirementsFromGoal, dir: body.dir, id, name, revision: 1, history: [], outcomes: [], createdAt: now, updatedAt: now }
     await this.store.putRecipe(record)
     return `Saved recipe ${record.id} "${record.name}" rev 1.`
   }
@@ -1564,17 +1568,20 @@ export class DotService {
     if (!reason) throw new DotError('dot/invalid', 'revise requires reason naming what changed')
     const body = this.recipeArgsBody(recipe, args)
     const explicitRequirements = args.requirements !== undefined
+    if (explicitRequirements && body.requirements === undefined) {
+      throw new DotError('dot/invalid', 'requirements must be a JSON array')
+    }
     const requirementsFromGoal = !explicitRequirements && requirementsFollowGoal(recipe)
     const requirements = explicitRequirements
-      ? body.requirements ?? []
+      ? body.requirements!
       : requirementsFromGoal ? goalRequirements(body.goal) : recipe.requirements
     const name = (typeof args.name === 'string' && args.name.trim() ? args.name.trim() : recipe.name)
     const clash = this.store.recipe(name)
     if (clash && clash.id !== recipe.id) throw new DotError('dot/invalid', `a recipe named "${name}" exists already`)
-    if (sameRecipeBody({ ...body, requirements, name }, recipe)) {
+    if (sameRecipeBody({ ...body, requirements, requirementsFromGoal, name }, recipe)) {
       throw new DotError('dot/invalid', 'revise changes nothing')
     }
-    const next = reviseRecipeRecord(recipe, { ...body, requirements, ...(requirementsFromGoal ? { requirementsFromGoal: true } : {}), name, reason }, this.now())
+    const next = reviseRecipeRecord(recipe, { ...body, requirements, requirementsFromGoal, name, reason }, this.now())
     await this.store.putRecipe(next)
     return `Revised recipe ${recipe.id} "${name}" → rev ${next.revision}.`
   }
@@ -2539,6 +2546,9 @@ export class DotService {
     const goal = text('goal')
     const dir = text('dir')
     const explicitRequirements = requirementList(args.requirements)
+    if (args.requirements !== undefined && explicitRequirements === undefined) {
+      throw new DotError('dot/invalid', 'requirements must be a JSON array')
+    }
     const steps = args.steps === undefined ? undefined : stepList(args.steps)
     const constraints = constraintList(args.constraints)
     const userRequest = text('user_request')
@@ -2565,6 +2575,7 @@ export class DotService {
         change = await this.store.work.createChange({
           title: createTitle, cwd: createDir, goal: createGoal,
           requirements,
+          requirementsFromGoal: explicitRequirements === undefined && (recipe === undefined || requirementsFollowGoal(recipe)),
           ...(steps ? { steps } : {}),
           ...(createConstraints !== undefined ? { constraints: createConstraints } : {}),
           ...(userRequest !== undefined ? { userRequest } : {}),
@@ -2587,11 +2598,19 @@ export class DotService {
     const changeId = text('task_id') ?? ''
     if (!changeId) throw new DotError('dot/invalid', 'task_id is required')
     const requirements = explicitRequirements
+    const currentChange = this.store.work.change(changeId)
+    const previousInput = currentChange ? this.store.work.input(currentChange.currentInputRef) : undefined
+    const requirementsFromGoal = explicitRequirements !== undefined
+      ? false
+      : previousInput ? requirementsFollowGoal(previousInput) : undefined
+    const changesInput = goal !== undefined || explicitRequirements !== undefined || steps !== undefined || dir !== undefined
+      || constraints !== undefined || userRequest !== undefined || deliverableLanguage !== undefined
     const revised = await this.store.work.reviseChange(changeId, {
       ...(title !== undefined ? { title } : {}),
       ...(goal !== undefined ? { goal } : {}),
       ...(dir !== undefined ? { cwd: dir } : {}),
       ...(requirements ? { requirements } : {}),
+      ...(changesInput && requirementsFromGoal !== undefined ? { requirementsFromGoal } : {}),
       ...(steps ? { steps } : {}),
       ...inputFields,
       ...(maxConcurrentRuns !== undefined ? { maxConcurrentRuns } : {}),
@@ -3100,6 +3119,7 @@ export class DotService {
         cwd,
         goal,
         requirements: [{ requirementRef: 'goal', text: goal, required: true }],
+        requirementsFromGoal: true,
         ...(input.priority !== undefined ? { priority: input.priority } : {}),
         at: this.now(),
       })

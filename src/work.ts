@@ -81,6 +81,8 @@ export interface InputRecord {
   readonly revision: number
   readonly goal: string
   readonly requirements: readonly Requirement[]
+  /** Whether the implicit goal requirement follows later goal edits. */
+  readonly requirementsFromGoal?: boolean
   readonly steps: readonly StepSpec[]
   readonly constraints?: readonly Constraint[]
   readonly userRequest?: string
@@ -231,7 +233,7 @@ export const changeSchema = z.object({
 })
 export const inputSchema = z.object({
   id: z.string().min(1), changeId: z.string().min(1), revision: z.number().int().positive(), goal: z.string(),
-  requirements: z.array(requirementSchema), steps: z.array(stepSpecSchema),
+  requirements: z.array(requirementSchema), requirementsFromGoal: z.boolean().optional(), steps: z.array(stepSpecSchema),
   constraints: z.array(constraintSchema).optional(),
   userRequest: z.string().optional(), deliverableLanguage: z.string().optional(),
   designNotes: z.string().optional(), supersedes: z.string().optional(),
@@ -793,7 +795,7 @@ export class WorkBook {
     })
   }
 
-  createChange(input: { title: string; cwd: string; goal: string; requirements?: readonly Requirement[]; steps?: readonly StepSpec[]; source?: string; priority?: 1 | 2 | 3; maxConcurrentRuns?: number; constraints?: readonly Constraint[]; userRequest?: string; deliverableLanguage?: string; recipe?: { readonly id: string; readonly revision: number }; at?: number }): Promise<ChangeRecord> {
+  createChange(input: { title: string; cwd: string; goal: string; requirements?: readonly Requirement[]; requirementsFromGoal?: boolean; steps?: readonly StepSpec[]; source?: string; priority?: 1 | 2 | 3; maxConcurrentRuns?: number; constraints?: readonly Constraint[]; userRequest?: string; deliverableLanguage?: string; recipe?: { readonly id: string; readonly revision: number }; at?: number }): Promise<ChangeRecord> {
     return this.exclusive(async () => {
       this.assertRecovered()
       const requirements = input.requirements ?? []
@@ -803,6 +805,7 @@ export class WorkBook {
       const at = input.at ?? Date.now()
       const changeId = `c-${++this.changeSeq}`
       const inputRow = this.inputRow(changeId, 1, input.goal, requirements, steps, input.source ?? 'user', at, {
+        requirementsFromGoal: input.requirementsFromGoal,
         constraints: input.constraints,
         userRequest: input.userRequest,
         deliverableLanguage: input.deliverableLanguage,
@@ -824,14 +827,14 @@ export class WorkBook {
     })
   }
 
-  reviseChange(changeId: string, patch: { goal?: string; requirements?: readonly Requirement[]; steps?: readonly StepSpec[]; cwd?: string; constraints?: readonly Constraint[]; userRequest?: string; deliverableLanguage?: string; title?: string; priority?: 1 | 2 | 3; maxConcurrentRuns?: number; source?: string; at?: number }): Promise<ChangeRecord | WorkRefusal> {
+  reviseChange(changeId: string, patch: { goal?: string; requirements?: readonly Requirement[]; requirementsFromGoal?: boolean; steps?: readonly StepSpec[]; cwd?: string; constraints?: readonly Constraint[]; userRequest?: string; deliverableLanguage?: string; title?: string; priority?: 1 | 2 | 3; maxConcurrentRuns?: number; source?: string; at?: number }): Promise<ChangeRecord | WorkRefusal> {
     return this.exclusive(async () => {
       const refused = this.recoveryRefusal()
       if (refused) return refused
       const current = this.changes.get(changeId)
       if (!current) return { ok: false, code: 'missing', message: `unknown change ${changeId}` }
       const at = patch.at ?? Date.now()
-      const semantic = patch.goal !== undefined || patch.requirements !== undefined || patch.steps !== undefined || patch.cwd !== undefined || patch.constraints !== undefined || patch.userRequest !== undefined || patch.deliverableLanguage !== undefined
+      const semantic = patch.goal !== undefined || patch.requirements !== undefined || patch.requirementsFromGoal !== undefined || patch.steps !== undefined || patch.cwd !== undefined || patch.constraints !== undefined || patch.userRequest !== undefined || patch.deliverableLanguage !== undefined
       if (!semantic) {
         const next: ChangeRecord = {
           ...current,
@@ -847,12 +850,17 @@ export class WorkBook {
       }
       const previous = this.inputs.get(current.currentInputRef)
       if (!previous) return { ok: false, code: 'missing', message: `missing input ${current.currentInputRef}` }
-      const requirements = patch.requirements ?? previous.requirements
+      const requirementsFromGoal = patch.requirementsFromGoal ?? (patch.requirements !== undefined ? false : previous.requirementsFromGoal)
+      const nextGoal = patch.goal ?? previous.goal
+      const requirements = patch.requirements ?? (requirementsFromGoal && patch.goal !== undefined
+        ? [{ requirementRef: 'goal', text: nextGoal, required: true }]
+        : previous.requirements)
       const steps = patch.steps ?? previous.steps
       const constraints = patch.constraints !== undefined ? patch.constraints : previous.constraints
       const problem = inputContractError(requirements, steps, constraints)
       if (problem) return { ok: false, code: 'invalid', message: problem }
-      const inputRow = this.inputRow(changeId, current.currentRevision + 1, patch.goal ?? previous.goal, requirements, steps, patch.source ?? 'revision', at, {
+      const inputRow = this.inputRow(changeId, current.currentRevision + 1, nextGoal, requirements, steps, patch.source ?? 'revision', at, {
+        requirementsFromGoal,
         constraints,
         userRequest: patch.userRequest !== undefined ? patch.userRequest : previous.userRequest,
         deliverableLanguage: patch.deliverableLanguage !== undefined ? patch.deliverableLanguage : previous.deliverableLanguage,
@@ -2151,11 +2159,12 @@ export class WorkBook {
     return found
   }
 
-  private inputRow(changeId: string, revision: number, goal: string, requirements: readonly Requirement[], steps: readonly StepSpec[], source: string, at: number, fields: { readonly constraints?: readonly Constraint[]; readonly userRequest?: string; readonly deliverableLanguage?: string; readonly supersedes?: string } = {}): InputRecord {
+  private inputRow(changeId: string, revision: number, goal: string, requirements: readonly Requirement[], steps: readonly StepSpec[], source: string, at: number, fields: { readonly requirementsFromGoal?: boolean; readonly constraints?: readonly Constraint[]; readonly userRequest?: string; readonly deliverableLanguage?: string; readonly supersedes?: string } = {}): InputRecord {
     const id = `input-${++this.inputSeq}`
     return {
       id, changeId, revision, goal,
       requirements: requirements.map(copyRequirement),
+      ...(fields.requirementsFromGoal !== undefined ? { requirementsFromGoal: fields.requirementsFromGoal } : {}),
       steps: steps.map(copyStep),
       source, createdAt: at,
       ...(fields.constraints !== undefined ? { constraints: fields.constraints.map(item => ({ constraintRef: item.constraintRef, text: item.text })) } : {}),

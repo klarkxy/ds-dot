@@ -2462,6 +2462,52 @@ describe('task recipes', () => {
     await h.service.dispose()
   })
 
+  it('preserves explicit goal-shaped requirements and rejects invalid requirement lists', async () => {
+    const h = setup()
+    const cwd = dir()
+    const explicit = [{ requirementRef: 'goal', text: 'fixed goal', required: true }]
+    await h.service.manageRecipe({ action: 'save', name: 'fixed', goal: 'fixed goal', requirements: JSON.stringify(explicit), dir: cwd })
+    const saved = JSON.parse(await h.service.manageRecipe({ action: 'read', recipe: 'fixed' })) as { requirementsFromGoal: boolean }
+    expect(saved.requirementsFromGoal).toBe(false)
+    const overridden = JSON.parse(await h.service.manageTask({ action: 'create', recipe: 'fixed', goal: 'other goal' })) as { id: string }
+    expect(h.store.work.input(h.store.work.change(overridden.id)!.currentInputRef)!.requirements).toEqual(explicit)
+    await h.service.manageRecipe({ action: 'revise', recipe: 'fixed', goal: 'renamed goal', reason: 'rename only' })
+    const renamed = JSON.parse(await h.service.manageRecipe({ action: 'read', recipe: 'fixed' })) as { requirements: unknown; requirementsFromGoal: boolean }
+    expect(renamed).toMatchObject({ requirements: explicit, requirementsFromGoal: false })
+
+    const beforeInvalid = await h.service.manageRecipe({ action: 'read', recipe: 'fixed' })
+    await expect(h.service.manageRecipe({ action: 'revise', recipe: 'fixed', requirements: 'not json', reason: 'bad input' })).rejects.toThrow(/JSON array/)
+    expect(await h.service.manageRecipe({ action: 'read', recipe: 'fixed' })).toBe(beforeInvalid)
+    await expect(h.service.manageRecipe({ action: 'save', name: 'bad', goal: 'g', requirements: '{}', dir: cwd })).rejects.toThrow(/JSON array/)
+
+    await h.service.manageRecipe({ action: 'save', name: 'pin', goal: 'pin me', dir: cwd })
+    const pinnedRequirements = JSON.stringify([{ requirementRef: 'goal', text: 'pin me', required: true }])
+    await h.service.manageRecipe({ action: 'revise', recipe: 'pin', requirements: pinnedRequirements, reason: 'pin the acceptance condition' })
+    const pinned = JSON.parse(await h.service.manageRecipe({ action: 'read', recipe: 'pin' })) as { revision: number; requirementsFromGoal: boolean }
+    expect(pinned).toMatchObject({ revision: 2, requirementsFromGoal: false })
+    const pinnedTask = JSON.parse(await h.service.manageTask({ action: 'create', recipe: 'pin', goal: 'different goal' })) as { id: string }
+    expect(h.store.work.input(h.store.work.change(pinnedTask.id)!.currentInputRef)!.requirements).toEqual(JSON.parse(pinnedRequirements))
+
+    const taskRequirements = [{ requirementRef: 'goal', text: 'task goal', required: true }]
+    const explicitTask = JSON.parse(await h.service.manageTask({
+      action: 'create', title: 'Explicit', goal: 'task goal', requirements: JSON.stringify(taskRequirements), dir: cwd,
+    })) as { id: string }
+    expect(h.store.work.input(h.store.work.change(explicitTask.id)!.currentInputRef)!.requirementsFromGoal).toBe(false)
+    await h.service.manageRecipe({ action: 'save', name: 'task-copy', from_task: explicitTask.id, goal: 'new copied goal' })
+    const copied = JSON.parse(await h.service.manageRecipe({ action: 'read', recipe: 'task-copy' })) as { requirements: unknown; requirementsFromGoal: boolean }
+    expect(copied).toMatchObject({ requirements: taskRequirements, requirementsFromGoal: false })
+
+    const autoTask = JSON.parse(await h.service.manageTask({ action: 'create', title: 'Auto', goal: 'auto goal', dir: cwd })) as { id: string }
+    expect(h.store.work.input(h.store.work.change(autoTask.id)!.currentInputRef)!.requirementsFromGoal).toBe(true)
+    await h.service.manageTask({ action: 'revise', task_id: autoTask.id, goal: 'revised auto goal' })
+    const revisedInput = h.store.work.input(h.store.work.change(autoTask.id)!.currentInputRef)!
+    expect(revisedInput).toMatchObject({
+      requirementsFromGoal: true,
+      requirements: [{ requirementRef: 'goal', text: 'revised auto goal', required: true }],
+    })
+    await h.service.dispose()
+  })
+
   it('starts note-free recipe tasks, restores defaults by run_id and preflights inherited write access', async () => {
     const h = setup()
     const cwd = dir()

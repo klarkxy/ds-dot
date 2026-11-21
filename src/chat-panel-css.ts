@@ -163,22 +163,6 @@ export const chatCss = settingsCss + `
   min-width: 16px; height: 16px; padding: 0 4px; border-radius: 8px; font-size: 11px; line-height: 16px; font-weight: 500;
   background: var(--dsw-alias-state-warn-primary); color: var(--dsw-alias-label-primary-foreground);
 }
-@container dot-drawer-body (max-width: 439px) {
-  .dsh-dot-chat .dsh-dot-drawer-nav { width: 64px; padding: 8px 4px 18px; align-items: stretch; gap: 3px; }
-  .dsh-dot-chat .dsh-dot-nav-group-label { display: none; }
-  .dsh-dot-chat .dsh-dot-nav-sep { width: 28px; align-self: center; margin: 4px 0; }
-  .dsh-dot-chat .dsh-dot-nav-item {
-    flex-direction: column; justify-content: center; gap: 2px;
-    min-height: 44px; padding: 5px 2px; text-align: center;
-  }
-  .dsh-dot-chat .dsh-dot-nav-label {
-    flex: 0 0 auto; max-width: 100%; font-size: 10px; line-height: 12px; text-align: center;
-  }
-  .dsh-dot-chat .dsh-dot-nav-item .dsh-dot-nav-badge { position: absolute; top: 2px; right: 3px; min-width: 14px; height: 14px; padding: 0 3px; font-size: 10px; line-height: 14px; }
-  .dsh-dot-chat .dsh-dot-nav-item .dsh-dot-dirty-dot { position: absolute; top: 5px; right: 6px; }
-  .dsh-dot-chat .dsh-dot-settings { padding: 14px 14px 28px; }
-  .dsh-dot-chat .dsh-dot-settings[data-tab='trajectory'] { padding: 0; }
-}
 .dsh-dot-chat .dsh-dot-settings-status {
   display: inline-flex; align-items: center; gap: 4px; flex-shrink: 1; min-width: 0; margin-right: 2px; font-size: 12px; line-height: 18px;
   color: var(--dsw-alias-state-success-primary); max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
@@ -190,6 +174,23 @@ export const chatCss = settingsCss + `
 .dsh-dot-chat .dsh-dot-settings[data-tab='trajectory'] { padding: 0; }
 .dsh-dot-chat .dsh-dot-settings[data-tab='trajectory'] .dsh-dot-tr { flex: none; }
 .dsh-dot-chat .dsh-dot-settings[data-tab='trajectory'] .dsh-dot-tr-list { overflow: visible; }
+@container dot-drawer-body (max-width: 439px) {
+  .dsh-dot-chat .dsh-dot-drawer-nav { width: 68px; padding: 8px 4px 18px; align-items: stretch; gap: 3px; }
+  .dsh-dot-chat .dsh-dot-nav-group-label { display: none; }
+  .dsh-dot-chat .dsh-dot-nav-sep { width: 28px; align-self: center; margin: 4px 0; }
+  .dsh-dot-chat .dsh-dot-nav-item {
+    flex-direction: column; justify-content: center; gap: 2px;
+    min-height: 44px; padding: 5px 2px; text-align: center;
+  }
+  .dsh-dot-chat .dsh-dot-nav-label {
+    flex: 0 0 auto; max-width: 100%; font-size: 10px; line-height: 12px; text-align: center;
+    display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2;
+    white-space: normal; overflow-wrap: anywhere;
+  }
+  .dsh-dot-chat .dsh-dot-nav-item .dsh-dot-nav-badge { position: absolute; top: 2px; right: 3px; min-width: 14px; height: 14px; padding: 0 3px; font-size: 10px; line-height: 14px; }
+  .dsh-dot-chat .dsh-dot-nav-item .dsh-dot-dirty-dot { position: absolute; top: 5px; right: 6px; }
+  .dsh-dot-chat .dsh-dot-settings { padding: 14px 14px 28px; }
+}
 .dsh-dot-chat .dsh-dot-trajectory-wrap { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 .dsh-dot-chat .dsh-dot-tasks { display: flex; flex-direction: column; gap: 12px; }
 .dsh-dot-chat .dsh-dot-tasks .dsh-dot-board { padding: 0; height: auto; overflow: visible; }

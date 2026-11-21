@@ -893,6 +893,18 @@ describe('ChatPanel activity and notice cards', () => {
     await verifyCase(undefined, 'p/new', 25)
     await verifyCase({ provider: 'p', model: 'running' }, 'p/running', 30)
   })
+
+  it('orders the narrow drawer container query after base settings padding and wraps long rail labels', () => {
+    const baseRule = '.dsh-dot-chat .dsh-dot-settings { display: flex;'
+    const narrowQuery = '@container dot-drawer-body (max-width: 439px)'
+    const baseIndex = chatCss.indexOf(baseRule)
+    const queryIndex = chatCss.indexOf(narrowQuery)
+    expect(baseIndex).toBeGreaterThan(-1)
+    expect(queryIndex).toBeGreaterThan(baseIndex)
+    const block = chatCss.slice(queryIndex, chatCss.indexOf('\n}\n', queryIndex) + 3)
+    expect(block).toContain('.dsh-dot-chat .dsh-dot-settings { padding: 14px 14px 28px; }')
+    expect(block).toContain('white-space: normal;')
+  })
 })
 
 describe('ChatPanel bottom pin', () => {

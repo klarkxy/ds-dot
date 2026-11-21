@@ -33,7 +33,7 @@ flowchart LR
   M -->|"sync PR, merge commit"| D
 ```
 
-Feature and fix PRs merge into `dev` with a merge commit so the feature branch history stays intact; the merge commit subject is the pull request title plus the PR number, which becomes the release-notes entry. Release (`dev` → `main`), hotfix (`hotfix/*` → `main`), and sync (`main` → `dev`) PRs also use merge commits so `main` and `dev` continue sharing history.
+Feature and fix PRs merge into `dev` with a merge commit so the feature branch history stays intact; the merge commit subject is the pull request title plus the PR number, which becomes the release-notes entry. Because the branch's commits land on `dev` verbatim, tidy them before merging — squashing or rebasing within your own feature branch is welcome and carries none of the shared-history risks of merging `main` and `dev` the same way. Release (`dev` → `main`), hotfix (`hotfix/*` → `main`), and sync (`main` → `dev`) PRs also use merge commits so `main` and `dev` continue sharing history.
 
 1. **Start from an issue.** Open or claim an issue so work is not duplicated (trivial typo or docs fixes may skip this).
 2. **Branch from the latest `dev`** (`feat/<issue>-<slug>`, `fix/<issue>-<slug>`, `refactor/...`, or `docs/...`):

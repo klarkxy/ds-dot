@@ -6,8 +6,10 @@
  * the host feed and redraws on every change.
  */
 import {
-  Button, DisclosureRow, IconCheckOutlineRegular, IconChevronDownOutlineRegular, IconCloseOutlineRegular, IconWarningOutlineRegular,
-  MarkdownText, Modal, modalSelector, StateDot, Tag, TextShimmer, UserMessageBubble,
+  Button, DisclosureRow, IconCheckOutlineRegular, IconChecklistOutlineRegular, IconChevronDownOutlineRegular,
+  IconCloseOutlineRegular, IconCordisPluginOutlineRegular, IconEditOutlineRegular, IconGaugeOutlineRegular,
+  IconInspectOutlineRegular, IconShieldOutlineRegular, IconSlidersTwoOutlineRegular, IconUserOutlineRegular,
+  IconWarningOutlineRegular, MarkdownText, Modal, modalSelector, StateDot, Tag, TextShimmer, Tooltip, UserMessageBubble,
   type MarkdownLabels, type StateDotState, type TagTone,
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type ComponentType, type ReactNode } from 'react'
@@ -18,14 +20,14 @@ import { formatToolDetail, parseNotice, permissionLabel, resolveSessionBadge, su
 import { BellGlyph, Composer, GearGlyph, JumpGlyph, NarrowGlyph, ToolGlyph, WidenGlyph } from './composer.tsx'
 import {
   useBoard, useChatFeed, useContextUse, useDrawerGuard, useLocalEchoes, useReminderRemoval, useScrollPin, useSettings,
-  type DrawerAction, type DrawerTab,
+  type DrawerAction, type DrawerTab, type SettingsSection,
 } from './chat-hooks.ts'
 import { ContextPanel, type ContextApi } from './context-panel.tsx'
 import { PersonaPanel, type KnowledgeApi } from './persona-panel.tsx'
 import { TrajectoryPanel, type TrajectoryApi } from './trajectory-panel.tsx'
 import type { BoardView, ChatItem, ChatSnapshot, DotSettings, RolloverReason } from './contracts.ts'
 import type { ChatImage } from './chat-images.ts'
-import { SettingsPanel, type SaveNotice, type SettingsApi } from './settings-panel.tsx'
+import { SettingsPanel, useSettingProposals, type SaveNotice, type SettingsApi } from './settings-panel.tsx'
 import type { RenderFactorySlot } from '@klarkxy/dsh-plugin-kit/model-picker'
 import { cardCopy, fillText, intlLocale, t, toolLabel, type CopyLocale, type TextKey } from './ui-copy.ts'
 import { WorkBoardPanel, type WorkApi } from './work-board.tsx'
@@ -105,6 +107,23 @@ interface DrawerProps {
   readonly onProposalCount: (count: number) => void
 }
 
+const SETTINGS_SECTIONS: ReadonlySet<DrawerTab> = new Set<SettingsSection>([
+  'proposals', 'general', 'takeover', 'dispatch', 'capabilities',
+])
+
+function isSettingsSection(tab: DrawerTab): tab is SettingsSection {
+  return SETTINGS_SECTIONS.has(tab)
+}
+
+interface DrawerNavItem {
+  readonly value: DrawerTab
+  readonly label: string
+  readonly title: string
+  readonly icon: ReactNode
+  readonly badge?: number
+  readonly dirty?: boolean
+}
+
 /**
  * One drawer docked beside the chat for the board and every settings page.
  * It has no backdrop, so the conversation and the composer stay usable while it is open.
@@ -127,42 +146,84 @@ function WorkDrawer({ locale, api, tab, wide, settings, trajectoryRev, running, 
     return () => clearTimeout(timer)
   }, [saveNotice])
   const isTasks = tab === 'tasks'
-  const items: readonly { value: DrawerTab; label: string; title: string; badge: number }[] = isTasks ? [
-    { value: 'tasks', label: t(locale, 'tasks'), title: t(locale, 'tasks'), badge: waiting },
-  ] : [
-    { value: 'settings', label: t(locale, 'settings'), title: t(locale, 'settings'), badge: proposalCount },
-    { value: 'persona', label: t(locale, 'tabPersona'), title: t(locale, 'personaTitle'), badge: 0 },
-    { value: 'context', label: t(locale, 'tabContext'), title: t(locale, 'ctxTitle'), badge: 0 },
-    { value: 'trajectory', label: t(locale, 'viewTrajectory'), title: t(locale, 'trTitle'), badge: 0 },
+  const reloadSettings = useCallback(() => {
+    api.settings(new AbortController().signal).then(onSaved, () => {})
+  }, [api, onSaved])
+  const proposalState = useSettingProposals(api, !isTasks, reloadSettings, onProposalCount)
+  useEffect(() => {
+    if (tab === 'proposals' && proposalState.loaded && proposalState.rows.length === 0 && !proposalState.error) {
+      requestTab('general')
+    }
+  }, [tab, proposalState.loaded, proposalState.rows.length, proposalState.error, requestTab])
+
+  const bodyRef = useRef<HTMLDivElement>(null)
+  const scrollerRef = useRef<HTMLDivElement>(null)
+  const [navCompact, setNavCompact] = useState(false)
+  useEffect(() => {
+    const el = bodyRef.current
+    if (isTasks || !el || typeof ResizeObserver === 'undefined') { setNavCompact(false); return }
+    const sync = (width: number) => {
+      if (width > 0) setNavCompact(width < 440)
+    }
+    sync(el.getBoundingClientRect().width)
+    const observer = new ResizeObserver(entries => {
+      const width = entries[0]?.contentRect.width ?? el.getBoundingClientRect().width
+      sync(width)
+    })
+    observer.observe(el)
+    return () => observer.disconnect()
+  }, [isTasks])
+  useEffect(() => {
+    if (scrollerRef.current) scrollerRef.current.scrollTop = 0
+  }, [tab])
+
+  const proposalItems: readonly DrawerNavItem[] = !isTasks && (proposalCount > 0 || tab === 'proposals') ? [
+    { value: 'proposals', label: t(locale, 'tabProposals'), title: t(locale, 'sProposals'), icon: <IconEditOutlineRegular size={15} />, badge: proposalCount },
+  ] : []
+  const configItems: readonly DrawerNavItem[] = isTasks ? [] : [
+    { value: 'general', label: t(locale, 'tabGeneral'), title: t(locale, 'tabGeneral'), icon: <IconSlidersTwoOutlineRegular size={15} /> },
+    { value: 'takeover', label: t(locale, 'tabTakeover'), title: t(locale, 'sRequests'), icon: <IconShieldOutlineRegular size={15} /> },
+    { value: 'dispatch', label: t(locale, 'tabDispatch'), title: t(locale, 'sTasks'), icon: <IconChecklistOutlineRegular size={15} /> },
+    { value: 'capabilities', label: t(locale, 'tabCapabilities'), title: t(locale, 'sCapabilities'), icon: <IconCordisPluginOutlineRegular size={15} /> },
+    { value: 'persona', label: t(locale, 'tabPersona'), title: t(locale, 'personaTitle'), icon: <IconUserOutlineRegular size={15} />, dirty: personaDirty },
   ]
-  const activeItem = items.find(item => item.value === tab) ?? items[0]!
+  const inspectItems: readonly DrawerNavItem[] = isTasks ? [] : [
+    { value: 'context', label: t(locale, 'tabContext'), title: t(locale, 'ctxTitle'), icon: <IconGaugeOutlineRegular size={15} /> },
+    { value: 'trajectory', label: t(locale, 'viewTrajectory'), title: t(locale, 'trTitle'), icon: <IconInspectOutlineRegular size={15} /> },
+  ]
+  const allItems: readonly DrawerNavItem[] = isTasks
+    ? [{ value: 'tasks', label: t(locale, 'tasks'), title: t(locale, 'tasks'), icon: null, badge: waiting }]
+    : [...proposalItems, ...configItems, ...inspectItems]
+  const activeItem = allItems.find(item => item.value === tab) ?? allItems[0]!
+
+  const renderNavButton = (item: DrawerNavItem) => (
+    <Tooltip key={item.value} label={item.label} side="right" portal disabled={!navCompact}>
+      <button
+        type="button"
+        className="dsh-dot-nav-item"
+        data-nav={item.value}
+        aria-pressed={tab === item.value}
+        aria-controls={`dsh-dot-drawer-panel-${item.value}`}
+        aria-label={navCompact ? item.label : undefined}
+        onClick={() => requestTab(item.value)}
+      >
+        <span className="dsh-dot-nav-icon" aria-hidden="true">{item.icon}</span>
+        <span className="dsh-dot-nav-label">{item.label}</span>
+        {item.badge && item.badge > 0 ? <span className="dsh-dot-nav-badge">{item.badge}</span> : null}
+        {item.dirty ? <span className="dsh-dot-dirty-dot" aria-hidden="true" /> : null}
+      </button>
+    </Tooltip>
+  )
+
   return (
-    <div className="dsh-dot-drawer-layer">
+    <div className="dsh-dot-drawer-layer" data-kind={isTasks ? 'tasks' : 'settings'}>
     <button type="button" tabIndex={-1} className="dsh-dot-drawer-backdrop" aria-label={t(locale, 'closeDrawer')} onClick={requestClose} />
     <aside className="dsh-dot-drawer" data-kind={isTasks ? 'tasks' : 'settings'} data-wide={wide ? '' : undefined} role="dialog" aria-label={isTasks ? t(locale, 'tasks') : t(locale, 'settings')}>
       <header className="dsh-dot-drawer-head">
-        {isTasks ? (
-          <h2 className="dsh-dot-drawer-title">
-            {t(locale, 'tasks')}
-            {waiting > 0 ? <span className="dsh-dot-nav-badge">{waiting}</span> : null}
-          </h2>
-        ) : (
-        <nav className="dsh-dot-drawer-tabs" aria-label={t(locale, 'drawerTabs')}>
-          {items.map(item => (
-            <button
-              key={item.value}
-              type="button"
-              aria-pressed={tab === item.value}
-              aria-controls={`dsh-dot-drawer-panel-${item.value}`}
-              onClick={() => requestTab(item.value)}
-            >
-              <span className="dsh-dot-nav-label">{item.label}</span>
-              {item.badge > 0 ? <span className="dsh-dot-nav-badge">{item.badge}</span> : null}
-              {item.value === 'persona' && personaDirty ? <span className="dsh-dot-dirty-dot" aria-hidden="true" /> : null}
-            </button>
-          ))}
-        </nav>
-        )}
+        <h2 className="dsh-dot-drawer-title">
+          {activeItem.title}
+          {isTasks && waiting > 0 ? <span className="dsh-dot-nav-badge">{waiting}</span> : null}
+        </h2>
         <span className="dsh-dot-spacer" />
         {saveNotice?.kind === 'saved' ? (
           <span className="dsh-dot-settings-status" role="status">
@@ -186,17 +247,34 @@ function WorkDrawer({ locale, api, tab, wide, settings, trajectoryRev, running, 
           <Button variant="primary" size="sm" onClick={onDiscardPending}>{t(locale, 'unsavedDiscard')}</Button>
         </div>
       ) : null}
-      <div className="dsh-dot-settings-scroll">
-        <div className="dsh-dot-settings" data-tab={tab} id={`dsh-dot-drawer-panel-${tab}`} role="region" aria-label={activeItem.title}>
-          {tab === 'tasks'
-            ? tasks
-            : tab === 'settings'
-              ? <SettingsPanel locale={locale} api={api} {...settings ? { settings } : {}} onSaved={onSaved} onStatusChange={setSaveNotice} onProposalCount={onProposalCount} {...renderFactorySlot ? { renderFactorySlot } : {}} />
-              : tab === 'persona'
-                ? <PersonaPanel locale={locale} api={api} {...settings ? { settings } : {}} discardSignal={discardSignal} onDirtyChange={onDirtyChange} onSaved={onSaved} onStatusChange={setSaveNotice} />
-                : tab === 'context'
-                  ? <ContextPanel locale={locale} api={api} running={running} />
-                  : <TrajectoryPanel locale={locale} api={api} {...trajectoryRev === undefined ? {} : { rev: trajectoryRev }} running={running} />}
+      <div className="dsh-dot-drawer-body" ref={bodyRef}>
+        {!isTasks ? (
+          <nav className="dsh-dot-drawer-nav" aria-label={t(locale, 'drawerTabs')}>
+            {proposalItems.length > 0 ? (
+              <>
+                {proposalItems.map(renderNavButton)}
+                <div className="dsh-dot-nav-sep" role="separator" />
+              </>
+            ) : null}
+            <div className="dsh-dot-nav-group-label">{t(locale, 'sNavGroupConfig')}</div>
+            {configItems.map(renderNavButton)}
+            <div className="dsh-dot-nav-sep" role="separator" />
+            <div className="dsh-dot-nav-group-label">{t(locale, 'sNavGroupInspect')}</div>
+            {inspectItems.map(renderNavButton)}
+          </nav>
+        ) : null}
+        <div className="dsh-dot-settings-scroll" ref={scrollerRef}>
+          <div className="dsh-dot-settings" data-tab={tab} id={`dsh-dot-drawer-panel-${tab}`} role="region" aria-label={activeItem.title}>
+            {tab === 'tasks'
+              ? tasks
+              : isSettingsSection(tab)
+                ? <SettingsPanel locale={locale} api={api} section={tab} proposals={proposalState} {...settings ? { settings } : {}} onSaved={onSaved} onStatusChange={setSaveNotice} onProposalCount={onProposalCount} {...renderFactorySlot ? { renderFactorySlot } : {}} />
+                : tab === 'persona'
+                  ? <PersonaPanel locale={locale} api={api} {...settings ? { settings } : {}} discardSignal={discardSignal} onDirtyChange={onDirtyChange} onSaved={onSaved} onStatusChange={setSaveNotice} />
+                  : tab === 'context'
+                    ? <ContextPanel locale={locale} api={api} running={running} />
+                    : <TrajectoryPanel locale={locale} api={api} {...trajectoryRev === undefined ? {} : { rev: trajectoryRev }} running={running} />}
+          </div>
         </div>
       </div>
     </aside>
@@ -356,7 +434,7 @@ export function ChatPanel({ locale, api, Card, onOpenSession, renderFactorySlot 
         <Button variant="ghost" size="sm" aria-expanded={drawerTab === 'tasks'} aria-pressed={drawerTab === 'tasks'} onClick={() => requestDrawer(drawerTab === 'tasks' ? { kind: 'close' } : { kind: 'tab', tab: 'tasks' })}>
           {t(locale, 'tasks')}{live > 0 ? ` ${live}` : ''}{waiting > 0 ? <span className="dsh-dot-badge">{waiting}</span> : null}
         </Button>
-        <Button variant="ghost" size="sm" className="dsh-dot-gear" aria-label={t(locale, 'settings')} aria-pressed={configOpen} title={t(locale, 'settings')} onClick={() => requestDrawer(configOpen ? { kind: 'close' } : { kind: 'tab', tab: 'settings' })}>
+        <Button variant="ghost" size="sm" className="dsh-dot-gear" aria-label={t(locale, 'settings')} aria-pressed={configOpen} title={t(locale, 'settings')} onClick={() => requestDrawer(configOpen ? { kind: 'close' } : { kind: 'tab', tab: 'general' })}>
           <GearGlyph />
           {proposalCount > 0 ? <span className="dsh-dot-gear-dot" aria-hidden="true" /> : null}
         </Button>
@@ -410,7 +488,7 @@ export function ChatPanel({ locale, api, Card, onOpenSession, renderFactorySlot 
         items={state.items}
         onNewSegment={() => api.newSegment()}
         onOpenTasks={() => requestDrawer({ kind: 'tab', tab: 'tasks' })}
-        onOpenSettings={() => requestDrawer({ kind: 'tab', tab: 'settings' })}
+        onOpenSettings={() => requestDrawer({ kind: 'tab', tab: 'general' })}
         onSend={send}
         onStop={() => { void api.stop() }}
         onDismissError={() => setSendError(undefined)}

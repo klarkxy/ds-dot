@@ -257,10 +257,10 @@ describe('auto update setting', () => {
     expect(document.body.textContent).toContain('Last check:')
     expect(document.body.textContent).toContain('Up to date')
 
-    const tablist = document.querySelector('[role="tablist"][aria-label="Auto update"]')!
-    expect(tablist).not.toBeNull()
-    const off = [...tablist.querySelectorAll<HTMLElement>('[role="tab"]')].find(tab => tab.textContent?.trim() === 'Off')!
-    await act(async () => off.click())
+    const toggle = document.querySelector<HTMLButtonElement>('button[role="switch"][aria-label="Auto update"]')!
+    expect(toggle).not.toBeNull()
+    expect(toggle.getAttribute('aria-checked')).toBe('true')
+    await act(async () => toggle.click())
     expect(saved).toEqual([{ autoUpdate: false }])
 
     const button = [...document.querySelectorAll<HTMLButtonElement>('button')].find(row => row.textContent === 'Check now')!
@@ -283,9 +283,102 @@ describe('auto update setting', () => {
     const root = createRoot(document.getElementById('root')!)
     await act(async () => root.render(<SettingsPanel locale="en" api={api as never} settings={current} onSaved={() => {}} />))
     await act(async () => { await Promise.resolve() })
-    expect(document.querySelector('[role="tablist"][aria-label="Auto update"]')).not.toBeNull()
+    expect(document.querySelector('button[role="switch"][aria-label="Auto update"]')).not.toBeNull()
     expect(document.body.textContent).not.toContain('Last check:')
     expect([...document.querySelectorAll('button')].some(row => row.textContent === 'Check now')).toBe(false)
+    await act(async () => root.unmount())
+  })
+})
+
+describe('sectioned settings, switches, and help tips', () => {
+  it('renders each settings section in isolation and toggles reflection via Switch', async () => {
+    let current: DotSettings = { ...DEFAULT_SETTINGS, taskModels: { mode: 'allow', list: [] } }
+    const decisions: Array<{ id: string; allow: boolean }> = []
+    const api = {
+      models: async () => ({ groups: [] }),
+      settings: async () => current,
+      settingProposals: async () => [{ id: 'p-1', field: 'reflection' as const, before: true, after: false, reason: 'save turns', createdAt: 1 }],
+      decideSetting: async (id: string, allow: boolean) => { decisions.push({ id, allow }); return 'ok' },
+      keepalive: async () => ({ provider: 'p', model: 'base', minutes: 60, defaultMinutes: 60 }),
+      updateStatus: async () => null,
+      updateCheck: async () => ({}),
+      capabilities: async () => ({ locked: ['dot_overview'], groups: [] }),
+      previewFactoryReset: async () => ({ token: 't', expiresAt: 1, tasks: 0, changes: 0, runs: 0, schedules: 0, proposals: 0, cards: 0, inbox: 0, ownedSessions: 0, pastSegments: 0, reflections: 0, hasAgreements: false, hasCognition: false, archiveSessionIds: [] }),
+      confirmFactoryReset: async () => ({ archived: [], archiveFailed: [], sessionId: 's', at: 1 }),
+      setSettings: async (patch: Partial<DotSettings>) => { current = { ...current, ...patch } as DotSettings; return current },
+    }
+    function Harness({ section }: { section: 'general' | 'takeover' | 'dispatch' | 'capabilities' | 'proposals' }) {
+      const [settings, setSettings] = useState<DotSettings>(current)
+      return <SettingsPanel locale="en" api={api as never} section={section} settings={settings} onSaved={setSettings} />
+    }
+    const root = createRoot(document.getElementById('root')!)
+
+    // General: model, cache lifetime, reflection switch, auto update switch, factory reset — zero static .dsh-ui-help paragraphs.
+    await act(async () => root.render(<Harness section="general" />))
+    await act(async () => { await Promise.resolve() })
+    expect(document.querySelector('select[aria-label="Dorothy\'s model"]')).not.toBeNull()
+    expect(document.querySelector('input[aria-label="Cache lifetime"]')).not.toBeNull()
+    const reflSwitch = document.querySelector<HTMLButtonElement>('button[role="switch"][aria-label="Background reflection"]')!
+    expect(reflSwitch.getAttribute('aria-checked')).toBe('true')
+    await act(async () => reflSwitch.click())
+    expect(current.reflection).toBe(false)
+    expect(document.querySelector('button[role="switch"][aria-label="Auto update"]')).not.toBeNull()
+    expect(document.body.textContent).toContain('Factory reset')
+    expect(document.querySelectorAll('.dsh-ui-help')).toHaveLength(0)
+    expect(document.querySelectorAll('.dsh-dot-help-tip').length).toBeGreaterThanOrEqual(4)
+    expect(document.querySelector('[role="tablist"][aria-label="Scope"]')).toBeNull()
+    expect(document.querySelector('[role="tablist"][aria-label="Task permissions"]')).toBeNull()
+
+    // Takeover: scope, approvals, questions only (task permissions moved to dispatch).
+    await act(async () => root.render(<Harness section="takeover" />))
+    await act(async () => { await Promise.resolve() })
+    expect(document.querySelector('[role="tablist"][aria-label="Scope"]')).not.toBeNull()
+    expect(document.querySelector('[role="tablist"][aria-label="Permission approvals"]')).not.toBeNull()
+    expect(document.querySelector('[role="tablist"][aria-label="Model questions"]')).not.toBeNull()
+    expect(document.querySelector('[role="tablist"][aria-label="Task permissions"]')).toBeNull()
+    expect(document.querySelectorAll('.dsh-ui-help')).toHaveLength(0)
+    expect(document.querySelectorAll('.dsh-dot-help-tip')).toHaveLength(2)
+
+    // Dispatch: task permissions, task models (with dynamic empty-allow-list warning inline), routine check.
+    await act(async () => root.render(<Harness section="dispatch" />))
+    await act(async () => { await Promise.resolve() })
+    expect(document.querySelector('[role="tablist"][aria-label="Task permissions"]')).not.toBeNull()
+    expect(document.querySelector('[role="tablist"][aria-label="Allowed task models"]')).not.toBeNull()
+    expect(document.querySelector('input[aria-label="Routine check"]')).not.toBeNull()
+    const inlineHelps = [...document.querySelectorAll('.dsh-ui-help')].map(el => el.textContent)
+    expect(inlineHelps).toEqual(['No models selected — cannot start new tasks.'])
+    expect(document.querySelectorAll('.dsh-dot-help-tip')).toHaveLength(2)
+
+    // Capabilities: single header without redundant outer section heading.
+    await act(async () => root.render(<Harness section="capabilities" />))
+    await act(async () => { await Promise.resolve() })
+    expect(document.querySelector('.dsh-dot-pane-section-title')).toBeNull()
+    expect(document.querySelector('.dsh-dot-caps')).not.toBeNull()
+    expect(document.querySelectorAll('.dsh-dot-help-tip')).toHaveLength(1)
+
+    // Proposals: renders pending boolean reflection proposal chips and applies decision.
+    await act(async () => root.render(<Harness section="proposals" />))
+    await act(async () => { await Promise.resolve() })
+    const chips = [...document.querySelectorAll('.dsh-dot-proposal-chip')].map(node => node.textContent)
+    expect(chips).toEqual(['On', 'Off'])
+    await act(async () => document.querySelector<HTMLButtonElement>('.dsh-dot-proposal button')!.click())
+    expect(decisions).toEqual([{ id: 'p-1', allow: true }])
+
+    await act(async () => root.unmount())
+  })
+
+  it('keeps model-load failure warnings inline instead of hiding them in tooltips', async () => {
+    const api = {
+      models: async () => { throw new Error('offline') },
+      settings: async () => DEFAULT_SETTINGS,
+      settingProposals: async () => [],
+      decideSetting: async () => 'ok',
+      setSettings: async () => DEFAULT_SETTINGS,
+    }
+    const root = createRoot(document.getElementById('root')!)
+    await act(async () => root.render(<SettingsPanel locale="en" section="general" api={api as never} settings={DEFAULT_SETTINGS} onSaved={() => {}} />))
+    await act(async () => { await Promise.resolve() })
+    expect(document.querySelector('.dsh-ui-warn')?.textContent).toContain('Could not load the model list')
     await act(async () => root.unmount())
   })
 })

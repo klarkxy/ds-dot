@@ -45,7 +45,7 @@ import { AGREEMENTS_MAX_CHARS, COGNITION_MAX_CHARS, KnowledgeError, addEntry, ag
 import { deliverPeer, guardRunWriteTool, PeerLedger, refreshChildSeals, sealChildSession, type PeerSendInput } from './peer.ts'
 import { PendingHub, type PendingAnswer } from './pending.ts'
 import { personaSection } from './persona.ts'
-import { mergeRecipeOutcomes, recipeBody, recipeBodyAt, recipeRevisionStats, recipeStatsLine, recipeVersionAt, reviseRecipe as reviseRecipeRecord, sameRecipeBody, upsertRecipeOutcome, type LiveRecipeChange } from './recipes.ts'
+import { goalRequirements, mergeRecipeOutcomes, recipeBody, recipeBodyAt, recipeRequirements, recipeRevisionStats, recipeStatsLine, recipeVersionAt, requirementsFollowGoal, reviseRecipe as reviseRecipeRecord, sameRecipeBody, upsertRecipeOutcome, type LiveRecipeChange } from './recipes.ts'
 import { ReflectionRunner } from './reflection.ts'
 import { ReminderClock } from './reminders.ts'
 import { routeRequest } from './rules.ts'
@@ -1258,17 +1258,22 @@ export class DotService {
       }).join('\n') : 'No tasks.'
     }
     if (action === 'dispatch' || action === 'check') {
-      // A change pinned to a recipe revision takes that revision's body as
-      // dispatch defaults; explicit arguments always win. check only reports.
-      const dispatchChange = action === 'dispatch' && changeId ? this.store.work.change(changeId) : undefined
+      // Resolve task_id or run_id before applying pinned defaults so a continued
+      // reservation and a preflight see the same recipe access, preset and model.
+      const role = typeof args.role === 'string' ? args.role as RunKind : undefined
+      const requestedRunId = typeof args.run_id === 'string' ? args.run_id : ''
+      const namedRun = requestedRunId ? this.store.work.run(requestedRunId) : undefined
+      const dispatchChange = changeId
+        ? this.store.work.change(changeId)
+        : namedRun ? this.store.work.change(namedRun.changeId) : undefined
       const pinnedRecipe = dispatchChange ? this.taggedRecipe(dispatchChange) : undefined
       const pinnedBody = pinnedRecipe && dispatchChange?.recipe ? recipeBodyAt(pinnedRecipe, dispatchChange.recipe.revision) : undefined
-      const role = typeof args.role === 'string' ? args.role as RunKind : undefined
       const message = typeof args.instruction === 'string' ? args.instruction : typeof args.message === 'string' ? args.message : ''
       const instruction = pinnedBody?.notes ? `Recipe notes:\n${pinnedBody.notes}${message ? `\n\n${message}` : ''}` : message
       return this.startWorkSession({
         title: typeof args.title === 'string' ? args.title : 'task',
         instruction,
+        startFromWorkOrder: pinnedBody !== undefined,
         ...(changeId ? { taskId: changeId } : {}),
         ...(typeof args.dir === 'string' ? { cwd: args.dir } : {}),
         ...(typeof args.workspace_id === 'string' ? { workspaceId: args.workspace_id } : {}),
@@ -1277,7 +1282,7 @@ export class DotService {
         ...(role !== undefined ? { role } : {}),
         ...(typeof args.access === 'string' ? { access: args.access as RunAccess } : role !== 'review' && pinnedBody?.access !== undefined ? { access: pinnedBody.access } : {}),
         ...(typeof args.paths === 'string' ? { paths: args.paths } : Array.isArray(args.paths) ? { paths: JSON.stringify(args.paths) } : {}),
-        ...(typeof args.run_id === 'string' ? { runId: args.run_id } : {}),
+        ...(requestedRunId ? { runId: requestedRunId } : {}),
         ...(typeof args.model === 'string' ? { model: args.model } : pinnedBody?.model !== undefined ? { model: pinnedBody.model } : {}),
         ...(typeof args.preset === 'string' ? { preset: args.preset } : pinnedBody?.preset !== undefined ? { preset: pinnedBody.preset } : {}),
         ...(jsonArray(args.step_refs) ? { stepRefs: jsonArray(args.step_refs)!.map(String) } : {}),
@@ -1543,12 +1548,13 @@ export class DotService {
       }
     }
     const body = this.recipeArgsBody(base, args)
-    const requirements = body.requirements ?? [{ requirementRef: 'goal', text: body.goal, required: true }]
+    const requirementsFromGoal = args.requirements === undefined && (base === undefined || requirementsFollowGoal(base))
+    const requirements = requirementsFromGoal ? goalRequirements(body.goal) : body.requirements ?? goalRequirements(body.goal)
     if (!body.dir) throw new DotError('dot/invalid', 'save requires an absolute dir (or from_task)')
     const now = this.now()
     let id = ''
     do { id = `rcp-${randomUUID().slice(0, 6)}` } while (this.store.recipe(id))
-    const record: RecipeRecord = { ...body, requirements, dir: body.dir, id, name, revision: 1, history: [], outcomes: [], createdAt: now, updatedAt: now }
+    const record: RecipeRecord = { ...body, requirements, ...(requirementsFromGoal ? { requirementsFromGoal: true } : {}), dir: body.dir, id, name, revision: 1, history: [], outcomes: [], createdAt: now, updatedAt: now }
     await this.store.putRecipe(record)
     return `Saved recipe ${record.id} "${record.name}" rev 1.`
   }
@@ -1557,14 +1563,18 @@ export class DotService {
     const reason = (typeof args.reason === 'string' ? args.reason : '').trim()
     if (!reason) throw new DotError('dot/invalid', 'revise requires reason naming what changed')
     const body = this.recipeArgsBody(recipe, args)
-    const requirements = body.requirements ?? recipe.requirements
+    const explicitRequirements = args.requirements !== undefined
+    const requirementsFromGoal = !explicitRequirements && requirementsFollowGoal(recipe)
+    const requirements = explicitRequirements
+      ? body.requirements ?? []
+      : requirementsFromGoal ? goalRequirements(body.goal) : recipe.requirements
     const name = (typeof args.name === 'string' && args.name.trim() ? args.name.trim() : recipe.name)
     const clash = this.store.recipe(name)
     if (clash && clash.id !== recipe.id) throw new DotError('dot/invalid', `a recipe named "${name}" exists already`)
     if (sameRecipeBody({ ...body, requirements, name }, recipe)) {
       throw new DotError('dot/invalid', 'revise changes nothing')
     }
-    const next = reviseRecipeRecord(recipe, { ...body, requirements, name, reason }, this.now())
+    const next = reviseRecipeRecord(recipe, { ...body, requirements, ...(requirementsFromGoal ? { requirementsFromGoal: true } : {}), name, reason }, this.now())
     await this.store.putRecipe(next)
     return `Revised recipe ${recipe.id} "${name}" → rev ${next.revision}.`
   }
@@ -1597,7 +1607,7 @@ export class DotService {
         revision: change.recipe.revision,
         terminal,
         accepted: change.closeout !== undefined,
-        failedRounds: terminal ? this.store.work.failedRounds(change.id) : 0,
+        failedRounds: terminal ? this.store.work.failedRoundsAcrossInputs(change.id) : 0,
         at: change.updatedAt,
       }]
     })
@@ -1618,6 +1628,7 @@ export class DotService {
       ...(recipe.reason !== undefined ? { reason: recipe.reason } : {}),
       goal: recipe.goal,
       requirements: recipe.requirements,
+      requirementsFromGoal: requirementsFollowGoal(recipe),
       constraints: recipe.constraints ?? [],
       ...(recipe.notes !== undefined ? { notes: recipe.notes } : {}),
       ...(recipe.deliverableLanguage !== undefined ? { deliverableLanguage: recipe.deliverableLanguage } : {}),
@@ -1626,7 +1637,10 @@ export class DotService {
       ...(recipe.model !== undefined ? { model: recipe.model } : {}),
       ...(recipe.access !== undefined ? { access: recipe.access } : {}),
       ...(recipe.humanReview !== undefined ? { humanReview: recipe.humanReview } : {}),
-      history: recipe.history.map(row => ({ revision: row.revision, name: row.name, ...(row.reason !== undefined ? { reason: row.reason } : {}), at: row.at })),
+      history: recipe.history.map(row => ({
+        ...recipeBody(row), requirementsFromGoal: requirementsFollowGoal(row),
+        revision: row.revision, name: row.name, ...(row.reason !== undefined ? { reason: row.reason } : {}), at: row.at,
+      })),
       stats: recipeRevisionStats(recipe, live),
       outcomes: mergeRecipeOutcomes(recipe.outcomes, live).slice(0, 10),
     })
@@ -2232,7 +2246,7 @@ export class DotService {
 
   private async pruneWorkArtifactsIfNeeded(maxKeep?: number): Promise<void> {
     try {
-      const { prunedChanges, keptArtifacts } = await this.store.pruneWorkHistory(maxKeep, async (change, failedRounds) => {
+      const { prunedChanges, keptArtifacts } = await this.store.pruneWorkHistory(maxKeep, async change => {
         // A tagged change records its terminal outcome on the recipe before its
         // rows are deleted; a removed recipe or an untagged change records none.
         const tag = change.recipe
@@ -2240,7 +2254,8 @@ export class DotService {
         if (!tag || !recipe) return
         await this.store.putRecipe(upsertRecipeOutcome(recipe, {
           changeId: change.id, title: change.title, revision: tag.revision,
-          result: change.closeout ? 'accepted' : 'cancelled', failedRounds, at: this.now(),
+          result: change.closeout ? 'accepted' : 'cancelled',
+          failedRounds: this.store.work.failedRoundsAcrossInputs(change.id), at: change.updatedAt,
         }))
       })
       if (prunedChanges.length > 0) pruneSnapshots(this.options.homeDir, keptArtifacts)
@@ -2543,8 +2558,8 @@ export class DotService {
       const createLanguage = deliverableLanguage ?? recipe?.deliverableLanguage
       if (!createTitle?.trim() || !createGoal?.trim() || !createDir || !isAbsolute(createDir)) throw new DotError('dot/invalid', 'title, goal and an absolute dir are required')
       const requirements = explicitRequirements
-        ?? recipe?.requirements
-        ?? [{ requirementRef: 'goal', text: createGoal, required: true }]
+        ?? (recipe ? recipeRequirements(recipe, createGoal) : undefined)
+        ?? goalRequirements(createGoal)
       let change: ChangeRecord
       try {
         change = await this.store.work.createChange({
@@ -3053,7 +3068,7 @@ export class DotService {
     return released.ok === true
   }
 
-  private async startWorkSession(input: { workspaceId?: string; cwd?: string; title: string; instruction: string; goal?: string; model?: string; taskId?: string; role?: RunKind; access?: RunAccess; priority?: ChangePriority; preset?: string; checkOnly?: boolean; paths?: string; runId?: string; stepRefs?: readonly string[] }): Promise<string> {
+  private async startWorkSession(input: { workspaceId?: string; cwd?: string; title: string; instruction: string; startFromWorkOrder?: boolean; goal?: string; model?: string; taskId?: string; role?: RunKind; access?: RunAccess; priority?: ChangePriority; preset?: string; checkOnly?: boolean; paths?: string; runId?: string; stepRefs?: readonly string[] }): Promise<string> {
     const role = input.role ?? 'work'
     if (role !== 'work' && role !== 'rework' && role !== 'review') throw new DotError('dot/invalid', 'invalid role')
     let changeId = input.taskId
@@ -3143,7 +3158,7 @@ export class DotService {
       }
     }
     const instruction = input.instruction.trim()
-    if (!instruction) return `reserved ${runId} on ${changeId}${note}`
+    if (!instruction && !input.startFromWorkOrder) return `reserved ${runId} on ${changeId}${note}`
     const live = this.store.work.run(runId)
     const material = live ? this.store.work.input(live.inputRef) : undefined
     if (!live || !material) throw new DotError('dot/invalid', `unknown run ${runId}`)

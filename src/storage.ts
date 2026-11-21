@@ -274,6 +274,7 @@ export function parseInboxRecord(value: unknown): InboxRecord | undefined {
 const recipeBodyFields = {
   goal: z.string(),
   requirements: z.array(requirementSchema),
+  requirementsFromGoal: z.boolean().optional(),
   constraints: z.array(constraintSchema).optional(),
   notes: z.string().optional(),
   deliverableLanguage: z.string().optional(),

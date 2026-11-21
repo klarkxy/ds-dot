@@ -670,6 +670,16 @@ export class WorkBook {
     return failedRuns + failedVerifications
   }
 
+  /** Failed rounds across every input revision, for whole-change outcome stats. */
+  failedRoundsAcrossInputs(changeId: string): number {
+    if (!this.changes.has(changeId)) return 0
+    const failedRuns = [...this.runs.values()].filter(run =>
+      run.changeId === changeId && run.kind !== 'review' && run.phase === 'failed').length
+    const failedVerifications = [...this.verifications.values()].filter(row =>
+      row.changeId === changeId && (row.verdict === 'rework' || row.verdict === 'unverified')).length
+    return failedRuns + failedVerifications
+  }
+
   /** Read-only board projection. Done is derived from closeout plus released runs. */
   workView(changeId: string) {
     const change = this.changes.get(changeId)

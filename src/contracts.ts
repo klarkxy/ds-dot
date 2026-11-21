@@ -566,6 +566,8 @@ export interface RecipeBody {
   /** One English sentence stating what a delivery of this kind must achieve. */
   readonly goal: string
   readonly requirements: readonly import('./work.ts').Requirement[]
+  /** True when requirements are the implicit goal check and follow goal edits. */
+  readonly requirementsFromGoal?: boolean
   readonly constraints?: readonly import('./work.ts').Constraint[]
   /** English guidance added to every run brief dispatched from this recipe. */
   readonly notes?: string

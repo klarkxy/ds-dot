@@ -10,6 +10,7 @@ export function recipeBody(row: RecipeBody): RecipeBody {
   return {
     goal: row.goal,
     requirements: row.requirements,
+    ...(row.requirementsFromGoal !== undefined ? { requirementsFromGoal: row.requirementsFromGoal } : {}),
     ...(row.constraints !== undefined ? { constraints: row.constraints } : {}),
     ...(row.notes !== undefined ? { notes: row.notes } : {}),
     ...(row.deliverableLanguage !== undefined ? { deliverableLanguage: row.deliverableLanguage } : {}),
@@ -19,6 +20,26 @@ export function recipeBody(row: RecipeBody): RecipeBody {
     ...(row.access !== undefined ? { access: row.access } : {}),
     ...(row.humanReview !== undefined ? { humanReview: row.humanReview } : {}),
   }
+}
+
+/** The implicit acceptance requirement used when no explicit list was supplied. */
+export function goalRequirements(goal: string): RecipeBody['requirements'] {
+  return [{ requirementRef: 'goal', text: goal, required: true }]
+}
+
+/** New rows record provenance; legacy rows retain it through their exact shape. */
+export function requirementsFollowGoal(row: Pick<RecipeBody, 'goal' | 'requirements' | 'requirementsFromGoal'>): boolean {
+  if (row.requirementsFromGoal !== undefined) return row.requirementsFromGoal
+  return row.requirements.length === 1
+    && row.requirements[0]!.requirementRef === 'goal'
+    && row.requirements[0]!.text === row.goal
+    && row.requirements[0]!.required === true
+    && row.requirements[0]!.scenarios === undefined
+}
+
+/** Requirements for a goal, regenerating only the implicit goal-derived list. */
+export function recipeRequirements(row: RecipeBody, goal = row.goal): RecipeBody['requirements'] {
+  return requirementsFollowGoal(row) ? goalRequirements(goal) : row.requirements
 }
 
 /**

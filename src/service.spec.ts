@@ -2487,6 +2487,13 @@ describe('task recipes', () => {
     expect(pinned).toMatchObject({ revision: 2, requirementsFromGoal: false })
     const pinnedTask = JSON.parse(await h.service.manageTask({ action: 'create', recipe: 'pin', goal: 'different goal' })) as { id: string }
     expect(h.store.work.input(h.store.work.change(pinnedTask.id)!.currentInputRef)!.requirements).toEqual(JSON.parse(pinnedRequirements))
+    await h.service.manageRecipe({ action: 'restore', recipe: 'pin', revision: 1, reason: 'restore goal-derived acceptance' })
+    const restored = JSON.parse(await h.service.manageRecipe({ action: 'read', recipe: 'pin' })) as { revision: number; requirementsFromGoal: boolean }
+    expect(restored).toMatchObject({ revision: 3, requirementsFromGoal: true })
+    const restoredTask = JSON.parse(await h.service.manageTask({ action: 'create', recipe: 'pin', goal: 'restored goal' })) as { id: string }
+    expect(h.store.work.input(h.store.work.change(restoredTask.id)!.currentInputRef)!.requirements).toEqual([
+      { requirementRef: 'goal', text: 'restored goal', required: true },
+    ])
 
     const taskRequirements = [{ requirementRef: 'goal', text: 'task goal', required: true }]
     const explicitTask = JSON.parse(await h.service.manageTask({

@@ -80,9 +80,9 @@ describe('Dorothy self-management controls', () => {
     await act(async () => fullAccessTab.click())
     expect(current.taskPermission).toBe('danger-full-access')
 
-    // The reflection switch is a direct on/off setting, not a model proposal.
-    const reflectionOff = [...document.querySelectorAll<HTMLButtonElement>('[role="tab"]')].find(node => node.textContent === '关闭')!
-    await act(async () => reflectionOff.click())
+    // The reflection switch is a direct on/off Switch control, not a model proposal.
+    const reflectionSwitch = document.querySelector<HTMLButtonElement>('button[role="switch"][aria-label="后台反思"]')!
+    await act(async () => reflectionSwitch.click())
     expect(current.reflection).toBe(false)
 
     const allowTab = [...document.querySelectorAll<HTMLButtonElement>('[role="tab"]')].find(node => node.textContent === '仅允许所选')!

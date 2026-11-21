@@ -466,8 +466,8 @@ describe('ChatPanel activity and notice cards', () => {
 
       const gear = document.querySelector<HTMLButtonElement>('button[aria-label="设置"]')!
       await act(async () => { gear.click() })
-      const navButtons = [...document.querySelectorAll<HTMLButtonElement>('.dsh-dot-drawer-tabs button')]
-      await act(async () => { navButtons[1]!.click() })
+      const nav = (key: string) => document.querySelector<HTMLButtonElement>(`.dsh-dot-drawer-nav button[data-nav="${key}"]`)!
+      await act(async () => { nav('persona').click() })
       await act(async () => { await Promise.resolve(); await Promise.resolve() })
 
       const textarea = document.querySelector<HTMLTextAreaElement>('textarea.dsh-dot-persona-text')!
@@ -488,7 +488,7 @@ describe('ChatPanel activity and notice cards', () => {
       expect(document.querySelector('.dsh-dot-unsaved-bar')?.textContent).toContain('当前页有未保存的修改')
       expect(document.querySelector('aside.dsh-dot-drawer [role="region"]')?.getAttribute('aria-label')).toBe('人设与约定')
 
-      await act(async () => { navButtons[2]!.click() })
+      await act(async () => { nav('context').click() })
       expect(document.querySelector('.dsh-dot-unsaved-bar')?.textContent).toContain('当前页有未保存的修改')
       expect(document.querySelector('aside.dsh-dot-drawer [role="region"]')?.getAttribute('aria-label')).toBe('人设与约定')
 
@@ -534,7 +534,7 @@ describe('ChatPanel activity and notice cards', () => {
 
     const gear = document.querySelector<HTMLButtonElement>('button[aria-label="设置"]')!
     await act(async () => { gear.click() })
-    const personaTab = () => [...document.querySelectorAll<HTMLButtonElement>('.dsh-dot-drawer-tabs button')][1]!
+    const personaTab = () => document.querySelector<HTMLButtonElement>('.dsh-dot-drawer-nav button[data-nav="persona"]')!
     await act(async () => { personaTab().click() })
     await act(async () => { await Promise.resolve(); await Promise.resolve() })
 
@@ -544,7 +544,7 @@ describe('ChatPanel activity and notice cards', () => {
     // Blur commits the address before the click that leaves, so the guard must not
     // raise a bar Discard cannot undo.
     await act(async () => { Simulate.blur(address()) })
-    const contextTab = [...document.querySelectorAll<HTMLButtonElement>('.dsh-dot-drawer-tabs button')][2]!
+    const contextTab = document.querySelector<HTMLButtonElement>('.dsh-dot-drawer-nav button[data-nav="context"]')!
     await act(async () => { contextTab.click() })
     expect(document.querySelector('.dsh-dot-unsaved-bar')).toBeNull()
     expect(document.querySelector('aside.dsh-dot-drawer [role="region"]')?.getAttribute('aria-label')).toBe('上下文用量')
@@ -742,12 +742,17 @@ describe('ChatPanel activity and notice cards', () => {
     await act(async function () { root.unmount() })
   })
 
-  it('opens the settings drawer with proposal count badge, header status, tab switching, and close button', async () => {
+  it('opens the settings drawer with vertical navigation, conditional proposals, header status, and close controls', async () => {
     const snapshot: ChatSnapshot = { sessionId: 'dot-1', running: false, streaming: '', rev: 1, itemsRev: 1, items: [] }
     const base = makeApi(snapshot)
+    let proposals = [{ id: 'p-1', field: 'scope' as const, before: 'all', after: 'tracked', reason: 'test', createdAt: 1 }]
     const api: ChatApi = {
       ...base,
-      settingProposals: async () => [{ id: 'p-1', field: 'scope', before: 'all', after: 'tracked', reason: 'test', createdAt: 1 }],
+      settingProposals: async () => [...proposals],
+      decideSetting: async (id: string) => {
+        proposals = proposals.filter(row => row.id !== id)
+        return 'ok'
+      },
     }
     const root = createRoot(document.getElementById('root')!)
     await act(async () => { root.render(<ChatPanel locale="zh" api={api} onOpenSession={() => {}} />) })
@@ -757,43 +762,66 @@ describe('ChatPanel activity and notice cards', () => {
     await act(async () => { gear.click() })
     await act(async () => { await Promise.resolve() })
 
-    // The gear opens the settings drawer over a mask; tasks live in their own drawer.
+    // The gear opens the settings drawer with vertical sidebar nav; tasks live in their own drawer.
     const drawer = document.querySelector('aside.dsh-dot-drawer')!
     expect(drawer.getAttribute('data-kind')).toBe('settings')
     expect(document.querySelector('.dsh-dot-drawer-backdrop')).not.toBeNull()
     expect(gear.querySelector('.dsh-dot-gear-dot')).not.toBeNull()
     const region = () => document.querySelector('aside.dsh-dot-drawer [role="region"]')!.getAttribute('aria-label')
-    const navButtons = [...drawer.querySelectorAll<HTMLButtonElement>('.dsh-dot-drawer-tabs button')]
-    expect(navButtons.map(node => node.querySelector('.dsh-dot-nav-label')?.textContent)).toEqual(['设置', '人设', '上下文', '轨迹'])
-    expect(navButtons[0]!.querySelector('.dsh-dot-nav-badge')?.textContent).toBe('1')
-    expect(region()).toBe('设置')
+    const headerTitle = () => drawer.querySelector('.dsh-dot-drawer-title')?.textContent
+    const navButtons = () => [...drawer.querySelectorAll<HTMLButtonElement>('.dsh-dot-drawer-nav button')]
+    const navBy = (key: string) => drawer.querySelector<HTMLButtonElement>(`.dsh-dot-drawer-nav button[data-nav="${key}"]`)!
+    expect(navButtons().map(node => node.querySelector('.dsh-dot-nav-label')?.textContent)).toEqual([
+      '待确认', '常规', '会话接管', '派发任务', '额外能力', '人设', '上下文', '轨迹',
+    ])
+    expect(navBy('proposals').querySelector('.dsh-dot-nav-badge')?.textContent).toBe('1')
+    expect(region()).toBe('常规')
+    expect(headerTitle()).toBe('常规')
 
-    // Trigger a save and confirm the non-jumping header status appears.
+    // Switch to Takeover, trigger a save and confirm the non-jumping header status appears.
+    await act(async () => { navBy('takeover').click() })
+    expect(region()).toBe('会话接管')
+    expect(headerTitle()).toBe('会话接管')
     const trackedTab = [...drawer.querySelectorAll<HTMLButtonElement>('[role="tab"]')].find(node => node.textContent === '所有会话')!
     await act(async () => { trackedTab.click() })
     await act(async () => { await Promise.resolve() })
     expect(drawer.querySelector('.dsh-dot-settings-status')?.textContent).toContain('已保存')
 
-    await act(async () => { navButtons[1]!.click() })
-    expect(region()).toBe('人设与约定')
+    await act(async () => { navBy('dispatch').click() })
+    expect(region()).toBe('派发任务')
     expect(drawer.querySelector('.dsh-dot-settings-status')).toBeNull()
-    await act(async () => { navButtons[2]!.click() })
+    await act(async () => { navBy('capabilities').click() })
+    expect(region()).toBe('额外能力')
+    await act(async () => { navBy('persona').click() })
+    expect(region()).toBe('人设与约定')
+    await act(async () => { navBy('context').click() })
     expect(region()).toBe('上下文用量')
-    await act(async () => { navButtons[3]!.click() })
+    await act(async () => { navBy('trajectory').click() })
     expect(region()).toBe('运行轨迹')
+
+    // Resolving the last proposal removes the Proposals nav item and returns to General.
+    await act(async () => { navBy('proposals').click() })
+    await act(async () => { await Promise.resolve() })
+    expect(region()).toBe('待确认的修改')
+    const approveBtn = drawer.querySelector<HTMLButtonElement>('.dsh-dot-proposal button')!
+    await act(async () => { approveBtn.click() })
+    await act(async () => { await Promise.resolve(); await Promise.resolve() })
+    expect(drawer.querySelector('.dsh-dot-drawer-nav button[data-nav="proposals"]')).toBeNull()
+    expect(gear.querySelector('.dsh-dot-gear-dot')).toBeNull()
+    expect(region()).toBe('常规')
 
     const widen = drawer.querySelector<HTMLButtonElement>('button[aria-label="加宽抽屉"]')!
     await act(async () => { widen.click() })
     expect(drawer.hasAttribute('data-wide')).toBe(true)
 
-    // The gear closes its own drawer; the tasks button opens the other one, with no settings tabs.
+    // The gear closes its own drawer; the tasks button opens the other one, with no settings nav.
     await act(async () => { gear.click() })
     expect(document.querySelector('aside.dsh-dot-drawer')).toBeNull()
     const tasks = [...document.querySelectorAll<HTMLButtonElement>('.dsh-dot-head button')].find(node => node.textContent?.startsWith('任务'))!
     await act(async () => { tasks.click() })
     const tasksDrawer = document.querySelector('aside.dsh-dot-drawer')!
     expect(tasksDrawer.getAttribute('data-kind')).toBe('tasks')
-    expect(tasksDrawer.querySelector('.dsh-dot-drawer-tabs')).toBeNull()
+    expect(tasksDrawer.querySelector('.dsh-dot-drawer-nav')).toBeNull()
     expect(tasksDrawer.querySelector('.dsh-dot-drawer-title')?.textContent).toContain('任务')
     expect(tasksDrawer.querySelector('.dsh-dot-filters')).not.toBeNull()
 
@@ -804,6 +832,78 @@ describe('ChatPanel activity and notice cards', () => {
     await act(async () => { document.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'Escape' })) })
     expect(document.querySelector('aside.dsh-dot-drawer')).toBeNull()
     await act(async () => { root.unmount() })
+  })
+
+  it('refreshes cache keepalive after approving a model proposal while preserving armed running session model', async () => {
+    const flush = async () => {
+      await Promise.resolve()
+      await Promise.resolve()
+      await new Promise(resolve => setTimeout(resolve, 0))
+    }
+    const setInputValue = (el: HTMLInputElement, value: string) => {
+      el.value = value
+      const key = Object.keys(el).find(k => k.startsWith('__reactProps'))
+      const props = key ? (el as unknown as Record<string, { onChange?: (event: { target: HTMLElement }) => void }>)[key] : undefined
+      props?.onChange?.({ target: el })
+    }
+    const snapshot: ChatSnapshot = { sessionId: 'dot-1', running: false, streaming: '', rev: 1, itemsRev: 1, items: [] }
+
+    const verifyCase = async (armedModel: { provider: string; model: string } | undefined, expectedKey: string, nextMinutes: number) => {
+      let current = { ...DEFAULT_SETTINGS, model: { provider: 'p', model: 'old' } }
+      let proposals = [{ id: 'pm-1', field: 'model' as const, before: { provider: 'p', model: 'old' }, after: { provider: 'p', model: 'new' }, reason: 'faster', createdAt: 1 }]
+      const saved: Array<Record<string, unknown>> = []
+      let keepaliveCalls = 0
+      const api: ChatApi = {
+        ...makeApi(snapshot),
+        models: async () => ({ groups: [{ id: 'p', name: 'P', models: [{ id: 'old', name: 'Old' }, { id: 'new', name: 'New' }] }] }),
+        settings: async () => current,
+        setSettings: async patch => { saved.push(patch as Record<string, unknown>); current = { ...current, ...patch } as typeof current; return current },
+        keepalive: async () => {
+          keepaliveCalls += 1
+          const m = armedModel ?? current.model ?? { provider: 'p', model: 'old' }
+          return { provider: m.provider, model: m.model, minutes: current.cacheTtl?.[`${m.provider}/${m.model}`] ?? 15, defaultMinutes: 15 }
+        },
+        settingProposals: async () => [...proposals],
+        decideSetting: async (id, allow) => {
+          proposals = proposals.filter(row => row.id !== id)
+          if (allow) current = { ...current, model: { provider: 'p', model: 'new' } }
+          return 'ok'
+        },
+      }
+      const root = createRoot(document.getElementById('root')!)
+      await act(async () => { root.render(<ChatPanel locale="en" api={api} onOpenSession={() => {}} />) })
+      await act(flush)
+      await act(async () => { document.querySelector<HTMLButtonElement>('button[aria-label="Settings"]')!.click() })
+      await act(flush)
+      await act(async () => { document.querySelector<HTMLButtonElement>('.dsh-dot-drawer-nav button[data-nav="proposals"]')!.click() })
+      await act(flush)
+      const callsBeforeApprove = keepaliveCalls
+      await act(async () => { document.querySelector<HTMLButtonElement>('.dsh-dot-proposal button')!.click() })
+      await act(flush)
+      expect(keepaliveCalls).toBeGreaterThan(callsBeforeApprove)
+      expect(document.querySelector('aside.dsh-dot-drawer [role="region"]')?.getAttribute('aria-label')).toBe('General')
+      expect(document.body.textContent).toContain(expectedKey)
+      const ttlInput = document.querySelector<HTMLInputElement>('input[aria-label="Cache lifetime"]')!
+      await act(async () => { setInputValue(ttlInput, String(nextMinutes)) })
+      await act(async () => { ttlInput.dispatchEvent(new dom.window.FocusEvent('focusout', { bubbles: true })) })
+      expect(saved.at(-1)).toEqual({ cacheTtl: { [expectedKey]: nextMinutes } })
+      await act(async () => { root.unmount() })
+    }
+
+    await verifyCase(undefined, 'p/new', 25)
+    await verifyCase({ provider: 'p', model: 'running' }, 'p/running', 30)
+  })
+
+  it('orders the narrow drawer container query after base settings padding and wraps long rail labels', () => {
+    const baseRule = '.dsh-dot-chat .dsh-dot-settings { display: flex;'
+    const narrowQuery = '@container dot-drawer-body (max-width: 439px)'
+    const baseIndex = chatCss.indexOf(baseRule)
+    const queryIndex = chatCss.indexOf(narrowQuery)
+    expect(baseIndex).toBeGreaterThan(-1)
+    expect(queryIndex).toBeGreaterThan(baseIndex)
+    const block = chatCss.slice(queryIndex, chatCss.indexOf('\n}\n', queryIndex) + 3)
+    expect(block).toContain('.dsh-dot-chat .dsh-dot-settings { padding: 14px 14px 28px; }')
+    expect(block).toContain('white-space: normal;')
   })
 })
 

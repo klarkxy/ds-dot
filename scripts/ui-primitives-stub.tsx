@@ -285,12 +285,15 @@ export function Tooltip({ label, children, disabled }: {
   label: string | (() => string)
   children: React.ReactElement
   disabled?: boolean
-  side?: 'right' | 'bottom' | 'top'
+  side?: 'right' | 'left' | 'bottom' | 'top'
   align?: 'center' | 'end'
   gap?: number
   portal?: boolean
   delayMs?: number
+  focusDelayMs?: number
   maxWidth?: number
+  openOnClick?: boolean
+  onlyWhenClipped?: boolean
   shortcutKeys?: readonly string[]
 }) {
   return h(React.Fragment, null, children,
@@ -466,6 +469,12 @@ export const PermissionIconReadOnlyRegular = icon('permission-read-only')
 export const PermissionIconWorkspaceWriteRegular = icon('permission-workspace-write')
 export const IconGlobeOutlineRegular = icon('globe')
 export const IconQuestionOutlineRegular = icon('question')
+export const IconInfoOutlineRegular = icon('info')
+export const IconSlidersTwoOutlineRegular = icon('sliders-two')
+export const IconCordisPluginOutlineRegular = icon('cordis-plugin')
+export const IconPersonalizationOutlineRegular = icon('personalization')
+export const IconGaugeOutlineRegular = icon('gauge')
+export const IconInspectOutlineRegular = icon('inspect')
 export const IconDataOutlineRegular = icon('data')
 export const IconDataOutlineMedium = icon('data-medium')
 export const IconWarningOutlineRegular = icon('warning')
@@ -530,7 +539,9 @@ const known = new Set([
   'IconChevronRightOutlineRegular', 'IconCloseOutlineRegular', 'IconCloseFillRegular', 'IconSearchOutlineRegular', 'IconEditOutlineRegular', 'IconCopyOutlineRegular', 'IconRefreshOutlineRegular', 'IconSettingsOutlineRegular', 'IconShieldOutlineRegular',
   'IconUserOutlineRegular', 'IconUsersOutlineRegular',
   'PermissionIconFullAccessRegular', 'PermissionIconReadOnlyRegular', 'PermissionIconWorkspaceWriteRegular',
-  'IconGlobeOutlineRegular', 'IconQuestionOutlineRegular',
+  'IconGlobeOutlineRegular', 'IconQuestionOutlineRegular', 'IconInfoOutlineRegular',
+  'IconSlidersTwoOutlineRegular', 'IconCordisPluginOutlineRegular', 'IconPersonalizationOutlineRegular',
+  'IconGaugeOutlineRegular', 'IconInspectOutlineRegular',
   'IconDataOutlineRegular', 'IconDataOutlineMedium', 'IconWarningOutlineRegular',
   'useAnchoredPosition',
   'useDismissOnOutsidePointer', 'useModalLayer', 'modalSelector', 'closeTopModal', 'isBehindModal',

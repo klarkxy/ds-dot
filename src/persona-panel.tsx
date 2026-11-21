@@ -7,7 +7,7 @@ import { Button, Input, Tag } from '@deepseek-ai/dsh-client-ui-primitives'
 import { useCallback, useEffect, useState } from 'react'
 import type { DotSettings, KnowledgeView, SettingField } from './contracts.ts'
 import { ADDRESS_MAX_CHARS, PERSONA_MAX_CHARS, defaultAddress, defaultPersona } from './persona.ts'
-import { LockToggle, PaneSkeleton, type SaveNotice, type SettingsApi, type SettingsPatch } from './settings-panel.tsx'
+import { HelpTip, LockToggle, PaneSkeleton, type SaveNotice, type SettingsApi, type SettingsPatch } from './settings-panel.tsx'
 import { formatWhen, t, type CopyLocale } from './ui-copy.ts'
 
 export interface KnowledgeApi {
@@ -161,12 +161,14 @@ function KnowledgeSection({ locale, api, onStatus, locked, onLock, discardSignal
         <div className="dsh-ui-form">
           <div className="dsh-ui-field">
             <div className="dsh-dot-setting-head">
-              <span className="dsh-ui-label">{t(locale, 'pAgreements')}</span>
+              <span className="dsh-ui-label">
+                <span>{t(locale, 'pAgreements')}</span>
+                <HelpTip locale={locale} fieldLabel={t(locale, 'pAgreements')} text={t(locale, 'pAgreementsHint')} />
+              </span>
               <div className="dsh-dot-setting-tools">
                 <LockToggle locale={locale} label={t(locale, 'pAgreements')} locked={locked} onLock={next => onLock('agreements', next)} />
               </div>
             </div>
-            <span className="dsh-ui-help">{t(locale, 'pAgreementsHint')}</span>
             <TextBlock
               locale={locale}
               label={t(locale, 'pAgreements')}
@@ -187,9 +189,11 @@ function KnowledgeSection({ locale, api, onStatus, locked, onLock, discardSignal
         <div className="dsh-ui-form">
           <div className="dsh-ui-field">
             <div className="dsh-dot-setting-head">
-              <span className="dsh-ui-label">{t(locale, 'pCognition')}</span>
+              <span className="dsh-ui-label">
+                <span>{t(locale, 'pCognition')}</span>
+                <HelpTip locale={locale} fieldLabel={t(locale, 'pCognition')} text={t(locale, 'pCognitionHint')} />
+              </span>
             </div>
-            <span className="dsh-ui-help">{t(locale, 'pCognitionHint')}</span>
             <TextBlock
               locale={locale}
               label={t(locale, 'pCognition')}

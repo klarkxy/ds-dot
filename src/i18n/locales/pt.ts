@@ -232,6 +232,7 @@ const ptUi: UiText = {
   sFactoryChanges: '{n} alteração(ões)',
   sFactoryRuns: '{n} execução(ões)',
   sFactorySchedules: '{n} lembrete(s)',
+  sFactoryRecipes: '{n} receita(s) de tarefa',
   sFactoryProposals: '{n} proposta(s) de configuração',
   sFactoryCards: '{n} cartão(ões)',
   sFactoryInbox: '{n} evento(s) na caixa de entrada',

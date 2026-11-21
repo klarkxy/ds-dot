@@ -29,6 +29,7 @@ export const TOOL = {
   newSegment: 'dot_new_segment',
   settings: 'dot_settings',
   capabilities: 'dot_capabilities',
+  recipe: 'dot_recipe',
 } as const
 
 /**
@@ -350,6 +351,7 @@ export interface FactoryResetPreview {
   readonly changes: number
   readonly runs: number
   readonly schedules: number
+  readonly recipes: number
   readonly proposals: number
   readonly cards: number
   /** Pending and delivered external events in the inbox table. */
@@ -552,6 +554,72 @@ export interface InboxRecord extends InboxEventInput {
 }
 
 export type InboxSubmitResult = 'stored' | 'merged' | 'duplicate'
+
+// ---- dot's task recipes --------------------------------------------------
+
+/**
+ * The versioned content of a task recipe: a saved work order dot fills a new
+ * change from. Requirement and constraint rows share the change-input shape,
+ * so a stored recipe always passes the same validation a create would.
+ */
+export interface RecipeBody {
+  /** One English sentence stating what a delivery of this kind must achieve. */
+  readonly goal: string
+  readonly requirements: readonly import('./work.ts').Requirement[]
+  readonly constraints?: readonly import('./work.ts').Constraint[]
+  /** English guidance added to every run brief dispatched from this recipe. */
+  readonly notes?: string
+  readonly deliverableLanguage?: string
+  /** Absolute default project directory. */
+  readonly dir?: string
+  readonly preset?: string
+  /** provider/model key. */
+  readonly model?: string
+  readonly access?: 'read' | 'write'
+  readonly humanReview?: boolean
+}
+
+/** One earlier revision of a recipe, with the name and reason it carried. */
+export interface RecipeVersion extends RecipeBody {
+  readonly revision: number
+  readonly name: string
+  readonly reason?: string
+  /** When this version was replaced. */
+  readonly at: number
+}
+
+/** How one change tagged with a recipe ended: settled by closeout or cancelled. */
+export interface RecipeOutcome {
+  readonly changeId: string
+  readonly title: string
+  /** The recipe revision the change ran on. */
+  readonly revision: number
+  readonly result: 'accepted' | 'cancelled'
+  readonly failedRounds: number
+  readonly at: number
+}
+
+/** A saved, versioned work-order template. Changes it spawned keep their tag after removal. */
+export interface RecipeRecord extends RecipeBody {
+  readonly id: string
+  /** Unique case-insensitively. */
+  readonly name: string
+  /** 1 on save, +1 on each revise or restore. */
+  readonly revision: number
+  /** The reason recorded for the current revision. */
+  readonly reason?: string
+  /** Earlier revisions, newest first, capped at RECIPE_HISTORY_MAX. */
+  readonly history: readonly RecipeVersion[]
+  /** Newest first, capped at RECIPE_OUTCOMES_MAX, upserted by changeId. */
+  readonly outcomes: readonly RecipeOutcome[]
+  readonly createdAt: number
+  readonly updatedAt: number
+}
+
+/** How many earlier recipe revisions are kept for restore. */
+export const RECIPE_HISTORY_MAX = 10
+/** How many recorded outcomes one recipe keeps. */
+export const RECIPE_OUTCOMES_MAX = 50
 
 // ---- dot's own chat, drawn by the plugin -------------------------------
 

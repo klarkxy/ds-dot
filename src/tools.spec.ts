@@ -85,11 +85,11 @@ describe('dot tools', () => {
   it('keeps the private reflection preset to history reads and one restricted submission', () => {
     expect(loadReflection().map(tool => tool.name).sort()).toEqual([TOOL.searchHistory, TOOL.readHistory, REFLECTION_SUBMIT_TOOL].sort())
   })
-  it('compiles every dot tool definition through defineTool and keeps 18 dot_* plus show_view', () => {
+  it('compiles every dot tool definition through defineTool and keeps 19 dot_* plus show_view', () => {
     const names = load().map(tool => tool.name)
     expect([...names].sort()).toEqual([...Object.values(TOOL), 'show_view'].sort())
-    expect(names).toHaveLength(19)
-    expect(new Set(names).size).toBe(19)
+    expect(names).toHaveLength(20)
+    expect(new Set(names).size).toBe(20)
   })
 
   it('marks only the reading tools read-only', () => {

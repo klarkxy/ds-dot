@@ -70,6 +70,8 @@ export interface ChangeRecord {
   readonly closeout?: { readonly verificationId: string; readonly source: string; readonly inputRef?: string; readonly subjectKey?: string; readonly at?: number }
   /** The user asked to see this input. A version field on accept does not replace the recorded decision. */
   readonly oversight?: OversightRecord
+  /** The recipe and revision this change was created from; kept after the recipe is removed or revised. */
+  readonly recipe?: { readonly id: string; readonly revision: number }
   readonly createdAt: number
   readonly updatedAt: number
 }
@@ -180,7 +182,7 @@ const scenarioSchema = z.object({
   when: z.string(),
   then: z.string(),
 })
-const requirementSchema = z.object({
+export const requirementSchema = z.object({
   requirementRef: z.string().min(1),
   text: z.string(),
   required: z.boolean(),
@@ -192,7 +194,7 @@ const stepSpecSchema = z.object({
   covers: z.array(z.string().min(1)).optional(),
   after: z.array(z.string().min(1)).optional(),
 })
-const constraintSchema = z.object({ constraintRef: z.string().min(1), text: z.string() })
+export const constraintSchema = z.object({ constraintRef: z.string().min(1), text: z.string() })
 const stepViewSchema = z.object({ stepRef: z.string().min(1), done: z.boolean(), runId: z.string().optional(), inputRef: z.string().min(1) })
 const baselineSchema = z.object({ workspaceRoot: z.string().min(1), scopeKey: z.string().min(1), artifactRef: z.string().min(1) })
 const writePathSchema = z.object({ path: z.string().min(1), type: z.enum(['file', 'directory']) })
@@ -224,6 +226,7 @@ export const changeSchema = z.object({
       notifiedAt: z.number().optional(),
     }).optional(),
   }).optional(),
+  recipe: z.object({ id: z.string().min(1), revision: z.number().int().positive() }).optional(),
   createdAt: z.number(), updatedAt: z.number(),
 })
 export const inputSchema = z.object({
@@ -780,7 +783,7 @@ export class WorkBook {
     })
   }
 
-  createChange(input: { title: string; cwd: string; goal: string; requirements?: readonly Requirement[]; steps?: readonly StepSpec[]; source?: string; priority?: 1 | 2 | 3; maxConcurrentRuns?: number; constraints?: readonly Constraint[]; userRequest?: string; deliverableLanguage?: string; at?: number }): Promise<ChangeRecord> {
+  createChange(input: { title: string; cwd: string; goal: string; requirements?: readonly Requirement[]; steps?: readonly StepSpec[]; source?: string; priority?: 1 | 2 | 3; maxConcurrentRuns?: number; constraints?: readonly Constraint[]; userRequest?: string; deliverableLanguage?: string; recipe?: { readonly id: string; readonly revision: number }; at?: number }): Promise<ChangeRecord> {
     return this.exclusive(async () => {
       this.assertRecovered()
       const requirements = input.requirements ?? []
@@ -801,6 +804,7 @@ export class WorkBook {
         currentRevision: 1, currentInputRef: inputRow.id, control: 'open',
         steps: inputRow.steps.map(step => ({ stepRef: step.stepRef, done: false, inputRef: inputRow.id })),
         maxConcurrentRuns: clampConcurrency(input.maxConcurrentRuns), priority: input.priority ?? 2,
+        ...(input.recipe ? { recipe: input.recipe } : {}),
         createdAt: at, updatedAt: at,
       }
       await this.commit('changes', change.id, change)
@@ -1930,21 +1934,21 @@ export class WorkBook {
   pruneCompletedChanges(
     maxKeep = MAX_COMPLETED_CHANGES,
     removeDurable?: (table: 'changes' | 'inputs' | 'runs' | 'verifications', key: string) => Promise<void>,
+    beforeRemove?: (change: ChangeRecord, failedRounds: number) => Promise<void>,
   ): Promise<{ readonly prunedChanges: readonly string[]; readonly keptArtifacts: ReadonlySet<string> }> {
     return this.exclusive(async () => {
       if (this.recovery) return { prunedChanges: [], keptArtifacts: this.referencedArtifacts() }
       const terminalChanges = [...this.changes.values()]
-        .filter(change => {
-          const runs = [...this.runs.values()].filter(run => run.changeId === change.id)
-          if (runs.some(run => !TERMINAL.has(run.phase))) return false
-          return change.control === 'cancelled' || change.closeout !== undefined
-        })
+        .filter(change => changeIsTerminal(change, [...this.runs.values()].filter(run => run.changeId === change.id)))
         .sort((a, b) => a.updatedAt - b.updatedAt || Number(a.id.slice(2)) - Number(b.id.slice(2)))
       const excess = Math.max(0, terminalChanges.length - Math.max(1, maxKeep))
       if (excess === 0) return { prunedChanges: [], keptArtifacts: this.referencedArtifacts() }
       const victims = terminalChanges.slice(0, excess)
       const prunedChanges: string[] = []
       for (const change of victims) {
+        if (beforeRemove) {
+          try { await beforeRemove(change, this.failedRounds(change.id)) } catch { /* outcome recording is best-effort */ }
+        }
         const changeRuns = [...this.runs.values()].filter(run => run.changeId === change.id)
         const changeInputs = [...this.inputs.values()].filter(inp => inp.changeId === change.id)
         const changeVers = [...this.verifications.values()].filter(ver => ver.changeId === change.id)
@@ -2160,6 +2164,12 @@ export class WorkBook {
 
 function sameBaseline(left: BaselineRef, right: BaselineRef): boolean {
   return left.workspaceRoot === right.workspaceRoot && left.scopeKey === right.scopeKey && left.artifactRef === right.artifactRef
+}
+
+/** Settled for good: every run is terminal and the change was closed out or cancelled. */
+export function changeIsTerminal(change: ChangeRecord, runs: readonly RunRecord[]): boolean {
+  if (runs.some(run => !TERMINAL.has(run.phase))) return false
+  return change.control === 'cancelled' || change.closeout !== undefined
 }
 
 /** Why this input must not be stored. Undefined means the refs and the step order are usable. */

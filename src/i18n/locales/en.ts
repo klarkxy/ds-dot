@@ -233,6 +233,7 @@ const enUi: UiText = {
   sFactoryChanges: '{n} change(s)',
   sFactoryRuns: '{n} run(s)',
   sFactorySchedules: '{n} reminder(s)',
+  sFactoryRecipes: '{n} task recipe(s)',
   sFactoryProposals: '{n} setting proposal(s)',
   sFactoryCards: '{n} card(s)',
   sFactoryInbox: '{n} inbox event(s)',

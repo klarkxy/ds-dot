@@ -232,6 +232,7 @@ const ruUi: UiText = {
   sFactoryChanges: 'Изменений: {n}',
   sFactoryRuns: 'Запусков: {n}',
   sFactorySchedules: 'Напоминаний: {n}',
+  sFactoryRecipes: 'Рецептов задач: {n}',
   sFactoryProposals: 'Предложений по настройкам: {n}',
   sFactoryCards: 'Карточек: {n}',
   sFactoryInbox: 'Событий во входящих: {n}',

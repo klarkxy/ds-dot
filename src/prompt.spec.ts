@@ -7,8 +7,8 @@ import { formatNotices } from './batcher.ts'
 describe('coordinator prompt contract', () => {
   it('names only real actions and real tools, without the removed ceremony', () => {
     const mentioned = new Set([...DOT_INSTRUCTIONS.matchAll(/action=([a-z]+)/g)].map(match => match[1]!))
-    // Every action named belongs to a registered enum: dot_task's own or dot_settings'.
-    const known = new Set<string>([...TASK_ACTIONS, 'propose'])
+    // Every action named belongs to a registered enum: dot_task's own, dot_settings', or dot_recipe's.
+    const known = new Set<string>([...TASK_ACTIONS, 'propose', 'save', 'restore', 'remove'])
     for (const action of mentioned) expect(known.has(action), action).toBe(true)
     for (const action of ['reserve', 'baseline', 'subject', 'evidence', 'verify', 'hold', 'accept', 'move', 'note', 'delete', 'update', 'board']) expect(mentioned.has(action), action).toBe(false)
     // The core lifecycle is still taught.

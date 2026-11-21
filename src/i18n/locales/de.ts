@@ -232,6 +232,7 @@ const deUi: UiText = {
   sFactoryChanges: '{n} Änderung(en)',
   sFactoryRuns: '{n} Ausführung(en)',
   sFactorySchedules: '{n} Erinnerung(en)',
+  sFactoryRecipes: '{n} Aufgabenrezept(e)',
   sFactoryProposals: '{n} Einstellungsvorschlag/-vorschläge',
   sFactoryCards: '{n} Karte(n)',
   sFactoryInbox: '{n} Eingangsereignis(se)',

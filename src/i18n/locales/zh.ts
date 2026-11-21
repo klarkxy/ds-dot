@@ -233,6 +233,7 @@ export const zhUi = {
   sFactoryChanges: '{n} 个变更',
   sFactoryRuns: '{n} 次运行',
   sFactorySchedules: '{n} 条提醒',
+  sFactoryRecipes: '{n} 个任务配方',
   sFactoryProposals: '{n} 条设置提案',
   sFactoryCards: '{n} 张卡片',
   sFactoryInbox: '{n} 条外部事件',

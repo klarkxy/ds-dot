@@ -249,7 +249,7 @@ export function apply(ctx: Context): void {
   // ── dot_task ──────────────────────────────────────────────────────────────
   tool(defineToolInput({
     name: TOOL.task,
-    description: 'Drive a contract-backed change from goal definition to verified closeout. create/revise define or update the input contract; dispatch reserves scope, captures the baseline, and launches a run (omit task_id to open a quick run on a new change in dir/workspace_id, or pass run_id to launch a saved reservation); finish settles a writer run once its report arrives; closeout snapshots the delivery, evaluates checks, and accepts it (or opens human oversight when human_review is set). check reports conflicting run reservations and active user sessions for dir/workspace_id (+ optional paths) without starting anything. Optional independent review: dispatch with role=review, then closeout or reject. read/list inspect state; supplement delivers context once to an active run without changing requirements; step records progress notes; pause/resume/cancel control execution; decide requests a human decision on a recorded verification. Service refusals preserve scope and version invariants.',
+    description: `Drive a contract-backed change from goal definition to verified closeout. create/revise define or update the input contract; dispatch reserves scope, captures the baseline, and launches a run (omit task_id to open a quick run on a new change in dir/workspace_id, or pass run_id to launch a saved reservation); finish settles a writer run once its report arrives; closeout snapshots the delivery, evaluates checks, and accepts it (or opens human oversight when human_review is set). check reports conflicting run reservations and active user sessions for dir/workspace_id (+ optional paths) without starting anything. Optional independent review: dispatch with role=review, then closeout or reject. read/list inspect state; supplement delivers context once to an active run without changing requirements; step records progress notes; pause/resume/cancel control execution; decide requests a human decision on a recorded verification. create accepts recipe=<id or name> to fill the order from a saved recipe (see ${TOOL.recipe}). Service refusals preserve scope and version invariants.`,
     parameters: {
       action: { type: 'string', enum: [...TASK_ACTIONS], required: true, description: 'Lifecycle action to perform.' },
       task_id: { type: 'string', description: 'Change id (required except on create, list, or initial dispatch of a new change).' },
@@ -261,6 +261,7 @@ export function apply(ctx: Context): void {
       steps: { type: 'string', description: 'create/revise: JSON array of {stepRef,text,covers?,after?} for planning notes (never treated as delivery proof). covers lists requirement/scenario ids served; after lists prerequisite step ids (acyclic).' },
       constraints: { type: 'string', description: 'create/revise: JSON array of {constraintRef,text} in English specifying execution boundaries (order, untouched paths, forbidden tools). Modifying constraints creates a new input revision.' },
       user_request: { type: 'string', description: "create/revise: the human's exact unedited, untranslated request text, passed verbatim to runs as the source of truth." },
+      recipe: { type: 'string', description: "create: recipe id or name; fills title, goal, requirements, constraints, dir, deliverable_language and human_review from the recipe — pass a field only to override it for this task." },
       deliverable_language: { type: 'string', description: 'create/revise: target language for deliverable files/copy/commits (e.g. "Simplified Chinese"); omit to follow user_request and existing project files. Run reports stay in English.' },
       priority: { type: 'integer', description: 'create/revise: priority from 1 (normal) to 3 (urgent).' },
       human_review: { type: 'boolean', description: 'create/revise: set true when the human asked to decide before acceptance. The first closeout records the verification and opens that decision; a later closeout accepts it.' },
@@ -527,6 +528,32 @@ export function apply(ctx: Context): void {
     },
     title: 'Settings',
   }), /* read is not exclusively read-only since propose mutates */ false)
+
+  // ── dot_recipe ────────────────────────────────────────────────────────────
+  tool(defineToolInput({
+    name: TOOL.recipe,
+    description: `Manage saved, versioned work-order recipes you reuse through ${TOOL.task} action=create recipe=<id or name>. action=save records a new recipe under a unique name — pass from_task to copy goal, requirements, constraints, deliverable language, dir, preset and access from a change you were happy with, or pass the fields directly. action=revise replaces any subset of fields (or renames) and always requires a reason naming what changed; it refuses a no-op. action=restore brings an earlier revision back as a new revision (reason required). action=list shows every recipe with its current-revision outcome stats; action=read shows the full body, revision history, per-revision accepted/cancelled stats and recent outcomes; action=remove deletes the recipe while tagged changes keep their tag.`,
+    parameters: {
+      action: { type: 'string', enum: ['list', 'read', 'save', 'revise', 'restore', 'remove'], required: true, description: 'Operation: list, read, save, revise, restore, or remove.' },
+      recipe: { type: 'string', description: 'read/revise/restore/remove: recipe id or exact name (case-insensitive).' },
+      name: { type: 'string', description: 'save: unique recipe name. revise: new name (rename).' },
+      from_task: { type: 'string', description: 'save: change id to copy goal, requirements, constraints, deliverable_language, dir, preset and access from; explicit fields override the copied ones.' },
+      goal: { type: 'string', description: 'save/revise: one English sentence stating what a delivery must achieve. Required on save without from_task.' },
+      requirements: { type: 'string', description: 'save/revise: JSON array of {requirementRef,text,required,scenarios?}, same contract as dot_task. Omit to copy or default to the goal.' },
+      constraints: { type: 'string', description: 'save/revise: JSON array of {constraintRef,text}; empty array clears.' },
+      notes: { type: 'string', description: 'save/revise: English guidance added to every run brief; empty string clears.' },
+      deliverable_language: { type: 'string', description: 'save/revise: target language for deliverables; empty string clears.' },
+      dir: { type: 'string', description: 'save/revise: absolute default project directory; empty string clears. Required on save without from_task.' },
+      preset: { type: 'string', description: 'save/revise: default task preset id for dispatches; empty string clears.' },
+      model: { type: 'string', description: 'save/revise: default provider/model key for dispatches; empty string clears.' },
+      access: { type: 'string', enum: ['read', 'write'], description: 'save/revise: default run access for work and rework dispatches (review stays read-only).' },
+      human_review: { type: 'boolean', description: 'save/revise: created tasks open human oversight before acceptance.' },
+      revision: { type: 'integer', description: 'restore: earlier revision number from action=read history.' },
+      reason: { type: 'string', description: 'revise/restore: required — why this revision exists (name the failure it fixes).' },
+    },
+    execute: async (args) => dot().manageRecipe(args as Record<string, unknown>),
+    title: 'Task recipes',
+  }))
 
   // ── dot_capabilities ────────────────────────────────────────────────────
   // Extra tools from other plugins and MCP servers are off by default; the

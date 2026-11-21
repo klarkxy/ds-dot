@@ -85,11 +85,11 @@ describe('dot tools', () => {
   it('keeps the private reflection preset to history reads and one restricted submission', () => {
     expect(loadReflection().map(tool => tool.name).sort()).toEqual([TOOL.searchHistory, TOOL.readHistory, REFLECTION_SUBMIT_TOOL].sort())
   })
-  it('compiles every dot tool definition through defineTool and keeps 17 dot_* plus show_view', () => {
+  it('compiles every dot tool definition through defineTool and keeps 18 dot_* plus show_view', () => {
     const names = load().map(tool => tool.name)
     expect([...names].sort()).toEqual([...Object.values(TOOL), 'show_view'].sort())
-    expect(names).toHaveLength(18)
-    expect(new Set(names).size).toBe(18)
+    expect(names).toHaveLength(19)
+    expect(new Set(names).size).toBe(19)
   })
 
   it('marks only the reading tools read-only', () => {
@@ -298,7 +298,7 @@ describe('dot tools', () => {
     const root = join(dirname(fileURLToPath(import.meta.url)), '..')
     const rowsOf = (file: string) => [...readFileSync(file, 'utf8').matchAll(/- id: (\S+)\s+name: '([^']+)'/g)].map(match => ({ id: match[1]!, name: match[2]! }))
     const rows = rowsOf(join(root, 'cordis.patch.yml'))
-    expect(rows).toEqual([{ id: 'deep-view', name: '@klarkxy/dsh-deep-view' }, { id: 'dot', name: 'ds-dot' }])
+    expect(rows).toEqual([{ id: 'dot-attribution', name: 'ds-dot/attribution' }, { id: 'deep-view', name: '@klarkxy/dsh-deep-view' }, { id: 'dot', name: 'ds-dot' }])
     const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'))
     // The dependency has to resolve from npm: a link:/file: spec only resolves on
     // the machine that owns that checkout, so a GitHub install would find no Deep View.

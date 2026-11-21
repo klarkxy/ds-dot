@@ -140,7 +140,7 @@ export class DotStore {
   }
 
   addCard(card: import('./card-state.ts').DotCardRecord): Promise<void> {
-    const updated = [...this.cards.map(row => row.answer ? row : { ...row, expired: true }), card]
+    const updated = [...this.cards.map(row => row.answer || row.keepAlive ? row : { ...row, expired: true }), card]
     if (updated.length <= MAX_STORED_CARDS) {
       return this.setDot({ cardSequence: card.number, cards: updated })
     }
@@ -154,8 +154,14 @@ export class DotStore {
   }
 
   expireCards(keepId?: string): Promise<void> {
-    if (!this.cards.some(card => !card.expired && !card.answer && card.id !== keepId)) return Promise.resolve()
-    return this.setDot({ cards: this.cards.map(card => card.answer || card.id === keepId ? card : { ...card, expired: true }) })
+    if (!this.cards.some(card => !card.expired && !card.answer && !card.keepAlive && card.id !== keepId)) return Promise.resolve()
+    return this.setDot({ cards: this.cards.map(card => card.answer || card.keepAlive || card.id === keepId ? card : { ...card, expired: true }) })
+  }
+
+  /** Mark one unanswered card expired — a human request that ended without an answer. */
+  expireCard(id: string): Promise<void> {
+    if (!this.cards.some(card => card.id === id && !card.expired && !card.answer)) return Promise.resolve()
+    return this.setDot({ cards: this.cards.map(card => card.id === id && !card.answer ? { ...card, expired: true } : card) })
   }
 
   setCardAnswer(id: string, answer: NonNullable<import('./card-state.ts').DotCardRecord['answer']>, notificationPending = false): Promise<void> {
@@ -204,7 +210,7 @@ export class DotStore {
       dotSessionId: next.sessionId,
       segment: next,
       pastSegments: past,
-      ...(moved ? { cards: this.cards.map(card => card.answer ? card : { ...card, expired: true }) } : {}),
+      ...(moved ? { cards: this.cards.map(card => card.answer || card.keepAlive ? card : { ...card, expired: true }) } : {}),
     }
     this.changed()
     return this.write('state', STATE_KEY, this.state)
@@ -229,13 +235,14 @@ export class DotStore {
   }
 
   /** Refresh the frozen inputs of a segment dot has not replied in yet. */
-  refreezeSegment(patch: Pick<Segment, 'persona' | 'model' | 'agreements' | 'cognition'>): Promise<void> {
+  refreezeSegment(patch: Pick<Segment, 'persona' | 'model' | 'agreements' | 'cognition' | 'capabilities'>): Promise<void> {
     const segment = this.segment
     if (!segment) return Promise.resolve()
-    const { model: _model, agreements: _agreements, agreementsSeen: _aseen, cognition: _cognition, cognitionSeen: _cseen, ...rest } = segment
+    const { model: _model, agreements: _agreements, agreementsSeen: _aseen, cognition: _cognition, cognitionSeen: _cseen, capabilities: _caps, ...rest } = segment
     return this.setDot({ segment: {
       ...rest,
       persona: patch.persona,
+      ...patch.capabilities !== undefined ? { capabilities: patch.capabilities } : {},
       ...patch.model !== undefined ? { model: patch.model } : {},
       ...patch.agreements !== undefined ? { agreements: patch.agreements } : {},
       ...patch.cognition !== undefined ? { cognition: patch.cognition } : {},

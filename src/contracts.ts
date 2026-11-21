@@ -28,13 +28,14 @@ export const TOOL = {
   cognition: 'dot_cognition',
   newSegment: 'dot_new_segment',
   settings: 'dot_settings',
+  capabilities: 'dot_capabilities',
 } as const
 
 /**
  * Settings Dorothy may propose changing; locks themselves are human-only.
  * `agreements` is the human's rules text, edited as one bulk value.
  */
-export const SETTING_FIELDS = ['model', 'approvals', 'questions', 'scope', 'taskModels', 'taskPermission', 'reflection', 'idleCheckMinutes', 'persona', 'address', 'agreements'] as const
+export const SETTING_FIELDS = ['model', 'approvals', 'questions', 'scope', 'taskModels', 'taskPermission', 'reflection', 'idleCheckMinutes', 'persona', 'address', 'agreements', 'capabilities'] as const
 export type SettingField = typeof SETTING_FIELDS[number]
 export type SettingLocks = Readonly<Partial<Record<SettingField, boolean>>>
 
@@ -248,6 +249,58 @@ export const TASK_MODEL_LIST_MAX = 500
  */
 export type TaskPermission = 'workspace-write' | 'danger-full-access' | 'default'
 
+/**
+ * How dot may use one extra capability selector: off denies it, ask raises a
+ * human-only approval card on each call, auto lets the call through.
+ */
+export type CapabilityGrant = 'off' | 'ask' | 'auto'
+
+/**
+ * Grants for dot's optional extra tools, keyed by selector: `tool:<name>`,
+ * `mcp:<server>`, `plugin:<bundle>`, `plugin:<bundle>#<entryId>` or
+ * `prefix:<segment>` for an unattributed name cluster. A name on the locked
+ * inherited list is never grantable, whatever its row says.
+ */
+export interface DotCapabilities {
+  readonly grants: Readonly<Record<string, CapabilityGrant>>
+}
+
+/** One tool row inside a capability group, as the settings view renders it. */
+export interface CapabilityToolView {
+  readonly name: string
+  readonly description?: string
+  /** Registered under a `when` gate (e.g. Creator-only): grantable, applied as a scoped copy. */
+  readonly conditional: boolean
+  /** Granted but not currently registered. */
+  readonly missing?: boolean
+  /** Self-escalating under dot's full-access session: runs unsandboxed with no host approval. */
+  readonly highRisk?: boolean
+}
+
+/** A grantable group of extra tools: one MCP server, one bundle, one loader entry, an unattributed name prefix, or the unattributed remainder. */
+export interface CapabilityGroupView {
+  /** Selector a grant row addresses: `mcp:<s>`, `plugin:<b>`, `plugin:<b>#<e>`, `prefix:<s>` or `host`. */
+  readonly id: string
+  readonly kind: 'mcp' | 'plugin' | 'entry' | 'prefix' | 'host'
+  readonly label: string
+  /** Granted but nothing currently owns the selector. */
+  readonly missing?: boolean
+  /** At least one tool inside the group (at any depth) is high-risk. */
+  readonly highRisk?: boolean
+  readonly tools: readonly CapabilityToolView[]
+  readonly children?: readonly CapabilityGroupView[]
+}
+
+/** The catalog the settings view draws: locked dot tools on top, grantable groups below. */
+export interface CapabilityCatalogView {
+  readonly locked: readonly string[]
+  readonly groups: readonly CapabilityGroupView[]
+  /** Grants of the current settings, keyed by selector. */
+  readonly grants: Readonly<Record<string, CapabilityGrant>>
+  /** Grant each tool got when the live segment started, before any later edits. */
+  readonly applied: Readonly<Record<string, CapabilityGrant>>
+}
+
 /** Everything the human tunes in dot's settings view; stored with dot's state. */
 export interface DotSettings {
   /** dot's own model; absent follows the host default model. */
@@ -271,6 +324,8 @@ export interface DotSettings {
   readonly persona?: string
   /** How dot addresses the human; absent uses the default. */
   readonly address?: string
+  /** Grants for optional extra tools from other plugins and MCP servers; every extra defaults to off. */
+  readonly capabilities: DotCapabilities
   /** Missing and false both mean unlocked: existing installs opt in to self-management. */
   readonly locks?: SettingLocks
 }
@@ -284,6 +339,7 @@ export const DEFAULT_SETTINGS: DotSettings = {
   reflection: true,
   autoUpdate: true,
   idleCheckMinutes: 10,
+  capabilities: { grants: {} },
 }
 
 /** What a factory-reset preview shows before the human confirms. */
@@ -325,7 +381,7 @@ export const DEFAULT_RULES: RuleConfig = DEFAULT_SETTINGS
  * past the rollover line, the segment sat idle, the model or the persona
  * changed, or the previous session could not be reopened.
  */
-export type RolloverReason = 'context-full' | 'idle-expired' | 'model-switch' | 'prompt-changed' | 'lost' | 'manual' | 'dot-requested'
+export type RolloverReason = 'context-full' | 'idle-expired' | 'model-switch' | 'prompt-changed' | 'capabilities-changed' | 'lost' | 'manual' | 'dot-requested'
 
 /** Once a finished turn leaves this share of the usable window occupied, the next message starts a new segment. */
 export const ROLLOVER_POLICY = { ratio: 0.7 } as const

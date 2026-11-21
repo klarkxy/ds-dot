@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { DEFAULT_SETTINGS } from './contracts.ts'
+import { reasonBeforeDelivery } from './segments.ts'
 import { DotStore, type DotDomainHandle } from './store.ts'
 
 function fakeDomain(seed: Record<string, Record<string, unknown>> = {}) {
@@ -110,6 +111,39 @@ describe('DotStore', () => {
     expect(tables.schedules!.has('sch-a')).toBe(false)
     expect(puts.at(-1)).toBe('schedules:-sch-a')
     expect(new DotStore(domain).schedules.map(record => record.id)).toEqual(['sch-b'])
+  })
+
+  it('keeps a capabilities-changed rollover reason on current and past segments across a reload', async () => {
+    const { domain } = fakeDomain()
+    const store = new DotStore(domain)
+    await store.setDot({ dotSessionId: 'dot-1' })
+    await store.beginSegment({ sessionId: 'dot-1', startedAt: 1, persona: 'p' })
+    await store.beginSegment(
+      { sessionId: 'dot-2', startedAt: 2, persona: 'p', reason: 'capabilities-changed' },
+      { reason: 'capabilities-changed' },
+    )
+    const reloaded = new DotStore(domain)
+    expect(reloaded.segment?.sessionId).toBe('dot-2')
+    expect(reloaded.segment?.reason).toBe('capabilities-changed')
+    expect(reloaded.pastSegments.at(-1)).toMatchObject({ sessionId: 'dot-1', reason: 'capabilities-changed' })
+  })
+
+  it('keeps the frozen capabilities signature on the current segment across a reload', async () => {
+    const { domain } = fakeDomain()
+    const store = new DotStore(domain)
+    await store.setDot({ dotSessionId: 'dot-1' })
+    const signature = '{"tool:bash":"auto"}'
+    await store.beginSegment({ sessionId: 'dot-1', startedAt: 1, persona: 'p', capabilities: signature })
+    const reloaded = new DotStore(domain)
+    expect(reloaded.segment?.capabilities).toBe(signature)
+    expect(reasonBeforeDelivery({
+      replied: true,
+      now: 10,
+      persona: 'p',
+      frozenPersona: 'p',
+      capabilities: signature,
+      frozenCapabilities: reloaded.segment?.capabilities,
+    })).toBeUndefined()
   })
 
   it('serializes writes in call order', async () => {

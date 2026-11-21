@@ -49,7 +49,7 @@ import { ReminderClock } from './reminders.ts'
 import { routeRequest } from './rules.ts'
 import { ScheduleInputError, describeTiming, scheduleLines, type ScheduleInput } from './schedule.ts'
 import { KEEPALIVE_MAX_PINGS, cacheTtlMinutes, defaultCacheTtl, keepaliveIntervalMs } from './keepalive.ts'
-import { IDLE_MIN_TOKENS, openingText, reasonAfterTurn, reasonBeforeDelivery, type Segment } from './segments.ts'
+import { EMPTY_CAPABILITIES_SIGNATURE, IDLE_MIN_TOKENS, openingText, reasonAfterTurn, reasonBeforeDelivery, type Segment } from './segments.ts'
 import { parseInboxRecord } from './storage.ts'
 import type { DotStore } from './store.ts'
 import { factoryResetArchiveIds, factoryResetCounts, factoryResetStopGap, factoryResetTokenError, issueFactoryResetToken, type FactoryResetStopEvidence } from './factory-reset.ts'
@@ -60,7 +60,10 @@ import { TaskPresetError, pickTaskPreset, type TaskPresetCatalog, type TaskPrese
 import { stamp, transcriptRows, type TranscriptRow } from './transcript.ts'
 import type { RawEvent } from './chat.ts'
 import { SelfSettings } from './self-settings.ts'
-import { approvalCardCopy, copyLocale, type CopyLocale } from './i18n/index.ts'
+import { approvalCardCopy, copyLocale, t, type CopyLocale } from './i18n/index.ts'
+import { HIGH_RISK_TOOLS, resolveGrants, type DotCapabilities } from './capabilities.ts'
+import type { CapabilityCatalogView, CapabilityGrant, CapabilityGroupView } from './contracts.ts'
+import type { GateVerdict } from './tool-scope.ts'
 
 export interface DotServiceOptions {
   readonly host: DotHost
@@ -79,11 +82,12 @@ export interface DotServiceOptions {
   readonly trace?: Parameters<typeof emitDotTrace>[0]
   /** Durable peer-delivery rows. Absent only in tests that never send one. */
   readonly peers?: PeerLedger
+  /** Optional extra-capability layer; absent in tests that never grant one. */
+  readonly capabilities?: DotCapabilities
   /** Durable inbox rows. Absent only in tests that never submit one. */
   readonly inbox?: InboxLedger
   /** The host's plugin-manager service, looked up lazily; absent in tests and hosts without it. */
   readonly pluginManager?: () => unknown
-
 }
 
 /** The history tools themselves: their calls and results are not part of the record they read. */
@@ -98,6 +102,11 @@ export const HOME_TITLE = 'Dorothy'
 export const APPROVAL_GRACE_MS = 10_000
 /** At most this many distinct inbox records ride one delivered batch; the rest stay pending for the next flush. */
 const INBOX_NOTICES_PER_DELIVERY = 20
+
+/** npm package name (scope optional); install proposals accept no paths, urls, or git specs. */
+const NPM_NAME = /^(?:@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]{0,213}$/i
+/** Install proposals pin an exact published version, never a range or tag. */
+const EXACT_VERSION = /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/
 
 export class DotError extends HarnessError {
   constructor(code: string, message: string) { super(message, code) }
@@ -127,6 +136,10 @@ export class DotService {
   private knowledgeLane: Promise<unknown> = Promise.resolve()
   private requestedSegment?: { focus?: string }
   private readonly retryingCardNotifications = new Set<string>()
+  /** Install proposals waiting on the human; in-memory only — a restart never resumes one. */
+  private readonly pendingInstalls = new Map<string, { name: string; version: string; spec: string; reason: string; cardId?: string }>()
+  /** Open capability asks, so a settings change that revokes the grant settles them before the human answers. */
+  private readonly openCapabilityAsks = new Map<string, { readonly chain: readonly string[]; readonly withdraw: () => void }>()
   /** Decision wakes already queued in this process. The durable mark is notifiedAt. */
   private readonly decisionWakes = new Set<string>()
   private readonly childRefreshers = new Set<() => void>()
@@ -146,7 +159,7 @@ export class DotService {
   constructor(private readonly options: DotServiceOptions) {
     this.currentLocale = options.locale ?? options.store.uiLocale
     this.inbox = options.inbox ?? new InboxLedger(memoryInboxTable(), parseInboxRecord)
-    this.cards = new DotCards(options.store, options.log)
+    this.cards = new DotCards(options.store, options.log, () => this.now())
     this.now = options.now ?? Date.now
     this.timer = options.timer ?? realTimer
     this.pending = new PendingHub(this.now)
@@ -276,6 +289,13 @@ export class DotService {
 
   /** Best-effort seal for sessions that were already open when the plugin started. */
   async sealExisting(): Promise<void> {
+    // Approval requests live only in memory; a restart leaves their cards
+    // unanswerable, so unanswered approval-bound cards expire now.
+    for (const card of this.store.cards) {
+      if (card.approvalId !== undefined && !card.answer && !card.expired) {
+        await this.store.expireCard(card.id).catch(error => this.options.log?.(`dsh-dot: stale card expiry was not saved: ${messageOf(error)}`))
+      }
+    }
     const prepare = this.host.prepareOwnedSession
     if (!prepare) return
     for (const sessionId of this.store.ownedSessionIds()) {
@@ -405,6 +425,234 @@ export class DotService {
     return JSON.stringify(detail)
   }
 
+  /**
+   * The pre-execute verdict for a tool outside dot's locked set. A granted
+   * extra runs only while it is still granted and was applied when the current
+   * segment started: the human's mid-segment change never edits a live
+   * request's tool list, but revocation denies at once.
+   */
+  async capabilityGate(exec: { readonly name: string; readonly callId?: string; readonly arguments?: unknown; readonly signal?: AbortSignal }): Promise<GateVerdict> {
+    const caps = this.options.capabilities
+    const dot = this.store.dotSessionId
+    if (!caps || !dot || this.closing) return { kind: 'deny', reason: 'This preset cannot run that tool.' }
+    const entry = caps.appliedFor(dot)?.get(exec.name)
+    if (!entry) return { kind: 'deny', reason: `The extra capability ${exec.name} was not applied to this segment.` }
+    const live = caps.liveGrant(entry.chain)
+    if (live !== 'ask' && live !== 'auto') return { kind: 'deny', reason: `The extra capability ${exec.name} is off.` }
+    if (live === 'auto') return 'next'
+    const allowed = await this.askCapabilityApproval(exec, entry.chain)
+    if (!allowed) return { kind: 'deny', reason: `The human declined ${exec.name}.` }
+    // The human approved, but the grant may have been revoked while the card
+    // was open — or in the instant after they answered. Re-resolve the live
+    // state; an approval only counts while the grant still exists.
+    const reapplied = caps.appliedFor(dot)?.get(exec.name)
+    if (!reapplied) return { kind: 'deny', reason: `The extra capability ${exec.name} was not applied to this segment.` }
+    const still = caps.liveGrant(reapplied.chain)
+    if (still !== 'ask' && still !== 'auto') return { kind: 'deny', reason: `The extra capability ${exec.name} is off.` }
+    return 'next'
+  }
+
+  /**
+   * A human-only approval card in dot's own panel for one `ask`-granted call.
+   * It bypasses the relay path, which skips dot's own session; the abort
+   * signal of the waiting call withdraws the request, and the card is expired
+   * when it ends unanswered.
+   */
+  private async askCapabilityApproval(exec: { readonly name: string; readonly callId?: string; readonly arguments?: unknown; readonly signal?: AbortSignal }, chain: readonly string[]): Promise<boolean> {
+    const sessionId = this.store.dotSessionId
+    if (!sessionId || this.closing) return false
+    const args = exec.arguments === undefined ? undefined : typeof exec.arguments === 'string' ? exec.arguments : JSON.stringify(exec.arguments)
+    const opened = this.pending.open({
+      kind: 'approval',
+      sessionId,
+      subject: exec.name,
+      ...(args !== undefined ? { detail: args } : {}),
+      ...(exec.signal !== undefined ? { signal: exec.signal } : {}),
+      humanRequired: true,
+    })
+    if (!this.pending.get(opened.id)) return false
+    this.openCapabilityAsks.set(opened.id, { chain, withdraw: opened.withdraw })
+    let cardId: string | undefined
+    try {
+      await this.saveApprovalDetail({ requestId: opened.id, sessionId, ...(exec.callId !== undefined ? { callId: exec.callId } : {}), toolName: exec.name, ...(args !== undefined ? { arguments: args } : {}) })
+      const copy = approvalCardCopy(this.locale)
+      const presentation = await this.cards.present({ title: copy.title, interactive: true, view: { type: 'stack', children: [
+        { type: 'text', text: `${copy.title} ${opened.id}\n${copy.request}: ${exec.name}${args ? `\n${clip(args, 1200)}` : ''}` },
+        { type: 'confirm', id: 'approval', confirmLabel: copy.approve, cancelLabel: copy.deny },
+      ] } }, `capability:${opened.id}`, opened.id)
+      cardId = presentation.viewId
+    } catch (error) {
+      this.options.log?.(`dsh-dot: capability approval card failed: ${messageOf(error)}`)
+      this.openCapabilityAsks.delete(opened.id)
+      opened.withdraw()
+      return false
+    }
+    const answer = await opened.settled
+    this.openCapabilityAsks.delete(opened.id)
+    if (cardId !== undefined && answer === undefined) await this.store.expireCard(cardId).catch(error => this.options.log?.(`dsh-dot: capability card expiry was not saved: ${messageOf(error)}`))
+    return answer?.kind === 'approval' && answer.allow === true
+  }
+
+  /** The catalog, grants, and applied state the settings view draws. */
+  async capabilitiesView(): Promise<CapabilityCatalogView> {
+    const caps = this.options.capabilities
+    const grants = this.store.settings.capabilities?.grants ?? {}
+    const base = caps ? await caps.catalog() : { locked: [], groups: [] }
+    const applied = caps?.appliedFor(this.store.dotSessionId)
+    return { ...base, grants, applied: Object.fromEntries([...applied ?? []].map(([name, resolved]) => [name, resolved.grant])) }
+  }
+
+  /** Compact text tree of the catalog for dot_capabilities list. */
+  async listCapabilities(): Promise<string> {
+    const caps = this.options.capabilities
+    if (!caps) return 'No capability catalog exists on this host.'
+    const { locked, groups } = await caps.catalog()
+    const grants = this.store.settings.capabilities?.grants ?? {}
+    const applied = caps.appliedFor(this.store.dotSessionId)
+    const lines = [`Locked dot tools (always on; cannot be granted or revoked): ${locked.length} inherited tools.`]
+    if (groups.length === 0) lines.push('No extra capabilities are currently installed.')
+    const row = (group: CapabilityGroupView, parents: readonly string[], indent: string) => {
+      const grant = grants[group.id]
+      // The host group is display-only: unattributed tools answer to per-tool grants.
+      const selector = group.kind === 'host' ? '(per-tool grants only)' : `[${group.id}] grant=${grant ?? 'inherited'}`
+      lines.push(`${indent}${group.label} ${selector}${group.missing === true ? ' UNAVAILABLE' : ''}`)
+      const chain = group.kind === 'host' ? parents : [group.id, ...parents]
+      for (const tool of group.tools) {
+        if (tool.missing === true) { lines.push(`${indent}  ${tool.name} — UNAVAILABLE (grant kept)`); continue }
+        let effective: string | undefined
+        for (const selector of [`tool:${tool.name}`, ...chain]) { if (grants[selector] !== undefined) { effective = grants[selector]; break } }
+        const flags = [tool.conditional ? 'conditional (when-gate bypassed while granted)' : '', tool.highRisk === true ? 'HIGH RISK (runs unapproved and unsandboxed)' : '', applied?.has(tool.name) ? `applied=${applied.get(tool.name)?.grant}` : 'not applied this segment'].filter(Boolean).join(', ')
+        lines.push(`${indent}  ${tool.name} — grant=${effective ?? 'off'}${flags ? ` (${flags})` : ''}`)
+      }
+      for (const child of group.children ?? []) row(child, chain, `${indent}  `)
+    }
+    for (const group of groups) row(group, [], '- ')
+    lines.push(`Propose a change with action=propose; grants apply from the next segment and need human approval.`)
+    return lines.join('\n')
+  }
+
+  /**
+   * Queue a grant change for human approval. A well-shaped selector for a
+   * tool that is not installed yet is still accepted; a selector naming a
+   * locked dot tool is not.
+   */
+  async proposeCapability(input: { readonly selector: string; readonly grant: CapabilityGrant; readonly reason: string }): Promise<string> {
+    const caps = this.options.capabilities
+    if (!caps) throw new DotError('dot/invalid', 'no capability catalog exists on this host')
+    const selector = input.selector.trim()
+    if (selector === 'host') throw new DotError('dot/invalid', 'unattributed tools are granted one by one with tool:<name> or prefix:<segment>; there is no host-wide grant')
+    if (!/^(tool|mcp|plugin|prefix):/.test(selector)) throw new DotError('dot/invalid', 'selector must be tool:<name>, mcp:<server>, plugin:<bundle>[#<entry>], or prefix:<segment>')
+    if (selector.startsWith('tool:') && caps.locked.includes(selector.slice(5))) throw new DotError('dot/invalid', `${selector.slice(5)} is a locked dot tool; it is always on and cannot be granted`)
+    if (!['off', 'ask', 'auto'].includes(input.grant)) throw new DotError('dot/invalid', 'grant must be off, ask, or auto')
+    const grants = { ...this.store.settings.capabilities?.grants, [selector]: input.grant }
+    let reason = input.reason
+    if (input.grant === 'auto') {
+      // Warn the human when the merged grants would let a self-escalating tool
+      // run unapproved and unsandboxed; the proposal still stands.
+      const { groups } = await caps.catalog()
+      const risky = [...resolveGrants(grants, groups)].filter(([name, resolved]) => resolved.grant === 'auto' && HIGH_RISK_TOOLS.has(name)).map(([name]) => name).sort()
+      if (risky.length > 0) reason = `${reason}\nWarning: this makes ${risky.join(', ')} run automatically — no approval and no sandbox.`
+    }
+    return this.selfSettings.propose({ field: 'capabilities', value: { grants }, reason })
+  }
+
+  /**
+   * Queue a plugin installation for human approval. The call returns at once;
+   * the human-only card's answer settles the pending request and settleInstall
+   * runs the install (or reports the decline) through the notice channel.
+   */
+  async proposeInstall(input: { readonly spec: string; readonly version?: string; readonly reason: string }): Promise<string> {
+    const pm = this.options.capabilities?.pluginManager()
+    if (typeof pm?.inspect !== 'function' || typeof pm.installBundle !== 'function') throw new DotError('dot/invalid', 'this host cannot install plugins')
+    const name = input.spec.trim()
+    const given = input.version?.trim() ?? ''
+    if (!NPM_NAME.test(name)) throw new DotError('dot/invalid', `${name || 'spec'} is not an npm package name`)
+    const sessionId = this.store.dotSessionId
+    if (!sessionId) throw new DotError('dot/invalid', 'dot has no session yet')
+    let bundles
+    try { bundles = await pm.listBundles() } catch (error) { throw new DotError('dot/unavailable', `cannot check installed bundles: ${messageOf(error)}`) }
+    const existing = bundles.find(bundle => bundle.name === name)
+    if (existing?.installed === true) throw new DotError('dot/invalid', `${name} is already installed`)
+    if (existing?.readOnlyReason !== undefined) throw new DotError('dot/invalid', `${name} is a protected bundle managed by the host`)
+    // An official on-demand row already pins the exact spec and version the
+    // host offers; anything else official stays off-limits to dot.
+    const official = existing?.official === true ? existing.installTarget : undefined
+    if (existing !== undefined && existing.official === true && official === undefined) throw new DotError('dot/invalid', `${name} is a protected bundle managed by the host`)
+    let spec: string
+    let version: string
+    let description: string | undefined
+    if (official !== undefined) {
+      if (given !== '' && given !== official.version) throw new DotError('dot/invalid', `the official ${name} build is ${official.version}; got "${given}"`)
+      spec = official.spec
+      version = official.version
+      description = existing?.description
+    } else {
+      if (!EXACT_VERSION.test(given)) throw new DotError('dot/invalid', `version must be exact, e.g. 1.2.3; got "${given || 'none'}"`)
+      version = given
+      spec = `${name}@${version}`
+      let inspection
+      try { inspection = await pm.inspect(spec) } catch (error) { throw new DotError('dot/unavailable', `inspection failed: ${messageOf(error)}`) }
+      if (inspection.status === 'refused') throw new DotError('dot/invalid', `${spec} refused (${inspection.problem}): ${inspection.reason}`)
+      if (inspection.bundle === false) throw new DotError('dot/invalid', `${spec} declares no dsh bundle`)
+      description = inspection.status === 'accepted' ? inspection.description : undefined
+    }
+    const opened = this.pending.open({ kind: 'approval', sessionId, subject: `${name}@${version}`, detail: input.reason, humanRequired: true })
+    const meta: { name: string; version: string; spec: string; reason: string; cardId?: string } = { name, version, spec, reason: input.reason }
+    this.pendingInstalls.set(opened.id, meta)
+    try {
+      await this.saveApprovalDetail({ requestId: opened.id, sessionId, toolName: `${TOOL.capabilities}:propose_install`, reason: input.reason, arguments: `${name}@${version}` })
+      const copy = approvalCardCopy(this.locale)
+      const presentation = await this.cards.present({ title: t(this.locale, 'sCapInstallTitle'), interactive: true, view: { type: 'stack', children: [
+        { type: 'text', text: `${t(this.locale, 'sCapInstallTitle')} ${opened.id}\n${copy.request}: ${name}@${version}${description ? `\n${clip(description, 600)}` : ''}\n${input.reason}` },
+        { type: 'confirm', id: 'approval', confirmLabel: copy.approve, cancelLabel: copy.deny },
+      ] } }, `install:${opened.id}`, opened.id)
+      meta.cardId = presentation.viewId
+    } catch (error) {
+      this.pendingInstalls.delete(opened.id)
+      opened.withdraw()
+      throw error
+    }
+    void opened.settled.then(answer => this.settleInstall(opened.id, answer))
+    return `Install proposal ${opened.id} for ${name}@${version} is waiting for the human in dot's panel. Nothing installs until they approve; you will be told the outcome.`
+  }
+
+  /** Runs only on a live pending request's settlement — never after a restart. */
+  private async settleInstall(requestId: string, answer: PendingAnswer | undefined): Promise<void> {
+    const meta = this.pendingInstalls.get(requestId)
+    if (!meta) return
+    this.pendingInstalls.delete(requestId)
+    const { name, version, spec } = meta
+    if (answer === undefined) {
+      if (meta.cardId !== undefined) await this.store.expireCard(meta.cardId).catch(error => this.options.log?.(`dsh-dot: install card expiry was not saved: ${messageOf(error)}`))
+      return
+    }
+    const sessionId = this.store.dotSessionId
+    if (!sessionId) return
+    // The proposal id rides in the text: a notice keyed by requestId would be
+    // dropped with the just-settled pending request instead of reaching dot.
+    if (!(answer.kind === 'approval' && answer.allow === true)) {
+      this.notify({ sessionId, kind: 'turn-end', text: `Install proposal ${requestId}: the human declined installing ${name}@${version}.`, at: this.now() }, true)
+      return
+    }
+    const pm = this.options.capabilities?.pluginManager()
+    if (typeof pm?.installBundle !== 'function') {
+      this.notify({ sessionId, kind: 'turn-end', text: `Install proposal ${requestId}: approved install of ${name}@${version} cannot run: this host cannot install plugins.`, at: this.now() }, true)
+      return
+    }
+    let text: string
+    try {
+      const result = await pm.installBundle(spec, { enabled: true, expected: { name, version }, requestId })
+      if (result.error !== undefined || result.application === 'failed' || result.application === 'cancelled' || result.changed !== true) {
+        text = `Install proposal ${requestId}: the human approved installing ${name}@${version}, but the install failed: ${result.error?.code ?? result.application}${result.error?.diagnostic ? ` — ${clip(result.error.diagnostic, 400)}` : ''}`
+      } else {
+        text = `Install proposal ${requestId}: Installed ${result.bundle ?? name}@${result.version ?? version} — the human approved the install. Its tools now appear in dot_capabilities (action=list) and stay off until granted; grants apply from the next segment.`
+      }
+    } catch (error) {
+      text = `Install proposal ${requestId}: the human approved installing ${name}@${version}, but the install failed: ${messageOf(error)}`
+    }
+    this.notify({ sessionId, kind: 'turn-end', text, at: this.now() }, true)
+  }
+
   presentCard(shown: ShownView, callId: string, approvalId?: string) {
     return this.serial(async () => {
       if (approvalId) {
@@ -426,7 +674,10 @@ export class DotService {
     return this.track(() => this.cards.answer(id, action, values, async (card, answer) => {
       if (card.approvalId) {
         if (answer.action !== 'approval' || typeof answer.values.confirmed !== 'boolean') throw new DotError('dot/invalid-answer', 'invalid approval decision')
+        // A capability approval belongs to dot's own session; its answer resolves the waiting call, nothing is spoken into the chat.
+        const own = this.pending.get(card.approvalId)?.sessionId === this.store.dotSessionId
         this.answerHumanApproval(card.approvalId, answer.values.confirmed)
+        if (own) return false
         try { await this.say('card reply', { card, answer }); return false }
         catch (error) {
           this.options.log?.(`dsh-dot: approval committed, notification failed: ${messageOf(error)}`)
@@ -460,6 +711,20 @@ export class DotService {
   settingsChanged(): Promise<void> {
     this.armIdleCheck()
     this.updates.settingsChanged()
+    // A grant revoked while its approval card waits settles the ask at once:
+    // the call denies and the card expires through the unanswered path. This
+    // runs outside the serial lane so a queued settings write cannot stall
+    // withdrawal behind itself.
+    const caps = this.options.capabilities
+    if (caps) {
+      for (const [id, ask] of [...this.openCapabilityAsks]) {
+        const grant = caps.liveGrant(ask.chain)
+        if (grant !== 'ask' && grant !== 'auto') {
+          this.openCapabilityAsks.delete(id)
+          ask.withdraw()
+        }
+      }
+    }
     return this.serial(async () => {
       const dot = this.store.dotSessionId
       if (!dot) return
@@ -863,6 +1128,14 @@ export class DotService {
   reconcile(): Promise<void> { return this.track(() => this.reconcileNow()) }
 
   private async reconcileNow(): Promise<void> {
+    // Pending requests do not survive a restart, so a keep-alive approval card
+    // left behind by one can never be answered again; expire it up front.
+    const live = new Set(this.pending.list().map(row => row.id))
+    for (const card of this.store.cards) {
+      if (card.keepAlive !== true || card.answer || card.expired) continue
+      if (card.approvalId !== undefined && live.has(card.approvalId)) continue
+      await this.store.expireCard(card.id).catch(error => this.options.log?.(`dsh-dot: stale approval card expiry was not saved: ${messageOf(error)}`))
+    }
     for (const run of this.store.work.occupying()) {
       if (this.closing) return
       await reconcileRun(this.store.work, this.runHost(), run.id, this.now()).catch(error => {
@@ -2755,14 +3028,16 @@ export class DotService {
     if (frozen === undefined || frozen === this.host.modelKey()) this.host.syncModel(dot)
   }
 
-  /** Persona, model, agreements and cognition as a segment starting now would freeze them. */
-  private async frozen(): Promise<Pick<Segment, 'persona' | 'model' | 'agreements' | 'cognition'>> {
+  /** Persona, model, agreements, cognition and capability grants as a segment starting now would freeze them. */
+  private async frozen(): Promise<Pick<Segment, 'persona' | 'model' | 'agreements' | 'cognition' | 'capabilities'>> {
     const model = this.host.modelKey()
+    const capabilities = this.options.capabilities?.signature()
     return {
       persona: personaSection(this.store.settings, this.locale),
       ...model ? { model } : {},
       agreements: agreementsSection(this.store.agreements),
       cognition: cognitionSection(this.store.cognition),
+      ...capabilities !== undefined ? { capabilities } : {},
     }
   }
 
@@ -2792,7 +3067,9 @@ export class DotService {
     const events = await this.host.readEvents(dot)
     if (this.repliedInEvents(events).replied) return
     const wanted = await this.frozen()
-    if (segment.persona !== wanted.persona) await this.store.refreezeSegment(wanted)
+    const capChanged = (segment.capabilities ?? EMPTY_CAPABILITIES_SIGNATURE) !== (wanted.capabilities ?? EMPTY_CAPABILITIES_SIGNATURE)
+    if (capChanged) await this.host.reapplyCapabilities?.(dot)
+    if (segment.persona !== wanted.persona || capChanged) await this.store.refreezeSegment(wanted)
   }
 
   /**
@@ -2809,11 +3086,14 @@ export class DotService {
     const wanted = await this.frozen()
     const seenAgreements = segment.agreementsSeen ?? segment.agreements ?? ''
     const seenCognition = segment.cognitionSeen ?? segment.cognition ?? ''
+    const capChanged = (segment.capabilities ?? EMPTY_CAPABILITIES_SIGNATURE) !== (wanted.capabilities ?? EMPTY_CAPABILITIES_SIGNATURE)
     if (!replied) {
       // No request of this segment is cached yet, so it simply takes the current settings and blocks.
+      if (capChanged) await this.host.reapplyCapabilities?.(dot)
       if (segment.persona !== wanted.persona || segment.model !== wanted.model
         || (wanted.agreements ?? '') !== (segment.agreements ?? '')
-        || (wanted.cognition ?? '') !== (segment.cognition ?? '')) await this.store.refreezeSegment(wanted)
+        || (wanted.cognition ?? '') !== (segment.cognition ?? '')
+        || capChanged) await this.store.refreezeSegment(wanted)
       return undefined
     }
     const view = await this.host.dotContext(dot)
@@ -2830,6 +3110,8 @@ export class DotService {
       seenAgreements,
       cognition: wanted.cognition ?? '',
       seenCognition,
+      capabilities: wanted.capabilities,
+      frozenCapabilities: segment.capabilities,
     }) ?? reasonAfterTurn(view)
   }
 

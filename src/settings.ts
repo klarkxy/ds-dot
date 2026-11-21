@@ -30,8 +30,15 @@ const FIELDS = {
     .refine(map => Object.keys(map).length <= CACHE_TTL_MAX_ENTRIES),
   persona: z.string().max(PERSONA_MAX_CHARS),
   address: z.string().trim().min(1).max(ADDRESS_MAX_CHARS),
+  capabilities: z.object({
+    grants: z.record(z.string().trim().min(1).max(400), z.enum(['off', 'ask', 'auto']))
+      .refine(map => Object.keys(map).length <= CAPABILITY_GRANTS_MAX),
+  }).strict(),
   locks: z.object(Object.fromEntries(SETTING_FIELDS.map(field => [field, z.boolean().optional()]))).strict(),
 } as const
+
+/** Selector rows the capabilities field may hold at once. */
+export const CAPABILITY_GRANTS_MAX = 500
 
 /** Settings a patch may clear with null, going back to their defaults. */
 const CLEARABLE = new Set<string>(['model', 'persona', 'address'])

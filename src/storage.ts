@@ -36,7 +36,7 @@ const storedTaskSchema = z.object({
   unseenTurns: z.number().int().nonnegative(),
 })
 
-const reasonSchema = z.enum(['context-full', 'idle-expired', 'model-switch', 'prompt-changed', 'lost', 'manual', 'dot-requested'])
+const reasonSchema = z.enum(['context-full', 'idle-expired', 'model-switch', 'prompt-changed', 'capabilities-changed', 'lost', 'manual', 'dot-requested'])
 
 const handoffSchema = z.object({
   tier: z.enum(['verbatim', 'summary', 'tail']),
@@ -60,6 +60,8 @@ const segmentSchema = z.object({
   opening: z.string().optional(),
   handoff: handoffSchema.optional(),
   reason: reasonSchema.optional(),
+  /** Extra-capability grant signature as it read when the segment started; old rows predating the field open without it. */
+  capabilities: z.string().optional(),
 })
 
 const pastSegmentSchema = z.object({
@@ -115,6 +117,7 @@ const cardSchema = z.object({
   approvalDetail: z.object({ requestId: z.string(), sessionId: z.string(), callerSessionId: z.string().optional(), callId: z.string().optional(), toolName: z.string(), reason: z.string().optional(), arguments: z.string().optional() }).optional(),
   notificationPending: z.boolean().optional(),
   answer: z.object({ id: z.string(), action: z.string(), values: z.record(z.string(), z.unknown()) }).optional(),
+  keepAlive: z.literal(true).optional(),
 })
 
 const updateStatusSchema = z.object({

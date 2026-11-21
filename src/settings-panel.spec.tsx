@@ -381,4 +381,43 @@ describe('sectioned settings, switches, and help tips', () => {
     expect(document.querySelector('.dsh-ui-warn')?.textContent).toContain('Could not load the model list')
     await act(async () => root.unmount())
   })
+
+  it('shows the Model questions help tip only when questions is set to dot', async () => {
+    let current: DotSettings = { ...DEFAULT_SETTINGS, questions: 'dot' }
+    const api = {
+      models: async () => ({ groups: [] }),
+      settings: async () => current,
+      settingProposals: async () => [],
+      decideSetting: async () => 'ok',
+      setSettings: async (patch: Partial<DotSettings>) => { current = { ...current, ...patch } as DotSettings; return current },
+    }
+    function Harness() {
+      const [settings, setSettings] = useState<DotSettings>(current)
+      return <SettingsPanel locale="en" section="takeover" api={api as never} settings={settings} onSaved={setSettings} />
+    }
+    const root = createRoot(document.getElementById('root')!)
+    await act(async () => root.render(<Harness />))
+    await act(async () => { await Promise.resolve() })
+
+    const tip = () => document.querySelector<HTMLButtonElement>('button.dsh-dot-help-tip[aria-label="About Model questions"]')
+    const tabNamed = (label: string) => [...document.querySelectorAll<HTMLButtonElement>('[role="tab"]')].find(el => el.textContent === label)!
+    expect(tip()).not.toBeNull()
+
+    await act(async () => tabNamed('Ask me').click())
+    await act(async () => { await Promise.resolve() })
+    expect(current.questions).toBe('human')
+    expect(tip()).toBeNull()
+
+    await act(async () => tabNamed('Hands off').click())
+    await act(async () => { await Promise.resolve() })
+    expect(current.questions).toBe('off')
+    expect(tip()).toBeNull()
+
+    await act(async () => tabNamed('She decides').click())
+    await act(async () => { await Promise.resolve() })
+    expect(current.questions).toBe('dot')
+    expect(tip()).not.toBeNull()
+
+    await act(async () => root.unmount())
+  })
 })

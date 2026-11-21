@@ -164,13 +164,20 @@ export const chatCss = settingsCss + `
   background: var(--dsw-alias-state-warn-primary); color: var(--dsw-alias-label-primary-foreground);
 }
 @container dot-drawer-body (max-width: 439px) {
-  .dsh-dot-chat .dsh-dot-drawer-nav { width: 46px; padding: 10px 6px 18px; align-items: center; }
+  .dsh-dot-chat .dsh-dot-drawer-nav { width: 64px; padding: 8px 4px 18px; align-items: stretch; gap: 3px; }
   .dsh-dot-chat .dsh-dot-nav-group-label { display: none; }
-  .dsh-dot-chat .dsh-dot-nav-sep { width: 22px; margin: 6px 0; }
-  .dsh-dot-chat .dsh-dot-nav-item { width: 34px; height: 34px; padding: 0; justify-content: center; }
-  .dsh-dot-chat .dsh-dot-nav-label { display: none; }
-  .dsh-dot-chat .dsh-dot-nav-item .dsh-dot-nav-badge { position: absolute; top: 2px; right: 2px; min-width: 14px; height: 14px; padding: 0 3px; font-size: 10px; line-height: 14px; }
-  .dsh-dot-chat .dsh-dot-nav-item .dsh-dot-dirty-dot { position: absolute; top: 5px; right: 5px; }
+  .dsh-dot-chat .dsh-dot-nav-sep { width: 28px; align-self: center; margin: 4px 0; }
+  .dsh-dot-chat .dsh-dot-nav-item {
+    flex-direction: column; justify-content: center; gap: 2px;
+    min-height: 44px; padding: 5px 2px; text-align: center;
+  }
+  .dsh-dot-chat .dsh-dot-nav-label {
+    flex: 0 0 auto; max-width: 100%; font-size: 10px; line-height: 12px; text-align: center;
+  }
+  .dsh-dot-chat .dsh-dot-nav-item .dsh-dot-nav-badge { position: absolute; top: 2px; right: 3px; min-width: 14px; height: 14px; padding: 0 3px; font-size: 10px; line-height: 14px; }
+  .dsh-dot-chat .dsh-dot-nav-item .dsh-dot-dirty-dot { position: absolute; top: 5px; right: 6px; }
+  .dsh-dot-chat .dsh-dot-settings { padding: 14px 14px 28px; }
+  .dsh-dot-chat .dsh-dot-settings[data-tab='trajectory'] { padding: 0; }
 }
 .dsh-dot-chat .dsh-dot-settings-status {
   display: inline-flex; align-items: center; gap: 4px; flex-shrink: 1; min-width: 0; margin-right: 2px; font-size: 12px; line-height: 18px;

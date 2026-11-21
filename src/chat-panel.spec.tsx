@@ -833,6 +833,66 @@ describe('ChatPanel activity and notice cards', () => {
     expect(document.querySelector('aside.dsh-dot-drawer')).toBeNull()
     await act(async () => { root.unmount() })
   })
+
+  it('refreshes cache keepalive after approving a model proposal while preserving armed running session model', async () => {
+    const flush = async () => {
+      await Promise.resolve()
+      await Promise.resolve()
+      await new Promise(resolve => setTimeout(resolve, 0))
+    }
+    const setInputValue = (el: HTMLInputElement, value: string) => {
+      el.value = value
+      const key = Object.keys(el).find(k => k.startsWith('__reactProps'))
+      const props = key ? (el as unknown as Record<string, { onChange?: (event: { target: HTMLElement }) => void }>)[key] : undefined
+      props?.onChange?.({ target: el })
+    }
+    const snapshot: ChatSnapshot = { sessionId: 'dot-1', running: false, streaming: '', rev: 1, itemsRev: 1, items: [] }
+
+    const verifyCase = async (armedModel: { provider: string; model: string } | undefined, expectedKey: string, nextMinutes: number) => {
+      let current = { ...DEFAULT_SETTINGS, model: { provider: 'p', model: 'old' } }
+      let proposals = [{ id: 'pm-1', field: 'model' as const, before: { provider: 'p', model: 'old' }, after: { provider: 'p', model: 'new' }, reason: 'faster', createdAt: 1 }]
+      const saved: Array<Record<string, unknown>> = []
+      let keepaliveCalls = 0
+      const api: ChatApi = {
+        ...makeApi(snapshot),
+        models: async () => ({ groups: [{ id: 'p', name: 'P', models: [{ id: 'old', name: 'Old' }, { id: 'new', name: 'New' }] }] }),
+        settings: async () => current,
+        setSettings: async patch => { saved.push(patch as Record<string, unknown>); current = { ...current, ...patch } as typeof current; return current },
+        keepalive: async () => {
+          keepaliveCalls += 1
+          const m = armedModel ?? current.model ?? { provider: 'p', model: 'old' }
+          return { provider: m.provider, model: m.model, minutes: current.cacheTtl?.[`${m.provider}/${m.model}`] ?? 15, defaultMinutes: 15 }
+        },
+        settingProposals: async () => [...proposals],
+        decideSetting: async (id, allow) => {
+          proposals = proposals.filter(row => row.id !== id)
+          if (allow) current = { ...current, model: { provider: 'p', model: 'new' } }
+          return 'ok'
+        },
+      }
+      const root = createRoot(document.getElementById('root')!)
+      await act(async () => { root.render(<ChatPanel locale="en" api={api} onOpenSession={() => {}} />) })
+      await act(flush)
+      await act(async () => { document.querySelector<HTMLButtonElement>('button[aria-label="Settings"]')!.click() })
+      await act(flush)
+      await act(async () => { document.querySelector<HTMLButtonElement>('.dsh-dot-drawer-nav button[data-nav="proposals"]')!.click() })
+      await act(flush)
+      const callsBeforeApprove = keepaliveCalls
+      await act(async () => { document.querySelector<HTMLButtonElement>('.dsh-dot-proposal button')!.click() })
+      await act(flush)
+      expect(keepaliveCalls).toBeGreaterThan(callsBeforeApprove)
+      expect(document.querySelector('aside.dsh-dot-drawer [role="region"]')?.getAttribute('aria-label')).toBe('General')
+      expect(document.body.textContent).toContain(expectedKey)
+      const ttlInput = document.querySelector<HTMLInputElement>('input[aria-label="Cache lifetime"]')!
+      await act(async () => { setInputValue(ttlInput, String(nextMinutes)) })
+      await act(async () => { ttlInput.dispatchEvent(new dom.window.FocusEvent('focusout', { bubbles: true })) })
+      expect(saved.at(-1)).toEqual({ cacheTtl: { [expectedKey]: nextMinutes } })
+      await act(async () => { root.unmount() })
+    }
+
+    await verifyCase(undefined, 'p/new', 25)
+    await verifyCase({ provider: 'p', model: 'running' }, 'p/running', 30)
+  })
 })
 
 describe('ChatPanel bottom pin', () => {

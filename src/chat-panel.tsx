@@ -204,7 +204,6 @@ function WorkDrawer({ locale, api, tab, wide, settings, trajectoryRev, running, 
         data-nav={item.value}
         aria-pressed={tab === item.value}
         aria-controls={`dsh-dot-drawer-panel-${item.value}`}
-        aria-label={navCompact ? item.label : undefined}
         onClick={() => requestTab(item.value)}
       >
         <span className="dsh-dot-nav-icon" aria-hidden="true">{item.icon}</span>

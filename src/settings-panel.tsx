@@ -206,6 +206,7 @@ export interface ProposalsState {
   readonly error: string
   readonly loaded: boolean
   readonly decide: (id: string, allow: boolean) => void
+  readonly revision: number
 }
 
 /** Shared polling/decision hook so the settings drawer keeps badge counts live across every view. */
@@ -219,6 +220,7 @@ export function useSettingProposals(
   const [error, setError] = useState('')
   const [loaded, setLoaded] = useState(false)
   const [refresh, setRefresh] = useState(0)
+  const [decidedRev, setDecidedRev] = useState(0)
   const onDecidedRef = useRef(onDecided)
   onDecidedRef.current = onDecided
   const onCountRef = useRef(onCountChange)
@@ -245,11 +247,12 @@ export function useSettingProposals(
         return next
       })
       setRefresh(value => value + 1)
+      if (allow) setDecidedRev(value => value + 1)
       onDecidedRef.current?.()
     }, failure => setError(failure instanceof Error ? failure.message : String(failure)))
   }, [api])
 
-  return { rows, error, loaded, decide }
+  return { rows, error, loaded, decide, revision: decidedRev }
 }
 
 function Proposals({ locale, choices, state, showTitle }: { locale: CopyLocale; choices: readonly ModelMenuChoice[]; state: ProposalsState; showTitle: boolean }) {
@@ -616,15 +619,24 @@ export function SettingsPanel({ locale, api, settings, section = 'all', proposal
   const [modelFilter, setModelFilter] = useState('')
   const [keepalive, setKeepalive] = useState<KeepaliveInfo>()
   const [keepaliveRefresh, setKeepaliveRefresh] = useState(0)
+  const show = (target: SettingsSection) => section === 'all' || section === target
+  const reloadSettings = useCallback(() => {
+    api.settings(new AbortController().signal).then(onSaved, () => {})
+  }, [api, onSaved])
+  const ownProposals = useSettingProposals(api, proposals === undefined && show('proposals'), reloadSettings, onProposalCount)
+  const proposalState = proposals ?? ownProposals
+  const hasSettings = settings !== undefined
+  const modelKey = settings?.model ? `${settings.model.provider}/${settings.model.model}` : ''
+  const cacheTtlSig = JSON.stringify(settings?.cacheTtl ?? null)
   useEffect(() => {
-    if (!api.keepalive) return
+    if (!api.keepalive || !hasSettings) return
     const life = new AbortController()
     api.keepalive(life.signal).then(
       info => { if (!life.signal.aborted) setKeepalive(info) },
       () => { if (!life.signal.aborted) setKeepalive(undefined) },
     )
     return () => { life.abort() }
-  }, [api, keepaliveRefresh])
+  }, [api, keepaliveRefresh, hasSettings, modelKey, cacheTtlSig, proposalState.revision])
   const reportStatus = useCallback((next: SaveNotice | undefined) => {
     setStatus(next)
     onStatusChange?.(next)
@@ -636,12 +648,6 @@ export function SettingsPanel({ locale, api, settings, section = 'all', proposal
       failure => reportStatus({ kind: 'error', message: failure instanceof Error ? failure.message : String(failure) }),
     )
   }, [api, onSaved, reportStatus])
-  const show = (target: SettingsSection) => section === 'all' || section === target
-  const reloadSettings = useCallback(() => {
-    api.settings(new AbortController().signal).then(onSaved, () => {})
-  }, [api, onSaved])
-  const ownProposals = useSettingProposals(api, proposals === undefined && show('proposals'), reloadSettings, onProposalCount)
-  const proposalState = proposals ?? ownProposals
 
   if (!settings) return <PaneSkeleton label={t(locale, 'settingsLoading')} />
 
@@ -773,7 +779,7 @@ export function SettingsPanel({ locale, api, settings, section = 'all', proposal
             <Field label={t(locale, 'sApprovals')} tip={approvalHelp} {...lock('approvals')}>
               <SegmentedChoice locale={locale} label={t(locale, 'sApprovals')} value={settings.approvals} options={approvalModes} labelKeyOf={opt => `sApprovals_${opt}`} onChange={next => save({ approvals: next })} />
             </Field>
-            <Field label={t(locale, 'sQuestions')} tip={t(locale, 'sQuestionsDesc_dot')} {...lock('questions')}>
+            <Field label={t(locale, 'sQuestions')} tip={settings.questions === 'dot' ? t(locale, 'sQuestionsDesc_dot') : undefined} {...lock('questions')}>
               <SegmentedChoice locale={locale} label={t(locale, 'sQuestions')} value={settings.questions} options={questionModes} labelKeyOf={opt => `sQuestions_${opt}`} onChange={next => save({ questions: next })} />
             </Field>
           </div>

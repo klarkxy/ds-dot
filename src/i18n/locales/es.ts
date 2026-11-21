@@ -240,6 +240,7 @@ const esUi: UiText = {
   sFactoryChanges: '{n} cambio(s)',
   sFactoryRuns: '{n} ejecución(es)',
   sFactorySchedules: '{n} recordatorio(s)',
+  sFactoryRecipes: '{n} receta(s) de tarea',
   sFactoryProposals: '{n} propuesta(s) de ajuste',
   sFactoryCards: '{n} tarjeta(s)',
   sFactoryInbox: '{n} evento(s) de la bandeja',

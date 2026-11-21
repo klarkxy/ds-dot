@@ -37,6 +37,8 @@ Create a workspace at D:\work\site and fix the broken links on the docs page. Te
 
 - **Schedule reminders:** Set one-off or recurring reminders in natural language (*"check in half an hour"*, *"summarize overnight builds at 9:00 every weekday"*). Reminders persist across segment handoffs and DSH restarts, and duplicates of an existing reminder are refused instead of stacking.
 
+- **Reuse recipes:** When a kind of task comes back regularly — a weekly report, a dependency bump, a triage pass — Dorothy can save a delivery you were happy with as a versioned **recipe** (or you can have her define one directly). She runs it again on request or from a reminder you set up, filling the work order from the recipe so each run only needs what is different this time. When a run fails because of the recipe itself, she revises it with a reason naming the failure, and revisions are compared by their accepted/cancelled outcomes so a worse revision can be restored.
+
 Dorothy replies in your language while writing project deliverables in the language you or the repository use. Her answers stream as plain text, with cards reserved for structure — tables, choices, and approvals. Long conversations automatically roll over into a fresh **segment** without losing active tasks, reminders, or memory.
 
 ## Panel and settings
@@ -49,7 +51,7 @@ Dorothy replies in your language while writing project deliverables in the langu
 
 - **Context & Trajectory:** Inspect token usage, frozen prompt sections, and cache hit rates, or start a new segment manually; search turn-by-turn steps, tool calls, and background reflection runs.
 
-- **Factory reset:** Previews exactly what will be cleared — tracked tasks, work changes and runs, reminders, proposals, cards, archived sessions (including her own conversation and background sessions), agreements, cognition, and settings — then asks for confirmation. Your own sessions, project files, and host persona stay untouched.
+- **Factory reset:** Previews exactly what will be cleared — tracked tasks, work changes and runs, reminders, recipes, proposals, cards, archived sessions (including her own conversation and background sessions), agreements, cognition, and settings — then asks for confirmation. Your own sessions, project files, and host persona stay untouched.
 
 ## Upgrading from earlier versions
 

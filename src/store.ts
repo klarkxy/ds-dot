@@ -3,18 +3,18 @@
  * the durable copy follows the in-memory order; reads never wait on disk.
  */
 import { APPROVAL_DETAIL_LIMIT } from './approval-risk.ts'
-import { COGNITION_HISTORY_MAX, type BoardView, type CognitionVersion, type DotContextUsage, type DotSettings, type DotUsageOffset, type PendingView, type ReflectionRun, type ScheduleRecord, type SettingProposal, type TaskRecord } from './contracts.ts'
+import { COGNITION_HISTORY_MAX, type BoardView, type CognitionVersion, type DotContextUsage, type DotSettings, type DotUsageOffset, type PendingView, type RecipeRecord, type ReflectionRun, type ScheduleRecord, type SettingProposal, type TaskRecord } from './contracts.ts'
 import { ZERO_USAGE, addUsage } from './context.ts'
 import { applyEvent, createTask, ledgerSummary, markSeen, sortTasks, withPending, type LedgerEvent, type NewTask } from './ledger.ts'
 import { MAX_PAST_SEGMENTS, type PastSegment, type Segment } from './segments.ts'
 import { parseSettings } from './settings.ts'
 import { isCopyLocale, type CopyLocale } from './i18n/index.ts'
-import { STATE_KEY, parseScheduleRecord, parseSettingProposal, parseState, parseTask, type DotState } from './storage.ts'
+import { STATE_KEY, parseRecipeRecord, parseScheduleRecord, parseSettingProposal, parseState, parseTask, type DotState } from './storage.ts'
 import { ownedSessionIds, sessionIsOwned } from './peer.ts'
-import { WorkBook, isUnknownState, type WorkPersist } from './work.ts'
+import { WorkBook, isUnknownState, type ChangeRecord, type WorkPersist } from './work.ts'
 import { projectWorkIdle, projectWorkLedger } from './work-actions.ts'
 
-type TableName = 'state' | 'tasks' | 'schedules' | 'proposals' | 'changes' | 'inputs' | 'runs' | 'verifications' | 'peers' | 'inbox'
+type TableName = 'state' | 'tasks' | 'schedules' | 'proposals' | 'changes' | 'inputs' | 'runs' | 'verifications' | 'peers' | 'inbox' | 'recipes'
 
 export interface DotTable {
   entries(): IterableIterator<[unknown, unknown]>
@@ -44,6 +44,7 @@ export class DotStore {
   private localePref: CopyLocale | undefined
   private readonly tasks = new Map<string, TaskRecord>()
   private readonly reminders = new Map<string, ScheduleRecord>()
+  private readonly recipeRows = new Map<string, RecipeRecord>()
   private readonly proposals = new Map<string, SettingProposal>()
   private tail: Promise<unknown> = Promise.resolve()
   private cognitionRevision = 0
@@ -69,6 +70,10 @@ export class DotStore {
       for (const [key, value] of domain.table('proposals').entries()) {
         const proposal = parseSettingProposal(value)
         if (proposal && proposal.id === key) this.proposals.set(proposal.id, proposal)
+      }
+      for (const [key, value] of domain.table('recipes').entries()) {
+        const recipe = parseRecipeRecord(value)
+        if (recipe && recipe.id === key) this.recipeRows.set(recipe.id, recipe)
       }
     }
     this.work = WorkBook.restore({
@@ -403,7 +408,7 @@ export class DotStore {
    */
   async factoryReset(now = Date.now()): Promise<void> {
     await this.flush()
-    const names: TableName[] = ['tasks', 'schedules', 'proposals', 'changes', 'inputs', 'runs', 'verifications', 'peers']
+    const names: TableName[] = ['tasks', 'schedules', 'recipes', 'proposals', 'changes', 'inputs', 'runs', 'verifications', 'peers']
     const domain = this.domain
     const op = this.tail.then(async () => {
       if (domain) {
@@ -415,6 +420,7 @@ export class DotStore {
       }
       this.tasks.clear()
       this.reminders.clear()
+      this.recipeRows.clear()
       this.proposals.clear()
       this.work.clear()
       this.localePref = undefined
@@ -546,6 +552,36 @@ export class DotStore {
     return op.then(() => true)
   }
 
+  /** dot's task recipes, ordered by name. */
+  get recipes(): readonly RecipeRecord[] {
+    return [...this.recipeRows.values()].sort((a, b) => a.name.toLowerCase().localeCompare(b.name.toLowerCase()) || a.id.localeCompare(b.id))
+  }
+
+  /** Look a recipe up by id, or by exact name case-insensitively. */
+  recipe(idOrName: string): RecipeRecord | undefined {
+    const direct = this.recipeRows.get(idOrName)
+    if (direct) return direct
+    const folded = idOrName.trim().toLowerCase()
+    return [...this.recipeRows.values()].find(row => row.name.toLowerCase() === folded)
+  }
+
+  putRecipe(record: RecipeRecord): Promise<void> {
+    this.recipeRows.set(record.id, record)
+    this.changed()
+    return this.write('recipes', record.id, record)
+  }
+
+  /** @returns false when no recipe has that id. */
+  deleteRecipe(id: string): Promise<boolean> {
+    if (!this.recipeRows.delete(id)) return Promise.resolve(false)
+    this.changed()
+    const domain = this.domain
+    if (domain === undefined) return Promise.resolve(true)
+    const op = this.tail.then(() => this.durable(() => domain.table('recipes').delete(id)))
+    this.tail = op.catch(() => undefined)
+    return op.then(() => true)
+  }
+
   workLedger() { return projectWorkLedger(this.work) }
   workIdle() { return projectWorkIdle(this.work) }
 
@@ -586,14 +622,14 @@ export class DotStore {
   }
 
   /** Evict oldest terminal WorkBook changes from both memory and durable storage. */
-  pruneWorkHistory(maxKeep?: number): Promise<{ readonly prunedChanges: readonly string[]; readonly keptArtifacts: ReadonlySet<string> }> {
+  pruneWorkHistory(maxKeep?: number, beforeRemove?: (change: ChangeRecord, failedRounds: number) => Promise<void>): Promise<{ readonly prunedChanges: readonly string[]; readonly keptArtifacts: ReadonlySet<string> }> {
     return this.work.pruneCompletedChanges(maxKeep, async (table, key) => {
       const domain = this.domain
       if (!domain) return
       const op = this.tail.then(() => this.durable(() => domain.table(table).delete(key)))
       this.tail = op.catch(() => undefined)
       await op
-    })
+    }, beforeRemove)
   }
 
   private prune(): void {

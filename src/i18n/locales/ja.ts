@@ -240,6 +240,7 @@ const jaUi: UiText = {
   sFactoryChanges: '変更 {n} 件',
   sFactoryRuns: '実行 {n} 回',
   sFactorySchedules: 'リマインダー {n} 件',
+  sFactoryRecipes: 'タスクレシピ {n} 件',
   sFactoryProposals: '設定提案 {n} 件',
   sFactoryCards: 'カード {n} 枚',
   sFactoryInbox: '受信イベント {n} 件',

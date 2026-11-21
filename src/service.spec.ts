@@ -1939,7 +1939,7 @@ describe('DotService work dispatch', () => {
 })
 
 function memoryDomain(seed: Record<string, Record<string, unknown>> = {}) {
-  const names = ['state', 'tasks', 'tickets', 'schedules', 'proposals', 'changes', 'inputs', 'runs', 'verifications']
+  const names = ['state', 'tasks', 'tickets', 'schedules', 'proposals', 'recipes', 'changes', 'inputs', 'runs', 'verifications']
   const tables: Record<string, Map<string, unknown>> = {}
   for (const name of names) tables[name] = new Map(Object.entries(seed[name] ?? {}))
   const domain: DotDomainHandle = {
@@ -2317,5 +2317,281 @@ describe('workspace inspect and files', () => {
     expect(files).toContain('src/a.ts')
     await expect(h.service.listWorkspaceFiles(id, '..')).rejects.toThrow(/outside/)
     await expect(h.service.inspectWorkspace('missing')).rejects.toThrow(/no workspace/)
+  })
+})
+
+describe('task recipes', () => {
+  const dir = () => mkdtempSync(join(tmpdir(), 'dsh-dot-recipe-'))
+
+  it('saves a recipe from a change, copying its input and last work run defaults', async () => {
+    const h = setup()
+    const cwd = dir()
+    const created = JSON.parse(await h.service.manageTask({
+      action: 'create', title: 'Triage', goal: 'triage the queue', dir: cwd,
+      constraints: JSON.stringify([{ constraintRef: 'c1', text: 'no pushes' }]),
+      deliverable_language: 'zh', user_request: 'do the triage',
+    })) as { id: string }
+    await h.service.manageTask({ action: 'dispatch', task_id: created.id, instruction: 'go', preset: 'cordis', access: 'read' })
+    const saved = await h.service.manageRecipe({ action: 'save', name: 'queue triage', from_task: created.id })
+    expect(saved).toMatch(/Saved recipe rcp-\w+ "queue triage" rev 1\./)
+    const read = JSON.parse(await h.service.manageRecipe({ action: 'read', recipe: 'QUEUE TRIAGE' })) as Record<string, unknown>
+    expect(read).toMatchObject({ name: 'queue triage', revision: 1, goal: 'triage the queue', dir: h.store.work.change(created.id)!.cwd, deliverableLanguage: 'zh', preset: 'cordis', access: 'read' })
+    expect(read.requirements).toEqual([{ requirementRef: 'goal', text: 'triage the queue', required: true }])
+    expect(read.constraints).toEqual([{ constraintRef: 'c1', text: 'no pushes' }])
+    // An explicit field overrides the copied one.
+    await h.service.manageRecipe({ action: 'save', name: 'other', from_task: created.id, goal: 'explicit goal' })
+    const other = JSON.parse(await h.service.manageRecipe({ action: 'read', recipe: 'other' })) as { goal: string }
+    expect(other.goal).toBe('explicit goal')
+    await h.service.dispose()
+  })
+
+  it('validates recipe bodies like a change input and keeps names unique', async () => {
+    const h = setup()
+    const cwd = dir()
+    await expect(h.service.manageRecipe({ action: 'save', name: 'x', goal: 'g', dir: 'relative' })).rejects.toMatchObject({ code: 'dot/invalid' })
+    await expect(h.service.manageRecipe({ action: 'save', name: 'x', goal: 'g', dir: cwd, requirements: '[{"requirementRef":"r1"}]' })).rejects.toMatchObject({ code: 'dot/invalid' })
+    await h.service.manageRecipe({ action: 'save', name: 'weekly', goal: 'report', dir: cwd })
+    await expect(h.service.manageRecipe({ action: 'save', name: 'WEEKLY', goal: 'g', dir: cwd })).rejects.toThrow(/exists already/)
+    await expect(h.service.manageRecipe({ action: 'read', recipe: 'nope' })).rejects.toThrow(/saved recipes: rcp-\w+ "weekly"/)
+    // revise requires a reason and a real change
+    await expect(h.service.manageRecipe({ action: 'revise', recipe: 'weekly', goal: 'other' })).rejects.toThrow(/reason/)
+    await expect(h.service.manageRecipe({ action: 'revise', recipe: 'weekly', reason: 'why' })).rejects.toThrow(/changes nothing/)
+    const revised = await h.service.manageRecipe({ action: 'revise', recipe: 'weekly', goal: 'weekly report', notes: 'keep it short', reason: 'goal was vague' })
+    expect(revised).toContain('rev 2')
+    await expect(h.service.manageRecipe({ action: 'restore', recipe: 'weekly', revision: 99, reason: 'back' })).rejects.toThrow(/no revision 99/)
+    const restored = await h.service.manageRecipe({ action: 'restore', recipe: 'weekly', revision: 1, reason: 'back to v1' })
+    expect(restored).toContain('rev 3')
+    const read = JSON.parse(await h.service.manageRecipe({ action: 'read', recipe: 'weekly' })) as { goal: string; revision: number; reason: string; notes?: string; history: { revision: number }[] }
+    expect(read).toMatchObject({ goal: 'report', revision: 3, reason: 'back to v1' })
+    expect(read.notes).toBeUndefined()
+    expect(read.history.map(row => row.revision)).toEqual([2, 1])
+    await h.service.dispose()
+  })
+
+  it('creates a tagged change from a recipe and applies defaults plus overrides', async () => {
+    const h = setup()
+    const cwd = dir()
+    await h.service.manageRecipe({
+      action: 'save', name: 'report', goal: 'write the report', dir: cwd,
+      requirements: JSON.stringify([{ requirementRef: 'r1', text: 'has a summary', required: true }]),
+      constraints: JSON.stringify([{ constraintRef: 'c1', text: 'under one page' }]),
+      notes: 'be terse', deliverable_language: 'ja', human_review: true,
+    })
+    const created = JSON.parse(await h.service.manageTask({ action: 'create', recipe: 'report' })) as { id: string; recipe?: { id: string; name: string; revision: number } }
+    expect(created.recipe).toMatchObject({ name: 'report', revision: 1 })
+    const change = h.store.work.change(created.id)!
+    expect(change.recipe).toEqual({ id: created.recipe!.id, revision: 1 })
+    expect(change.title).toBe('report')
+    const input = h.store.work.input(change.currentInputRef)!
+    expect(input).toMatchObject({ goal: 'write the report', deliverableLanguage: 'ja' })
+    expect(input.requirements).toEqual([{ requirementRef: 'r1', text: 'has a summary', required: true }])
+    expect(input.constraints).toEqual([{ constraintRef: 'c1', text: 'under one page' }])
+    expect(change.oversight?.requested).toBe(true)
+    // Explicit args win over the recipe.
+    const overridden = JSON.parse(await h.service.manageTask({ action: 'create', recipe: 'report', goal: 'explicit', title: 'Custom' })) as { id: string }
+    const overrideInput = h.store.work.input(h.store.work.change(overridden.id)!.currentInputRef)!
+    expect(overrideInput.goal).toBe('explicit')
+    expect(h.store.work.change(overridden.id)!.title).toBe('Custom')
+    // readWork exposes the tag; a removed recipe reports name null.
+    const read = JSON.parse(await h.service.manageTask({ action: 'read', task_id: created.id })) as { recipe?: { id: string; name: string | null; revision: number } }
+    expect(read.recipe).toMatchObject({ name: 'report', revision: 1 })
+    await h.service.manageRecipe({ action: 'remove', recipe: 'report' })
+    const missing = JSON.parse(await h.service.manageTask({ action: 'read', task_id: created.id })) as { recipe?: { name: string | null } }
+    expect(missing.recipe?.name).toBeNull()
+    await expect(h.service.manageTask({ action: 'create', recipe: 'missing' })).rejects.toThrow(/unknown recipe missing/)
+    await h.service.dispose()
+  })
+
+  it('dispatches a recipe change with its pinned defaults and notes; review stays read-only', async () => {
+    const h = setup()
+    const cwd = dir()
+    await h.service.manageRecipe({ action: 'save', name: 'ship', goal: 'ship it', dir: cwd, preset: 'cordis', model: 'p/big', access: 'write', notes: 'keep diffs small' })
+    const created = JSON.parse(await h.service.manageTask({ action: 'create', recipe: 'ship' })) as { id: string }
+    const started = await h.service.manageTask({ action: 'dispatch', task_id: created.id, instruction: 'go' })
+    const runId = /started (run-\d+)/.exec(started)![1]!
+    const run = h.store.work.listRuns().find(row => row.id === runId)!
+    expect(run).toMatchObject({ access: 'write', expectedPreset: 'cordis' })
+    expect(h.calls).toContain(`model ${run.sessionId} p/big`)
+    expect(h.calls).toContain(`permit ${run.sessionId} workspace-write`)
+    const prompt = h.calls.find(call => call.startsWith(`prompt ${run.sessionId} `))!
+    expect(prompt).toContain('Recipe notes:\nkeep diffs small')
+    expect(prompt).toContain('go')
+    // Explicit dispatch args still win once the first run settles.
+    await h.service.manageTask({ action: 'finish', task_id: created.id, run_id: runId })
+    await h.service.manageTask({ action: 'dispatch', task_id: created.id, role: 'rework', instruction: 'again', preset: 'ptc', model: 'q/small', access: 'read' })
+    const rework = h.store.work.listRuns().find(row => row.changeId === created.id && row.kind === 'rework')!
+    expect(rework).toMatchObject({ access: 'read', expectedPreset: 'ptc' })
+    await h.service.manageTask({ action: 'finish', task_id: created.id, run_id: rework.id })
+    // A review run never picks up the recipe's write access.
+    await h.service.manageTask({ action: 'dispatch', task_id: created.id, role: 'review', instruction: 'look' })
+    const review = h.store.work.listRuns().find(row => row.changeId === created.id && row.kind === 'review')!
+    expect(review.access).toBe('read')
+    expect(h.calls).toContain(`readonly ${review.sessionId}`)
+    const reviewPrompt = h.calls.find(call => call.startsWith(`prompt ${review.sessionId} `))!
+    expect(reviewPrompt).toContain('Recipe notes:\nkeep diffs small')
+    await h.service.dispose()
+  })
+
+  it('regenerates only goal-derived requirements on goal overrides and revisions', async () => {
+    const h = setup()
+    const cwd = dir()
+    await h.service.manageRecipe({ action: 'save', name: 'auto', goal: 'weekly report', dir: cwd })
+    const created = JSON.parse(await h.service.manageTask({ action: 'create', recipe: 'auto', goal: 'monthly report' })) as { id: string }
+    const material = h.store.work.input(h.store.work.change(created.id)!.currentInputRef)!
+    expect(material.requirements).toEqual([{ requirementRef: 'goal', text: 'monthly report', required: true }])
+
+    await h.service.manageRecipe({ action: 'revise', recipe: 'auto', goal: 'quarterly report', reason: 'cadence changed' })
+    const revised = JSON.parse(await h.service.manageRecipe({ action: 'read', recipe: 'auto' })) as {
+      requirements: unknown; requirementsFromGoal: boolean; history: { goal: string; requirements: unknown }[]
+    }
+    expect(revised.requirementsFromGoal).toBe(true)
+    expect(revised.requirements).toEqual([{ requirementRef: 'goal', text: 'quarterly report', required: true }])
+    expect(revised.history[0]).toMatchObject({
+      goal: 'weekly report',
+      requirements: [{ requirementRef: 'goal', text: 'weekly report', required: true }],
+    })
+
+    await h.service.manageRecipe({ action: 'save', name: 'copied', from_task: created.id, goal: 'copied report' })
+    const copied = JSON.parse(await h.service.manageRecipe({ action: 'read', recipe: 'copied' })) as { requirements: unknown }
+    expect(copied.requirements).toEqual([{ requirementRef: 'goal', text: 'copied report', required: true }])
+
+    const explicit = [{ requirementRef: 'r1', text: 'has a summary', required: true }]
+    await h.service.manageRecipe({ action: 'save', name: 'explicit', goal: 'old goal', requirements: JSON.stringify(explicit), dir: cwd })
+    const custom = JSON.parse(await h.service.manageTask({ action: 'create', recipe: 'explicit', goal: 'new goal' })) as { id: string }
+    expect(h.store.work.input(h.store.work.change(custom.id)!.currentInputRef)!.requirements).toEqual(explicit)
+    await h.service.dispose()
+  })
+
+  it('preserves explicit goal-shaped requirements and rejects invalid requirement lists', async () => {
+    const h = setup()
+    const cwd = dir()
+    const explicit = [{ requirementRef: 'goal', text: 'fixed goal', required: true }]
+    await h.service.manageRecipe({ action: 'save', name: 'fixed', goal: 'fixed goal', requirements: JSON.stringify(explicit), dir: cwd })
+    const saved = JSON.parse(await h.service.manageRecipe({ action: 'read', recipe: 'fixed' })) as { requirementsFromGoal: boolean }
+    expect(saved.requirementsFromGoal).toBe(false)
+    const overridden = JSON.parse(await h.service.manageTask({ action: 'create', recipe: 'fixed', goal: 'other goal' })) as { id: string }
+    expect(h.store.work.input(h.store.work.change(overridden.id)!.currentInputRef)!.requirements).toEqual(explicit)
+    await h.service.manageRecipe({ action: 'revise', recipe: 'fixed', goal: 'renamed goal', reason: 'rename only' })
+    const renamed = JSON.parse(await h.service.manageRecipe({ action: 'read', recipe: 'fixed' })) as { requirements: unknown; requirementsFromGoal: boolean }
+    expect(renamed).toMatchObject({ requirements: explicit, requirementsFromGoal: false })
+
+    const beforeInvalid = await h.service.manageRecipe({ action: 'read', recipe: 'fixed' })
+    await expect(h.service.manageRecipe({ action: 'revise', recipe: 'fixed', requirements: 'not json', reason: 'bad input' })).rejects.toThrow(/JSON array/)
+    expect(await h.service.manageRecipe({ action: 'read', recipe: 'fixed' })).toBe(beforeInvalid)
+    await expect(h.service.manageRecipe({ action: 'save', name: 'bad', goal: 'g', requirements: '{}', dir: cwd })).rejects.toThrow(/JSON array/)
+
+    await h.service.manageRecipe({ action: 'save', name: 'pin', goal: 'pin me', dir: cwd })
+    const pinnedRequirements = JSON.stringify([{ requirementRef: 'goal', text: 'pin me', required: true }])
+    await h.service.manageRecipe({ action: 'revise', recipe: 'pin', requirements: pinnedRequirements, reason: 'pin the acceptance condition' })
+    const pinned = JSON.parse(await h.service.manageRecipe({ action: 'read', recipe: 'pin' })) as { revision: number; requirementsFromGoal: boolean }
+    expect(pinned).toMatchObject({ revision: 2, requirementsFromGoal: false })
+    const pinnedTask = JSON.parse(await h.service.manageTask({ action: 'create', recipe: 'pin', goal: 'different goal' })) as { id: string }
+    expect(h.store.work.input(h.store.work.change(pinnedTask.id)!.currentInputRef)!.requirements).toEqual(JSON.parse(pinnedRequirements))
+    await h.service.manageRecipe({ action: 'restore', recipe: 'pin', revision: 1, reason: 'restore goal-derived acceptance' })
+    const restored = JSON.parse(await h.service.manageRecipe({ action: 'read', recipe: 'pin' })) as { revision: number; requirementsFromGoal: boolean }
+    expect(restored).toMatchObject({ revision: 3, requirementsFromGoal: true })
+    const restoredTask = JSON.parse(await h.service.manageTask({ action: 'create', recipe: 'pin', goal: 'restored goal' })) as { id: string }
+    expect(h.store.work.input(h.store.work.change(restoredTask.id)!.currentInputRef)!.requirements).toEqual([
+      { requirementRef: 'goal', text: 'restored goal', required: true },
+    ])
+
+    const taskRequirements = [{ requirementRef: 'goal', text: 'task goal', required: true }]
+    const explicitTask = JSON.parse(await h.service.manageTask({
+      action: 'create', title: 'Explicit', goal: 'task goal', requirements: JSON.stringify(taskRequirements), dir: cwd,
+    })) as { id: string }
+    expect(h.store.work.input(h.store.work.change(explicitTask.id)!.currentInputRef)!.requirementsFromGoal).toBe(false)
+    await h.service.manageRecipe({ action: 'save', name: 'task-copy', from_task: explicitTask.id, goal: 'new copied goal' })
+    const copied = JSON.parse(await h.service.manageRecipe({ action: 'read', recipe: 'task-copy' })) as { requirements: unknown; requirementsFromGoal: boolean }
+    expect(copied).toMatchObject({ requirements: taskRequirements, requirementsFromGoal: false })
+
+    const autoTask = JSON.parse(await h.service.manageTask({ action: 'create', title: 'Auto', goal: 'auto goal', dir: cwd })) as { id: string }
+    expect(h.store.work.input(h.store.work.change(autoTask.id)!.currentInputRef)!.requirementsFromGoal).toBe(true)
+    await h.service.manageTask({ action: 'revise', task_id: autoTask.id, goal: 'revised auto goal' })
+    const revisedInput = h.store.work.input(h.store.work.change(autoTask.id)!.currentInputRef)!
+    expect(revisedInput).toMatchObject({
+      requirementsFromGoal: true,
+      requirements: [{ requirementRef: 'goal', text: 'revised auto goal', required: true }],
+    })
+    await h.service.dispose()
+  })
+
+  it('starts note-free recipe tasks, restores defaults by run_id and preflights inherited write access', async () => {
+    const h = setup()
+    const cwd = dir()
+    await h.service.manageRecipe({ action: 'save', name: 'plain', goal: 'ship the report', dir: cwd, preset: 'cordis', model: 'p/big', access: 'read' })
+    const created = JSON.parse(await h.service.manageTask({ action: 'create', recipe: 'plain' })) as { id: string }
+    const started = await h.service.manageTask({ action: 'dispatch', task_id: created.id })
+    const runId = /started (run-\d+)/.exec(started)?.[1]
+    expect(runId, started).toBeTruthy()
+    const firstRun = h.store.work.run(runId!)!
+    expect(h.calls).toContain(`model ${firstRun.sessionId} p/big`)
+    expect(h.calls.find(call => call.startsWith(`prompt ${firstRun.sessionId} `))).toContain('ship the report')
+    await h.service.manageTask({ action: 'finish', task_id: created.id, run_id: firstRun.id, verdict: 'pass' })
+
+    const change = h.store.work.change(created.id)!
+    const reserved = await h.store.work.reserveRun({ changeId: created.id, cwd: change.cwd, writeScope: { kind: 'paths', paths: [] } })
+    if (!reserved.ok) throw new Error(reserved.message)
+    const continued = await h.service.manageTask({ action: 'dispatch', run_id: reserved.run.id, message: 'continue' })
+    expect(continued).toContain(`started ${reserved.run.id}`)
+    const continuedRun = h.store.work.run(reserved.run.id)!
+    expect(continuedRun.expectedPreset).toBe('cordis')
+    expect(h.calls).toContain(`model ${continuedRun.sessionId} p/big`)
+    await h.service.manageTask({ action: 'finish', task_id: created.id, run_id: continuedRun.id, verdict: 'pass' })
+
+    await h.service.manageRecipe({ action: 'save', name: 'writer', goal: 'edit files', dir: cwd, access: 'write' })
+    const first = JSON.parse(await h.service.manageTask({ action: 'create', recipe: 'writer' })) as { id: string }
+    const second = JSON.parse(await h.service.manageTask({ action: 'create', recipe: 'writer' })) as { id: string }
+    await h.service.manageTask({ action: 'dispatch', task_id: first.id })
+    const report = await h.service.manageTask({ action: 'check', task_id: second.id })
+    expect(report).toContain('Path reservations:')
+    expect(h.store.work.listRuns().filter(run => run.changeId === second.id)).toEqual([])
+    await h.service.dispose()
+  })
+
+  it('merges live tagged changes into list stats and records pruned outcomes', async () => {
+    const h = setup()
+    const cwd = dir()
+    await h.service.manageRecipe({ action: 'save', name: 'stats', goal: 'run the pass', dir: cwd })
+    const first = JSON.parse(await h.service.manageTask({ action: 'create', recipe: 'stats' })) as { id: string }
+    const second = JSON.parse(await h.service.manageTask({ action: 'create', recipe: 'stats' })) as { id: string }
+    expect(await h.service.manageRecipe({ action: 'list' })).toContain('2 in flight')
+    const started = await h.service.manageTask({ action: 'dispatch', task_id: first.id })
+    const runId = /started (run-\d+)/.exec(started)?.[1]
+    expect(runId, started).toBeTruthy()
+    await h.service.manageTask({ action: 'finish', task_id: first.id, run_id: runId, verdict: 'fail' })
+    await h.service.manageTask({ action: 'revise', task_id: first.id, goal: 'run the revised pass' })
+    expect(h.store.work.failedRounds(first.id)).toBe(0)
+    await h.service.manageTask({ action: 'cancel', task_id: first.id })
+    const firstUpdatedAt = h.store.work.change(first.id)!.updatedAt
+    await h.service.manageTask({ action: 'cancel', task_id: second.id })
+    // Live terminal changes count even before the ledger is pruned, including
+    // failures from input revisions preceding the terminal one.
+    expect(await h.service.manageRecipe({ action: 'list' })).toContain('2 cancelled')
+    const beforePrune = JSON.parse(await h.service.manageRecipe({ action: 'read', recipe: 'stats' })) as { stats: { failedRounds: number }[] }
+    expect(beforePrune.stats[0]!.failedRounds).toBe(1)
+    const prune = h.service as unknown as { pruneWorkArtifactsIfNeeded(maxKeep?: number): Promise<void> }
+    await prune.pruneWorkArtifactsIfNeeded(1)
+    const recipe = h.store.recipes[0]!
+    expect(recipe.outcomes).toEqual([
+      expect.objectContaining({ changeId: first.id, revision: 1, result: 'cancelled', failedRounds: 1, at: firstUpdatedAt }),
+    ])
+    expect(h.store.work.change(first.id)).toBeUndefined()
+    expect(h.store.work.change(second.id)).toBeDefined()
+    // Stored + live merge: one stored cancelled, one live cancelled.
+    expect(await h.service.manageRecipe({ action: 'list' })).toContain('2 cancelled')
+    await h.service.dispose()
+  })
+
+  it('clears recipes on factory reset', async () => {
+    const h = setup()
+    const cwd = dir()
+    await h.service.ensureDot()
+    await h.service.manageRecipe({ action: 'save', name: 'doomed', goal: 'g', dir: cwd })
+    expect(h.service.previewFactoryReset().recipes).toBe(1)
+    const armed = h.service.previewFactoryReset()
+    await h.service.confirmFactoryReset(armed.token)
+    expect(h.store.recipes).toEqual([])
+    expect(h.service.previewFactoryReset().recipes).toBe(0)
+    await h.service.dispose()
   })
 })

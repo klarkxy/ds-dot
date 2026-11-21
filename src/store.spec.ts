@@ -9,6 +9,7 @@ function fakeDomain(seed: Record<string, Record<string, unknown>> = {}) {
     tasks: new Map(Object.entries(seed.tasks ?? {})),
     tickets: new Map(Object.entries(seed.tickets ?? {})),
     schedules: new Map(Object.entries(seed.schedules ?? {})),
+    recipes: new Map(Object.entries(seed.recipes ?? {})),
     proposals: new Map(Object.entries(seed.proposals ?? {})),
     changes: new Map(Object.entries(seed.changes ?? {})),
     inputs: new Map(Object.entries(seed.inputs ?? {})),
@@ -403,6 +404,7 @@ describe('factory reset of the store', () => {
     await store.factoryReset(5000)
     expect(store.list()).toEqual([])
     expect(store.schedules).toEqual([])
+    expect(store.recipes).toEqual([])
     expect(store.settingProposals).toEqual([])
     expect(store.agreements).toBe('')
     expect(store.cognition).toBe('')
@@ -417,4 +419,55 @@ describe('factory reset of the store', () => {
     expect(reloaded.list()).toEqual([])
   })
 
+})
+
+
+describe('task recipe storage', () => {
+  const recipeRow = {
+    id: 'rcp-abc123', name: 'Weekly', revision: 2, reason: 'v2', createdAt: 1, updatedAt: 2,
+    goal: 'write the weekly report',
+    requirements: [{ requirementRef: 'goal', text: 'write the weekly report', required: true }],
+    notes: 'be terse', dir: '/proj', preset: 'cordis', access: 'read' as const,
+    history: [{ goal: 'report', requirements: [], revision: 1, name: 'Weekly', reason: 'v1', at: 1 }],
+    outcomes: [{ changeId: 'c-1', title: 'Run', revision: 1, result: 'accepted' as const, failedRounds: 0, at: 2 }],
+  }
+
+  it('round-trips a recipe, resolves it by id or name, and deletes it', async () => {
+    const { domain, tables } = fakeDomain()
+    const store = new DotStore(domain)
+    await store.putRecipe(recipeRow)
+    expect([...tables.recipes.keys()]).toEqual(['rcp-abc123'])
+    const reloaded = new DotStore(domain)
+    expect(reloaded.recipe('rcp-abc123')).toMatchObject({ name: 'Weekly', revision: 2 })
+    expect(reloaded.recipe('weekly')).toMatchObject({ id: 'rcp-abc123' })
+    expect(reloaded.recipe('missing')).toBeUndefined()
+    expect(await reloaded.deleteRecipe('rcp-abc123')).toBe(true)
+    expect(reloaded.recipe('rcp-abc123')).toBeUndefined()
+    expect(new DotStore(domain).recipes).toEqual([])
+  })
+
+  it('reads a malformed recipe row as absent', () => {
+    const { domain } = fakeDomain({ recipes: {
+      'rcp-bad': { id: 'rcp-bad', name: 5 },
+      'rcp-stray': { ...recipeRow, id: 'rcp-other' },
+      'rcp-abc123': recipeRow,
+    } })
+    const store = new DotStore(domain)
+    expect(store.recipes.map(row => row.id)).toEqual(['rcp-abc123'])
+  })
+
+  it('still loads a change row written before the recipe tag existed', () => {
+    const { domain } = fakeDomain({ changes: {
+      'c-1': {
+        id: 'c-1', title: 'Old', cwd: '/w', priority: 2, control: 'open', maxConcurrentRuns: 1,
+        currentRevision: 1, currentInputRef: 'input-1', steps: [], createdAt: 1, updatedAt: 1,
+      },
+    }, inputs: {
+      'input-1': { id: 'input-1', changeId: 'c-1', revision: 1, goal: 'g', requirements: [], steps: [], source: 'create', createdAt: 1 },
+    } })
+    const store = new DotStore(domain)
+    const change = store.work.change('c-1')
+    expect(change).toMatchObject({ id: 'c-1', title: 'Old' })
+    expect(change?.recipe).toBeUndefined()
+  })
 })

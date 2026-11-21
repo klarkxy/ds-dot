@@ -101,6 +101,7 @@ export function factoryResetScope(locale: CopyLocale, preview: FactoryResetPrevi
     n('sFactoryChanges', preview.changes),
     n('sFactoryRuns', preview.runs),
     n('sFactorySchedules', preview.schedules),
+    n('sFactoryRecipes', preview.recipes),
     n('sFactoryProposals', preview.proposals),
     n('sFactoryCards', preview.cards),
     n('sFactoryInbox', preview.inbox),

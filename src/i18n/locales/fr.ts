@@ -240,6 +240,7 @@ const frUi: UiText = {
   sFactoryChanges: '{n} modification(s)',
   sFactoryRuns: '{n} exécution(s)',
   sFactorySchedules: '{n} rappel(s)',
+  sFactoryRecipes: '{n} recette(s) de tâche',
   sFactoryProposals: '{n} proposition(s) de paramètre',
   sFactoryCards: '{n} carte(s)',
   sFactoryInbox: '{n} événement(s) en boîte',

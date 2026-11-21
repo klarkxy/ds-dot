@@ -7,10 +7,10 @@
 import { defineDomain, domainTable } from '@deepseek-ai/dsh-storage-domain'
 import { z } from 'zod'
 import type { ViewNode } from '@klarkxy/dsh-deep-view/contracts'
-import { SETTING_FIELDS, type CognitionVersion, type DotContextUsage, type DotUsageOffset, type InboxRecord, type ReflectionRun, type ScheduleRecord, type SettingProposal, type TaskRecord } from './contracts.ts'
+import { SETTING_FIELDS, type CognitionVersion, type DotContextUsage, type DotUsageOffset, type InboxRecord, type RecipeRecord, type ReflectionRun, type ScheduleRecord, type SettingProposal, type TaskRecord } from './contracts.ts'
 import type { UpdateStatus } from './auto-update.ts'
 import type { PastSegment, Segment } from './segments.ts'
-import { changeSchema, inputSchema, runSchema, storedVerificationSchema } from './work.ts'
+import { changeSchema, constraintSchema, inputSchema, requirementSchema, runSchema, storedVerificationSchema } from './work.ts'
 
 export const STATE_KEY = 'current'
 
@@ -271,12 +271,47 @@ export function parseInboxRecord(value: unknown): InboxRecord | undefined {
   return parsed.success ? parsed.data as InboxRecord : undefined
 }
 
+const recipeBodyFields = {
+  goal: z.string(),
+  requirements: z.array(requirementSchema),
+  requirementsFromGoal: z.boolean().optional(),
+  constraints: z.array(constraintSchema).optional(),
+  notes: z.string().optional(),
+  deliverableLanguage: z.string().optional(),
+  dir: z.string().optional(),
+  preset: z.string().optional(),
+  model: z.string().optional(),
+  access: z.enum(['read', 'write']).optional(),
+  humanReview: z.boolean().optional(),
+}
+
+const recipeSchema = z.object({
+  ...recipeBodyFields,
+  id: z.string().min(1),
+  name: z.string().min(1),
+  revision: z.number().int().positive(),
+  reason: z.string().optional(),
+  history: z.array(z.object({ ...recipeBodyFields, revision: z.number().int().positive(), name: z.string(), reason: z.string().optional(), at: z.number() })),
+  outcomes: z.array(z.object({
+    changeId: z.string().min(1), title: z.string(), revision: z.number().int(),
+    result: z.enum(['accepted', 'cancelled']), failedRounds: z.number().int().nonnegative(), at: z.number(),
+  })),
+  createdAt: z.number(),
+  updatedAt: z.number(),
+})
+
+/** A malformed recipe reads as absent. */
+export function parseRecipeRecord(value: unknown): RecipeRecord | undefined {
+  const parsed = recipeSchema.safeParse(value)
+  return parsed.success ? parsed.data as RecipeRecord : undefined
+}
+
 export const dotDomain = defineDomain({
   name: 'klarkxy_dsh_dot',
-  // v7 adds inbox rows; v1–v6 rows still open: read schemas strip keys they no
+  // v8 adds recipe rows; v1–v7 rows still open: read schemas strip keys they no
   // longer declare and the removed `tickets` table is simply never read.
-  version: 7,
-  compatibleVersions: [1, 2, 3, 4, 5, 6],
+  version: 8,
+  compatibleVersions: [1, 2, 3, 4, 5, 6, 7],
   tables: {
     state: domainTable<string, DotState>(stateSchema),
     tasks: domainTable<string, StoredTaskRecord>(storedTaskSchema),
@@ -288,6 +323,7 @@ export const dotDomain = defineDomain({
     verifications: domainTable(storedVerificationSchema),
     peers: domainTable<string, PeerDelivery>(peerDeliverySchema),
     inbox: domainTable<string, InboxRecord>(inboxRecordSchema),
+    recipes: domainTable<string, RecipeRecord>(recipeSchema),
   },
 })
 

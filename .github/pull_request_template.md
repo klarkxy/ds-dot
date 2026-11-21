@@ -1,7 +1,7 @@
 ## What and why
 
-<!-- One or two sentences. The PR title becomes the squash commit, so keep it in
-Conventional Commits form: feat(scope): summary -->
+<!-- One or two sentences. The PR title becomes the merge commit subject, so
+keep it in Conventional Commits form: feat(scope): summary -->
 
 Closes #
 
@@ -31,7 +31,7 @@ No frontend changes.
 
 <!--
 Target branch:
-  - normal work      -> dev   (squash merge)
+  - normal work      -> dev   (merge commit)
   - release          -> main  from dev, title "release: vX.Y.Z" (merge commit)
   - hotfix           -> main  from hotfix/*, bump the patch version (merge commit)
   - sync after main  -> dev   from main, title "chore: sync main into dev" (merge commit)

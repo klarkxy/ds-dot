@@ -25,7 +25,7 @@ pnpm typecheck && pnpm test && pnpm build
 ```mermaid
 flowchart LR
   I["Issue"] --> F["feat/123-slug"]
-  F -->|"PR, squash"| D["dev"]
+  F -->|"PR, merge commit"| D["dev"]
   D -->|"release PR, merge commit"| M["main"]
   M -->|"GitHub Release vX.Y.Z"| N["npm latest"]
   D -.->|"GitHub prerelease vX.Y.Z-rc.N"| R["npm next"]
@@ -33,7 +33,7 @@ flowchart LR
   M -->|"sync PR, merge commit"| D
 ```
 
-Feature and fix PRs squash-merge into `dev` so the PR title becomes the single commit and release-notes entry. Release (`dev` → `main`), hotfix (`hotfix/*` → `main`), and sync (`main` → `dev`) PRs use merge commits so `main` and `dev` continue sharing history.
+Feature and fix PRs merge into `dev` with a merge commit so the feature branch history stays intact; the merge commit subject is the pull request title plus the PR number, which becomes the release-notes entry. Release (`dev` → `main`), hotfix (`hotfix/*` → `main`), and sync (`main` → `dev`) PRs also use merge commits so `main` and `dev` continue sharing history.
 
 1. **Start from an issue.** Open or claim an issue so work is not duplicated (trivial typo or docs fixes may skip this).
 2. **Branch from the latest `dev`** (`feat/<issue>-<slug>`, `fix/<issue>-<slug>`, `refactor/...`, or `docs/...`):
@@ -47,8 +47,8 @@ Feature and fix PRs squash-merge into `dev` so the PR title becomes the single c
    - Reference the issue with `Closes #123` in the PR body.
    - Keep PRs focused; prefer small, reviewable changes over monolithic diffs.
    - Include a live interaction GIF whenever the PR touches the frontend (see [Frontend changes](#frontend-changes)).
-4. **Pass CI and review.** `CI result` (typecheck, test, build, and pack on Linux and Windows) and `PR title` must pass, all review threads must be resolved, and any required frontend GIF must be embedded in the PR body before squash-merging.
-5. **Squash and merge**, then delete the feature branch.
+4. **Pass CI and review.** `CI result` (typecheck, test, build, and pack on Linux and Windows) and `PR title` must pass, all review threads must be resolved, and any required frontend GIF must be embedded in the PR body before merging.
+5. **Merge with a merge commit**, then delete the feature branch.
 
 ## Frontend changes
 

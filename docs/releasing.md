@@ -11,7 +11,7 @@ The release tag (`v<version>`), `package.json` `version`, GitHub *pre-release* f
 
 ## Stable release
 
-1. **Prepare on `dev`.** Open a PR into `dev` titled `release: prepare v0.3.0` that sets `package.json` `version` to `0.3.0`, and squash-merge it.
+1. **Prepare on `dev`.** Open a PR into `dev` titled `release: prepare v0.3.0` that sets `package.json` `version` to `0.3.0`, and merge it with a merge commit.
 2. **Open the release PR** from `dev` into `main`, titled `release: v0.3.0`. (`Release guard` requires `dev` to contain everything on `main` and `package.json` to have a higher stable version.)
 3. **Merge with a merge commit**, the only merge method allowed on `main`.
 4. **Publish.** In GitHub *Releases → Draft a new release*, create tag `v0.3.0` on `main`, click *Generate release notes*, and publish. Watch the **Publish to npm** workflow complete.
@@ -49,6 +49,6 @@ npm publish --access public --ignore-scripts
 Configure once in GitHub repository settings:
 
 - **Rulesets:** Under *Settings → Rules → Rulesets → New ruleset → Import a ruleset*, import [`.github/rulesets/main.json`](../.github/rulesets/main.json) and [`.github/rulesets/dev.json`](../.github/rulesets/dev.json).
-- **Pull Requests:** Under *Settings → General → Pull Requests*, enable *Allow squash merging* (default message: *Pull request title*) and *Allow merge commits*, disable *Allow rebase merging*, and enable *Automatically delete head branches*.
+- **Pull Requests:** Under *Settings → General → Pull Requests*, enable *Allow merge commits* (default title: *Pull request title*, default message: *Blank*), disable *Allow squash merging* and *Allow rebase merging*, and enable *Automatically delete head branches*.
 - **Default branch:** Keep `main` as the default branch so the repository opens on the latest published release.
 - **Actions permissions:** Under *Settings → Actions → General*, keep *Workflow permissions* set to *Read repository contents*.

@@ -18,8 +18,8 @@ jobs:
           TITLE: ${{ github.event.pull_request.title }}
         run: |
           node --input-type=module <<'NODE'
-          // Feature PRs are squash-merged into dev, so the PR title becomes the
-          // commit subject and the release-notes line.
+          // Feature PRs merge into dev with a merge commit whose subject is
+          // the PR title, which also becomes the release-notes line.
           const types = ['feat', 'fix', 'perf', 'refactor', 'docs', 'test', 'build', 'ci', 'chore', 'revert', 'release']
           const pattern = new RegExp(`^(${types.join('|')})(\\([\\w./ -]+\\))?!?: \\S.*$`)
           const title = process.env.TITLE ?? ''

@@ -156,6 +156,8 @@ export const boardCss = `
 .dsh-dot-board .dsh-dot-work-mono { font: 11px/16px var(--ds-font-family-code); color: var(--dsw-alias-label-tertiary); }
 .dsh-dot-board .dsh-dot-work-diag > summary { cursor: pointer; font-size: 11px; line-height: 16px; color: var(--dsw-alias-label-tertiary); }
 .dsh-dot-board .dsh-dot-work-facts-line { font: 11px/16px var(--ds-font-family-code); color: var(--dsw-alias-label-tertiary); overflow-wrap: anywhere; }
+.dsh-dot-board .dsh-dot-work-link { display: inline-flex; align-items: center; gap: 4px; font: 11px/16px var(--ds-font-family-code); color: var(--dsw-alias-label-tertiary); text-decoration: none; }
+.dsh-dot-board a.dsh-dot-work-link:hover { color: var(--dsw-alias-label-primary); }
 .dsh-dot-board .dsh-dot-work-title { font-size: 13px; line-height: 19px; font-weight: 500; color: var(--dsw-alias-label-primary); overflow-wrap: anywhere; }
 .dsh-dot-board .dsh-dot-work-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; padding: 2px 12px 8px 28px; }
 .dsh-dot-board .dsh-dot-work-actions > button { white-space: nowrap; }

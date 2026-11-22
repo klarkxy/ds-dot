@@ -1002,3 +1002,32 @@ describe('WorkBoard', () => {
     await act(async () => root.unmount())
   })
 })
+
+describe('WorkBoard link chips', () => {
+  it('renders bound targets with the newest event, state tag, and URL', async () => {
+    const linked: WorkBoardItem = {
+      ...item, id: 'c-9', title: 'Linked task', status: 'running', humanAction: undefined,
+      links: [
+        { repo: 'acme/widgets', number: 12, url: 'https://gh/acme/widgets/pull/12', state: 'open', lastEvent: { type: 'workflow_run.completed', title: 'CI failure', summary: 's', at: Date.now() - 180_000, count: 1 } },
+        { repo: 'acme/widgets', number: 13, state: 'merged' },
+      ],
+    }
+    const root = createRoot(document.getElementById('root')!)
+    await act(async () => root.render(<WorkBoard locale="en" items={[linked]} pending={[]} onAccept={vi.fn()} onReject={vi.fn()} onAnswer={vi.fn()} onResume={vi.fn()} />))
+    const text = document.body.textContent ?? ''
+    expect(text).toContain('acme/widgets#12')
+    expect(text).toContain('CI failure')
+    expect(text).toContain('ago')
+    expect(text).toContain('acme/widgets#13')
+    expect(text).toContain('merged')
+    const anchor = [...document.querySelectorAll<HTMLAnchorElement>('a.dsh-dot-work-link')].find(node => node.href === 'https://gh/acme/widgets/pull/12')
+    expect(anchor).toBeTruthy()
+    // A branch link without a URL renders as a span.
+    const branch: WorkBoardItem = { ...linked, id: 'c-10', links: [{ repo: 'acme/widgets', branch: 'feature/x', state: 'closed' }] }
+    await act(async () => root.render(<WorkBoard locale="en" items={[branch]} pending={[]} onAccept={vi.fn()} onReject={vi.fn()} onAnswer={vi.fn()} onResume={vi.fn()} />))
+    expect(document.body.textContent).toContain('acme/widgets@feature/x')
+    expect(document.body.textContent).toContain('closed')
+    expect(document.querySelector('span.dsh-dot-work-link')).toBeTruthy()
+    await act(async () => root.unmount())
+  })
+})

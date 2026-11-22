@@ -18,6 +18,7 @@ function fakeDomain(seed: Record<string, Record<string, unknown>> = {}) {
     verifications: new Map(Object.entries(seed.verifications ?? {})),
     peers: new Map(Object.entries(seed.peers ?? {})),
     inbox: new Map(Object.entries(seed.inbox ?? {})),
+    links: new Map(Object.entries(seed.links ?? {})),
   }
   const puts: string[] = []
   const domain: DotDomainHandle = {
@@ -97,6 +98,37 @@ describe('DotStore', () => {
     expect(store.board([]).tasks.map(task => task.sessionId)).toEqual(['w'])
   })
 
+
+  it('round-trips task links and deletes them for good', async () => {
+    const { domain, tables, puts } = fakeDomain()
+    const store = new DotStore(domain)
+    await store.putLink({ id: 'link-a', changeId: 'c-1', repo: 'acme/widgets', number: 12, origin: 'dot', state: 'open', addedAt: 1 })
+    await store.putLink({ id: 'link-b', changeId: 'c-1', repo: 'acme/widgets', branch: 'feature/x', url: 'https://gh/x', origin: 'auto', state: 'merged', addedAt: 2, lastEvent: { type: 'workflow_run.completed', title: 'CI failure', summary: 's', url: 'https://gh/ci', at: 5, count: 3 } })
+    await store.putLink({ id: 'link-bad', changeId: 'c-1', repo: 'acme/widgets', origin: 'dot', state: 'open', addedAt: 0.5 })
+    const reloaded = new DotStore(domain)
+    expect(reloaded.links.map(link => link.id)).toEqual(['link-bad', 'link-a', 'link-b'])
+    expect(reloaded.linksFor('c-1')).toHaveLength(3)
+    expect(reloaded.link('link-b')).toMatchObject({ branch: 'feature/x', state: 'merged', lastEvent: { count: 3 } })
+    expect(reloaded.linksFor('c-404')).toEqual([])
+    await reloaded.deleteLink('link-a')
+    await reloaded.deleteLink('link-a')
+    expect(tables.links!.has('link-a')).toBe(false)
+    expect(puts.at(-1)).toBe('links:-link-a')
+    expect(new DotStore(domain).links.map(link => link.id)).toEqual(['link-bad', 'link-b'])
+  })
+
+  it('attaches links to work rows on the board', async () => {
+    const { domain } = fakeDomain()
+    const store = new DotStore(domain)
+    const change = await store.work.createChange({ title: 'Linked', cwd: '/repo', goal: 'g', at: 1 })
+    const bare = await store.work.createChange({ title: 'Bare', cwd: '/repo', goal: 'g', at: 2 })
+    await store.putLink({ id: 'link-a', changeId: change.id, repo: 'acme/widgets', number: 12, origin: 'dot', state: 'open', addedAt: 1 })
+    const board = store.board([])
+    const linked = board.work!.find(row => row.id === change.id)!
+    expect(linked.links).toHaveLength(1)
+    expect(linked.links![0]).toMatchObject({ repo: 'acme/widgets', number: 12, state: 'open' })
+    expect(board.work!.find(row => row.id === bare.id)!.links).toBeUndefined()
+  })
 
   it('keeps reminders across a reload, the one due first on top, and deletes them for good', async () => {
     const { domain, tables, puts } = fakeDomain({ schedules: { broken: { id: 'broken' }, moved: { id: 'other', title: 't', prompt: 'p', timing: { kind: 'once', at: 5 }, createdAt: 1, nextAt: 5 } } })

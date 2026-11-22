@@ -45,6 +45,7 @@ function fakeDomain(seed: Record<string, Record<string, unknown>> = {}) {
     verifications: new Map(Object.entries(seed.verifications ?? {})),
     peers: new Map(Object.entries(seed.peers ?? {})),
     inbox: new Map(Object.entries(seed.inbox ?? {})),
+    links: new Map(Object.entries(seed.links ?? {})),
   }
   const domain: DotDomainHandle = {
     table: name => ({

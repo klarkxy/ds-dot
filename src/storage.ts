@@ -7,7 +7,7 @@
 import { defineDomain, domainTable } from '@deepseek-ai/dsh-storage-domain'
 import { z } from 'zod'
 import type { ViewNode } from '@klarkxy/dsh-deep-view/contracts'
-import { SETTING_FIELDS, type CognitionVersion, type DotContextUsage, type DotUsageOffset, type InboxRecord, type RecipeProposal, type RecipeRecord, type ReflectionRun, type ScheduleRecord, type SettingProposal, type TaskRecord } from './contracts.ts'
+import { SETTING_FIELDS, type CognitionVersion, type DotContextUsage, type DotUsageOffset, type InboxRecord, type RecipeProposal, type RecipeRecord, type TaskLink, type ReflectionRun, type ScheduleRecord, type SettingProposal, type TaskRecord } from './contracts.ts'
 import type { UpdateStatus } from './auto-update.ts'
 import type { PastSegment, Segment } from './segments.ts'
 import { changeSchema, constraintSchema, inputSchema, requirementSchema, runSchema, storedVerificationSchema } from './work.ts'
@@ -263,6 +263,8 @@ const inboxRecordSchema = z.object({
   count: z.number().int().positive(),
   status: z.enum(['pending', 'delivered']),
   receivedAt: z.number(),
+  headRef: z.string().optional(),
+  headRepo: z.string().optional(),
   updatedAt: z.number(),
   deliveredAt: z.number().optional(),
 })
@@ -284,6 +286,35 @@ const recipeBodyFields = {
   model: z.string().optional(),
   access: z.enum(['read', 'write']).optional(),
   humanReview: z.boolean().optional(),
+}
+
+const linkEventSchema = z.object({
+  type: z.string(),
+  title: z.string(),
+  summary: z.string(),
+  url: z.string().optional(),
+  at: z.number(),
+  count: z.number().int().positive(),
+})
+
+const taskLinkSchema = z.object({
+  id: z.string().min(1),
+  changeId: z.string().min(1),
+  repo: z.string().min(1),
+  number: z.number().int().positive().optional(),
+  branch: z.string().optional(),
+  headRepo: z.string().optional(),
+  url: z.string().optional(),
+  origin: z.enum(['dot', 'auto']),
+  state: z.enum(['open', 'closed', 'merged']),
+  addedAt: z.number(),
+  lastEvent: linkEventSchema.optional(),
+})
+
+/** A malformed link reads as absent. */
+export function parseTaskLink(value: unknown): TaskLink | undefined {
+  const parsed = taskLinkSchema.safeParse(value)
+  return parsed.success ? parsed.data as TaskLink : undefined
 }
 
 const recipeSchema = z.object({
@@ -335,10 +366,10 @@ export function parseRecipeProposal(value: unknown): RecipeProposal | undefined 
 
 export const dotDomain = defineDomain({
   name: 'klarkxy_dsh_dot',
-  // v8 adds recipe rows; v9 adds recipe proposals. Older rows still open: read
+  // v9 adds task links; v10 adds recipe proposals. Older rows still open: read
   // schemas strip keys they no longer declare and dropped tables are never read.
-  version: 9,
-  compatibleVersions: [1, 2, 3, 4, 5, 6, 7, 8],
+  version: 10,
+  compatibleVersions: [1, 2, 3, 4, 5, 6, 7, 8, 9],
   tables: {
     state: domainTable<string, DotState>(stateSchema),
     tasks: domainTable<string, StoredTaskRecord>(storedTaskSchema),
@@ -351,6 +382,7 @@ export const dotDomain = defineDomain({
     peers: domainTable<string, PeerDelivery>(peerDeliverySchema),
     inbox: domainTable<string, InboxRecord>(inboxRecordSchema),
     recipes: domainTable<string, RecipeRecord>(recipeSchema),
+    links: domainTable<string, TaskLink>(taskLinkSchema),
     recipe_proposals: domainTable<string, RecipeProposal>(recipeProposalSchema),
   },
 })

@@ -16,11 +16,7 @@ import hashlib
 import json
 import re
 import urllib.request
-from collections import defaultdict
-from datetime import datetime, timezone
 from pathlib import Path
-
-import duckdb
 
 DATASET = 'lmarena-ai/leaderboard-dataset'
 DEFAULT_REVISION = 'ad6131670bd01ed74a552172c1afee8c0db20047'
@@ -67,12 +63,24 @@ def canonical(value: str) -> str:
     text = value.strip().lower()
     text = re.sub(r'\(([^()]*)\)', lambda m: '' if m.group(1).strip() in EFFORT_LABELS else m.group(0), text)
     text = re.sub(r'[^a-z0-9]+', '', text)
-    text = re.sub(r'20\d{6}$', '', text)
     return ALIASES.get(text, text)
 
 
 def display_name(value: str) -> str:
     return re.sub(r'\s*\((?:' + '|'.join(re.escape(x) for x in EFFORT_LABELS) + r')\)\s*$', '', value, flags=re.I).strip()
+
+
+def source_dir_for(source_dir: Path | None, revision: str) -> Path:
+    root = source_dir or Path('.scratch') / 'arena-source'
+    return root / revision
+
+
+def last_modified_for(revision: str, explicit: str | None, fetch) -> str:
+    if explicit:
+        return explicit
+    if revision == DEFAULT_REVISION:
+        return DEFAULT_LAST_MODIFIED
+    return fetch(revision)
 
 
 def download(url: str, path: Path) -> None:
@@ -82,25 +90,70 @@ def download(url: str, path: Path) -> None:
         output.write(response.read())
 
 
+def download_json(url: str) -> str:
+    request = urllib.request.Request(url, headers={'User-Agent': 'ds-dot-arena-builder/1'})
+    with urllib.request.urlopen(request, timeout=60) as response:
+        return response.read().decode('utf-8')
+
+
+def fetch_revision_last_modified(base_url: str, revision: str) -> str:
+    payload = json.loads(download_json(f'{base_url}/api/datasets/{DATASET}/revision/{revision}'))
+    modified = payload.get('lastModified') or payload.get('last_modified')
+    if not isinstance(modified, str) or not modified:
+        raise ValueError(f'could not read lastModified for revision {revision}; pass --last-modified')
+    return modified
+
+
+def parquet_columns(con, path: Path) -> list[str]:
+    return [row[0] for row in con.execute('describe select * from read_parquet(?)', [str(path)]).fetchall()]
+
+
+def parquet_records(con, path: Path, category: str, publish_date, votes_column: str) -> list[dict]:
+    rows = con.execute(f'''
+        select model_name, organization, license, rank, {votes_column} as votes
+        from read_parquet(?)
+        where category = ? and leaderboard_publish_date = ?
+        order by rank, model_name
+    ''', [str(path), category, publish_date]).fetchall()
+    return [
+        {
+            'model_name': row[0],
+            'organization': row[1],
+            'license': row[2],
+            'rank': row[3],
+            'votes': row[4],
+        }
+        for row in rows
+    ]
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument('--revision', default=DEFAULT_REVISION)
-    parser.add_argument('--last-modified', default=DEFAULT_LAST_MODIFIED)
+    parser.add_argument('--last-modified', default=None)
     parser.add_argument('--base-url', default='https://huggingface.co')
     parser.add_argument('--source-dir', type=Path)
     parser.add_argument('--output', type=Path, default=Path('src/model-arena.json'))
     args = parser.parse_args()
 
     revision = args.revision
-    last_modified = args.last_modified
     if revision == 'latest':
         metadata = json.loads(download_json(f'{args.base_url}/api/datasets/{DATASET}'))
         revision = metadata['sha']
         last_modified = metadata['lastModified']
-    if not re.fullmatch(r'[0-9a-f]{40}', revision):
-        raise ValueError('revision must be "latest" or a full 40-character dataset commit')
+    else:
+        if not re.fullmatch(r'[0-9a-f]{40}', revision):
+            raise ValueError('revision must be "latest" or a full 40-character dataset commit')
+        try:
+            last_modified = last_modified_for(
+                revision,
+                args.last_modified,
+                lambda rev: fetch_revision_last_modified(args.base_url, rev),
+            )
+        except Exception as error:
+            raise ValueError(f'could not read lastModified for {revision}; pass --last-modified') from error
 
-    source_dir = args.source_dir or Path('.scratch') / 'arena-source' / revision
+    source_dir = source_dir_for(args.source_dir, revision)
     source_dir.mkdir(parents=True, exist_ok=True)
     file_hashes: dict[str, str] = {}
     for config in ARENAS:
@@ -109,12 +162,13 @@ def main() -> None:
             download(f'{args.base_url}/datasets/{DATASET}/resolve/{revision}/{config}/latest-00000-of-00001.parquet', path)
         file_hashes[f'{config}/latest-00000-of-00001.parquet'] = hashlib.sha256(path.read_bytes()).hexdigest()
 
+    import duckdb
     con = duckdb.connect()
     models: dict[str, dict] = {}
     board_dates: dict[str, str] = {}
     for config, arena in ARENAS.items():
         path = source_dir / f'{config}.parquet'
-        columns = con.execute('describe select * from read_parquet(?)', [str(path)]).fetchdf()['column_name'].tolist()
+        columns = parquet_columns(con, path)
         votes_column = 'session_count' if 'session_count' in columns else 'vote_count'
         for category in sorted(USED_CATEGORIES[arena]):
             exists = con.execute('select count(*) from read_parquet(?) where category = ?', [str(path), category]).fetchone()[0]
@@ -123,12 +177,7 @@ def main() -> None:
             publish_date = con.execute('select max(leaderboard_publish_date) from read_parquet(?) where category = ?', [str(path), category]).fetchone()[0]
             date_text = publish_date.isoformat() if hasattr(publish_date, 'isoformat') else str(publish_date)
             board_dates[f'{arena}/{category}'] = date_text
-            rows = con.execute(f'''
-                select model_name, organization, license, rank, {votes_column} as votes
-                from read_parquet(?)
-                where category = ? and leaderboard_publish_date = ?
-                order by rank, model_name
-            ''', [str(path), category, publish_date]).fetchdf().to_dict('records')
+            rows = parquet_records(con, path, category, publish_date, votes_column)
             rank_count = len(rows)
             best: dict[str, dict] = {}
             for row in rows:
@@ -175,12 +224,6 @@ def main() -> None:
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(document, ensure_ascii=False, separators=(',', ':')) + '\n', encoding='utf-8')
     print(f'Wrote {args.output}: {len(document["models"])} base models, {len(board_dates)} boards, revision {revision}')
-
-
-def download_json(url: str) -> str:
-    request = urllib.request.Request(url, headers={'User-Agent': 'ds-dot-arena-builder/1'})
-    with urllib.request.urlopen(request, timeout=60) as response:
-        return response.read().decode('utf-8')
 
 
 if __name__ == '__main__':

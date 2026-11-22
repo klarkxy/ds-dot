@@ -22,8 +22,6 @@ import { DEV_INDEX_TOOLS, installDotDevIndex } from './dev-index-scope.ts'
 import { gateToolExecution } from './tool-scope.ts'
 import { installDotWeb } from './web-scope.ts'
 import { toolDisplay } from './chat-format.ts'
-import { formatTaskModels } from './task-models.ts'
-import { ArenaQueryError } from './arena-models.ts'
 
 /** Host tool names from `@deepseek-ai/dsh-tool-web` (0.2.2-rc.1). Absent names are not an error. */
 export const HOST_WEB_TOOLS = ['web_search', 'web_fetch'] as const
@@ -302,20 +300,11 @@ export function apply(ctx: Context): void {
       tags: { type: 'string', description: 'Comma-separated task tags for recommendation, e.g. "coding,review" or "vision,ocr". Default "general".' },
       limit: { type: 'integer', description: 'Maximum ranked routes to return, 1–10 (default 5).' },
     },
-    execute: async args => {
-      if (str(args, 'mode') === 'raw') return dot().listModels()
-      try {
-        const catalog = await dot().host.listModels()
-        return formatTaskModels(dot().store.settings.taskModels, catalog, {
-          mode: 'recommend',
-          ...str(args, 'tags') ? { tags: str(args, 'tags')! } : {},
-          ...num(args, 'limit') !== undefined ? { limit: num(args, 'limit')! } : {},
-        })
-      } catch (error) {
-        if (error instanceof ArenaQueryError) throw new DotError('dot/invalid-model-query', error.message)
-        throw new DotError('dot/models-unavailable', `the host's model list could not be read: ${messageOf(error)}`)
-      }
-    },
+    execute: async args => dot().listModels({
+      mode: str(args, 'mode') === 'raw' ? 'raw' : 'recommend',
+      ...str(args, 'tags') ? { tags: str(args, 'tags')! } : {},
+      ...num(args, 'limit') !== undefined ? { limit: num(args, 'limit')! } : {},
+    }),
     title: 'Recommend models',
   }), true)
 

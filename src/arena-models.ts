@@ -75,11 +75,27 @@ const MODEL_ALIASES: Readonly<Record<string, string>> = {
   k3256k: 'kimik3',
 }
 
-/** Conservative identity normalization; unmatched routes stay explicitly unranked. */
+const DATE_SUFFIX = /20\d{6}$/
+
+/** Conservative identity normalization; unmatched routes stay explicitly unranked. Dated revisions stay distinct. */
 export function arenaModelId(value: string): string {
   const withoutEffort = value.trim().toLowerCase().replace(/\(([^()]*)\)/g, (whole, label: string) => EFFORT_LABELS.has(label.trim()) ? '' : whole)
-  const compact = withoutEffort.replace(/[^a-z0-9]+/g, '').replace(/20\d{6}$/, '')
+  const compact = withoutEffort.replace(/[^a-z0-9]+/g, '')
   return MODEL_ALIASES[compact] ?? compact
+}
+
+function baseArenaModelId(id: string): string {
+  return id.replace(DATE_SUFFIX, '')
+}
+
+/** Dated host routes match only that revision; an undated alias may follow a unique dated board row. */
+function documentModelFor(model: ArenaCatalogModel, document: ArenaDocument, byId: Map<string, ArenaDocumentModel>): ArenaDocumentModel | undefined {
+  const id = arenaModelId(model.model)
+  const exact = byId.get(id)
+  if (exact) return exact
+  if (DATE_SUFFIX.test(id)) return undefined
+  const matches = document.models.filter(row => baseArenaModelId(row.id) === id)
+  return matches.length === 1 ? matches[0] : undefined
 }
 
 export class ArenaQueryError extends Error {
@@ -145,7 +161,7 @@ export function rankArenaModels(models: readonly ArenaCatalogModel[], query: Are
   const byId = new Map(document.models.map(model => [model.id, model]))
   const ranked: Ranked[] = []
   for (const model of models) {
-    const documentModel = byId.get(arenaModelId(model.model))
+    const documentModel = documentModelFor(model, document, byId)
     if (!documentModel) continue
     const evidenceByBoard = new Map(documentModel.evidence.map(evidence => [`${evidence.arena}/${evidence.category}`, evidence]))
     const found: Ranked['evidence'][number][] = []
@@ -165,7 +181,7 @@ export function rankArenaModels(models: readonly ArenaCatalogModel[], query: Are
     ranked.push({ model, score, coverage: coveredWeight / totalWeight, evidence: found })
   }
   const catalogOrder = new Map(models.map((model, index) => [`${model.provider}/${model.model}`, index]))
-  ranked.sort((a, b) => b.score - a.score || b.coverage - a.coverage || catalogOrder.get(`${a.model.provider}/${a.model.model}`)! - catalogOrder.get(`${b.model.provider}/${b.model.model}`)!)
+  ranked.sort((a, b) => b.score - a.score || catalogOrder.get(`${a.model.provider}/${a.model.model}`)! - catalogOrder.get(`${b.model.provider}/${b.model.model}`)!)
   return ranked
 }
 

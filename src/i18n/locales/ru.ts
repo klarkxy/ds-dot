@@ -544,6 +544,12 @@ const ruUi: UiText = {
   workOpenSession: 'Открыть сессию',
   workSourceExpandAll: 'Развернуть всё',
   workSourceCollapseAll: 'Свернуть всё',
+  attentionTitle: 'Дороти ждёт вас',
+  attentionBadge: '{n} ждут вас',
+  sNotify: 'Уведомления рабочего стола',
+  sNotifyDesc: 'Показывает уведомление браузера, когда Дороти ждёт вас, а это окно скрыто или не в фокусе.',
+  sNotifyBlocked: 'Заблокировано браузером',
+  sNotifyUnsupported: 'Не поддерживается этим браузером',
 }
 
 const ruCard: CardCopy = {

@@ -544,6 +544,12 @@ const ptUi: UiText = {
   workOpenSession: 'Abrir sessão',
   workSourceExpandAll: 'Expandir tudo',
   workSourceCollapseAll: 'Recolher tudo',
+  attentionTitle: 'Dorothy precisa de você',
+  attentionBadge: '{n} precisam de você',
+  sNotify: 'Notificações de área de trabalho',
+  sNotifyDesc: 'Mostra uma notificação do navegador quando Dorothy precisa de você enquanto esta janela está oculta ou sem foco.',
+  sNotifyBlocked: 'Bloqueado pelo navegador',
+  sNotifyUnsupported: 'Sem suporte neste navegador',
 }
 
 const ptCard: CardCopy = {

@@ -544,6 +544,12 @@ const frUi: UiText = {
   workOpenSession: 'Ouvrir la session',
   workSourceExpandAll: 'Tout déplier',
   workSourceCollapseAll: 'Tout replier',
+  attentionTitle: 'Dorothy a besoin de vous',
+  attentionBadge: '{n} ont besoin de vous',
+  sNotify: 'Notifications de bureau',
+  sNotifyDesc: 'Affiche une notification du navigateur quand Dorothy a besoin de vous alors que cette fenêtre est masquée ou inactive.',
+  sNotifyBlocked: 'Bloqué par le navigateur',
+  sNotifyUnsupported: 'Non pris en charge par ce navigateur',
 }
 
 const frCard: CardCopy = {

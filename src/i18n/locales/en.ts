@@ -545,6 +545,12 @@ const enUi: UiText = {
   workOpenSession: 'Open session',
   workSourceExpandAll: 'Expand all',
   workSourceCollapseAll: 'Collapse all',
+  attentionTitle: 'Dorothy needs you',
+  attentionBadge: '{n} need you',
+  sNotify: 'Desktop notifications',
+  sNotifyDesc: 'Show a browser notification when Dorothy needs you while this window is hidden or not focused.',
+  sNotifyBlocked: 'Blocked by the browser',
+  sNotifyUnsupported: 'Not supported by this browser',
 }
 
 export const en: LocalePack = {

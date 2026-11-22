@@ -544,6 +544,12 @@ const deUi: UiText = {
   workOpenSession: 'Sitzung öffnen',
   workSourceExpandAll: 'Alle ausklappen',
   workSourceCollapseAll: 'Alle einklappen',
+  attentionTitle: 'Dorothy braucht dich',
+  attentionBadge: '{n} brauchen dich',
+  sNotify: 'Desktop-Benachrichtigungen',
+  sNotifyDesc: 'Zeigt eine Browser-Benachrichtigung, wenn Dorothy dich braucht, während dieses Fenster ausgeblendet oder nicht fokussiert ist.',
+  sNotifyBlocked: 'Vom Browser blockiert',
+  sNotifyUnsupported: 'Von diesem Browser nicht unterstützt',
 }
 
 const deCard: CardCopy = {

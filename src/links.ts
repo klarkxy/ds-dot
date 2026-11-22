@@ -10,8 +10,10 @@ import type { InboxRecord, TaskLink } from './contracts.ts'
 /** Auto-links one run report may add; a report quoting many PRs stays bounded. */
 export const REPORT_LINKS_MAX = 5
 
-const REPO = '[A-Za-z0-9][A-Za-z0-9_.-]*'
-const REPO_RE = new RegExp(`^(${REPO}/${REPO})$`)
+const OWNER = '[A-Za-z0-9][A-Za-z0-9_.-]*'
+/** Repo names may start with a dot or underscore (`org/.github`). */
+const NAME = '[A-Za-z0-9_.][A-Za-z0-9_.-]*'
+const REPO_RE = new RegExp(`^(${OWNER}/${NAME})$`)
 
 /** A GitHub target parsed from a `ref` argument or a report URL. */
 export interface LinkTarget {
@@ -28,13 +30,13 @@ export interface LinkTarget {
  */
 export function parseLinkRef(ref: string): LinkTarget | undefined {
   const text = ref.trim()
-  const url = /^https?:\/\/github\.com\/([A-Za-z0-9][A-Za-z0-9_.-]*)\/([A-Za-z0-9][A-Za-z0-9_.-]*)\/(pull|issues)\/(\d+)(?:[/?#]|$)/i.exec(text)
+  const url = /^https?:\/\/github\.com\/([A-Za-z0-9][A-Za-z0-9_.-]*)\/([A-Za-z0-9_.][A-Za-z0-9_.-]*)\/(pull|issues)\/(\d+)(?:[/?#]|$)/i.exec(text)
   if (url) {
     return { repo: `${url[1]}/${url[2]}`.toLowerCase(), number: Number(url[4]), url: text.split(/[?#]/)[0] }
   }
-  const numbered = new RegExp(`^(${REPO}/${REPO})#(\\d+)$`).exec(text)
+  const numbered = new RegExp(`^(${OWNER}/${NAME})#(\\d+)$`).exec(text)
   if (numbered) return { repo: numbered[1].toLowerCase(), number: Number(numbered[2]) }
-  const branched = new RegExp(`^(${REPO}/${REPO})@([^\\s@#]+)$`).exec(text)
+  const branched = new RegExp(`^(${OWNER}/${NAME})@([^\\s@#]+)$`).exec(text)
   if (branched && REPO_RE.test(branched[1])) return { repo: branched[1].toLowerCase(), branch: branched[2] }
   return undefined
 }
@@ -59,7 +61,7 @@ export function makeTaskLink(changeId: string, target: LinkTarget, origin: 'dot'
   }
 }
 
-const REPORT_URL_RE = /https?:\/\/github\.com\/([A-Za-z0-9][A-Za-z0-9_.-]*)\/([A-Za-z0-9][A-Za-z0-9_.-]*)\/(?:pull|issues)\/(\d+)/gi
+const REPORT_URL_RE = /https?:\/\/github\.com\/([A-Za-z0-9][A-Za-z0-9_.-]*)\/([A-Za-z0-9_.][A-Za-z0-9_.-]*)\/(?:pull|issues)\/(\d+)/gi
 
 /** PR/issue URLs quoted in a run report, deduped and capped. */
 export function scanReportLinks(text: string): LinkTarget[] {
@@ -80,29 +82,34 @@ export interface SubjectTarget {
   readonly branch?: string
 }
 
-const SUBJECT_NUMBER_RE = new RegExp(`^(${REPO}/${REPO})#(\\d+)$`)
-const SUBJECT_BRANCH_RE = new RegExp(`^(${REPO}/${REPO}):(?:workflow|checks):[^\\s@]+@([^\\s@]+)$`)
+const SUBJECT_NUMBER_RE = new RegExp(`^(${OWNER}/${NAME})#(\\d+)$`)
+// Workflow/check names may contain spaces or '@' ('Build and test'), so the
+// name matches greedily and the branch is everything after the LAST '@'.
+const SUBJECT_BRANCH_RE = new RegExp(`^(${OWNER}/${NAME}):(?:workflow|checks):(.+)@([^\\s@]+)$`)
 
 /** Subjects an event may carry that can bind to a link; anything else cannot. */
 export function subjectTarget(subject: string): SubjectTarget | undefined {
   const numbered = SUBJECT_NUMBER_RE.exec(subject)
   if (numbered) return { repo: numbered[1].toLowerCase(), number: Number(numbered[2]) }
   const branched = SUBJECT_BRANCH_RE.exec(subject)
-  if (branched) return { repo: branched[1].toLowerCase(), branch: branched[2] }
+  if (branched) return { repo: branched[1].toLowerCase(), branch: branched[3] }
   return undefined
 }
 
-export function linkMatchesSubject(link: Pick<TaskLink, 'repo' | 'number' | 'branch'>, subject: string): boolean {
-  const target = subjectTarget(subject)
+export function linkMatchesSubject(link: Pick<TaskLink, 'repo' | 'number' | 'branch' | 'headRepo'>, record: Pick<InboxRecord, 'subject' | 'headRepo'>): boolean {
+  const target = subjectTarget(record.subject)
   if (!target || target.repo !== link.repo) return false
   if (target.number !== undefined) return link.number === target.number
-  return target.branch !== undefined && link.branch === target.branch
+  if (target.branch === undefined || link.branch !== target.branch) return false
+  // Forks reuse branch names: when both sides know the head repo it must agree.
+  return link.headRepo === undefined || record.headRepo === undefined || link.headRepo === record.headRepo
 }
 
 /** The link state an event type settles, when it settles one. */
-export function linkEventState(type: string): 'closed' | 'merged' | undefined {
+export function linkEventState(type: string): 'open' | 'closed' | 'merged' | undefined {
   if (type === 'pull_request.merged') return 'merged'
   if (type === 'pull_request.closed') return 'closed'
+  if (type === 'pull_request.reopened') return 'open'
   return undefined
 }
 
@@ -117,6 +124,9 @@ export function applyLinkEvent(link: TaskLink, record: InboxRecord, at: number):
   const next: TaskLink = {
     ...link,
     ...(learnBranch ? { branch: record.headRef } : {}),
+    // The head ref alone does not say which fork pushed it; keep the repo too
+    // so branch matching can tell same-named branches apart.
+    ...(learnBranch && record.headRepo !== undefined ? { headRepo: record.headRepo } : {}),
     ...(state !== undefined && state !== link.state ? { state } : {}),
     lastEvent: {
       type: record.type,

@@ -568,6 +568,14 @@ export class DotStore {
     return [...this.linkRows.values()].sort((a, b) => a.addedAt - b.addedAt || a.id.localeCompare(b.id))
   }
 
+  /** The board's work row for one change: workView plus its link chips. */
+  workViewWithLinks(changeId: string) {
+    const row = this.work.workView(changeId)
+    if (!row) return undefined
+    const links = this.linksFor(changeId)
+    return links.length > 0 ? { ...row, links } : row
+  }
+
   linksFor(changeId: string): readonly TaskLink[] {
     return this.links.filter(link => link.changeId === changeId)
   }
@@ -632,12 +640,8 @@ export class DotStore {
     const watched = all.filter(task => task.origin === 'watched')
     const started = all.filter(task => task.origin === 'started')
     const work = this.work.listChanges()
-      .map(change => this.work.workView(change.id))
+      .map(change => this.workViewWithLinks(change.id))
       .filter((row): row is NonNullable<typeof row> => row !== undefined)
-      .map(row => {
-        const links = this.linksFor(row.id)
-        return links.length > 0 ? { ...row, links } : row
-      })
     return {
       ...this.state.dotSessionId === undefined ? {} : { dotSessionId: this.state.dotSessionId },
       tasks: watched,

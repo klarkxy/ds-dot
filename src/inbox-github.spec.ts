@@ -43,6 +43,40 @@ describe('normalizeGithub', () => {
     expect(event.headRef).toBe('feature/add')
   })
 
+  it('carries the head repository so links can tell fork branches apart', () => {
+    const pr = pullRequestPayload()
+    ;(pr.pull_request as Record<string, unknown>).head = {
+      sha: 'abc123def4567890', ref: 'feature/add',
+      repo: { full_name: 'Fork/Widgets' },
+    }
+    expect(normalizeGithub(delivery('pull_request', pr))!.headRepo).toBe('fork/widgets')
+    const run = {
+      name: 'CI', head_branch: 'feature/add', head_sha: 'def456abc123', run_number: 42,
+      conclusion: 'failure', html_url: 'https://gh/acme/widgets/actions/runs/42',
+      head_repository: { full_name: 'Fork/Widgets' },
+    }
+    expect(normalizeGithub(delivery('workflow_run', {
+      action: 'completed', sender: { login: 'bob' }, repository: REPO, workflow_run: run,
+    }))!.headRepo).toBe('fork/widgets')
+    // check_suite has no head_repository: the linked PR's head repo is the hint.
+    expect(normalizeGithub(delivery('check_suite', {
+      action: 'completed', sender: { login: 'bob' }, repository: REPO,
+      check_suite: {
+        head_branch: 'feature/add', head_sha: 'def456abc123', conclusion: 'failure',
+        app: { name: 'Checks' }, url: 'https://gh/acme/widgets/check/1',
+        pull_requests: [{ head: { repo: { full_name: 'Fork/Widgets' } } }],
+      },
+    }))!.headRepo).toBe('fork/widgets')
+    // No hint anywhere stays undefined.
+    expect(normalizeGithub(delivery('check_suite', {
+      action: 'completed', sender: { login: 'bob' }, repository: REPO,
+      check_suite: {
+        head_branch: 'feature/add', head_sha: 'def456abc123', conclusion: 'failure',
+        app: { name: 'Checks' }, url: 'https://gh/acme/widgets/check/1',
+      },
+    }))!.headRepo).toBeUndefined()
+  })
+
   it('drops pull_request synchronize', () => {
     expect(normalizeGithub(delivery('pull_request', pullRequestPayload({ action: 'synchronize' })))).toBeUndefined()
   })

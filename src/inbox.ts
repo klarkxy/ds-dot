@@ -80,12 +80,11 @@ export class InboxLedger {
   get(id: string): InboxRecord | undefined { return this.load().get(id) }
 
   /**
-   * Store one event. A seen delivery id is a no-op; a pending record on the
-   * same source, source id and subject takes the latest fields and the event's
-   * delivery id instead of a new row. Callers serialize, so the
-   * read-modify-write cannot race.
+   * The row a submit would write — merged into the pending row when one
+   * matches — without storing it. Read-only, so a caller can do dependent
+   * bookkeeping before the event exists and a retry still redoes both.
    */
-  async submit(input: InboxEventInput, now: number): Promise<InboxSubmit> {
+  peek(input: InboxEventInput, now: number): InboxSubmit {
     const rows = this.load()
     for (const row of rows.values()) {
       if (row.source === input.source && row.sourceId === input.sourceId && row.deliveryIds.includes(input.deliveryId)) {
@@ -107,12 +106,11 @@ export class InboxLedger {
         summary: input.summary,
         receivedAt: input.receivedAt,
         ...(input.headRef !== undefined ? { headRef: input.headRef } : {}),
+        ...(input.headRepo !== undefined ? { headRepo: input.headRepo } : {}),
         deliveryIds: [...pending.deliveryIds.slice(-(INBOX_DELIVERY_IDS_MAX - 1)), input.deliveryId],
         count: pending.count + 1,
         updatedAt: now,
       }
-      await this.table.put(record.id, record)
-      rows.set(record.id, record)
       return { result: 'merged', record }
     }
     const record: InboxRecord = {
@@ -123,10 +121,23 @@ export class InboxLedger {
       status: 'pending',
       updatedAt: now,
     }
-    await this.table.put(record.id, record)
-    rows.set(record.id, record)
-    await this.pruneDelivered()
     return { result: 'stored', record }
+  }
+
+  /**
+   * Store one event. A seen delivery id is a no-op; a pending record on the
+   * same source, source id and subject takes the latest fields and the event's
+   * delivery id instead of a new row. Callers serialize, so the
+   * read-modify-write cannot race.
+   */
+  async submit(input: InboxEventInput, now: number): Promise<InboxSubmit> {
+    const classified = this.peek(input, now)
+    if (!classified.record) return classified
+    const rows = this.load()
+    await this.table.put(classified.record.id, classified.record)
+    rows.set(classified.record.id, classified.record)
+    if (classified.result === 'stored') await this.pruneDelivered()
+    return classified
   }
 
   /** Mark pending records delivered once dot saw them; ignored ids are skipped. */

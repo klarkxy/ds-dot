@@ -560,6 +560,8 @@ export interface InboxEventInput {
   readonly receivedAt: number
   /** PR head branch carried for link matching; never shown to the model. */
   readonly headRef?: string
+  /** PR/workflow head repository (owner/repo, lower-cased) for fork-aware link matching. */
+  readonly headRepo?: string
 }
 
 /** A stored inbox row: one pending record per source+sourceId+subject, merged deliveries folded in. */
@@ -602,6 +604,8 @@ export interface TaskLink {
   readonly repo: string
   readonly number?: number
   readonly branch?: string
+  /** Head repository learned with the branch; distinguishes same-named fork branches. */
+  readonly headRepo?: string
   readonly url?: string
   readonly origin: 'dot' | 'auto'
   readonly state: 'open' | 'closed' | 'merged'

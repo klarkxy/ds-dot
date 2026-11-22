@@ -4,7 +4,7 @@
  */
 import { describe, expect, it } from 'vitest'
 import type { InboxRecord } from './contracts.ts'
-import { applyLinkEvent, linkMatchesSubject, makeTaskLink, parseLinkRef, scanReportLinks, taskLinkId } from './links.ts'
+import { applyLinkEvent, linkMatchesSubject, makeTaskLink, parseLinkRef, scanReportLinks, subjectTarget, taskLinkId } from './links.ts'
 
 describe('parseLinkRef', () => {
   it('accepts pull and issue URLs, owner/repo#N, and owner/repo@branch', () => {
@@ -38,20 +38,46 @@ describe('scanReportLinks', () => {
 })
 
 describe('linkMatchesSubject', () => {
+  const subject = (value: string, headRepo?: string) => ({ subject: value, ...(headRepo ? { headRepo } : {}) })
+
   it('matches repo#N subjects on the link number and workflow/checks subjects on the branch', () => {
     const pr = { repo: 'acme/widgets', number: 12 }
-    expect(linkMatchesSubject(pr, 'acme/widgets#12')).toBe(true)
-    expect(linkMatchesSubject(pr, 'acme/widgets#13')).toBe(false)
-    expect(linkMatchesSubject(pr, 'other/widgets#12')).toBe(false)
+    expect(linkMatchesSubject(pr, subject('acme/widgets#12'))).toBe(true)
+    expect(linkMatchesSubject(pr, subject('acme/widgets#13'))).toBe(false)
+    expect(linkMatchesSubject(pr, subject('other/widgets#12'))).toBe(false)
     const branch = { repo: 'acme/widgets', branch: 'feature/x' }
-    expect(linkMatchesSubject(branch, 'acme/widgets:workflow:ci@feature/x')).toBe(true)
-    expect(linkMatchesSubject(branch, 'acme/widgets:checks:app@feature/x')).toBe(true)
-    expect(linkMatchesSubject(branch, 'acme/widgets:workflow:ci@main')).toBe(false)
+    expect(linkMatchesSubject(branch, subject('acme/widgets:workflow:ci@feature/x'))).toBe(true)
+    expect(linkMatchesSubject(branch, subject('acme/widgets:checks:app@feature/x'))).toBe(true)
+    expect(linkMatchesSubject(branch, subject('acme/widgets:workflow:ci@main'))).toBe(false)
     // Push subjects are repo@refs/heads/... and never bind.
-    expect(linkMatchesSubject(branch, 'acme/widgets@refs/heads/feature/x')).toBe(false)
+    expect(linkMatchesSubject(branch, subject('acme/widgets@refs/heads/feature/x'))).toBe(false)
     const both = { repo: 'acme/widgets', number: 12, branch: 'feature/x' }
-    expect(linkMatchesSubject(both, 'acme/widgets#12')).toBe(true)
-    expect(linkMatchesSubject(both, 'acme/widgets:workflow:ci@feature/x')).toBe(true)
+    expect(linkMatchesSubject(both, subject('acme/widgets#12'))).toBe(true)
+    expect(linkMatchesSubject(both, subject('acme/widgets:workflow:ci@feature/x'))).toBe(true)
+  })
+
+  it('splits the branch off at the last @ so workflow names keep spaces', () => {
+    const branch = { repo: 'acme/widgets', branch: 'feature/x' }
+    expect(linkMatchesSubject(branch, subject('acme/widgets:workflow:Build and test@feature/x'))).toBe(true)
+    expect(linkMatchesSubject(branch, subject('acme/widgets:workflow:Build and test@main'))).toBe(false)
+    expect(subjectTarget('acme/widgets:checks:lint@v2@feature/x')).toEqual({ repo: 'acme/widgets', branch: 'feature/x' })
+  })
+
+  it('tells same-named fork branches apart through headRepo when both sides know it', () => {
+    const link = { repo: 'acme/widgets', branch: 'feature/x', headRepo: 'fork-one/widgets' }
+    expect(linkMatchesSubject(link, subject('acme/widgets:workflow:ci@feature/x', 'fork-one/widgets'))).toBe(true)
+    expect(linkMatchesSubject(link, subject('acme/widgets:workflow:ci@feature/x', 'fork-two/widgets'))).toBe(false)
+    // Either side missing the head repo still matches — it cannot be told apart.
+    expect(linkMatchesSubject(link, subject('acme/widgets:workflow:ci@feature/x'))).toBe(true)
+    expect(linkMatchesSubject({ repo: 'acme/widgets', branch: 'feature/x' }, subject('acme/widgets:workflow:ci@feature/x', 'fork-two/widgets'))).toBe(true)
+  })
+
+  it('accepts repos whose name starts with a dot', () => {
+    expect(parseLinkRef('org/.github#7')).toEqual({ repo: 'org/.github', number: 7 })
+    expect(parseLinkRef('https://github.com/org/.github/pull/7')).toMatchObject({ repo: 'org/.github', number: 7 })
+    expect(subjectTarget('org/.github#7')).toEqual({ repo: 'org/.github', number: 7 })
+    expect(subjectTarget('org/.github:workflow:ci@main')).toEqual({ repo: 'org/.github', branch: 'main' })
+    expect(scanReportLinks('see https://github.com/org/.github/pull/7')).toHaveLength(1)
   })
 })
 
@@ -78,10 +104,21 @@ describe('applyLinkEvent', () => {
     expect(kept.branch).toBe('feature/x')
   })
 
+  it('learns headRepo together with the branch', () => {
+    const learned = applyLinkEvent(base, record({ headRef: 'feature/x', headRepo: 'fork/widgets' }), 1000)!
+    expect(learned).toMatchObject({ branch: 'feature/x', headRepo: 'fork/widgets' })
+  })
+
   it('settles merged and closed state', () => {
     expect(applyLinkEvent(base, record({ type: 'pull_request.merged' }), 1000)!.state).toBe('merged')
     expect(applyLinkEvent(base, record({ type: 'pull_request.closed' }), 1000)!.state).toBe('closed')
     expect(applyLinkEvent(base, record({ type: 'issues.closed' }), 1000)!.state).toBe('open')
+  })
+
+  it('moves a closed link back to open on pull_request.reopened', () => {
+    const closed = applyLinkEvent(base, record({ type: 'pull_request.closed' }), 1000)!
+    const reopened = applyLinkEvent(closed, record({ type: 'pull_request.reopened' }), 1000)!
+    expect(reopened.state).toBe('open')
   })
 
   it('produces a stable id per change, repo and target', () => {

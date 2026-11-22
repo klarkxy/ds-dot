@@ -151,6 +151,8 @@ export class DotService {
   private readonly childRefreshers = new Set<() => void>()
   private readonly childReleases = new Map<string, () => void>()
   private resetArmed?: { readonly token: string; readonly expiresAt: number }
+  /** Bumped by every factory reset so a report captured across it skips link writes. */
+  private resetGeneration = 0
   private currentLocale: CopyLocale | undefined
   private readonly updates: AutoUpdater
   private readonly timer: Timer
@@ -872,6 +874,7 @@ export class DotService {
     // No usage pass may start or commit while the book is being wiped; the flag
     // is cleared on the way out whether the reset completes or throws.
     this.usageStopped = true
+    this.resetGeneration += 1
     try {
       const archiveIds = factoryResetArchiveIds(this.store)
       // The ownership list includes confirmed and uncertain host calls, but not
@@ -2159,9 +2162,12 @@ export class DotService {
    */
   async submitInbox(input: InboxEventInput): Promise<InboxSubmitResult> {
     const done = await this.serial(async () => {
-      const result = await this.inbox.submit(input, this.now())
-      if (result.record) await this.applyInboxLinks(result.record)
-      return result
+      const preview = this.inbox.peek(input, this.now())
+      if (!preview.record) return preview
+      // Link updates land BEFORE the inbox record: a failing links table throws
+      // here, so a webhook retry finds no stored record and redoes both steps.
+      await this.applyInboxLinks(preview.record)
+      return this.inbox.submit(input, this.now())
     })
     // queueInboxNotice itself skips a record that already has a queued notice.
     if (done.record) this.queueInboxNotice(done.record)
@@ -2171,10 +2177,20 @@ export class DotService {
   /** Fold one stored inbox record into every link its subject binds to. */
   private async applyInboxLinks(record: InboxRecord): Promise<void> {
     for (const link of this.store.links) {
-      if (!linkMatchesSubject(link, record.subject)) continue
+      if (!linkMatchesSubject(link, record)) continue
       const next = applyLinkEvent(link, record, this.now())
       if (next) await this.store.putLink(next)
     }
+  }
+
+  /** A fresh link still learns from inbox rows stored before it existed (a pull_request event may predate the run report). */
+  private learnFromStoredInbox(link: TaskLink): TaskLink {
+    let next = link
+    for (const record of this.inbox.list()) {
+      if (!linkMatchesSubject(next, record)) continue
+      next = applyLinkEvent(next, record, this.now()) ?? next
+    }
+    return next
   }
 
   /**
@@ -2186,7 +2202,7 @@ export class DotService {
     const seen = new Set<string>()
     const lines: string[] = []
     for (const link of this.store.links) {
-      if (seen.has(link.changeId) || !linkMatchesSubject(link, record.subject)) continue
+      if (seen.has(link.changeId) || !linkMatchesSubject(link, record)) continue
       const change = this.store.work.change(link.changeId)
       if (!change) continue
       if (changeIsTerminal(change, this.store.work.listRuns().filter(run => run.changeId === change.id))) continue
@@ -2209,7 +2225,7 @@ export class DotService {
   /** PR/issue URLs quoted in a finished report become auto links on its change. */
   private autoLinkReport(changeId: string, report: string): void {
     for (const target of scanReportLinks(report)) {
-      const link = makeTaskLink(changeId, target, 'auto', this.now())
+      const link = this.learnFromStoredInbox(makeTaskLink(changeId, target, 'auto', this.now()))
       if (this.store.link(link.id)) continue
       void this.store.putLink(link).catch(() => undefined)
     }
@@ -2402,6 +2418,12 @@ export class DotService {
     return reconcileRun(this.store.work, this.runHost(), runId, this.now())
   }
   workBoard(changeId: string) { return this.store.work.workView(changeId) }
+  /** Board-projection rows for work.list: the same view plus link chips the board shows. */
+  workList() {
+    return this.store.work.listChanges()
+      .map(change => this.store.workViewWithLinks(change.id))
+      .filter(row => row !== undefined)
+  }
   recordWorkVerification(changeId: string, checks: Parameters<DotStore['work']['recordVerification']>[1], runIds: readonly string[], detail?: Parameters<DotStore['work']['recordVerification']>[4]) {
     return this.store.work.recordVerification(changeId, checks, runIds, this.now(), detail)
   }
@@ -2751,6 +2773,8 @@ export class DotService {
    * resolve against this captured copy, not the live session log.
    */
   private async captureRunReport(runId: string): Promise<boolean> {
+    // A pre-reset run's report must not link a post-reset change reusing the id.
+    const generation = this.resetGeneration
     const run = this.store.work.run(runId)
     if (!run?.sessionId || typeof this.host.latestReply !== 'function') return false
     const reply = await this.host.latestReply(run.sessionId, 20_000).catch(() => undefined)
@@ -2759,7 +2783,7 @@ export class DotService {
       const dir = join(this.options.homeDir, 'artifacts', 'evidence')
       mkdirSync(dir, { recursive: true })
       writeFileSync(join(dir, `${artifactName(runId)}.md`), reply)
-      this.autoLinkReport(run.changeId, reply)
+      if (this.resetGeneration === generation) this.autoLinkReport(run.changeId, reply)
       return true
     } catch { return false }
   }
@@ -2965,7 +2989,7 @@ export class DotService {
       return `unlinked ${label} from ${changeId}`
     }
     if (this.store.link(id)) return `already linked ${label} to ${changeId}`
-    await this.store.putLink(makeTaskLink(changeId, target, 'dot', this.now()))
+    await this.store.putLink(this.learnFromStoredInbox(makeTaskLink(changeId, target, 'dot', this.now())))
     return `linked ${label} to ${changeId}`
   }
 

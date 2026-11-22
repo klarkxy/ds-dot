@@ -263,6 +263,7 @@ const inboxRecordSchema = z.object({
   status: z.enum(['pending', 'delivered']),
   receivedAt: z.number(),
   headRef: z.string().optional(),
+  headRepo: z.string().optional(),
   updatedAt: z.number(),
   deliveredAt: z.number().optional(),
 })
@@ -301,6 +302,7 @@ const taskLinkSchema = z.object({
   repo: z.string().min(1),
   number: z.number().int().positive().optional(),
   branch: z.string().optional(),
+  headRepo: z.string().optional(),
   url: z.string().optional(),
   origin: z.enum(['dot', 'auto']),
   state: z.enum(['open', 'closed', 'merged']),

@@ -229,6 +229,10 @@ export const boardCss = `
   border-radius: var(--dsw-radius-sm); background: var(--dsw-alias-bg-layer-1); box-shadow: var(--dsw-elevation-stroke);
   font: 11px/17px var(--ds-font-family-code); color: var(--dsw-alias-label-secondary);
 }
+.dsh-dot-board .dsh-dot-work-diff-trunc {
+  display: flex; align-items: center; gap: 8px; padding: 2px 0 0;
+  font: 11px/17px var(--ds-font-family-code); color: var(--dsw-alias-label-tertiary);
+}
 .dsh-dot-board .dsh-dot-work-diff-line { display: flex; min-width: 0; white-space: pre; }
 .dsh-dot-board .dsh-dot-work-diff-line[data-sign='add'] { background: color-mix(in srgb, var(--dsw-alias-state-success-primary) 14%, transparent); }
 .dsh-dot-board .dsh-dot-work-diff-line[data-sign='add'] .dsh-dot-work-diff-text,

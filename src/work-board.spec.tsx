@@ -895,10 +895,17 @@ describe('WorkBoard', () => {
     const rendered = document.querySelector('[data-diff-body="big.ts"]')!
     // Past the 2,000-line render cap the tail mounts on demand, not up front.
     expect(rendered.textContent).not.toContain('tail marker row')
+    // The truncation bar sits outside the scroll area: it must exist even
+    // before any scrolling, with the shown/total counts.
+    const truncBar = document.querySelector('.dsh-dot-work-diff-trunc')!
+    expect(truncBar).toBeTruthy()
+    expect(truncBar.parentElement!.className).not.toBe('dsh-dot-work-diff')
+    expect(truncBar.textContent).toContain('2000')
+    expect(truncBar.textContent).toContain('6006')
     const showAll = buttonIncluding('Show all')!
-    expect(showAll.textContent).toContain('6006')
     await act(async () => { showAll.click(); await Promise.resolve() })
     expect(rendered.textContent).toContain('tail marker row')
+    expect(document.querySelector('.dsh-dot-work-diff-trunc')).toBeNull()
     await act(async () => root.unmount())
   })
 
@@ -962,9 +969,11 @@ describe('WorkBoard', () => {
     await openDetails()
     const lines = () => document.querySelectorAll('.dsh-dot-work-diff-line').length
     expect(lines()).toBeLessThanOrEqual(2_000)
+    const truncBar = document.querySelector('.dsh-dot-work-diff-trunc')
+    expect(truncBar?.textContent).toContain('2000')
+    expect(truncBar?.textContent).toContain('2505')
     const showAll = buttonIncluding('Show all')
     expect(showAll).toBeTruthy()
-    expect(showAll?.textContent).toContain('Show all')
     await act(async () => { showAll!.click(); await Promise.resolve() })
     expect(lines()).toBeGreaterThan(2_000)
     expect(document.querySelector('[data-diff-body="huge.csv"]')!.textContent).toContain('row,1')

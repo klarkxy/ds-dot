@@ -527,10 +527,13 @@ describe('work.read diff view', () => {
     await h.service.ensureDot()
     await h.service.confirmFactoryReset(h.service.previewFactoryReset().token)
     // Ids restart after reset; the memo must not answer for the new delivery.
+    // Preparing the second delivery reads manifests itself, so the check needs
+    // the count after preparation, not the count from before reset.
     const second = await readyDiffChange(h)
+    const afterPrep = manifestReads
     const bound2 = { verificationId: second.verified.id, inputRef: second.current.currentInputRef, inputRevision: second.current.currentRevision }
     expect(h.service.readWorkSource(second.change.id, 'change', 'a.ts', bound2, { view: 'diff' }).ok).toBe(true)
-    expect(manifestReads).toBeGreaterThan(afterFirst)
+    expect(manifestReads).toBeGreaterThan(afterPrep)
     rmSync(h.project, { recursive: true, force: true })
     rmSync(h.home, { recursive: true, force: true })
   })

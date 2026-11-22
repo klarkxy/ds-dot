@@ -467,6 +467,7 @@ function DiffView({ locale, path, body, onQuote }: { readonly locale: CopyLocale
   const capped = !all && rows.length > DIFF_LINE_LIMIT
   const shown = capped ? rows.slice(0, DIFF_LINE_LIMIT) : rows
   return (
+    <div className="dsh-dot-work-diff-wrap">
     <div className="dsh-dot-work-diff" data-diff-body={path}>
       {shown.map((row, index) => row.kind === 'line' ? (
         <div key={index} className="dsh-dot-work-diff-line" data-sign={row.sign}>
@@ -487,11 +488,17 @@ function DiffView({ locale, path, body, onQuote }: { readonly locale: CopyLocale
       ) : row.kind === 'meta' ? null : (
         <div key={index} className="dsh-dot-work-diff-hunk">{row.text}</div>
       ))}
-      {capped ? (
+    </div>
+    {capped ? (
+      <div className="dsh-dot-work-diff-trunc">
+        <span className="dsh-dot-work-diff-trunc-text">
+          {t(locale, 'workDiffTruncated').replace('{shown}', String(DIFF_LINE_LIMIT)).replace('{total}', String(rows.length))}
+        </span>
         <Button variant="ghost" size="sm" onClick={() => setAll(true)}>
-          {t(locale, 'workDiffShowAll').replace('{n}', String(rows.length))}
+          {t(locale, 'workDiffShowAll')}
         </Button>
-      ) : null}
+      </div>
+    ) : null}
     </div>
   )
 }

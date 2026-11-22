@@ -3,6 +3,7 @@
  * The buttons carry the versions the backend already requires. They do not
  * decide acceptance, release a review, or invent a user answer.
  */
+import type { DotContextUsage } from './contracts.ts'
 import type { TextKey } from './ui-copy.ts'
 export type WorkStatus = 'cancelled' | 'rework' | 'unverified' | 'done' | 'review' | 'settling' | 'running' | 'waiting'
 
@@ -38,6 +39,12 @@ export interface WorkRunView {
   readonly cwd: string
   readonly sessionId?: string
   readonly writeScope?: WorkScopeView
+  /** Folded session usage once the run is terminal; the panel shows its total. */
+  readonly usage?: DotContextUsage
+  /** Wall time of a terminal run's session. */
+  readonly wallMs?: number
+  /** createdAt, present only while the run is live so the panel can tick elapsed. */
+  readonly startedAt?: number
   readonly deliveries?: readonly WorkDeliveryView[]
 }
 
@@ -92,6 +99,9 @@ export interface WorkBoardItem {
   readonly control: string
   readonly status: WorkStatus
   readonly summary?: string
+  /** Cost summed over the change's finished runs, when any recorded it. */
+  readonly tokens?: number
+  readonly wallMs?: number
   readonly runs: readonly WorkRunView[]
   readonly blockers: readonly string[]
   readonly verification?: WorkVerificationView

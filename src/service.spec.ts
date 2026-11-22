@@ -1936,6 +1936,58 @@ describe('DotService work dispatch', () => {
     rmSync(dir, { recursive: true, force: true })
     rmSync(home, { recursive: true, force: true })
   })
+
+  it('captures usage and wall time of settled runs once the board sees the work change', async () => {
+    const h = setup()
+    await h.service.ensureDot()
+    h.service.board()
+    await h.service.manageTask({ action: 'dispatch', dir: '/proj', title: 'one', message: 'go' })
+    const run = h.store.work.sessionRun(h.store.list()[0]!.sessionId)!
+    h.events.set(run.sessionId!, [
+      { type: 'assistant/message', time: 1000, data: { usage: { inputTokens: 10, outputTokens: 5, cacheReadTokens: 20, cacheWriteTokens: 2 } } },
+      { type: 'assistant/message', time: 5000, data: { usage: { inputTokens: 4, outputTokens: 3 } } },
+    ])
+    await h.service.finishWorkRun(run.id, 'completed')
+    h.service.board()
+    expect(h.delays()).toContain(2000)
+    h.fire()
+    await vi.waitFor(() => expect(h.store.work.run(run.id)?.usage).toEqual({ input: 14, cacheRead: 20, cacheWrite: 2, output: 8 }))
+    expect(h.store.work.run(run.id)?.wallMs).toBe(4000)
+    await h.service.dispose()
+  })
+
+  it('skips live and unreadable runs, retries a failed read on the next pass, and never runs two passes at once', async () => {
+    const h = setup()
+    await h.service.ensureDot()
+    await h.service.manageTask({ action: 'dispatch', dir: '/proj', title: 'one', message: 'go' })
+    const done = h.store.work.sessionRun(h.store.list()[0]!.sessionId)!
+    h.events.set(done.sessionId!, [
+      { type: 'assistant/message', time: 1000, data: { usage: { inputTokens: 7, outputTokens: 3 } } },
+      { type: 'assistant/message', time: 4000, data: { usage: { inputTokens: 1, outputTokens: 1 } } },
+    ])
+    await h.service.manageTask({ action: 'dispatch', dir: '/proj', title: 'two', message: 'go' })
+    const liveRun = h.store.work.listRuns().find(row => row.id !== done.id)!
+    h.events.set(liveRun.sessionId!, [{ type: 'assistant/message', time: 1, data: { usage: { inputTokens: 9, outputTokens: 9 } } }])
+    await h.service.finishWorkRun(done.id, 'completed')
+    // A session that cannot be read is skipped, not marked; the next pass retries it.
+    h.unreadable.add(done.sessionId!)
+    await h.service.reconcile()
+    expect(h.store.work.run(done.id)?.usage).toBeUndefined()
+    h.unreadable.delete(done.sessionId!)
+    // Two overlapping reconciles share one capture pass per session.
+    const readSessions: string[] = []
+    const original = h.host.readEvents.bind(h.host)
+    h.host.readEvents = async id => { readSessions.push(id); return original(id) }
+    await Promise.all([h.service.reconcile(), h.service.reconcile()])
+    expect(readSessions.filter(id => id === done.sessionId)).toHaveLength(1)
+    // The live run's session was never read: it is not a capture candidate.
+    expect(readSessions).not.toContain(liveRun.sessionId)
+    const stored = h.store.work.run(done.id)!
+    expect(stored.usage).toEqual({ input: 8, cacheRead: 0, cacheWrite: 0, output: 4 })
+    expect(stored.wallMs).toBe(3000)
+    expect(h.store.work.run(liveRun.id)?.usage).toBeUndefined()
+    await h.service.dispose()
+  })
 })
 
 function memoryDomain(seed: Record<string, Record<string, unknown>> = {}) {

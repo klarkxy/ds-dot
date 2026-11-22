@@ -495,6 +495,7 @@ export const zhUi = {
   workScope: '写入范围',
   workScopeExclusive: '整个工作区',
   workScopeNone: '无写入权限',
+  workTokens: 'tok',
   workEvidence: '证据',
   workFiles: '交付文件',
   workKindWork: '执行',

@@ -1172,8 +1172,8 @@ export class DotService {
 
   /**
    * Debounced capture re-armed whenever the work revision moved since the last
-   * board read. Recording usage itself bumps the revision, so one extra empty
-   * pass follows each batch and the loop then settles.
+   * board read. Usage is metadata and does not move the revision, so no extra
+   * pass is scheduled by a capture itself.
    */
   private scheduleRunUsage(): void {
     if (this.closing || this.usageSeenRevision === this.store.work.revision) return

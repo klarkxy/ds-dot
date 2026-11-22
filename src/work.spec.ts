@@ -686,3 +686,25 @@ describe('run usage', () => {
     expect(view.wallMs).toBe(4000)
   })
 })
+
+describe('run usage revision stability', () => {
+  it('does not move the revision, so a baseline published against the earlier revision still applies', async () => {
+    const { book } = openBook()
+    const change = await book.createChange({ title: 'A', cwd: 'H:/proj', goal: 'a', maxConcurrentRuns: 2, at: 1 })
+    const writer = await book.reserveRun({ changeId: change.id, cwd: 'H:/proj/a', writeScope: { kind: 'paths', paths: [{ path: 'H:/proj/a/x.ts', type: 'file' }] }, at: 2 })
+    if (!writer.ok) throw new Error(writer.message)
+    const finished = await book.reserveRun({ changeId: change.id, cwd: 'H:/proj/b', writeScope: { kind: 'paths', paths: [] }, at: 3 })
+    if (!finished.ok) throw new Error(finished.message)
+    const prepared = await book.prepareFinish(finished.run.id, 'completed', 4)
+    if (!prepared.ok) throw new Error(prepared.message)
+    expect((await book.finishSettled(finished.run.id, prepared.updatedAt, 'completed', { queueCleared: true, agentIdle: true, jobsSettled: true }, 5)).ok).toBe(true)
+    const seen = book.revision
+    const usage = { input: 4, cacheRead: 9, cacheWrite: 0, output: 2 }
+    const stored = await book.recordRunUsage(finished.run.id, usage, 1200)
+    if (!('id' in stored)) throw new Error(stored.message)
+    // Usage is metadata: the optimistic-concurrency token does not move.
+    expect(book.revision).toBe(seen)
+    const published = await book.publishBaseline(writer.run.id, seen, 'artifact-1', 6)
+    expect(published).toMatchObject({ applied: true })
+  })
+})

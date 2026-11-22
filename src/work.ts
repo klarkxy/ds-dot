@@ -1910,7 +1910,9 @@ export class WorkBook {
   /**
    * Recorded once, after the run is terminal: folded session usage and wall
    * time. A no-op on a live run and on a run that already carries usage, so
-   * later capture passes never rewrite a committed number.
+   * later capture passes never rewrite a committed number. Usage is metadata,
+   * not a state transition, so the revision does not move — a baseline
+   * published against the revision read before this write still applies.
    */
   recordRunUsage(runId: string, usage: DotContextUsage, wallMs: number): Promise<RunRecord | WorkRefusal> {
     return this.exclusive(async () => {
@@ -1923,7 +1925,6 @@ export class WorkBook {
       const next: RunRecord = { ...run, usage, wallMs }
       await this.commit('runs', next.id, next)
       this.runs.set(next.id, next)
-      this.currentRevision += 1
       return next
     })
   }

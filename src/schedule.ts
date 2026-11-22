@@ -145,7 +145,9 @@ export function formatReminders(due: readonly ScheduleRecord[], now: number, opt
     const refused = opts?.refusals?.get(record.id)
     // The refusal rides the bullet in brackets: a prompt can never reach that
     // position, so a quoted "… refused: …" line can't masquerade as a failure.
-    const refusalTag = refused ? ` [dispatch refused: ${refused.replace(/[[\]]/g, '')}]` : ''
+    // It must stay on one line — a newline would split the bullet.
+    const flat = refused?.replace(/[[\]]/g, '').replace(/\s+/g, ' ').trim() ?? ''
+    const refusalTag = flat ? ` [dispatch refused: ${flat.length > 300 ? `${flat.slice(0, 299)}…` : flat}]` : ''
     const prompt = record.prompt ? `: ${entryText(record.prompt)}` : ''
     lines.push(`- ${record.id} "${record.title}" (${facts.join('; ')})${recipeTag(record)}${refusalTag}${prompt}`)
   }

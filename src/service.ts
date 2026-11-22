@@ -18,12 +18,13 @@ import { attentionItems } from './board-groups.ts'
 import { renderBrief, renderSupplement, runTitle } from './brief.ts'
 import { bindRunSession, cancelWork, countRelayInserts, finishWork, launchReservedRun, observeRun, reconcileRun, supplementRun } from './execution.ts'
 import { detectWorkspaceRoot } from './git-root.ts'
+import { commitAll, createTaskWorktree, listTaskWorktrees, mergeInto, removeManagedWorktreeDir, removeTaskWorktree, runGit, taskWorktreeRoot, type GitRunner } from './git-worktree.ts'
 import {
   WRITE_PATHS_EXAMPLE, artifactName, constraintList, jsonArray,
   occupantOf, pathScope, plannedOccupant, plannedScope, requirementList, samePathList,
   stepList, verifyRefusal,
 } from './work-actions.ts'
-import { absoluteScopePath, changeIsTerminal, MAX_COMPLETED_CHANGES, InputShapeError, inputContractError, occupantsConflict, runCostTotals, runIsTerminal, scopeWithinRoot, scopeWrites, type ChangeRecord, type Constraint, type Occupant, type Requirement, type RunRecord, type WorkRefusal } from './work.ts'
+import { absoluteScopePath, changeIsTerminal, MAX_COMPLETED_CHANGES, InputShapeError, inputContractError, occupantsConflict, runCostTotals, runIsTerminal, scopeWithinRoot, scopeWrites, type ChangeRecord, type Constraint, type Occupant, type Requirement, type RootHint, type RunRecord, type TaskIsolation, type WorkRefusal } from './work.ts'
 import type { ShownView, ViewAnswer } from '@klarkxy/dsh-deep-view/contracts'
 import { DotCards, cardAnswerText, type DotCardRecord } from './card-state.ts'
 import { checkChatImages, type ChatImage } from './chat-images.ts'
@@ -93,6 +94,8 @@ export interface DotServiceOptions {
   readonly inbox?: InboxLedger
   /** The host's plugin-manager service, looked up lazily; absent in tests and hosts without it. */
   readonly pluginManager?: () => unknown
+  /** Git runner for task-worktree isolation; tests inject a fake. */
+  readonly git?: GitRunner
 }
 
 /** The history tools themselves: their calls and results are not part of the record they read. */
@@ -838,7 +841,7 @@ export class DotService {
     const issued = issueFactoryResetToken(this.now())
     this.resetArmed = issued
     return {
-      ...factoryResetCounts(this.store, this.inbox.list().length),
+      ...factoryResetCounts(this.store, this.inbox.list().length, listTaskWorktrees(this.options.homeDir).length),
       token: issued.token,
       expiresAt: issued.expiresAt,
       archiveSessionIds: factoryResetArchiveIds(this.store),
@@ -910,6 +913,9 @@ export class DotService {
         await this.options.peers?.clear()
         await this.inbox.clear()
         wipeArtifacts(this.options.homeDir)
+        for (const dir of listTaskWorktrees(this.options.homeDir)) {
+          await removeManagedWorktreeDir(dir, this.git())
+        }
       } catch (failure) {
         throw new DotError('dot/reset-incomplete', `Factory reset is incomplete: sessions were stopped and archived, but cleanup failed (${messageOf(failure)}). Some files may already have been removed; Dorothy's records and settings are retained. Request a new preview to retry.`)
       }
@@ -1635,6 +1641,13 @@ export class DotService {
     }
     let humanReview = base?.humanReview
     if (args.human_review !== undefined) humanReview = args.human_review === true ? true : undefined
+    let isolation = base?.isolation
+    const isolationRaw = raw('isolation')
+    if (isolationRaw !== undefined) {
+      if (isolationRaw === 'worktree') isolation = 'worktree'
+      else if (isolationRaw === 'none' || !isolationRaw.trim()) isolation = undefined
+      else throw new DotError('dot/invalid', 'isolation must be "none" or "worktree"')
+    }
     const problem = inputContractError(requirements ?? [], [], constraints)
     if (problem) throw new DotError('dot/invalid', problem)
     const notes = text('notes', base?.notes)
@@ -1652,6 +1665,7 @@ export class DotService {
       ...(model !== undefined ? { model } : {}),
       ...(access !== undefined ? { access } : {}),
       ...(humanReview !== undefined ? { humanReview } : {}),
+      ...(isolation !== undefined ? { isolation } : {}),
     }
   }
 
@@ -1777,6 +1791,7 @@ export class DotService {
       ...(recipe.model !== undefined ? { model: recipe.model } : {}),
       ...(recipe.access !== undefined ? { access: recipe.access } : {}),
       ...(recipe.humanReview !== undefined ? { humanReview: recipe.humanReview } : {}),
+      ...(recipe.isolation !== undefined ? { isolation: recipe.isolation } : {}),
       history: recipe.history.map(row => ({
         ...recipeBody(row), requirementsFromGoal: requirementsFollowGoal(row),
         revision: row.revision, name: row.name, ...(row.reason !== undefined ? { reason: row.reason } : {}), at: row.at,
@@ -2334,8 +2349,15 @@ export class DotService {
     const delivery = [...(this.store.work.run(runId)?.deliveries ?? [])].reverse().find(item => item.kind !== 'initial' && item.contentRef === rendered && item.source === senderId)
     return `supplemented ${runId} delivery ${delivery?.id ?? 'recorded'} ${delivery?.status ?? sent.phase} for ${inputRef}@${inputRevision}`
   }
-  cancelWorkChange(changeId: string) {
-    return cancelWork(this.store.work, this.runHost(), changeId, this.now())
+  async cancelWorkChange(changeId: string) {
+    const result = await cancelWork(this.store.work, this.runHost(), changeId, this.now())
+    if (result.ok) {
+      const isolation = this.store.work.change(changeId)?.isolation
+      if (isolation?.kind === 'worktree') {
+        await removeTaskWorktree({ repoRoot: isolation.repoRoot, worktree: isolation.worktree, branch: isolation.branch, baseSha: isolation.baseSha }, this.git()).catch(() => undefined)
+      }
+    }
+    return result
   }
   async finishWorkRun(runId: string, phase: 'completed' | 'failed') {
     const finished = await finishWork(this.store.work, this.runHost(), runId, phase, this.now())
@@ -2386,6 +2408,56 @@ export class DotService {
     return this.store.work.forceReleaseChange(changeId, this.now())
   }
 
+  /**
+   * Human-only integration of an accepted isolated change. Merging writes to
+   * the human's checkout, so this is reachable only from the panel RPC — never
+   * through a dot tool action, and accepting a delivery does not imply it.
+   */
+  async integrateWork(changeId: string, mode: 'merge' | 'keep' | 'discard'): Promise<{ readonly ok: true; readonly text: string } | { readonly ok: false; readonly code: 'missing' | 'invalid' | 'conflict' | 'failed'; readonly message: string; readonly conflicts?: readonly string[] }> {
+    const change = this.store.work.change(changeId)
+    if (!change) return { ok: false, code: 'missing', message: `unknown change ${changeId}` }
+    const isolation = change.isolation
+    if (isolation?.kind !== 'worktree') return { ok: false, code: 'invalid', message: `${changeId} is not an isolated change` }
+    if (isolation.state !== 'active') return { ok: false, code: 'invalid', message: `${changeId} was already ${isolation.state}` }
+    const view = this.store.work.workView(changeId)
+    if (!change.closeout || view?.status !== 'done') return { ok: false, code: 'invalid', message: `${changeId} is not accepted yet` }
+    const git = this.git()
+    let commitSha: string | undefined
+    try {
+      commitSha = await commitAll(isolation.worktree, `${change.title}\n\nDorothy task ${changeId}`, git)
+    } catch (error) {
+      return { ok: false, code: 'failed', message: `commit in the task worktree failed: ${messageOf(error)}` }
+    }
+    const mark = (patch: Partial<Omit<TaskIsolation, 'kind' | 'repoRoot' | 'worktree' | 'branch' | 'baseSha'>>) =>
+      this.store.work.updateIsolation(changeId, { ...(commitSha !== undefined ? { commitSha } : {}), ...patch }, this.now())
+    if (mode === 'discard') {
+      await removeTaskWorktree({ repoRoot: isolation.repoRoot, worktree: isolation.worktree, branch: isolation.branch, force: true }, git)
+      await mark({ state: 'discarded' })
+      return this.integrated(change, `discarded ${isolation.branch}`)
+    }
+    if (mode === 'keep') {
+      await removeTaskWorktree({ repoRoot: isolation.repoRoot, worktree: isolation.worktree }, git)
+      await mark({ state: 'committed' })
+      return this.integrated(change, `kept branch ${isolation.branch}; the worktree directory was removed`)
+    }
+    const merged = await mergeInto({ repoRoot: isolation.repoRoot, branch: isolation.branch, deliveredPaths: view.verification?.changes?.map(row => row.path) ?? [] }, git)
+    if (!merged.ok) {
+      return { ok: false, code: merged.conflicts ? 'conflict' : 'invalid', message: merged.message ?? 'merge failed', ...(merged.conflicts ? { conflicts: merged.conflicts } : {}) }
+    }
+    await mark({ state: 'merged', ...(merged.mergedInto ? { mergedInto: merged.mergedInto } : {}) })
+    // The branch is merged now, so -d succeeds and the worktree goes with it.
+    await removeTaskWorktree({ repoRoot: isolation.repoRoot, worktree: isolation.worktree, branch: isolation.branch }, git)
+    return this.integrated(change, `merged ${isolation.branch} into ${merged.mergedInto}`)
+  }
+
+  /** The integration result reaches dot as a held notice; the board row shows the same state. */
+  private integrated(change: ChangeRecord, text: string): { readonly ok: true; readonly text: string } {
+    if (this.store.dotSessionId) {
+      this.notify({ sessionId: this.store.dotSessionId, kind: 'turn-end', text: `Isolated task ${change.id} "${change.title}": ${text}.`, at: this.now() })
+    }
+    return { ok: true, text }
+  }
+
   private async pruneWorkArtifactsIfNeeded(maxKeep?: number): Promise<void> {
     try {
       // The runs of a pruned change are deleted and their sessions' events are
@@ -2401,6 +2473,13 @@ export class DotService {
         for (const run of runs.filter(row => row.changeId === change.id)) await this.captureRunUsageFor(run.id)
       }
       const { prunedChanges, keptArtifacts } = await this.store.pruneWorkHistory(maxKeep, async change => {
+        // A leftover isolated worktree goes with its change; a branch carrying
+        // commits stays (removeTaskWorktree only -d deletes, which git refuses
+        // for unmerged work).
+        const isolation = change.isolation
+        if (isolation?.kind === 'worktree') {
+          await removeTaskWorktree({ repoRoot: isolation.repoRoot, worktree: isolation.worktree, branch: isolation.branch, baseSha: isolation.baseSha }, this.git()).catch(() => undefined)
+        }
         // A tagged change records its terminal outcome on the recipe before its
         // rows are deleted; a removed recipe or an untagged change records none.
         const tag = change.recipe
@@ -2780,10 +2859,23 @@ export class DotService {
       const requirements = explicitRequirements
         ?? (recipe ? recipeRequirements(recipe, createGoal) : undefined)
         ?? goalRequirements(createGoal)
+      const isolationArg = args.isolation
+      if (isolationArg !== undefined && isolationArg !== 'none' && isolationArg !== 'worktree') {
+        throw new DotError('dot/invalid', 'isolation must be "none" or "worktree"')
+      }
+      const wantsWorktree = isolationArg === 'worktree' || (isolationArg === undefined && recipe?.isolation === 'worktree')
+      let worktree: Awaited<ReturnType<typeof createTaskWorktree>> | undefined
+      if (wantsWorktree) {
+        try {
+          worktree = await createTaskWorktree({ dir: createDir, homeDir: this.options.homeDir }, this.git())
+        } catch (error) {
+          throw new DotError('dot/invalid', `isolation "worktree" could not be prepared: ${messageOf(error)}`)
+        }
+      }
       let change: ChangeRecord
       try {
         change = await this.store.work.createChange({
-          title: createTitle, cwd: createDir, goal: createGoal,
+          title: createTitle, cwd: worktree?.cwd ?? createDir, goal: createGoal,
           requirements,
           requirementsFromGoal: explicitRequirements === undefined && (recipe === undefined || requirementsFollowGoal(recipe)),
           ...(steps ? { steps } : {}),
@@ -2791,11 +2883,20 @@ export class DotService {
           ...(userRequest !== undefined ? { userRequest } : {}),
           ...(createLanguage !== undefined ? { deliverableLanguage: createLanguage } : {}),
           ...(recipe ? { recipe: { id: recipe.id, revision: recipe.revision } } : {}),
+          ...(worktree !== undefined ? {
+            isolation: {
+              kind: 'worktree' as const, repoRoot: worktree.repoRoot, worktree: worktree.worktree,
+              branch: worktree.branch, baseSha: worktree.baseSha, state: 'active' as const, at: this.now(),
+            },
+          } : {}),
           ...(maxConcurrentRuns !== undefined ? { maxConcurrentRuns } : {}),
           ...(typeof args.priority === 'number' ? { priority: args.priority as 1 | 2 | 3 } : {}),
           at: this.now(),
         })
       } catch (error) {
+        if (worktree !== undefined) {
+          await removeTaskWorktree({ repoRoot: worktree.repoRoot, worktree: worktree.worktree, branch: worktree.branch, baseSha: worktree.baseSha }, this.git()).catch(() => undefined)
+        }
         if (error instanceof InputShapeError) throw new DotError('dot/invalid', error.message)
         throw error
       }
@@ -2832,6 +2933,21 @@ export class DotService {
     return JSON.stringify(this.store.work.workView(revised.id))
   }
 
+  private git(): GitRunner { return this.options.git ?? runGit }
+
+  /**
+   * Mutual-exclusion identity for a run's cwd. A cwd inside
+   * `<homeDir>/worktrees/` is a `dot/task-*` worktree only dot's own tasks
+   * check out, so its worktree root is the exclusion root — not the repo's git
+   * common dir, which would lock every linked worktree against the main
+   * checkout and each other.
+   */
+  private rootHint(cwd: string): RootHint {
+    const worktree = taskWorktreeRoot(cwd, this.options.homeDir)
+    if (worktree !== undefined) return { workspaceRoot: worktree }
+    return detectWorkspaceRoot(cwd)
+  }
+
   private async reserveFromTool(args: Record<string, unknown>): Promise<{ changeId: string; runId: string; phase: RunRecord['phase']; requestedSessionId: string }> {
     const changeId = typeof args.task_id === 'string' ? args.task_id : ''
     const role = typeof args.role === 'string' ? args.role : 'work'
@@ -2846,7 +2962,7 @@ export class DotService {
     const listed = jsonArray(args.step_refs)
     const stepRefs = listed?.map(item => String(item))
     const reserved = await this.store.work.reserveRun({
-      changeId, kind: role, cwd: change.cwd, root: detectWorkspaceRoot(change.cwd),
+      changeId, kind: role, cwd: change.cwd, root: this.rootHint(change.cwd),
       ...(stepRefs ? { stepRefs } : {}),
       writeScope: role === 'review'
         ? { kind: 'workspace-exclusive' }
@@ -3316,7 +3432,7 @@ export class DotService {
     if (input.checkOnly) {
       const cwd = change?.cwd ?? workspace?.path ?? input.cwd ?? (await this.homeWorkspace()).path
       if (!cwd || !isAbsolute(cwd)) throw new DotError('dot/invalid', 'directory must be absolute')
-      const candidate = plannedOccupant(cwd, plannedScope(role, input.access, input.paths, cwd))
+      const candidate = plannedOccupant(cwd, plannedScope(role, input.access, input.paths, cwd), this.rootHint(cwd))
       return (await this.scopeReport(cwd, change?.id ?? '', candidate)).text
     }
     if (!change) {
@@ -3353,7 +3469,7 @@ export class DotService {
       throw new DotError('dot/invalid', `these paths are a write scope, so access must be "write", not "${input.access ?? 'read'}". Example: access "write", paths ${WRITE_PATHS_EXAMPLE}. The run was not started.`)
     }
     const scope = selected ? selected.writeScope : plannedScope(role, input.access, input.paths, change.cwd)
-    const report = await this.scopeReport(change.cwd, change.id, selected ? occupantOf(selected) : plannedOccupant(change.cwd, scope))
+    const report = await this.scopeReport(change.cwd, change.id, selected ? occupantOf(selected) : plannedOccupant(change.cwd, scope, this.rootHint(change.cwd)))
     if (scopeWrites(scope) && report.blocked) throw new DotError('dot/locked', report.text)
     const note = report.text === 'Directory lock is available.' ? '' : `\n${report.text}`
     let createdHere = false
@@ -3398,6 +3514,7 @@ export class DotService {
       input: material,
       run: live,
       notes: instruction,
+      ...(change.isolation?.kind === 'worktree' ? { isolation: change.isolation } : {}),
     })
     const launched = await this.launchWorkRun(runId, brief, preset.named ? preset.id : undefined, model)
     if (!launched.ok) return `reserved ${runId} on ${changeId}; not started: ${launched.message}${note}`

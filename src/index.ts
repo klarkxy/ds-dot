@@ -555,6 +555,13 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
           if (result && 'ok' in result && result.ok === false) return { ok: false, error: { code: result.code, message: result.message } }
           return { ok: true, value: true }
         }
+        case 'work.integrate': {
+          const mode = field(payload, 'mode')
+          if (mode !== 'merge' && mode !== 'keep' && mode !== 'discard') return { ok: false, error: { code: 'dot/invalid', message: 'mode must be merge, keep or discard' } }
+          const result = await service.integrateWork(str(payload, 'id'), mode)
+          if (!result.ok) return { ok: false, error: { code: `dot/${result.code}`, message: result.message } }
+          return { ok: true, value: result.text }
+        }
         case 'knowledge': return { ok: true, value: await service.knowledgeView() }
         // Panel edits of the agreements/cognition do not switch segments at once: the change is
         // picked up before the next message (prompt-changed), or folded in while the segment is untouched.

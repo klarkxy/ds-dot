@@ -31,7 +31,7 @@ import { SettingsPanel, useSettingProposals, type SaveNotice, type SettingsApi }
 import type { RenderFactorySlot } from '@klarkxy/dsh-plugin-kit/model-picker'
 import { cardCopy, fillText, intlLocale, t, toolLabel, type CopyLocale, type TextKey } from './ui-copy.ts'
 import { WorkBoardPanel, type WorkApi } from './work-board.tsx'
-import type { WorkAcceptPayload, PendingGlance, WorkBoardItem, WorkReadRequest, WorkRejectPayload } from './work-board.ts'
+import type { WorkAcceptPayload, PendingGlance, WorkBoardItem, WorkIntegratePayload, WorkReadRequest, WorkRejectPayload } from './work-board.ts'
 import { DotAvatar } from './whale.tsx'
 
 export { chatCss } from './chat-panel-css.ts'
@@ -53,6 +53,7 @@ export interface ChatApi extends SettingsApi, ContextApi, TrajectoryApi, Knowled
   workAnswer?(payload: { readonly id: string; readonly allow: boolean; readonly note?: string }): Promise<void>
   workResume?(payload: { readonly id: string }): Promise<void>
   workForceRelease?(payload: { readonly id: string }): Promise<void>
+  workIntegrate?(payload: WorkIntegratePayload): Promise<void>
   workRead?(request: WorkReadRequest): Promise<{ readonly source: string; readonly body: string; readonly truncated?: boolean; readonly totalBytes?: number }>
   settings(signal: AbortSignal): Promise<DotSettings>
 }
@@ -343,6 +344,7 @@ export function ChatPanel({ locale, api, Card, onOpenSession, renderFactorySlot 
     return {
       workAccept: api.workAccept, workReject: api.workReject, workAnswer: api.workAnswer, workResume: api.workResume,
       ...(api.workForceRelease ? { workForceRelease: api.workForceRelease } : {}),
+      ...(api.workIntegrate ? { workIntegrate: api.workIntegrate } : {}),
       ...(api.workRead ? { workRead: api.workRead } : {}),
     }
   }, [api])

@@ -374,6 +374,8 @@ export interface FactoryResetPreview {
   readonly cards: number
   /** Pending and delivered external events in the inbox table. */
   readonly inbox: number
+  /** Dot-managed task worktrees removed with the reset (dot/task-* branches keep their commits). */
+  readonly worktrees: number
   readonly ownedSessions: number
   readonly pastSegments: number
   readonly reflections: number
@@ -597,6 +599,8 @@ export interface RecipeBody {
   readonly model?: string
   readonly access?: 'read' | 'write'
   readonly humanReview?: boolean
+  /** 'worktree' runs created tasks in a dot-managed git worktree instead of the checkout. */
+  readonly isolation?: 'worktree'
 }
 
 /** One earlier revision of a recipe, with the name and reason it carried. */

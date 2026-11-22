@@ -1001,4 +1001,65 @@ describe('WorkBoard', () => {
     expect(document.querySelector('[data-diff-body="huge.csv"]')!.textContent).toContain('row,1')
     await act(async () => root.unmount())
   })
+
+it('tags an isolated change and offers the three integrate actions after acceptance', async () => {
+    const isolated: WorkBoardItem = {
+      ...item, id: 'c-iso', status: 'done', humanAction: undefined,
+      closeout: { verificationId: 'v-3', source: 'run report' },
+      isolation: { kind: 'worktree', repoRoot: 'H:/repo', worktree: 'H:/home/worktrees/ab12cd', branch: 'dot/task-ab12cd', baseSha: 'sha', state: 'active' },
+    }
+    const onIntegrate = vi.fn(async () => {})
+    const root = createRoot(document.getElementById('root')!)
+    await act(async () => {
+      root.render(<WorkBoard locale="en" items={[isolated]} pending={[]} onAccept={vi.fn()} onReject={vi.fn()} onAnswer={vi.fn()} onResume={vi.fn()} onIntegrate={onIntegrate} />)
+      await Promise.resolve()
+    })
+    await click('Finished · 1')
+    expect(document.body.textContent).toContain('worktree · dot/task-ab12cd')
+    expect(buttonIncluding('Merge into checkout')).toBeTruthy()
+    expect(buttonIncluding('Keep branch')).toBeTruthy()
+    expect(buttonIncluding('Discard')).toBeTruthy()
+
+    // Discard arms before it fires; merge and keep fire straight away.
+    await click('Discard')
+    expect(onIntegrate).not.toHaveBeenCalled()
+    await click('Discard branch?')
+    expect(onIntegrate).toHaveBeenCalledWith({ id: 'c-iso', mode: 'discard' })
+    await click('Merge into checkout')
+    expect(onIntegrate).toHaveBeenCalledWith({ id: 'c-iso', mode: 'merge' })
+    await click('Keep branch')
+    expect(onIntegrate).toHaveBeenCalledWith({ id: 'c-iso', mode: 'keep' })
+    await act(async () => root.unmount())
+  })
+
+  it('shows a refusal inline and hides integrate buttons for settled or plain changes', async () => {
+    const failing = vi.fn(async () => { throw new Error('merge of dot/task-ab12cd conflicted and was aborted: a.ts') })
+    const refused: WorkBoardItem = {
+      ...item, id: 'c-iso', status: 'done', humanAction: undefined,
+      closeout: { verificationId: 'v-3', source: 'run report' },
+      isolation: { kind: 'worktree', repoRoot: 'H:/repo', worktree: 'H:/home/worktrees/ab12cd', branch: 'dot/task-ab12cd', baseSha: 'sha', state: 'active' },
+    }
+    const merged: WorkBoardItem = {
+      ...refused, id: 'c-merged', title: 'Merged',
+      isolation: { ...refused.isolation!, state: 'merged', mergedInto: 'main' },
+    }
+    const running: WorkBoardItem = {
+      ...refused, id: 'c-run', title: 'Running', status: 'running', closeout: undefined,
+    }
+    const root = createRoot(document.getElementById('root')!)
+    await act(async () => {
+      root.render(<WorkBoard locale="en" items={[refused, merged, running]} pending={[]} onAccept={vi.fn()} onReject={vi.fn()} onAnswer={vi.fn()} onResume={vi.fn()} onIntegrate={failing} />)
+      await Promise.resolve()
+    })
+    await click('Finished · 2')
+    // Terminal isolation states are labelled; only the accepted active one has buttons.
+    expect(document.body.textContent).toContain('worktree · dot/task-ab12cd · merged')
+    await click('Merge into checkout')
+    expect(failing).toHaveBeenCalledWith({ id: 'c-iso', mode: 'merge' })
+    await act(async () => { await Promise.resolve() })
+    expect(document.body.textContent).toContain('conflicted and was aborted: a.ts')
+    const mergeButtons = [...document.querySelectorAll('button')].filter(node => (node.textContent ?? '').includes('Merge into checkout'))
+    expect(mergeButtons).toHaveLength(1)
+    await act(async () => root.unmount())
+  })
 })

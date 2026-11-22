@@ -97,8 +97,22 @@ export interface ChangeRecord {
   readonly oversight?: OversightRecord
   /** The recipe and revision this change was created from; kept after the recipe is removed or revised. */
   readonly recipe?: { readonly id: string; readonly revision: number }
+  /** A change whose runs wrote into a dot-managed git worktree instead of the checkout. */
+  readonly isolation?: TaskIsolation
   readonly createdAt: number
   readonly updatedAt: number
+}
+/** Where an isolated change's worktree lives and how the human chose to integrate it. */
+export interface TaskIsolation {
+  readonly kind: 'worktree'
+  readonly repoRoot: string
+  readonly worktree: string
+  readonly branch: string
+  readonly baseSha: string
+  readonly state: 'active' | 'committed' | 'merged' | 'discarded'
+  readonly commitSha?: string
+  readonly mergedInto?: string
+  readonly at: number
 }
 export interface InputRecord {
   readonly id: string
@@ -258,6 +272,12 @@ export const changeSchema = z.object({
     }).optional(),
   }).optional(),
   recipe: z.object({ id: z.string().min(1), revision: z.number().int().positive() }).optional(),
+  isolation: z.object({
+    kind: z.literal('worktree'), repoRoot: z.string().min(1), worktree: z.string().min(1),
+    branch: z.string().min(1), baseSha: z.string().min(1),
+    state: z.enum(['active', 'committed', 'merged', 'discarded']),
+    commitSha: z.string().min(1).optional(), mergedInto: z.string().min(1).optional(), at: z.number(),
+  }).optional(),
   createdAt: z.number(), updatedAt: z.number(),
 })
 export const inputSchema = z.object({
@@ -772,6 +792,7 @@ export class WorkBook {
         } : {}),
       } : undefined,
       closeout: closeoutCurrent ? change.closeout : undefined,
+      ...(change.isolation ? { isolation: change.isolation } : {}),
       oversight: change.oversight,
       humanAction: !change.closeout && !verdictBlocks && !awaitsHumanDecision && verification?.verdict === 'accept' && verification.subjectKey
         && verification.inputRef === change.currentInputRef && verification.inputRevision === change.currentRevision ? {
@@ -830,7 +851,7 @@ export class WorkBook {
     })
   }
 
-  createChange(input: { title: string; cwd: string; goal: string; requirements?: readonly Requirement[]; requirementsFromGoal?: boolean; steps?: readonly StepSpec[]; source?: string; priority?: 1 | 2 | 3; maxConcurrentRuns?: number; constraints?: readonly Constraint[]; userRequest?: string; deliverableLanguage?: string; recipe?: { readonly id: string; readonly revision: number }; at?: number }): Promise<ChangeRecord> {
+  createChange(input: { title: string; cwd: string; goal: string; requirements?: readonly Requirement[]; requirementsFromGoal?: boolean; steps?: readonly StepSpec[]; source?: string; priority?: 1 | 2 | 3; maxConcurrentRuns?: number; constraints?: readonly Constraint[]; userRequest?: string; deliverableLanguage?: string; recipe?: { readonly id: string; readonly revision: number }; isolation?: TaskIsolation; at?: number }): Promise<ChangeRecord> {
     return this.exclusive(async () => {
       this.assertRecovered()
       const requirements = input.requirements ?? []
@@ -853,6 +874,7 @@ export class WorkBook {
         steps: inputRow.steps.map(step => ({ stepRef: step.stepRef, done: false, inputRef: inputRow.id })),
         maxConcurrentRuns: clampConcurrency(input.maxConcurrentRuns), priority: input.priority ?? 2,
         ...(input.recipe ? { recipe: input.recipe } : {}),
+        ...(input.isolation ? { isolation: input.isolation } : {}),
         createdAt: at, updatedAt: at,
       }
       await this.commit('changes', change.id, change)
@@ -1956,6 +1978,22 @@ export class WorkBook {
    * so a permanently unreachable session or missing host job registry cannot
    * brick the workspace forever. Never called automatically by model tools.
    */
+  /** Patch an isolated change's integration state (merge/keep/discard outcomes). */
+  updateIsolation(changeId: string, patch: Partial<Omit<TaskIsolation, 'kind' | 'repoRoot' | 'worktree' | 'branch' | 'baseSha'>>, at = Date.now()): Promise<{ readonly ok: true } | WorkRefusal> {
+    return this.exclusive(async () => {
+      const refused = this.recoveryRefusal()
+      if (refused) return refused
+      const current = this.changes.get(changeId)
+      if (!current) return { ok: false, code: 'missing', message: `unknown change ${changeId}` }
+      if (!current.isolation) return { ok: false, code: 'invalid', message: `${changeId} is not an isolated change` }
+      const next: ChangeRecord = { ...current, isolation: { ...current.isolation, ...patch, at }, updatedAt: at }
+      await this.commit('changes', next.id, next)
+      this.changes.set(next.id, next)
+      this.currentRevision += 1
+      return { ok: true }
+    })
+  }
+
   forceReleaseChange(changeId: string, at = Date.now()): Promise<{ readonly ok: true; readonly released: readonly string[] } | WorkRefusal> {
     return this.exclusive(async () => {
       const refused = this.recoveryRefusal()

@@ -20,6 +20,7 @@ export function recipeBody(row: RecipeBody): RecipeBody {
     ...(row.model !== undefined ? { model: row.model } : {}),
     ...(row.access !== undefined ? { access: row.access } : {}),
     ...(row.humanReview !== undefined ? { humanReview: row.humanReview } : {}),
+    ...(row.isolation !== undefined ? { isolation: row.isolation } : {}),
   }
 }
 
@@ -73,6 +74,7 @@ function bodyKey(row: RecipeBody & { readonly name?: string }): string {
     model: row.model ?? null,
     access: row.access ?? null,
     humanReview: row.humanReview ?? null,
+    isolation: row.isolation ?? null,
   })
 }
 

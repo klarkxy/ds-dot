@@ -108,6 +108,19 @@ export interface WorkBoardItem {
   readonly closeout?: WorkCloseoutView
   readonly oversight?: WorkOversightView
   readonly humanAction?: WorkHumanAction
+  /** A change whose runs wrote into a dot-managed git worktree. */
+  readonly isolation?: WorkIsolationView
+}
+
+export interface WorkIsolationView {
+  readonly kind: 'worktree'
+  readonly repoRoot: string
+  readonly worktree: string
+  readonly branch: string
+  readonly baseSha: string
+  readonly state: 'active' | 'committed' | 'merged' | 'discarded'
+  readonly commitSha?: string
+  readonly mergedInto?: string
 }
 
 export interface WorkReadRequest {
@@ -149,6 +162,18 @@ export interface WorkLookRequest {
   readonly inputRevision: number
   readonly verificationId: string
   readonly subjectKey: string
+}
+
+export interface WorkIntegratePayload {
+  readonly id: string
+  readonly mode: 'merge' | 'keep' | 'discard'
+}
+
+/** The three human-only integrations an accepted isolated change offers. */
+export function integrateActions(item: WorkBoardItem): readonly ('merge' | 'keep' | 'discard')[] {
+  if (item.isolation?.kind !== 'worktree' || item.isolation.state !== 'active') return []
+  if (item.status !== 'done' || !item.closeout) return []
+  return ['merge', 'keep', 'discard']
 }
 
 const TERMINAL = new Set(['completed', 'failed', 'stopped'])

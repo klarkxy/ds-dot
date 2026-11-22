@@ -7,6 +7,7 @@ import path from 'node:path'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { scopeContainsPath } from './acceptance.ts'
+import { mcpToolMayWrite } from './approval-risk.ts'
 import type { PeerDelivery } from './storage.ts'
 import { scopeWithinRoot, scopeWrites, type WriteScope } from './work.ts'
 
@@ -282,9 +283,15 @@ export function guardRunWriteTool(
   exec: PreExecuteToolCall,
   platform: NodeJS.Platform = process.platform,
 ): { readonly allow: true } | { readonly allow: false; readonly reason: string } {
+  const readOnly = run.access === 'read' || !scopeWrites(run.writeScope)
+  // MCP servers run outside the sandbox, so a read-only run refuses any MCP
+  // tool whose name does not read as a lookup.
+  if (readOnly && mcpToolMayWrite(exec.name)) {
+    return { allow: false, reason: `Run ${run.id} is read-only and cannot call MCP tool "${exec.name}", which may write outside the sandbox.` }
+  }
   const tool = exec.name.trim().toLowerCase()
   if (!FILE_MUTATION_TOOLS.has(tool)) return { allow: true }
-  if (run.access === 'read' || !scopeWrites(run.writeScope)) {
+  if (readOnly) {
     return { allow: false, reason: `Run ${run.id} is read-only and cannot execute file-modifying tool "${exec.name}".` }
   }
   const api = platform === 'win32' ? path.win32 : path.posix

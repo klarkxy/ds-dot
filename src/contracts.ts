@@ -135,6 +135,8 @@ export interface ScheduleRecord {
   readonly lastFiredAt?: number
   /** Set when a once reminder was handed off. Later ticks, late catch-up and restarts must not wake again. */
   readonly deliveredAt?: number
+  /** Bound task recipe id: firing dispatches the recipe directly instead of a model turn. */
+  readonly recipe?: string
 }
 
 /** Where a tracked session came from: dot started it, or the human asked dot to watch it. */
@@ -207,6 +209,22 @@ export interface PendingQuestionItem {
 }
 
 /** Board snapshot the client renders. */
+/** A reminder row as the board projects it: the bound recipe's current name resolved at read time. */
+export interface ScheduleView extends ScheduleRecord {
+  readonly recipeName?: string
+}
+
+/** One recipe as the Tasks panel's Recipes filter renders it. */
+export interface RecipeBoardRow {
+  readonly id: string
+  readonly name: string
+  readonly revision: number
+  readonly updatedAt: number
+  readonly stats: readonly import('./recipes.ts').RecipeRevisionStats[]
+  readonly inFlight: readonly { readonly changeId: string; readonly title: string; readonly status: string }[]
+  readonly reminders: readonly { readonly id: string; readonly title: string; readonly nextAt: number }[]
+}
+
 export interface BoardView {
   readonly dotSessionId?: string
   /** Sessions the human asked dot to watch; task sessions are shown through `work`. */
@@ -217,7 +235,7 @@ export interface BoardView {
   readonly work?: readonly import('./work-board.ts').WorkBoardItem[]
   readonly pending: readonly PendingView[]
   /** dot's reminders, the one due first on top. */
-  readonly schedules: readonly ScheduleRecord[]
+  readonly schedules: readonly ScheduleView[]
 }
 
 /**

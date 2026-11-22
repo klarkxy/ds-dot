@@ -7,8 +7,9 @@
 import { execFile } from 'node:child_process'
 import { mkdirSync, readdirSync, rmSync } from 'node:fs'
 import { randomBytes } from 'node:crypto'
-import { dirname, join, resolve, sep } from 'node:path'
+import path, { dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { HarnessError } from '@deepseek-ai/dsh-llm'
+import { canonicalPath } from './work.ts'
 
 export const TASK_WORKTREES_DIR = 'worktrees'
 export const TASK_BRANCH_PREFIX = 'dot/task-'
@@ -69,8 +70,14 @@ export async function createTaskWorktree(input: { readonly dir: string; readonly
       if (attempt < 4 && /already exists/i.test(failure instanceof Error ? failure.message : '')) continue
       throw failure
     }
-    const relative = repoRoot === dir ? '' : dir.slice(repoRoot.length).replace(/^[/\\]+/, '')
-    return { repoRoot, worktree, cwd: relative ? join(worktree, relative) : worktree, branch, baseSha }
+    // git reports forward slashes (and on Windows may differ in drive-letter
+    // case), so compute the in-repo subdir with path.relative on resolved
+    // paths instead of slicing the repoRoot prefix off the raw string.
+    const inside = relative(resolve(repoRoot), dir)
+    if (inside === '..' || inside.startsWith(`..${path.sep}`) || isAbsolute(inside)) {
+      throw new GitWorktreeError(`${input.dir} resolves outside ${repoRoot}`)
+    }
+    return { repoRoot, worktree, cwd: inside ? join(worktree, inside) : worktree, branch, baseSha }
   }
   throw new GitWorktreeError('could not allocate a unique task worktree name')
 }
@@ -108,8 +115,21 @@ export interface MergeResult {
 export async function mergeInto(input: { readonly repoRoot: string; readonly branch: string; readonly deliveredPaths?: readonly string[] }, git: GitRunner = runGit): Promise<MergeResult> {
   const current = await git(['branch', '--show-current'], input.repoRoot)
   if (!current) return { ok: false, message: `${input.repoRoot} is on a detached HEAD; check out a branch first` }
-  const status = await git(['status', '--porcelain'], input.repoRoot, { raw: true })
-  const dirty = status.split('\n').map(line => line.slice(3).trim()).filter(Boolean)
+  const status = await git(['status', '--porcelain', '-z'], input.repoRoot, { raw: true })
+  // -z keeps paths verbatim (spaces stay unquoted); a rename/copy entry is
+  // `XY <new>` followed by a bare `<old>` field, which also counts as dirty.
+  const fields = status.split('\0').filter(field => field !== '')
+  const dirty: string[] = []
+  for (let index = 0; index < fields.length; index += 1) {
+    const field = fields[index]
+    const name = field.slice(3)
+    if (name) dirty.push(name)
+    if (field[0] === 'R' || field[0] === 'C' || field[1] === 'R' || field[1] === 'C') {
+      index += 1
+      const original = fields[index]
+      if (original) dirty.push(original)
+    }
+  }
   const blocking = (input.deliveredPaths ?? []).filter(path => dirty.some(row => row === path || row.startsWith(`${path}/`)))
   if (blocking.length > 0) {
     return { ok: false, message: `uncommitted changes in the checkout overlap the delivery: ${blocking.join(', ')}` }
@@ -178,17 +198,16 @@ export async function removeManagedWorktreeDir(worktree: string, git: GitRunner 
 }
 
 /** The `<homeDir>/worktrees` row this cwd belongs to, or undefined. */
-export function taskWorktreeRoot(cwd: string, homeDir: string): string | undefined {
-  // Stored cwds are canonicalized (lowercased on win32), so compare through the
-  // same normalisation or a `C:` vs `c:` mismatch silently misses every row.
-  const normalize = (value: string) => resolve(value).toLowerCase().replaceAll(sep, '/')
-  const root = normalize(join(homeDir, TASK_WORKTREES_DIR))
-  const absolute = normalize(cwd)
-  if (absolute === root) return undefined
-  const relative = absolute.startsWith(`${root}/`) ? absolute.slice(root.length + 1) : undefined
-  if (relative === undefined) return undefined
-  const first = relative.split('/')[0]
-  return first ? join(resolve(homeDir), TASK_WORKTREES_DIR, first) : undefined
+export function taskWorktreeRoot(cwd: string, homeDir: string, platform: NodeJS.Platform = process.platform): string | undefined {
+  // Stored cwds are canonicalized like WorkBook paths (case-folded on win32
+  // only), so compare through canonicalPath — a `C:` vs `c:` mismatch must not
+  // silently miss rows, and Linux/macOS stay case-sensitive.
+  const api = platform === 'win32' ? path.win32 : path.posix
+  const root = api.join(api.resolve(homeDir), TASK_WORKTREES_DIR)
+  const inside = api.relative(canonicalPath(root, platform), canonicalPath(cwd, platform))
+  if (inside === '' || inside === '..' || inside.startsWith(`..${api.sep}`) || api.isAbsolute(inside)) return undefined
+  const first = inside.split(api.sep)[0]
+  return first ? api.join(root, first) : undefined
 }
 
 /** Directory names dot currently manages under `<homeDir>/worktrees` (for reset preview/cleanup). */

@@ -19,17 +19,17 @@ import { filterVisibleChat } from './chat-filter.ts'
 import { formatToolDetail, parseNotice, permissionLabel, resolveSessionBadge, summarizeNotice, summarizeToolCall, summarizeToolGroup, type NoticeEntry, type ParsedNotice, type SessionBadge, type TaskLookup } from './chat-format.ts'
 import { BellGlyph, Composer, GearGlyph, JumpGlyph, NarrowGlyph, ToolGlyph, WidenGlyph } from './composer.tsx'
 import {
-  useBoard, useChatFeed, useContextUse, useDrawerGuard, useLocalEchoes, useReminderRemoval, useScrollPin, useSettings,
+  useBoard, useChatFeed, useContextUse, useDrawerGuard, useLocalEchoes, useRecipes, useReminderRemoval, useScrollPin, useSettings,
   type DrawerAction, type DrawerTab, type SettingsSection,
 } from './chat-hooks.ts'
 import { ContextPanel, type ContextApi } from './context-panel.tsx'
 import { PersonaPanel, type KnowledgeApi } from './persona-panel.tsx'
 import { TrajectoryPanel, type TrajectoryApi } from './trajectory-panel.tsx'
-import type { BoardView, ChatItem, ChatSnapshot, DotSettings, RolloverReason } from './contracts.ts'
+import type { BoardView, ChatItem, ChatSnapshot, DotSettings, RecipeBoardRow, RolloverReason } from './contracts.ts'
 import type { ChatImage } from './chat-images.ts'
 import { SettingsPanel, useSettingProposals, type SaveNotice, type SettingsApi } from './settings-panel.tsx'
 import type { RenderFactorySlot } from '@klarkxy/dsh-plugin-kit/model-picker'
-import { cardCopy, fillText, intlLocale, t, toolLabel, type CopyLocale, type TextKey } from './ui-copy.ts'
+import { cardCopy, fillText, formatDuration, formatTokens, formatWhen, intlLocale, t, toolLabel, type CopyLocale, type TextKey } from './ui-copy.ts'
 import { WorkBoardPanel, type WorkApi } from './work-board.tsx'
 import type { WorkAcceptPayload, PendingGlance, WorkBoardItem, WorkIntegratePayload, WorkReadRequest, WorkRejectPayload } from './work-board.ts'
 import { DotAvatar } from './whale.tsx'
@@ -48,6 +48,10 @@ export interface ChatApi extends SettingsApi, ContextApi, TrajectoryApi, Knowled
   board(signal: AbortSignal): Promise<BoardView>
   /** Remove one of Dorothy's reminders from the board. */
   removeSchedule(id: string): Promise<boolean>
+  /** Recipes with per-revision stats, in-flight changes and bound reminders. */
+  recipes?(signal: AbortSignal): Promise<readonly RecipeBoardRow[]>
+  /** Create + dispatch a recipe task from the Tasks panel. */
+  recipeRun?(id: string): Promise<{ readonly ok: true; readonly changeId: string; readonly runId?: string } | { readonly ok: false; readonly reason: string }>
   workAccept?(payload: WorkAcceptPayload): Promise<void>
   workReject?(payload: WorkRejectPayload): Promise<void>
   workAnswer?(payload: { readonly id: string; readonly allow: boolean; readonly note?: string }): Promise<void>
@@ -282,13 +286,96 @@ function WorkDrawer({ locale, api, tab, wide, settings, trajectoryRev, running, 
   )
 }
 
+/** The Recipes filter: saved work orders with stats, bound reminders and a two-step Run now. */
+export function RecipesView({ locale, api, rows, error, onChanged }: {
+  locale: CopyLocale; api: ChatApi; rows: readonly RecipeBoardRow[]; error?: string; onChanged: () => void
+}) {
+  const [arm, setArm] = useState<string>()
+  const [busy, setBusy] = useState<string>()
+  const [refusals, setRefusals] = useState<Readonly<Record<string, string>>>({})
+  const [ran, setRan] = useState<Readonly<Record<string, string>>>({})
+  const armTimer = useRef<ReturnType<typeof setTimeout>>()
+  useEffect(() => () => { if (armTimer.current !== undefined) clearTimeout(armTimer.current) }, [])
+  const run = (row: RecipeBoardRow) => {
+    if (!api.recipeRun || busy) return
+    if (arm !== row.id) {
+      setArm(row.id)
+      if (armTimer.current !== undefined) clearTimeout(armTimer.current)
+      armTimer.current = setTimeout(() => setArm(current => current === row.id ? undefined : current), 5000)
+      return
+    }
+    setArm(undefined)
+    setBusy(row.id)
+    api.recipeRun(row.id).then(result => {
+      if (result.ok) {
+        setRefusals(prev => { const next = { ...prev }; delete next[row.id]; return next })
+        setRan(prev => ({ ...prev, [row.id]: result.changeId }))
+        onChanged()
+      } else {
+        setRan(prev => { const next = { ...prev }; delete next[row.id]; return next })
+        setRefusals(prev => ({ ...prev, [row.id]: result.reason }))
+      }
+    }, failure => {
+      setRefusals(prev => ({ ...prev, [row.id]: failure instanceof Error ? failure.message : String(failure) }))
+    }).finally(() => setBusy(undefined))
+  }
+  if (rows.length === 0) {
+    if (error === undefined) return <p className="dsh-ui-hint">{t(locale, 'recipeEmpty')}</p>
+    return <div className="dsh-ui-row" role="alert"><span className="dsh-ui-error">{t(locale, 'loadFailed')}: {error}</span><Button variant="ghost" onClick={onChanged}>{t(locale, 'retry')}</Button></div>
+  }
+  return (
+    <div className="dsh-dot-recipes">
+      {error !== undefined ? <p className="dsh-ui-hint" role="status">{t(locale, 'recipesRefreshFailed')}: {error}</p> : null}
+      {rows.map(row => {
+        const inFlight = row.inFlight.length > 0
+        const armed = arm === row.id
+        return (
+          <div key={row.id} className="dsh-dot-recipe" data-recipe={row.id}>
+            <div className="dsh-dot-recipe-head">
+              <span className="dsh-ui-compact dsh-ui-truncate">{row.name}</span>
+              <Tag tone="neutral">{fillText(t(locale, 'recipeRev'), { n: String(row.revision) })}</Tag>
+              <span className="dsh-ui-spacer" />
+              <Button variant="primary" size="sm" disabled={inFlight || busy === row.id || !api.recipeRun} title={inFlight ? t(locale, 'recipeInFlightTip') : undefined} onClick={() => run(row)}>
+                {armed ? t(locale, 'recipeRunConfirm') : t(locale, 'recipeRunNow')}
+              </Button>
+            </div>
+            {row.stats.length > 0 ? (
+              <div className="dsh-dot-recipe-stats">
+                {row.stats.map(stat => (
+                  <span key={stat.revision} className="dsh-ui-meta">
+                    {fillText(t(locale, 'recipeRev'), { n: String(stat.revision) })}: {stat.accepted} {t(locale, 'recipeAccepted')} · {stat.cancelled} {t(locale, 'recipeCancelled')} · {stat.failedRounds} {t(locale, 'recipeFailedRounds')} · {stat.inFlight} {t(locale, 'recipeInFlight')}{(stat.avgTokens !== undefined || stat.avgWallMs !== undefined) ? ` · ${t(locale, 'recipeAvg')}: ${[stat.avgTokens !== undefined ? `${formatTokens(stat.avgTokens)} ${t(locale, 'workTokens')}` : '', stat.avgWallMs !== undefined ? formatDuration(stat.avgWallMs) : ''].filter(Boolean).join(' · ')}` : ''}
+                  </span>
+                ))}
+              </div>
+            ) : <span className="dsh-ui-meta">{t(locale, 'recipeNoRuns')}</span>}
+            {row.reminders.length > 0 ? (
+              <div className="dsh-dot-recipe-reminders">
+                {row.reminders.map(reminder => (
+                  <span key={reminder.id} className="dsh-ui-hint dsh-ui-truncate">
+                    {reminder.title} · {t(locale, 'reminderNext').replace('{when}', formatWhen(reminder.nextAt))}
+                  </span>
+                ))}
+              </div>
+            ) : null}
+            {row.inFlight.map(item => (
+              <span key={item.changeId} className="dsh-ui-meta">{t(locale, 'recipeInFlightLabel')} {item.changeId} {item.title} ({item.status})</span>
+            ))}
+            {ran[row.id] ? <span className="dsh-ui-hint">{fillText(t(locale, 'recipeRunDone'), { id: ran[row.id]! })}</span> : null}
+            {refusals[row.id] ? <p className="dsh-ui-hint dsh-dot-recipe-refusal">{fillText(t(locale, 'recipeRunFailed'), { reason: refusals[row.id]! })}</p> : null}
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
 /** The board tab: a filter row, the work changes waiting on the human, then the board. */
-function TasksTab({ locale, view, workApi, boardError, pendingRemoveTitle, onUndoRemove, onOpen, onRetry, onRemoveSchedule }: {
-  locale: CopyLocale; view?: BoardView; workApi?: WorkApi; boardError?: string
+function TasksTab({ locale, view, api, workApi, boardError, pendingRemoveTitle, onUndoRemove, onOpen, onRetry, onRemoveSchedule }: {
+  locale: CopyLocale; view?: BoardView; api: ChatApi; workApi?: WorkApi; boardError?: string
   pendingRemoveTitle?: string; onUndoRemove?: () => void
   onOpen: (sessionId: string) => void; onRetry: () => void; onRemoveSchedule: (id: string) => void
 }) {
-  const [filter, setFilter] = useState<BoardFilter>('all')
+  const [filter, setFilter] = useState<BoardFilter | 'recipes'>('all')
   const counts = boardCounts(view)
   const totalCount = useMemo(() => {
     if (!view) return 0
@@ -296,11 +383,13 @@ function TasksTab({ locale, view, workApi, boardError, pendingRemoveTitle, onUnd
     const openWork = (view.work ?? []).filter(w => w.status !== 'done' && w.status !== 'cancelled').length
     return openWork + groups.requests.length + groups.watched.length + view.schedules.length
   }, [view])
-  const filters: readonly { value: BoardFilter; label: string }[] = [
+  const [recipes, recipesError, refreshRecipes] = useRecipes(api)
+  const filters: readonly { value: BoardFilter | 'recipes'; label: string }[] = [
     { value: 'all', label: totalCount > 0 ? `${t(locale, 'filterAll')} (${totalCount})` : t(locale, 'filterAll') },
     { value: 'waiting', label: `${t(locale, 'filterWaiting')} (${counts.waiting})` },
     { value: 'active', label: `${t(locale, 'filterActive')} (${counts.active})` },
     { value: 'watch', label: `${t(locale, 'filterWatch')} (${counts.watch})` },
+    { value: 'recipes', label: `${t(locale, 'filterRecipes')} (${recipes.length})` },
   ]
   return (
     <div className="dsh-dot-tasks">
@@ -313,8 +402,9 @@ function TasksTab({ locale, view, workApi, boardError, pendingRemoveTitle, onUnd
           <Button variant="ghost" size="sm" onClick={onUndoRemove}>{t(locale, 'undoAction')}</Button>
         </div>
       ) : null}
-      {workApi && filter !== 'watch' ? <WorkBoardPanel locale={locale} api={workApi} filter={filter} items={view?.work ?? NO_WORK} pending={view?.pending ?? NO_PENDING} onChanged={onRetry} onOpenSession={onOpen} /> : null}
-      <Board locale={locale} view={view} filter={filter} suppressEmpty={(view?.work?.length ?? 0) > 0 || (Boolean(workApi) && filter === 'all')} {...boardError === undefined ? {} : { error: boardError }} onOpen={onOpen} onRetry={onRetry} onRemoveSchedule={onRemoveSchedule} />
+      {filter === 'recipes' ? <RecipesView locale={locale} api={api} rows={recipes} {...recipesError === undefined ? {} : { error: recipesError }} onChanged={() => { refreshRecipes(); onRetry() }} /> : null}
+      {workApi && filter !== 'watch' && filter !== 'recipes' ? <WorkBoardPanel locale={locale} api={workApi} filter={filter} items={view?.work ?? NO_WORK} pending={view?.pending ?? NO_PENDING} onChanged={onRetry} onOpenSession={onOpen} /> : null}
+      {filter !== 'recipes' ? <Board locale={locale} view={view} filter={filter} suppressEmpty={(view?.work?.length ?? 0) > 0 || (Boolean(workApi) && filter === 'all')} {...boardError === undefined ? {} : { error: boardError }} onOpen={onOpen} onRetry={onRetry} onRemoveSchedule={onRemoveSchedule} /> : null}
     </div>
   )
 }
@@ -508,7 +598,7 @@ export function ChatPanel({ locale, api, Card, onOpenSession, renderFactorySlot 
           running={running}
           waiting={waiting}
           proposalCount={proposalCount}
-          tasks={<TasksTab locale={locale} {...board ? { view: board } : {}} {...workApi ? { workApi } : {}} {...boardError === undefined ? {} : { boardError }} {...pendingRemoval ? { pendingRemoveTitle: pendingRemoval.title, onUndoRemove: undoRemoveSchedule } : {}} onOpen={onOpenSession} onRetry={refreshBoard} onRemoveSchedule={removeSchedule} />}
+          tasks={<TasksTab locale={locale} api={api} {...board ? { view: board } : {}} {...workApi ? { workApi } : {}} {...boardError === undefined ? {} : { boardError }} {...pendingRemoval ? { pendingRemoveTitle: pendingRemoval.title, onUndoRemove: undoRemoveSchedule } : {}} onOpen={onOpenSession} onRetry={refreshBoard} onRemoveSchedule={removeSchedule} />}
           {...renderFactorySlot ? { renderFactorySlot } : {}}
           personaDirty={personaDirty}
           {...pendingDrawerAction ? { pendingAction: pendingDrawerAction } : {}}
@@ -765,6 +855,7 @@ const NOTICE_TAG_TONE: Record<Exclude<NoticeEntry['kind'], 'reminder'>, TagTone>
   'task-human': 'info',
   'idle-check': 'quiet',
   inbox: 'info',
+  'recipe-run': 'success',
 }
 
 function noticeTagLabel(locale: CopyLocale, kind: Exclude<NoticeEntry['kind'], 'reminder'>): string {
@@ -776,6 +867,7 @@ function noticeTagLabel(locale: CopyLocale, kind: Exclude<NoticeEntry['kind'], '
     case 'task-human': return t(locale, 'taskHuman')
     case 'idle-check': return t(locale, 'idleCheck')
     case 'inbox': return t(locale, 'inboxEvent')
+    case 'recipe-run': return t(locale, 'recipeRunTag')
   }
 }
 
@@ -799,6 +891,7 @@ function NoticeCard({ entry, locale, tasks, onOpenSession }: { entry: NoticeEntr
           ) : null}
         </div>
         {entry.prompt ? <div className="dsh-dot-card-body">{entry.prompt}</div> : null}
+        {entry.refused ? <div className="dsh-dot-card-body">{fillText(t(locale, 'recipeRunFailed'), { reason: entry.refused })}</div> : null}
       </div>
     )
   }

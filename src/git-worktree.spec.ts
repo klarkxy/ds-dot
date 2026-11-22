@@ -117,6 +117,27 @@ describe.skipIf(!gitAvailable)('git worktrees (real git)', () => {
     } finally { cleanup() }
   })
 
+  it('refuses a merge over a dirty path with spaces or a rename', async () => {
+    const { repo, home, cleanup } = makeRepo()
+    try {
+      const created = await createTaskWorktree({ dir: repo, homeDir: home })
+      writeFileSync(join(created.worktree, 'a.txt'), 'task side')
+      await commitAll(created.worktree, 'task commit')
+      execFileSync('git', ['-C', repo, 'mv', 'a.txt', 'a renamed.txt'], { stdio: 'ignore' })
+      let merged = await mergeInto({ repoRoot: repo, branch: created.branch, deliveredPaths: ['a.txt'] })
+      expect(merged.ok).toBe(false)
+      expect(merged.message).toMatch(/uncommitted changes.*a\.txt/)
+      merged = await mergeInto({ repoRoot: repo, branch: created.branch, deliveredPaths: ['a renamed.txt'] })
+      expect(merged.ok).toBe(false)
+      expect(merged.message).toMatch(/uncommitted changes.*a renamed\.txt/)
+      execFileSync('git', ['-C', repo, 'reset', '--hard', 'HEAD'], { stdio: 'ignore' })
+      writeFileSync(join(repo, 'new file.txt'), 'unsaved')
+      merged = await mergeInto({ repoRoot: repo, branch: created.branch, deliveredPaths: ['new file.txt'] })
+      expect(merged.ok).toBe(false)
+      expect(merged.message).toMatch(/uncommitted changes.*new file\.txt/)
+    } finally { cleanup() }
+  })
+
   it('merges anyway when the dirty file is outside the delivery', async () => {
     const { repo, home, cleanup } = makeRepo()
     try {
@@ -170,5 +191,16 @@ describe('taskWorktreeRoot', () => {
     expect(taskWorktreeRoot(join(home, 'worktrees'), home)).toBeUndefined()
     expect(taskWorktreeRoot(join(home, 'other', 'abc123'), home)).toBeUndefined()
     expect(taskWorktreeRoot('C:\\somewhere\\else', home)).toBeUndefined()
+  })
+
+  it('folds case on win32 but stays case-sensitive elsewhere', () => {
+    // The managed-row match must survive drive-letter and name casing on
+    // Windows, and must NOT merge distinct rows on case-sensitive systems.
+    expect(taskWorktreeRoot('c:\\Home\\Worktrees\\AbC\\sub', 'C:\\HOME', 'win32')).toBe('C:\\HOME\\worktrees\\abc')
+    expect(taskWorktreeRoot('/home/x/worktrees/AbC/sub', '/home/x', 'linux')).toBe('/home/x/worktrees/AbC')
+    expect(taskWorktreeRoot('/Home/x/worktrees/abc', '/home/x', 'linux')).toBeUndefined()
+    expect(taskWorktreeRoot('/home/x/Worktrees/abc', '/home/x', 'linux')).toBeUndefined()
+    expect(taskWorktreeRoot('/home/x/worktrees', '/home/x', 'linux')).toBeUndefined()
+    expect(taskWorktreeRoot('/home/x/worktrees-other/abc', '/home/x', 'linux')).toBeUndefined()
   })
 })

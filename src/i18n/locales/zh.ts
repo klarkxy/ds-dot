@@ -529,6 +529,7 @@ export const zhUi = {
   workViewFull: '全文',
   workFileView: '文件视图',
   workQuoteLine: '引用到备注',
+  workDiffShowAll: '显示全部 {n} 行',
   workEvidenceLoading: '正在读取…',
   workExcluded: '未纳入快照',
   workExcludeDir: '忽略的目录',

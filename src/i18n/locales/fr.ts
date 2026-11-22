@@ -528,6 +528,7 @@ const frUi: UiText = {
   workViewFull: 'Complet',
   workFileView: 'Vue du fichier',
   workQuoteLine: 'Citer dans la note',
+  workDiffShowAll: 'Afficher les {n} lignes',
   workEvidenceLoading: 'Chargement…',
   workExcluded: 'Exclu de l’instantané',
   workExcludeDir: 'Répertoire ignoré',

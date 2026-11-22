@@ -528,6 +528,7 @@ const ruUi: UiText = {
   workViewFull: 'Полный',
   workFileView: 'Вид файла',
   workQuoteLine: 'Цитировать в заметку',
+  workDiffShowAll: 'Показать все {n} строки',
   workEvidenceLoading: 'Загрузка…',
   workExcluded: 'Исключено из снимка',
   workExcludeDir: 'Игнорируемый каталог',

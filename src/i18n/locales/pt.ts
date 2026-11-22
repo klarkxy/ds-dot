@@ -528,6 +528,7 @@ const ptUi: UiText = {
   workViewFull: 'Completo',
   workFileView: 'Vista do ficheiro',
   workQuoteLine: 'Citar na nota',
+  workDiffShowAll: 'Mostrar todas as {n} linhas',
   workEvidenceLoading: 'Carregando…',
   workExcluded: 'Excluído do snapshot',
   workExcludeDir: 'Diretório ignorado',

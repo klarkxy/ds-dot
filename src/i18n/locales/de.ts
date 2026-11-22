@@ -528,6 +528,7 @@ const deUi: UiText = {
   workViewFull: 'Voll',
   workFileView: 'Dateiansicht',
   workQuoteLine: 'In Notiz zitieren',
+  workDiffShowAll: 'Alle {n} Zeilen anzeigen',
   workEvidenceLoading: 'Wird geladen…',
   workExcluded: 'Vom Snapshot ausgeschlossen',
   workExcludeDir: 'Ignoriertes Verzeichnis',

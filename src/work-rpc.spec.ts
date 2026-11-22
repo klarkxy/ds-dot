@@ -58,6 +58,13 @@ async function setup() {
       calls.push(`create ${id}`)
       return id
     },
+    createDot: async () => {
+      const id = `dot-${sessions.size}`
+      sessions.set(id, {})
+      calls.push(`dot ${id}`)
+      return id
+    },
+    resumeDot: async () => false,
     prompt: async () => { calls.push('prompt') },
     stopActivity: async () => { calls.push('stop'); return { cancelAccepted: true, queueCleared: true, idle: true, jobsSettled: true } },
   }
@@ -495,6 +502,35 @@ describe('work.read diff view', () => {
     const bound = { verificationId: verified.id, inputRef: current.currentInputRef, inputRevision: current.currentRevision }
     rmSync(join(h.home, 'artifacts', subject.baselineRefs[0]!.artifactRef), { recursive: true, force: true })
     expect(h.service.readWorkSource(change.id, 'change', 'a.ts', bound, { view: 'diff' })).toMatchObject({ ok: false, code: 'missing' })
+    rmSync(h.project, { recursive: true, force: true })
+    rmSync(h.home, { recursive: true, force: true })
+  })
+
+  it('clears memoized baselines on factory reset so reused ids cannot hit stale priors', async () => {
+    const h = await setup()
+    const first = await readyDiffChange(h)
+    const bound1 = { verificationId: first.verified.id, inputRef: first.current.currentInputRef, inputRevision: first.current.currentRevision }
+    let manifestReads = 0
+    const service = h.service as unknown as { subjectLook: () => { read: (ref: string) => unknown } }
+    const realLook = service.subjectLook.bind(h.service)
+    vi.spyOn(service, 'subjectLook').mockImplementation(() => {
+      const look = realLook() as { read: (ref: string) => unknown }
+      return { ...look, read: (ref: string) => { manifestReads += 1; return look.read(ref) } }
+    })
+    expect(h.service.readWorkSource(first.change.id, 'change', 'a.ts', bound1, { view: 'diff' }).ok).toBe(true)
+    const afterFirst = manifestReads
+    expect(afterFirst).toBeGreaterThan(0)
+    // A second file of the same subject is served from the memo, not re-scanned.
+    expect(h.service.readWorkSource(first.change.id, 'change', 'gone.ts', bound1, { view: 'diff' }).ok).toBe(true)
+    expect(manifestReads).toBe(afterFirst)
+
+    await h.service.ensureDot()
+    await h.service.confirmFactoryReset(h.service.previewFactoryReset().token)
+    // Ids restart after reset; the memo must not answer for the new delivery.
+    const second = await readyDiffChange(h)
+    const bound2 = { verificationId: second.verified.id, inputRef: second.current.currentInputRef, inputRevision: second.current.currentRevision }
+    expect(h.service.readWorkSource(second.change.id, 'change', 'a.ts', bound2, { view: 'diff' }).ok).toBe(true)
+    expect(manifestReads).toBeGreaterThan(afterFirst)
     rmSync(h.project, { recursive: true, force: true })
     rmSync(h.home, { recursive: true, force: true })
   })

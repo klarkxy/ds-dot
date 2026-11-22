@@ -344,7 +344,7 @@ function WorkFacts({ locale, item, onRead, onOpenSession, onQuote }: {
             <button type="button" data-active={view === 'diff' ? '' : undefined} onClick={() => setFileView(change.path, 'diff')}>{t(locale, 'workViewDiff')}</button>
             <button type="button" data-active={view === 'full' ? '' : undefined} disabled={change.kind === 'deleted'} onClick={() => setFileView(change.path, 'full')}>{t(locale, 'workViewFull')}</button>
           </span>
-          {fileOutcome(change)}
+          {isCollapsed ? null : fileOutcome(change)}
         </div>
       </div>
     )
@@ -458,11 +458,17 @@ function parsePatch(body: string): DiffLine[] {
   return rows
 }
 
+const DIFF_LINE_LIMIT = 2_000
+
 function DiffView({ locale, path, body, onQuote }: { readonly locale: CopyLocale; readonly path: string; readonly body: string; readonly onQuote?: (line: string) => void }) {
   const rows = useMemo(() => parsePatch(body), [body])
+  // A huge delivery would otherwise mount tens of thousands of rows at once.
+  const [all, setAll] = useState(false)
+  const capped = !all && rows.length > DIFF_LINE_LIMIT
+  const shown = capped ? rows.slice(0, DIFF_LINE_LIMIT) : rows
   return (
     <div className="dsh-dot-work-diff" data-diff-body={path}>
-      {rows.map((row, index) => row.kind === 'line' ? (
+      {shown.map((row, index) => row.kind === 'line' ? (
         <div key={index} className="dsh-dot-work-diff-line" data-sign={row.sign}>
           <span className="dsh-dot-work-diff-no">{row.oldNo ?? ''}</span>
           <span className="dsh-dot-work-diff-no">{row.newNo ?? ''}</span>
@@ -481,6 +487,11 @@ function DiffView({ locale, path, body, onQuote }: { readonly locale: CopyLocale
       ) : row.kind === 'meta' ? null : (
         <div key={index} className="dsh-dot-work-diff-hunk">{row.text}</div>
       ))}
+      {capped ? (
+        <Button variant="ghost" size="sm" onClick={() => setAll(true)}>
+          {t(locale, 'workDiffShowAll').replace('{n}', String(rows.length))}
+        </Button>
+      ) : null}
     </div>
   )
 }

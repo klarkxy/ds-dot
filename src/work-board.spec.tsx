@@ -774,7 +774,9 @@ describe('WorkBoard', () => {
       await Promise.resolve(); await Promise.resolve()
     })
     await openDetails()
-    // Default view is the diff for all three kinds; deleted has no Full.
+    // Default view is the diff; only the expanded row mounts its diff DOM.
+    expect(document.querySelectorAll('[data-diff-body]')).toHaveLength(1)
+    await click('Expand all')
     expect(document.querySelectorAll('[data-diff-body]')).toHaveLength(3)
     const rendered = document.querySelector('[data-diff-body="gone.ts"]')
     expect(rendered?.textContent).toContain('-line gone')
@@ -835,6 +837,7 @@ describe('WorkBoard', () => {
       await Promise.resolve(); await Promise.resolve()
     })
     await openDetails()
+    await click('Expand all')
     expect(document.querySelectorAll('[data-diff-body]')).toHaveLength(3)
     expect(document.querySelectorAll('.dsh-dot-work-diff-quote')).toHaveLength(0)
     await act(async () => silent.unmount())
@@ -890,6 +893,11 @@ describe('WorkBoard', () => {
     })
     await openDetails()
     const rendered = document.querySelector('[data-diff-body="big.ts"]')!
+    // Past the 2,000-line render cap the tail mounts on demand, not up front.
+    expect(rendered.textContent).not.toContain('tail marker row')
+    const showAll = buttonIncluding('Show all')!
+    expect(showAll.textContent).toContain('6006')
+    await act(async () => { showAll.click(); await Promise.resolve() })
     expect(rendered.textContent).toContain('tail marker row')
     await act(async () => root.unmount())
   })
@@ -929,9 +937,37 @@ describe('WorkBoard', () => {
     await openDetails()
     await act(async () => { await new Promise(done => setTimeout(done, 250)) })
     expect(maxInFlight).toBeLessThanOrEqual(4)
+    await click('Expand all')
     for (const path of paths) {
       expect(document.querySelector(`[data-evidence-body="change:${path}"]`)?.textContent).toContain(`FULL_${path}`)
     }
+    await act(async () => root.unmount())
+  })
+
+  it('renders at most 2,000 diff lines and expands the rest on demand', async () => {
+    const huge: WorkBoardItem = {
+      ...item, id: 'c-huge',
+      verification: {
+        id: 'v-3', verdict: 'accept', subjectKey: 'subject-key-long', inputRef: 'in-4', inputRevision: 4,
+        changes: [{ path: 'huge.csv', kind: 'added' }],
+      },
+    }
+    const body = `===\n--- a/huge.csv\n+++ b/huge.csv\n@@ -0,0 +1,2500 @@\n${'+row,1\n'.repeat(2500)}`
+    const onRead = (request: WorkReadRequest) => Promise.resolve({ source: `diff:${request.ref}`, body })
+    const root = createRoot(document.getElementById('root')!)
+    await act(async () => {
+      root.render(<WorkBoard locale="en" items={[huge]} pending={[]} onAccept={vi.fn()} onReject={vi.fn()} onAnswer={vi.fn()} onResume={vi.fn()} onRead={onRead} />)
+      await Promise.resolve(); await Promise.resolve()
+    })
+    await openDetails()
+    const lines = () => document.querySelectorAll('.dsh-dot-work-diff-line').length
+    expect(lines()).toBeLessThanOrEqual(2_000)
+    const showAll = buttonIncluding('Show all')
+    expect(showAll).toBeTruthy()
+    expect(showAll?.textContent).toContain('Show all')
+    await act(async () => { showAll!.click(); await Promise.resolve() })
+    expect(lines()).toBeGreaterThan(2_000)
+    expect(document.querySelector('[data-diff-body="huge.csv"]')!.textContent).toContain('row,1')
     await act(async () => root.unmount())
   })
 })

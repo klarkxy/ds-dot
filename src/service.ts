@@ -912,6 +912,7 @@ export class DotService {
         throw new DotError('dot/reset-incomplete', `Factory reset is incomplete: sessions were archived and artifact files were removed, but clearing Dorothy's records failed (${messageOf(failure)}). Request a new preview to retry the remaining cleanup.`)
       }
       this.pending.reset()
+      this.diffPriors.clear()
       this.batcher.take()
       this.releaseChildSeals()
       this.reminders.refresh()
@@ -2454,7 +2455,7 @@ export class DotService {
     const subject = verification.subject
     const named = subject?.changes.find(item => item.path === ref)
     if (!subject || !named) return { ok: false, code: 'stale', message: `${ref} is not a delivered file of ${verification.id}` }
-    if (options?.view === 'diff') return this.readWorkDiff(change, subject, named)
+    if (options?.view === 'diff') return this.readWorkDiff(change, verification.id, subject, named)
     if (named.kind === 'deleted' || !named.sha256) return { ok: false, code: 'missing', message: `${ref} was deleted in ${verification.id}` }
     if (!artifactName(subject.artifactRef) || artifactName(subject.artifactRef) !== subject.artifactRef) return { ok: false, code: 'invalid', message: 'delivery snapshot is not a single relative id' }
     try {
@@ -2473,7 +2474,7 @@ export class DotService {
    * reviewable too. Binary or >256 KiB sides refuse with `invalid`; the
    * reader falls back to the full view.
    */
-  private readWorkDiff(change: ChangeRecord, subject: DeliverySubject, named: DeliverySubject['changes'][number]): { readonly ok: true; readonly source: string; readonly body: string } | { readonly ok: false; readonly code: 'missing' | 'invalid'; readonly message: string } {
+  private readWorkDiff(change: ChangeRecord, verificationId: string, subject: DeliverySubject, named: DeliverySubject['changes'][number]): { readonly ok: true; readonly source: string; readonly body: string } | { readonly ok: false; readonly code: 'missing' | 'invalid'; readonly message: string } {
     const artifacts = join(this.options.homeDir, 'artifacts')
     const invalid = { ok: false as const, code: 'invalid' as const, message: `${named.path} is binary or larger than 256 KiB; open the full file` }
     let right: Uint8Array = new Uint8Array()
@@ -2486,7 +2487,7 @@ export class DotService {
     }
     let left: Uint8Array = new Uint8Array()
     if (named.kind !== 'added') {
-      const prior = this.diffPrior(change, subject)
+      const prior = this.diffPrior(change, verificationId, subject)
       if (prior.missing) return { ok: false, code: 'missing', message: `baseline ${prior.missing} is missing or incomplete` }
       const entry = prior.files.find(file => foldRel(file.path) === foldRel(named.path))
       if (entry) {
@@ -2512,8 +2513,10 @@ export class DotService {
 
   /** writerPrior re-reads every baseline manifest per file; a subject's baseline set is immutable, so one lookup serves all its files. */
   private readonly diffPriors = new Map<string, ReturnType<typeof writerPrior>>()
-  private diffPrior(change: ChangeRecord, subject: DeliverySubject): ReturnType<typeof writerPrior> {
-    const key = `${change.id}|${subject.artifactRef}`
+  private diffPrior(change: ChangeRecord, verificationId: string, subject: DeliverySubject): ReturnType<typeof writerPrior> {
+    // Change ids and artifact names restart after a factory reset; the key has
+    // to tie the memo to this exact verification and baseline set as well.
+    const key = `${verificationId}|${subject.artifactRef}|${subject.baselineRefs.map(ref => ref.artifactRef).join(',')}`
     const cached = this.diffPriors.get(key)
     if (cached) return cached
     const runs = this.store.work.listRuns().filter(run => run.changeId === change.id)

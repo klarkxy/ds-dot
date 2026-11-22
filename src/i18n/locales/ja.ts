@@ -528,6 +528,7 @@ const jaUi: UiText = {
   workViewFull: '全文',
   workFileView: 'ファイル表示',
   workQuoteLine: 'メモに引用',
+  workDiffShowAll: '{n} 行すべて表示',
   workEvidenceLoading: '読み込み中…',
   workExcluded: 'スナップショットから除外',
   workExcludeDir: '除外ディレクトリ',

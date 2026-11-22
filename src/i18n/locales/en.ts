@@ -529,6 +529,7 @@ const enUi: UiText = {
   workViewFull: 'Full',
   workFileView: 'File view',
   workQuoteLine: 'Quote in note',
+  workDiffShowAll: 'Show all {n} lines',
   workEvidenceLoading: 'Loading…',
   workExcluded: 'Excluded from snapshot',
   workExcludeDir: 'Ignored directory',

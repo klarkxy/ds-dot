@@ -482,7 +482,7 @@ export class DotCapabilities {
 
   private bundlesCache?: { readonly at: number; readonly rows: readonly CapabilityBundle[] }
 
-  /** Mark the bundle rows stale; the next catalog read starts the refresh. */
+  /** Mark the bundle rows stale without scanning. Catalog stays SWR; resolve/applyToAgent awaits a refresh. */
   invalidateBundles(): void {
     if (this.bundlesCache !== undefined) this.bundlesCache = { ...this.bundlesCache, at: 0 }
   }
@@ -565,6 +565,8 @@ export class DotCapabilities {
 
   /** Live grant resolution over the present catalog; only enabled tools are returned. */
   async resolve(): Promise<Map<string, ResolvedGrant>> {
+    // Catalog is SWR; apply needs the live bundle map after an explicit invalidate (`at === 0`).
+    if (this.bundlesCache === undefined || this.bundlesCache.at === 0) await this.refreshBundles()
     const { groups } = await this.catalog()
     return resolveGrants(this.deps.settings().capabilities?.grants ?? {}, groups)
   }

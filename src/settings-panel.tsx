@@ -367,7 +367,7 @@ function Capabilities({ locale, api, grants, onPick }: {
   const displayedLabel = (group: CapabilityGroupView): string =>
     group.kind === 'host' ? t(locale, 'sCapHostGroup')
     : group.id === 'builtin' ? t(locale, 'sCapBuiltinGroup')
-    : group.id.startsWith('builtin:') ? t(locale, `sCapBuiltin_${group.id.slice('builtin:'.length)}` as TextKey)
+    : group.id.startsWith('builtin:') ? t(locale, `sCapBuiltin_${group.id.slice('builtin:'.length)}` as TextKey) || group.label
     : group.label
   const groupSelfHits = (group: CapabilityGroupView): boolean =>
     capNeedle !== '' && (displayedLabel(group).toLowerCase().includes(capNeedle) || group.id.toLowerCase().includes(capNeedle))

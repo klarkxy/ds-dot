@@ -524,6 +524,43 @@ describe('capability application', () => {
     expect(calls).toBe(2)
   })
 
+  it('applies a plugin:<bundle> grant after invalidate before the background tick when entryId differs', async () => {
+    const tools = fakeTools(['report_tool'])
+    let rows: { name: string; rows: { entryId?: string }[] }[] = [{ name: 'dsh-reports', rows: [{ entryId: 'include:reports' }] }]
+    const make = () => new DotCapabilities({
+      tools: () => tools,
+      mcpManager: () => undefined,
+      pluginManager: () => ({ listBundles: async () => rows }),
+      settings: () => settingsWith({ 'plugin:dsh-reports': 'auto' }),
+      locked: LOCKED,
+    })
+    const apply = async (caps: DotCapabilities) => {
+      const env = agentCtx(tools)
+      const applied = await caps.applyToAgent(env.ctx as never, { session: { id: 'dot' } } as never)
+      caps.releaseAll()
+      return applied
+    }
+
+    // Empty cache: apply awaits the first scan even when owners use a different entryId.
+    const empty = make()
+    empty.owners.set('report_tool', { entryId: 'include:reports' })
+    const fromEmpty = await apply(empty)
+    expect(fromEmpty.get('report_tool')?.grant).toBe('auto')
+    expect(fromEmpty.get('report_tool')?.chain).toEqual(['tool:report_tool', 'plugin:dsh-reports'])
+
+    // Stale cache after invalidate: catalog would SWR the empty mapping and miss
+    // plugin:dsh-reports; applyToAgent must await the refresh instead of the tick.
+    rows = []
+    const stale = make()
+    stale.owners.set('report_tool', { entryId: 'include:reports' })
+    await stale.catalog()
+    rows = [{ name: 'dsh-reports', rows: [{ entryId: 'include:reports' }] }]
+    stale.invalidateBundles()
+    const fromStale = await apply(stale)
+    expect(fromStale.get('report_tool')?.grant).toBe('auto')
+    expect(fromStale.get('report_tool')?.chain).toEqual(['tool:report_tool', 'plugin:dsh-reports'])
+  })
+
   it('reaches the raw register through the cordis.original symbol', async () => {
     const raw = { register(this: unknown, def: { name: string }) { return () => {} } }
     const proxy = { [Symbol.for('cordis.original')]: raw, register: raw.register }
@@ -620,6 +657,7 @@ describe('service-level capability gate', () => {
     await expect(service.capabilityGate({ name: 'schedule_edit', arguments: { target: 'this_session' } }))
       .resolves.toMatchObject({ kind: 'deny' })
     await expect(service.capabilityGate({ name: 'schedule_create', arguments: { target: 'new_once', title: 't', prompt: 'p' } })).resolves.toBe('next')
+    await expect(service.capabilityGate({ name: 'schedule_create', arguments: { target: 'new', title: 't', prompt: 'p' } })).resolves.toBe('next')
     await expect(service.capabilityGate({ name: 'schedule_create', arguments: { target: 'session-other' } })).resolves.toBe('next')
   })
 

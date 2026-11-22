@@ -404,4 +404,40 @@ describe('capabilities page', () => {
     expect(toolRow('schedule_list')).not.toBeUndefined()
     await act(async () => root.unmount())
   })
+
+  it('keeps Extra capabilities search working when an unknown builtin grant is present', async () => {
+    const withUnknown = {
+      ...catalog,
+      grants: { 'builtin:calendar': 'auto' as const },
+      groups: catalog.groups.map(group => group.id !== 'builtin' ? group : {
+        ...group,
+        children: [
+          ...(group.children ?? []),
+          { id: 'builtin:skill', kind: 'builtin' as const, label: 'skill', tools: [{ name: 'skill', conditional: false }] },
+          { id: 'builtin:calendar', kind: 'builtin' as const, label: 'calendar', missing: true, tools: [] },
+        ],
+      }),
+    }
+    const api = {
+      models: async () => ({ groups: [] }),
+      settings: async () => DEFAULT_SETTINGS,
+      settingProposals: async () => [],
+      decideSetting: async () => 'ok',
+      setSettings: async () => DEFAULT_SETTINGS,
+      capabilities: async () => withUnknown,
+    }
+    const Harness = () => <SettingsPanel locale="zh" section="capabilities" api={api as never} settings={DEFAULT_SETTINGS} onSaved={() => {}} />
+    const root = createRoot(document.getElementById('root')!)
+    await act(async () => root.render(<Harness />))
+    await act(async () => { await Promise.resolve() })
+    await search('技能')
+    expect(document.querySelector('.dsh-dot-cap-intro')).not.toBeNull()
+    expect(groupIds()).toContain('builtin:skill')
+    expect(toolRow('skill')).not.toBeUndefined()
+    await search('skill')
+    expect(document.querySelector('.dsh-dot-cap-intro')).not.toBeNull()
+    expect(groupIds()).toContain('builtin:skill')
+    expect(toolRow('skill')).not.toBeUndefined()
+    await act(async () => root.unmount())
+  })
 })

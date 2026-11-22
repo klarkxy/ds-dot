@@ -35,15 +35,16 @@ import { ZERO_USAGE, addUsage, combineUsage, netSegmentUsage, totalUsage, usageF
 import { PRESET_ID, TOOL, type AttentionView, type BoardView, type DotContextSections, type DotContextUsage, type DotContextView, type FactoryResetPreview, type FactoryResetResult, type InboxEventInput, type InboxRecord, type InboxSubmitResult, type KeepaliveInfo, type KnowledgeView, type ModelChoice, type PendingKind, type PendingQuestionItem, type RecipeBody, type RecipeRecord, type ReflectionRun, type RolloverReason, type RuleConfig, type TrajectoryView } from './contracts.ts'
 import { SUMMARY_INSTRUCTION, SUMMARY_MAX_TOKENS, buildHandoff, type Handoff } from './handoff.ts'
 import { READ_ROWS_DEFAULT, READ_ROWS_MAX, SEARCH_LIMIT_DEFAULT, SEARCH_LIMIT_MAX, SEARCH_SESSIONS_MAX, formatRead, formatSearch, historyRows, queryTerms, searchRows, windowRows, type SessionHits } from './history.ts'
-import { InboxLedger, inboxNotice, memoryInboxTable } from './inbox.ts'
+import { InboxLedger, fenceUntrusted, inboxNotice, memoryInboxTable } from './inbox.ts'
 import { type DotHost, type WorkspaceRow } from './host.ts'
 import { clip, ledgerSummary } from './ledger.ts'
+import { applyLinkEvent, linkMatchesSubject, makeTaskLink, parseLinkRef, scanReportLinks, taskLinkId } from './links.ts'
 import { directoriesConflict } from './lock.ts'
 import { IdleChecker, idleCandidates } from './idle-check.ts'
 import { ACCEPTED_DELIVERY_HINT, IDLE_SILENCE_HINT } from './task-hints.ts'
 import { AutoUpdater, type PluginManagerLike, type UpdateStatus } from './auto-update.ts'
 import { DOT_TRACE, emitDotTrace, type DotTraceInput } from './trace.ts'
-import type { RunAccess, RunKind, ChangePriority } from './contracts.ts'
+import type { RunAccess, RunKind, ChangePriority, TaskLink } from './contracts.ts'
 import { AGREEMENTS_MAX_CHARS, COGNITION_MAX_CHARS, KnowledgeError, addEntry, agreementNotesBlock, agreementsSection, cognitionSection, normalizeAgreements, normalizeCognition, removeEntry } from './memory.ts'
 import { deliverPeer, guardRunWriteTool, PeerLedger, refreshChildSeals, sealChildSession, type PeerSendInput } from './peer.ts'
 import { PendingHub, type PendingAnswer } from './pending.ts'
@@ -153,6 +154,8 @@ export class DotService {
   private readonly childRefreshers = new Set<() => void>()
   private readonly childReleases = new Map<string, () => void>()
   private resetArmed?: { readonly token: string; readonly expiresAt: number }
+  /** Bumped by every factory reset so a report captured across it skips link writes. */
+  private resetGeneration = 0
   private currentLocale: CopyLocale | undefined
   private readonly updates: AutoUpdater
   private readonly timer: Timer
@@ -880,6 +883,7 @@ export class DotService {
     // No usage pass may start or commit while the book is being wiped; the flag
     // is cleared on the way out whether the reset completes or throws.
     this.usageStopped = true
+    this.resetGeneration += 1
     try {
       const archiveIds = factoryResetArchiveIds(this.store)
       // The ownership list includes confirmed and uncertain host calls, but not
@@ -1437,6 +1441,7 @@ export class DotService {
     if (!changeId) throw new DotError('dot/invalid', 'task_id is required')
     if (action === 'closeout') return this.closeoutFromTool(args)
     if (action === 'read') return this.readWork(changeId, typeof args.input_ref === 'string' ? args.input_ref : undefined)
+    if (action === 'link' || action === 'unlink') return this.linkFromTool(args, action === 'unlink')
     if (action === 'reject') {
       const reviewRunId = typeof args.review_run_id === 'string' ? args.review_run_id : ''
       const expectedInputRevision = typeof args.expected_input_revision === 'number' ? args.expected_input_revision : this.soleInputRevision(changeId)
@@ -2283,10 +2288,74 @@ export class DotService {
    * batcher will deliver. It never opens or resumes a session.
    */
   async submitInbox(input: InboxEventInput): Promise<InboxSubmitResult> {
-    const done = await this.serial(() => this.inbox.submit(input, this.now()))
+    const done = await this.serial(async () => {
+      const preview = this.inbox.peek(input, this.now())
+      if (!preview.record) return preview
+      // Link updates land BEFORE the inbox record: a failing links table throws
+      // here, so a webhook retry finds no stored record and redoes both steps.
+      await this.applyInboxLinks(preview.record)
+      return this.inbox.submit(input, this.now())
+    })
     // queueInboxNotice itself skips a record that already has a queued notice.
     if (done.record) this.queueInboxNotice(done.record)
     return done.result
+  }
+
+  /** Fold one stored inbox record into every link its subject binds to. */
+  private async applyInboxLinks(record: InboxRecord): Promise<void> {
+    for (const link of this.store.links) {
+      if (!linkMatchesSubject(link, record)) continue
+      const next = applyLinkEvent(link, record, this.now())
+      if (next) await this.store.putLink(next)
+    }
+  }
+
+  /** A fresh link still learns from inbox rows stored before it existed (a pull_request event may predate the run report). */
+  private learnFromStoredInbox(link: TaskLink): TaskLink {
+    let next = link
+    for (const record of this.inbox.list()) {
+      if (!linkMatchesSubject(next, record)) continue
+      next = applyLinkEvent(next, record, this.now()) ?? next
+    }
+    return next
+  }
+
+  /**
+   * The one trusted line an inbox notice earns per linked, still-open change.
+   * It sits outside the untrusted fence so payload text cannot forge it, and
+   * it is rebuilt at delivery so the shown task state is current.
+   */
+  private linkedTaskLines(record: InboxRecord): string[] {
+    const seen = new Set<string>()
+    const lines: string[] = []
+    for (const link of this.store.links) {
+      if (seen.has(link.changeId) || !linkMatchesSubject(link, record)) continue
+      const change = this.store.work.change(link.changeId)
+      if (!change) continue
+      if (changeIsTerminal(change, this.store.work.listRuns().filter(run => run.changeId === change.id))) continue
+      seen.add(change.id)
+      const status = this.store.work.workView(change.id)?.status ?? 'waiting'
+      const title = change.title.replace(/\s+/g, ' ').replace(/"/g, "'").trim()
+      lines.push(`Linked task: ${change.id} "${title}" (${status})`)
+    }
+    return lines
+  }
+
+  private inboxNoticeFor(record: InboxRecord): { readonly text: string; readonly display: string } {
+    const notice = inboxNotice(record)
+    const linked = this.linkedTaskLines(record)
+    if (linked.length === 0) return notice
+    const extra = linked.join('\n')
+    return { text: `${notice.text}\n${extra}`, display: `${notice.display}\n${extra}` }
+  }
+
+  /** PR/issue URLs quoted in a finished report become auto links on its change. */
+  private autoLinkReport(changeId: string, report: string): void {
+    for (const target of scanReportLinks(report)) {
+      const link = this.learnFromStoredInbox(makeTaskLink(changeId, target, 'auto', this.now()))
+      if (this.store.link(link.id)) continue
+      void this.store.putLink(link).catch(() => undefined)
+    }
   }
 
   flushNotices(): Promise<void> { return this.batcher.drain() }
@@ -2374,7 +2443,7 @@ export class DotService {
         if (record === undefined || record.status !== 'pending' || inboxKept >= INBOX_NOTICES_PER_DELIVERY) continue
         inboxKept += 1
         const sessionId = this.store.dotSessionId ?? item.sessionId
-        const notice = inboxNotice(record)
+        const notice = this.inboxNoticeFor(record)
         live.push({ ...item, sessionId, text: notice.text, display: { kind: 'inbox', sessionId, summary: notice.display } })
         continue
       }
@@ -2483,6 +2552,12 @@ export class DotService {
     return reconcileRun(this.store.work, this.runHost(), runId, this.now())
   }
   workBoard(changeId: string) { return this.store.work.workView(changeId) }
+  /** Board-projection rows for work.list: the same view plus link chips the board shows. */
+  workList() {
+    return this.store.work.listChanges()
+      .map(change => this.store.workViewWithLinks(change.id))
+      .filter(row => row !== undefined)
+  }
   recordWorkVerification(changeId: string, checks: Parameters<DotStore['work']['recordVerification']>[1], runIds: readonly string[], detail?: Parameters<DotStore['work']['recordVerification']>[4]) {
     return this.store.work.recordVerification(changeId, checks, runIds, this.now(), detail)
   }
@@ -2603,11 +2678,12 @@ export class DotService {
       const { prunedChanges, keptArtifacts } = await this.store.pruneWorkHistory(maxKeep, async change => {
         // A leftover isolated worktree goes with its change; a branch carrying
         // commits stays (removeTaskWorktree only -d deletes, which git refuses
-        // for unmerged work).
+        // for unmerged work). A pruned change takes its links with it.
         const isolation = change.isolation
         if (isolation?.kind === 'worktree') {
           await removeTaskWorktree({ repoRoot: isolation.repoRoot, worktree: isolation.worktree, branch: isolation.branch, baseSha: isolation.baseSha }, this.git()).catch(() => undefined)
         }
+        await this.store.deleteLinksFor(change.id)
         // A tagged change records its terminal outcome on the recipe before its
         // rows are deleted; a removed recipe or an untagged change records none.
         const tag = change.recipe
@@ -2903,6 +2979,8 @@ export class DotService {
    * resolve against this captured copy, not the live session log.
    */
   private async captureRunReport(runId: string): Promise<boolean> {
+    // A pre-reset run's report must not link a post-reset change reusing the id.
+    const generation = this.resetGeneration
     const run = this.store.work.run(runId)
     if (!run?.sessionId || typeof this.host.latestReply !== 'function') return false
     const reply = await this.host.latestReply(run.sessionId, 20_000).catch(() => undefined)
@@ -2911,6 +2989,7 @@ export class DotService {
       const dir = join(this.options.homeDir, 'artifacts', 'evidence')
       mkdirSync(dir, { recursive: true })
       writeFileSync(join(dir, `${artifactName(runId)}.md`), reply)
+      if (this.resetGeneration === generation) this.autoLinkReport(run.changeId, reply)
       return true
     } catch { return false }
   }
@@ -3151,10 +3230,35 @@ export class DotService {
       userRequest: material?.userRequest ?? null,
       deliverableLanguage: material?.deliverableLanguage ?? null,
       ...(change.recipe ? { recipe: { id: change.recipe.id, name: this.taggedRecipe(change)?.name ?? null, revision: change.recipe.revision } } : {}),
+      // lastEvent carries GitHub-authored title/summary (comment bodies etc.):
+      // fence them as untrusted in tool output; the board keeps plain text.
+      links: this.store.linksFor(changeId).map(link => link.lastEvent === undefined ? link : {
+        ...link,
+        lastEvent: { ...link.lastEvent, title: fenceUntrusted(link.lastEvent.title), summary: fenceUntrusted(link.lastEvent.summary) },
+      }),
       maxConcurrentRuns: change.maxConcurrentRuns,
       failedRounds: this.store.work.failedRounds(changeId),
       history: this.store.work.inputsFor(changeId).map(row => ({ id: row.id, revision: row.revision, goal: row.goal })),
     })
+  }
+
+  /** link/unlink attach or drop the GitHub target an inbox event can bind to. */
+  private async linkFromTool(args: Record<string, unknown>, unlink: boolean): Promise<string> {
+    const changeId = typeof args.task_id === 'string' ? args.task_id : ''
+    const ref = typeof args.ref === 'string' ? args.ref : ''
+    if (!changeId) throw new DotError('dot/invalid', 'task_id is required')
+    if (!this.store.work.change(changeId)) throw new DotError('dot/invalid', `unknown change ${changeId}`)
+    const target = parseLinkRef(ref)
+    if (!target) throw new DotError('dot/invalid', `ref ${ref} must be a GitHub pull/issue URL, owner/repo#N, or owner/repo@branch`)
+    const label = `${target.repo}${target.number !== undefined ? `#${target.number}` : `@${target.branch}`}`
+    const id = taskLinkId(changeId, target)
+    if (unlink) {
+      await this.store.deleteLink(id)
+      return `unlinked ${label} from ${changeId}`
+    }
+    if (this.store.link(id)) return `already linked ${label} to ${changeId}`
+    await this.store.putLink(this.learnFromStoredInbox(makeTaskLink(changeId, target, 'dot', this.now())))
+    return `linked ${label} to ${changeId}`
   }
 
   private async controlFromTool(args: Record<string, unknown>): Promise<string> {
@@ -3497,7 +3601,7 @@ export class DotService {
   private queueInboxNotice(record: InboxRecord): void {
     if (this.batcher.some(item => item.kind === 'inbox' && item.wakeKey === record.id)) return
     const sessionId = this.store.dotSessionId ?? ''
-    const notice = inboxNotice(record)
+    const notice = this.inboxNoticeFor(record)
     this.notify({
       sessionId,
       kind: 'inbox',

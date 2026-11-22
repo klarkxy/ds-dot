@@ -105,6 +105,7 @@ export function factoryResetScope(locale: CopyLocale, preview: FactoryResetPrevi
     n('sFactoryProposals', preview.proposals),
     n('sFactoryCards', preview.cards),
     n('sFactoryInbox', preview.inbox),
+    n('sFactoryLinks', preview.links),
     n('sFactorySegments', preview.pastSegments),
     n('sFactoryReflections', preview.reflections),
   ]

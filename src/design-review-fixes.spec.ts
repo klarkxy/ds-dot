@@ -35,7 +35,7 @@ import { WorkBook } from './work.ts'
 function makeFakeDomain() {
   const tables: Record<string, Map<string, unknown>> = {
     state: new Map(), tasks: new Map(), tickets: new Map(), schedules: new Map(), proposals: new Map(),
-    recipes: new Map(), changes: new Map(), inputs: new Map(), runs: new Map(), verifications: new Map(), peers: new Map(),
+    recipes: new Map(), links: new Map(), changes: new Map(), inputs: new Map(), runs: new Map(), verifications: new Map(), peers: new Map(),
   }
   const deletes: string[] = []
   const domain: DotDomainHandle = {

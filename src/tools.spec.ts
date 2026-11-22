@@ -44,6 +44,16 @@ function load(settings: { current: DotSettings; segment?: Seg; notes?: string; c
     systemPrompt: { section(section: (typeof sections)[number]) { sections.push(section); return () => {} } },
     dot: {
       store: { get settings() { return settings.current }, get segment() { return settings.segment } },
+      host: {
+        listModels: async () => ({
+          fallback: { provider: 'openai', model: 'gpt-6.2-sol' },
+          models: [
+            { provider: 'anthropic', model: 'claude-fable-5-2', name: 'Claude Fable 5.2' },
+            { provider: 'openai', model: 'gpt-6.2-sol', name: 'GPT-6.2 Sol' },
+          ],
+        }),
+      },
+      listModels: async () => 'raw eligible models',
       currentAgreementsBlock: () => settings.notes ?? '',
       currentCognitionBlock: () => settings.cognition ?? '',
       selfSettings: realSelf,
@@ -112,6 +122,25 @@ describe('dot tools', () => {
     for (const old of ['dot_list_workspaces', 'dot_create_workspace', 'dot_schedule_add', 'dot_schedule_list', 'dot_schedule_remove', 'dot_read_settings', 'dot_propose_settings', 'dot_remember', 'dot_forget']) {
       expect(names).not.toContain(old)
     }
+  })
+
+  it('exposes Arena recommendation tags and a raw compatibility mode', () => {
+    type Tool = { description: string; parameters: { properties: Record<string, { description?: string; enum?: string[] }> } }
+    const models = load().find(row => row.name === TOOL.listModels) as Tool
+    expect(models.parameters.properties.mode?.enum).toEqual(['recommend', 'raw'])
+    expect(models.parameters.properties.tags?.description).toContain('coding,review')
+    expect(models.description).toContain('never selects a model or changes a route')
+    expect(models.description).toContain('never replace a model the human named')
+  })
+
+  it('executes recommendations without a dispatch and preserves raw discovery and query errors', async () => {
+    type Tool = { execute(args: unknown): Promise<string> }
+    const models = load().find(row => row.name === TOOL.listModels) as Tool
+    const recommended = await models.execute({ tags: 'coding', limit: 1 })
+    expect(recommended).toContain('Recommendation only')
+    expect(recommended).toContain('anthropic/claude-fable-5-2')
+    expect(await models.execute({ mode: 'raw' })).toBe('raw eligible models')
+    await expect(models.execute({ tags: 'telepathy' })).rejects.toMatchObject({ code: 'dot/invalid-model-query' })
   })
 
   it('lists inspect/files on workspaces and names the Deep View rich nodes', () => {

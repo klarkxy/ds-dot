@@ -11,8 +11,10 @@ import { HarnessError } from '@deepseek-ai/dsh-llm'
 import { mkdir } from 'node:fs/promises'
 import { isAbsolute, join } from 'node:path'
 import { APPROVAL_DETAIL_LIMIT, approvalNotice } from './approval-risk.ts'
+import { createTwoFilesPatch } from 'diff'
 import { writerPrior, parseEvidenceRef, reportBullet, deliveryScope, scopeContainsPath, type DeliverySubject, type SubjectLook } from './acceptance.ts'
 import { captureScopeAsync, defaultIgnoreCover, foldRel, ignoreCovered, isLinkReason, pruneSnapshots, readManifest, readSnapshotEntry, relativePath, saveSnapshot, scanScope, scanScopeAsync, baselineCaptures, wipeArtifacts, type SnapshotExclusion, type SnapshotSource } from './artifacts.ts'
+import { attentionItems } from './board-groups.ts'
 import { renderBrief, renderSupplement, runTitle } from './brief.ts'
 import { bindRunSession, cancelWork, countRelayInserts, finishWork, launchReservedRun, observeRun, reconcileRun, supplementRun } from './execution.ts'
 import { detectWorkspaceRoot } from './git-root.ts'
@@ -29,7 +31,7 @@ import { approvalDisplay, parseNotice } from './chat-format.ts'
 import { cardText } from './cards.ts'
 import { NoticeBatcher, formatNotices, formatNoticeDisplay, realTimer, type Notice, type Timer } from './batcher.ts'
 import { ZERO_USAGE, addUsage, combineUsage, netSegmentUsage, usageFromEvents } from './context.ts'
-import { PRESET_ID, TOOL, type BoardView, type DotContextSections, type DotContextUsage, type DotContextView, type FactoryResetPreview, type FactoryResetResult, type InboxEventInput, type InboxRecord, type InboxSubmitResult, type KeepaliveInfo, type KnowledgeView, type ModelChoice, type PendingKind, type PendingQuestionItem, type RecipeBody, type RecipeRecord, type ReflectionRun, type RolloverReason, type RuleConfig, type TrajectoryView } from './contracts.ts'
+import { PRESET_ID, TOOL, type AttentionView, type BoardView, type DotContextSections, type DotContextUsage, type DotContextView, type FactoryResetPreview, type FactoryResetResult, type InboxEventInput, type InboxRecord, type InboxSubmitResult, type KeepaliveInfo, type KnowledgeView, type ModelChoice, type PendingKind, type PendingQuestionItem, type RecipeBody, type RecipeRecord, type ReflectionRun, type RolloverReason, type RuleConfig, type TrajectoryView } from './contracts.ts'
 import { SUMMARY_INSTRUCTION, SUMMARY_MAX_TOKENS, buildHandoff, type Handoff } from './handoff.ts'
 import { READ_ROWS_DEFAULT, READ_ROWS_MAX, SEARCH_LIMIT_DEFAULT, SEARCH_LIMIT_MAX, SEARCH_SESSIONS_MAX, formatRead, formatSearch, historyRows, queryTerms, searchRows, windowRows, type SessionHits } from './history.ts'
 import { InboxLedger, inboxNotice, memoryInboxTable } from './inbox.ts'
@@ -912,6 +914,7 @@ export class DotService {
         throw new DotError('dot/reset-incomplete', `Factory reset is incomplete: sessions were archived and artifact files were removed, but clearing Dorothy's records failed (${messageOf(failure)}). Request a new preview to retry the remaining cleanup.`)
       }
       this.pending.reset()
+      this.diffPriors.clear()
       this.batcher.take()
       this.releaseChildSeals()
       this.reminders.refresh()
@@ -1029,6 +1032,9 @@ export class DotService {
   serialSettings<T>(work: () => Promise<T>): Promise<T> { return this.serial(work) }
 
   board(): BoardView { return this.store.board(this.pending.list()) }
+
+  /** The background "needs you" projection the panel-less watcher polls. */
+  attention(): AttentionView { return { items: attentionItems(this.store.cards, this.board()) } }
 
   /** Self-update bookkeeping for the settings panel. */
   updateStatus(): UpdateStatus | undefined { return this.store.updateStatus }
@@ -2501,7 +2507,8 @@ export class DotService {
    * The verification has to be the one requested and it has to match the current input.
    * An older input, an unbound id, or a path outside that delivery is refused before any file is opened.
    */
-  readWorkSource(changeId: string, kind: 'evidence' | 'change', ref: string, bound: { readonly verificationId: string; readonly inputRef: string; readonly inputRevision: number }, options?: { readonly forceFull?: boolean }): { readonly ok: true; readonly source: string; readonly body: string; readonly truncated?: boolean; readonly totalBytes?: number } | { readonly ok: false; readonly code: 'missing' | 'stale' | 'invalid'; readonly message: string } {
+  readWorkSource(changeId: string, kind: 'evidence' | 'change', ref: string, bound: { readonly verificationId: string; readonly inputRef: string; readonly inputRevision: number }, options?: { readonly forceFull?: boolean; readonly view?: 'diff' }): { readonly ok: true; readonly source: string; readonly body: string; readonly truncated?: boolean; readonly totalBytes?: number } | { readonly ok: false; readonly code: 'missing' | 'stale' | 'invalid'; readonly message: string } {
+    if (options?.view === 'diff' && kind !== 'change') return { ok: false, code: 'invalid', message: 'diff view applies to delivered files only' }
     const change = this.store.work.change(changeId)
     if (!change) return { ok: false, code: 'missing', message: `unknown change ${changeId}` }
     if (!bound.verificationId || !bound.inputRef || !Number.isInteger(bound.inputRevision) || bound.inputRevision < 1) {
@@ -2550,6 +2557,7 @@ export class DotService {
     const subject = verification.subject
     const named = subject?.changes.find(item => item.path === ref)
     if (!subject || !named) return { ok: false, code: 'stale', message: `${ref} is not a delivered file of ${verification.id}` }
+    if (options?.view === 'diff') return this.readWorkDiff(change, verification.id, subject, named)
     if (named.kind === 'deleted' || !named.sha256) return { ok: false, code: 'missing', message: `${ref} was deleted in ${verification.id}` }
     if (!artifactName(subject.artifactRef) || artifactName(subject.artifactRef) !== subject.artifactRef) return { ok: false, code: 'invalid', message: 'delivery snapshot is not a single relative id' }
     try {
@@ -2559,6 +2567,65 @@ export class DotService {
     } catch {
       return { ok: false, code: 'missing', message: `${ref} could not be read` }
     }
+  }
+
+  /**
+   * Unified diff of one delivered file against the same writer baseline the
+   * added/modified/deleted classification compared against. `added` diffs
+   * against empty, `deleted` against the baseline body, so deletions are
+   * reviewable too. Binary or >256 KiB sides refuse with `invalid`; the
+   * reader falls back to the full view.
+   */
+  private readWorkDiff(change: ChangeRecord, verificationId: string, subject: DeliverySubject, named: DeliverySubject['changes'][number]): { readonly ok: true; readonly source: string; readonly body: string } | { readonly ok: false; readonly code: 'missing' | 'invalid'; readonly message: string } {
+    const artifacts = join(this.options.homeDir, 'artifacts')
+    const invalid = { ok: false as const, code: 'invalid' as const, message: `${named.path} is binary or larger than 256 KiB; open the full file` }
+    let right: Uint8Array = new Uint8Array()
+    if (named.kind !== 'deleted') {
+      if (!artifactName(subject.artifactRef) || artifactName(subject.artifactRef) !== subject.artifactRef) return { ok: false, code: 'invalid', message: 'delivery snapshot is not a single relative id' }
+      let delivered: Uint8Array | undefined
+      try { delivered = readSnapshotEntry(join(artifacts, subject.artifactRef), named.path) } catch { delivered = undefined }
+      if (!delivered) return { ok: false, code: 'missing', message: `${named.path} is missing from the delivery snapshot` }
+      right = delivered
+    }
+    let left: Uint8Array = new Uint8Array()
+    if (named.kind !== 'added') {
+      const prior = this.diffPrior(change, verificationId, subject)
+      if (prior.missing) return { ok: false, code: 'missing', message: `baseline ${prior.missing} is missing or incomplete` }
+      const entry = prior.files.find(file => foldRel(file.path) === foldRel(named.path))
+      if (entry) {
+        let before: Uint8Array | undefined
+        try { before = readSnapshotEntry(join(artifacts, entry.artifactRef), entry.path) } catch { before = undefined }
+        if (!before) return { ok: false, code: 'missing', message: `baseline ${entry.artifactRef} does not contain ${entry.path}` }
+        left = before
+      }
+    }
+    if (left.byteLength > 262_144 || right.byteLength > 262_144) return invalid
+    let leftText: string, rightText: string
+    const decoder = new TextDecoder('utf-8', { fatal: true })
+    try {
+      leftText = decoder.decode(left)
+      rightText = decoder.decode(right)
+    } catch { return invalid }
+    // Heavy rewrites can take seconds of main-loop time even under the side cap;
+    // jsdiff gives up past the timeout instead.
+    const patch = createTwoFilesPatch(`a/${named.path}`, `b/${named.path}`, leftText, rightText, undefined, undefined, { context: 3, timeout: 1500 })
+    if (patch === undefined) return { ok: false, code: 'invalid', message: `${named.path} has too many changes for a diff; open the full file` }
+    return { ok: true, source: `diff:${named.path}`, body: patch }
+  }
+
+  /** writerPrior re-reads every baseline manifest per file; a subject's baseline set is immutable, so one lookup serves all its files. */
+  private readonly diffPriors = new Map<string, ReturnType<typeof writerPrior>>()
+  private diffPrior(change: ChangeRecord, verificationId: string, subject: DeliverySubject): ReturnType<typeof writerPrior> {
+    // Change ids and artifact names restart after a factory reset; the key has
+    // to tie the memo to this exact verification and baseline set as well.
+    const key = `${verificationId}|${subject.artifactRef}|${subject.baselineRefs.map(ref => ref.artifactRef).join(',')}`
+    const cached = this.diffPriors.get(key)
+    if (cached) return cached
+    const runs = this.store.work.listRuns().filter(run => run.changeId === change.id)
+    const prior = writerPrior(subject.baselineRefs, runs, ref => this.subjectLook().read(ref))
+    if (this.diffPriors.size >= 8) this.diffPriors.delete(this.diffPriors.keys().next().value!)
+    this.diffPriors.set(key, prior)
+    return prior
   }
 
   /** Check the review, close it to new deliveries, then stop. A late delivery cannot reuse this stop. */

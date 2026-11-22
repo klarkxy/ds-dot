@@ -541,6 +541,12 @@ export const zhUi = {
   workEvidenceFailed: '读取失败：',
   workEvidenceFull: '查看全文',
   workEvidenceRetry: '重试',
+  workViewDiff: '差异',
+  workViewFull: '全文',
+  workFileView: '文件视图',
+  workQuoteLine: '引用到备注',
+  workDiffShowAll: '全部显示',
+  workDiffTruncated: '已显示 {total} 行中的前 {shown} 行',
   workEvidenceLoading: '正在读取…',
   workExcluded: '未纳入快照',
   workExcludeDir: '忽略的目录',
@@ -561,6 +567,12 @@ export const zhUi = {
   workOpenSession: '打开会话',
   workSourceExpandAll: '全部展开',
   workSourceCollapseAll: '全部收起',
+  attentionTitle: '桃乐丝需要你',
+  attentionBadge: '{n} 项待你处理',
+  sNotify: '桌面通知',
+  sNotifyDesc: '当桃乐丝需要你而此窗口被隐藏或未聚焦时，显示一条浏览器通知。',
+  sNotifyBlocked: '已被浏览器阻止',
+  sNotifyUnsupported: '此浏览器不支持',
 } as const
 
 export const zh: LocalePack = {

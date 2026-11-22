@@ -407,7 +407,7 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
   const str = (payload: unknown, key: string): string => { const value = field(payload, key); return typeof value === 'string' ? value : '' }
   // The kit's 64 KiB default answers 413 before `say` runs. A PNG of about
   // 51 KB does not fit after base64; the cap below fits the advertised images.
-  const PASSIVE_ENDPOINTS = new Set(['wait', 'board', 'work.list', 'work.read', 'card.pending', 'card.detail'])
+  const PASSIVE_ENDPOINTS = new Set(['wait', 'board', 'attention', 'work.list', 'work.read', 'card.pending', 'card.detail', 'recipes'])
   ctx.effect(() => registerHostRpc(ctx as unknown as HostRpcContext, RPC_CHANNEL, async (endpoint, payload, signal) => {
     try {
       const reqLocale = field(payload, 'uiLocale')
@@ -417,6 +417,7 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
       switch (endpoint) {
         case 'locale.sync': return { ok: true, value: await service.syncLocale(str(payload, 'locale') || str(payload, 'uiLocale')) }
         case 'board': return { ok: true, value: service.board() }
+        case 'attention': return { ok: true, value: service.attention() }
         case 'ensure': return { ok: true, value: { sessionId: await ensureDot() } }
         case 'chat': {
           await ensureDot()
@@ -504,9 +505,11 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
         case 'work.read': {
           const kind = field(payload, 'kind')
           if (kind !== 'evidence' && kind !== 'change') return { ok: false, error: { code: 'dot/invalid', message: 'kind must be evidence or change' } }
+          const view = field(payload, 'view')
+          if (view !== undefined && view !== 'diff') return { ok: false, error: { code: 'dot/invalid', message: 'view must be diff' } }
           const read = service.readWorkSource(str(payload, 'id'), kind, str(payload, 'ref'), {
             verificationId: str(payload, 'verificationId'), inputRef: str(payload, 'inputRef'), inputRevision: num(payload, 'inputRevision'),
-          }, { forceFull: field(payload, 'forceFull') === true })
+          }, { forceFull: field(payload, 'forceFull') === true, ...(view === 'diff' ? { view: 'diff' as const } : {}) })
           if (!read.ok) return { ok: false, error: { code: `dot/${read.code}`, message: read.message } }
           return { ok: true, value: { source: read.source, body: read.body, truncated: read.truncated, totalBytes: read.totalBytes } }
         }

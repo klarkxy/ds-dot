@@ -108,6 +108,8 @@ export interface WorkReadRequest {
   readonly inputRef: string
   readonly inputRevision: number
   readonly forceFull?: boolean
+  /** 'diff' asks for a unified diff against the writer baseline (change kind only). */
+  readonly view?: 'diff'
 }
 
 export interface PendingGlance {

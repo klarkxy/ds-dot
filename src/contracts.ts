@@ -239,6 +239,24 @@ export interface BoardView {
 }
 
 /**
+ * One thing waiting on the human, projected for the background badge and
+ * desktop notifications. `id` stays stable while the same unanswered card or
+ * the same decision keeps waiting, and changes when a work item re-enters
+ * needs-human for a new reason.
+ */
+export interface AttentionItem {
+  readonly id: string
+  readonly kind: 'card' | 'work'
+  readonly title: string
+  readonly since?: number
+}
+
+/** The "needs you" view the browser-side watcher polls while the panel is closed. */
+export interface AttentionView {
+  readonly items: readonly AttentionItem[]
+}
+
+/**
  * Who answers the approval prompts of the sessions in scope.
  * dot: dot settles what it can and asks the human the rest; human: every
  * request goes to the human; deny: every request is rejected.

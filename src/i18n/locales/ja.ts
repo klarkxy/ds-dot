@@ -540,6 +540,12 @@ const jaUi: UiText = {
   workEvidenceFailed: '読み込めませんでした：',
   workEvidenceFull: '全文を表示',
   workEvidenceRetry: '再試行',
+  workViewDiff: '差分',
+  workViewFull: '全文',
+  workFileView: 'ファイル表示',
+  workQuoteLine: 'メモに引用',
+  workDiffShowAll: 'すべて表示',
+  workDiffTruncated: '{total} 行中 {shown} 行を表示',
   workEvidenceLoading: '読み込み中…',
   workExcluded: 'スナップショットから除外',
   workExcludeDir: '除外ディレクトリ',
@@ -560,6 +566,12 @@ const jaUi: UiText = {
   workOpenSession: 'セッションを開く',
   workSourceExpandAll: 'すべて展開',
   workSourceCollapseAll: 'すべて折りたたむ',
+  attentionTitle: 'ドロシーがあなたを待っています',
+  attentionBadge: '{n} 件の要対応',
+  sNotify: 'デスクトップ通知',
+  sNotifyDesc: 'このウィンドウが非表示またはフォーカスされていない間にドロシーがあなたを必要としたとき、ブラウザー通知を表示します。',
+  sNotifyBlocked: 'ブラウザーでブロックされています',
+  sNotifyUnsupported: 'このブラウザーではサポートされていません',
 }
 
 const jaCard: CardCopy = {

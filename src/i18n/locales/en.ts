@@ -541,6 +541,12 @@ const enUi: UiText = {
   workEvidenceFailed: 'Could not be read: ',
   workEvidenceFull: 'View full content',
   workEvidenceRetry: 'Retry',
+  workViewDiff: 'Diff',
+  workViewFull: 'Full',
+  workFileView: 'File view',
+  workQuoteLine: 'Quote in note',
+  workDiffShowAll: 'Show all',
+  workDiffTruncated: 'Showing {shown} of {total} lines',
   workEvidenceLoading: 'Loading…',
   workExcluded: 'Excluded from snapshot',
   workExcludeDir: 'Ignored directory',
@@ -561,6 +567,12 @@ const enUi: UiText = {
   workOpenSession: 'Open session',
   workSourceExpandAll: 'Expand all',
   workSourceCollapseAll: 'Collapse all',
+  attentionTitle: 'Dorothy needs you',
+  attentionBadge: '{n} need you',
+  sNotify: 'Desktop notifications',
+  sNotifyDesc: 'Show a browser notification when Dorothy needs you while this window is hidden or not focused.',
+  sNotifyBlocked: 'Blocked by the browser',
+  sNotifyUnsupported: 'Not supported by this browser',
 }
 
 export const en: LocalePack = {

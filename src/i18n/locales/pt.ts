@@ -540,6 +540,12 @@ const ptUi: UiText = {
   workEvidenceFailed: 'Não foi possível ler: ',
   workEvidenceFull: 'Ver conteúdo completo',
   workEvidenceRetry: 'Tentar novamente',
+  workViewDiff: 'Diff',
+  workViewFull: 'Completo',
+  workFileView: 'Vista do ficheiro',
+  workQuoteLine: 'Citar na nota',
+  workDiffShowAll: 'Mostrar tudo',
+  workDiffTruncated: 'Mostrando {shown} de {total} linhas',
   workEvidenceLoading: 'Carregando…',
   workExcluded: 'Excluído do snapshot',
   workExcludeDir: 'Diretório ignorado',
@@ -560,6 +566,12 @@ const ptUi: UiText = {
   workOpenSession: 'Abrir sessão',
   workSourceExpandAll: 'Expandir tudo',
   workSourceCollapseAll: 'Recolher tudo',
+  attentionTitle: 'Dorothy precisa de você',
+  attentionBadge: '{n} precisam de você',
+  sNotify: 'Notificações de área de trabalho',
+  sNotifyDesc: 'Mostra uma notificação do navegador quando Dorothy precisa de você enquanto esta janela está oculta ou sem foco.',
+  sNotifyBlocked: 'Bloqueado pelo navegador',
+  sNotifyUnsupported: 'Sem suporte neste navegador',
 }
 
 const ptCard: CardCopy = {

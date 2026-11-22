@@ -540,6 +540,12 @@ const deUi: UiText = {
   workEvidenceFailed: 'Konnte nicht gelesen werden: ',
   workEvidenceFull: 'Vollständigen Inhalt anzeigen',
   workEvidenceRetry: 'Erneut versuchen',
+  workViewDiff: 'Diff',
+  workViewFull: 'Voll',
+  workFileView: 'Dateiansicht',
+  workQuoteLine: 'In Notiz zitieren',
+  workDiffShowAll: 'Alle anzeigen',
+  workDiffTruncated: '{shown} von {total} Zeilen angezeigt',
   workEvidenceLoading: 'Wird geladen…',
   workExcluded: 'Vom Snapshot ausgeschlossen',
   workExcludeDir: 'Ignoriertes Verzeichnis',
@@ -560,6 +566,12 @@ const deUi: UiText = {
   workOpenSession: 'Sitzung öffnen',
   workSourceExpandAll: 'Alle ausklappen',
   workSourceCollapseAll: 'Alle einklappen',
+  attentionTitle: 'Dorothy braucht dich',
+  attentionBadge: '{n} brauchen dich',
+  sNotify: 'Desktop-Benachrichtigungen',
+  sNotifyDesc: 'Zeigt eine Browser-Benachrichtigung, wenn Dorothy dich braucht, während dieses Fenster ausgeblendet oder nicht fokussiert ist.',
+  sNotifyBlocked: 'Vom Browser blockiert',
+  sNotifyUnsupported: 'Von diesem Browser nicht unterstützt',
 }
 
 const deCard: CardCopy = {

@@ -342,7 +342,7 @@ export function RecipesView({ locale, api, rows, error, onChanged }: {
               <div className="dsh-dot-recipe-stats">
                 {row.stats.map(stat => (
                   <span key={stat.revision} className="dsh-ui-meta">
-                    {fillText(t(locale, 'recipeRev'), { n: String(stat.revision) })}: {stat.accepted} {t(locale, 'recipeAccepted')} · {stat.cancelled} {t(locale, 'recipeCancelled')} · {stat.failedRounds} {t(locale, 'recipeFailedRounds')} · {stat.inFlight} {t(locale, 'recipeInFlight')}{stat.avgTokens !== undefined ? ` · ${t(locale, 'recipeAvg')} ${formatTokens(stat.avgTokens)} ${t(locale, 'workTokens')}` : ''}{stat.avgWallMs !== undefined ? ` · ${t(locale, 'recipeAvg')} ${formatDuration(stat.avgWallMs)}` : ''}
+                    {fillText(t(locale, 'recipeRev'), { n: String(stat.revision) })}: {stat.accepted} {t(locale, 'recipeAccepted')} · {stat.cancelled} {t(locale, 'recipeCancelled')} · {stat.failedRounds} {t(locale, 'recipeFailedRounds')} · {stat.inFlight} {t(locale, 'recipeInFlight')}{(stat.avgTokens !== undefined || stat.avgWallMs !== undefined) ? ` · ${t(locale, 'recipeAvg')}: ${[stat.avgTokens !== undefined ? `${formatTokens(stat.avgTokens)} ${t(locale, 'workTokens')}` : '', stat.avgWallMs !== undefined ? formatDuration(stat.avgWallMs) : ''].filter(Boolean).join(' · ')}` : ''}
                   </span>
                 ))}
               </div>

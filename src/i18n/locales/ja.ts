@@ -96,7 +96,7 @@ const jaUi: UiText = {
   filterWatch: '監視・リマインダー',
   filterRecipes: 'レシピ',
   recipeRev: 'rev {n}',
-  recipeAvg: '平均',
+  recipeAvg: '承認済みタスクの平均',
   recipeRunNow: '今すぐ実行',
   recipeRunConfirm: '実行を確認',
   recipeRunDone: '{id} をディスパッチしました',

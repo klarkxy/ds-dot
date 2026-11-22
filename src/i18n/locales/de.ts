@@ -96,7 +96,7 @@ const deUi: UiText = {
   filterWatch: 'Beobachtet & Erinnerungen',
   filterRecipes: 'Rezepte',
   recipeRev: 'Rev. {n}',
-  recipeAvg: 'Ø',
+  recipeAvg: 'Ø je akzeptierter Aufgabe',
   recipeRunNow: 'Jetzt ausführen',
   recipeRunConfirm: 'Ausführung bestätigen',
   recipeRunDone: '{id} gestartet',

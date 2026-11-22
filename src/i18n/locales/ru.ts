@@ -96,7 +96,7 @@ const ruUi: UiText = {
   filterWatch: 'Отслеживаемые и напоминания',
   filterRecipes: 'Рецепты',
   recipeRev: 'рев. {n}',
-  recipeAvg: 'сред.',
+  recipeAvg: 'сред. на принятую',
   recipeRunNow: 'Запустить',
   recipeRunConfirm: 'Подтвердить запуск',
   recipeRunDone: 'Запущено {id}',

@@ -96,7 +96,7 @@ const esUi: UiText = {
   filterWatch: 'Seguimiento y recordatorios',
   filterRecipes: 'Recetas',
   recipeRev: 'rev {n}',
-  recipeAvg: 'prom.',
+  recipeAvg: 'prom. por aceptada',
   recipeRunNow: 'Ejecutar ahora',
   recipeRunConfirm: 'Confirmar ejecución',
   recipeRunDone: '{id} despachado',

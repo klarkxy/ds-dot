@@ -97,7 +97,7 @@ const enUi: UiText = {
   filterWatch: 'Watched & reminders',
   filterRecipes: 'Recipes',
   recipeRev: 'rev {n}',
-  recipeAvg: 'avg',
+  recipeAvg: 'avg per accepted',
   recipeRunNow: 'Run now',
   recipeRunConfirm: 'Confirm run',
   recipeRunDone: 'Dispatched {id}',

@@ -122,7 +122,7 @@ describe('task recipes', () => {
     const stats = recipeRevisionStats(recipe, [])
     // c-2 has no cost fields so only c-1 counts; cancelled rows never feed the averages.
     expect(stats[0]).toMatchObject({ revision: 2, accepted: 2, cancelled: 1, avgTokens: 100, avgWallMs: 1000 })
-    expect(recipeStatsLine(recipe, [])).toBe('rev2: 2 accepted, 1 cancelled, avg 0.0 failed rounds, avg 100 tok, avg 1.0s')
+    expect(recipeStatsLine(recipe, [])).toBe('rev2: 2 accepted, 1 cancelled, avg 0.0 failed rounds, avg per accepted 100 tok, avg per accepted 1.0s')
     // A live terminal change feeds the same fields through the merge.
     const liveRow = live({ changeId: 'c-9', terminal: true, accepted: true, revision: 2, tokens: 50, wallMs: 500, at: 9 })
     expect(mergeRecipeOutcomes(recipe.outcomes, [liveRow])[0]).toMatchObject({ changeId: 'c-9', tokens: 50, wallMs: 500 })

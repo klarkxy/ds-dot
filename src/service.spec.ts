@@ -2695,6 +2695,9 @@ describe('runRecipe', () => {
     const changes = h.store.work.listChanges().filter(row => row.recipe?.id === h.store.recipe('bad')!.id)
     expect(changes).toHaveLength(1)
     expect(changes[0]!.control).toBe('cancelled')
+    // The cancellation note leads the reason so a long dispatch text can't
+    // push it past the flatten cap in formatReminders.
+    if (!result.ok) expect(result.reason).toMatch(new RegExp(`^fresh change ${changes[0]!.id} was cancelled — `))
     // The cancelled change is terminal: a retry is allowed to try again.
     const retry = await h.service.runRecipe('bad', { origin: 'reminder', note: 'the note', reminderTitle: 'weekly' })
     expect(retry).toMatchObject({ ok: false })

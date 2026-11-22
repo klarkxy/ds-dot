@@ -97,7 +97,7 @@ export const zhUi = {
   filterWatch: '关注与提醒',
   filterRecipes: '配方',
   recipeRev: '第 {n} 版',
-  recipeAvg: '平均',
+  recipeAvg: '每个通过任务的平均',
   recipeRunNow: '立即运行',
   recipeRunConfirm: '确认运行',
   recipeRunDone: '已派发 {id}',

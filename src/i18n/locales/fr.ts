@@ -96,7 +96,7 @@ const frUi: UiText = {
   filterWatch: 'Suivis et rappels',
   filterRecipes: 'Recettes',
   recipeRev: 'rév. {n}',
-  recipeAvg: 'moy.',
+  recipeAvg: "moy. par tâche acceptée",
   recipeRunNow: 'Exécuter',
   recipeRunConfirm: "Confirmer l'exécution",
   recipeRunDone: '{id} lancée',

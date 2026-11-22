@@ -1617,9 +1617,9 @@ export class DotService {
     const cancelFresh = async (reason: string): Promise<{ readonly ok: false; readonly reason: string }> => {
       const cancelled = await this.cancelWorkChange(change.id).catch(() => undefined)
       const cancelledNote = cancelled && 'ok' in cancelled && cancelled.ok
-        ? `; fresh change ${change.id} was cancelled`
-        : `; fresh change ${change.id} could not be cancelled`
-      return { ok: false as const, reason: `${reason}${cancelledNote}` }
+        ? `fresh change ${change.id} was cancelled`
+        : `fresh change ${change.id} could not be cancelled`
+      return { ok: false as const, reason: `${cancelledNote} — ${reason}` }
     }
     let dispatchText = ''
     try {

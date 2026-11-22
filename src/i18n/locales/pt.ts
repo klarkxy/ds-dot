@@ -96,7 +96,7 @@ const ptUi: UiText = {
   filterWatch: 'Observadas e lembretes',
   filterRecipes: 'Receitas',
   recipeRev: 'rev {n}',
-  recipeAvg: 'méd.',
+  recipeAvg: 'méd. por aceita',
   recipeRunNow: 'Executar agora',
   recipeRunConfirm: 'Confirmar execução',
   recipeRunDone: '{id} despachada',

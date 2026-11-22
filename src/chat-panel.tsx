@@ -29,7 +29,7 @@ import type { BoardView, ChatItem, ChatSnapshot, DotSettings, RecipeBoardRow, Ro
 import type { ChatImage } from './chat-images.ts'
 import { SettingsPanel, useSettingProposals, type SaveNotice, type SettingsApi } from './settings-panel.tsx'
 import type { RenderFactorySlot } from '@klarkxy/dsh-plugin-kit/model-picker'
-import { cardCopy, fillText, formatWhen, intlLocale, t, toolLabel, type CopyLocale, type TextKey } from './ui-copy.ts'
+import { cardCopy, fillText, formatDuration, formatTokens, formatWhen, intlLocale, t, toolLabel, type CopyLocale, type TextKey } from './ui-copy.ts'
 import { WorkBoardPanel, type WorkApi } from './work-board.tsx'
 import type { WorkAcceptPayload, PendingGlance, WorkBoardItem, WorkReadRequest, WorkRejectPayload } from './work-board.ts'
 import { DotAvatar } from './whale.tsx'
@@ -342,7 +342,7 @@ export function RecipesView({ locale, api, rows, error, onChanged }: {
               <div className="dsh-dot-recipe-stats">
                 {row.stats.map(stat => (
                   <span key={stat.revision} className="dsh-ui-meta">
-                    {fillText(t(locale, 'recipeRev'), { n: String(stat.revision) })}: {stat.accepted} {t(locale, 'recipeAccepted')} · {stat.cancelled} {t(locale, 'recipeCancelled')} · {stat.failedRounds} {t(locale, 'recipeFailedRounds')} · {stat.inFlight} {t(locale, 'recipeInFlight')}
+                    {fillText(t(locale, 'recipeRev'), { n: String(stat.revision) })}: {stat.accepted} {t(locale, 'recipeAccepted')} · {stat.cancelled} {t(locale, 'recipeCancelled')} · {stat.failedRounds} {t(locale, 'recipeFailedRounds')} · {stat.inFlight} {t(locale, 'recipeInFlight')}{stat.avgTokens !== undefined ? ` · ${t(locale, 'recipeAvg')} ${formatTokens(stat.avgTokens)} ${t(locale, 'workTokens')}` : ''}{stat.avgWallMs !== undefined ? ` · ${t(locale, 'recipeAvg')} ${formatDuration(stat.avgWallMs)}` : ''}
                   </span>
                 ))}
               </div>

@@ -295,7 +295,8 @@ const recipeSchema = z.object({
   history: z.array(z.object({ ...recipeBodyFields, revision: z.number().int().positive(), name: z.string(), reason: z.string().optional(), at: z.number() })),
   outcomes: z.array(z.object({
     changeId: z.string().min(1), title: z.string(), revision: z.number().int(),
-    result: z.enum(['accepted', 'cancelled']), failedRounds: z.number().int().nonnegative(), at: z.number(),
+    result: z.enum(['accepted', 'cancelled']), failedRounds: z.number().int().nonnegative(),
+    tokens: z.number().optional(), wallMs: z.number().optional(), at: z.number(),
   })),
   createdAt: z.number(),
   updatedAt: z.number(),

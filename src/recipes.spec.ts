@@ -112,4 +112,24 @@ describe('task recipes', () => {
     expect(stats[0]).toMatchObject({ accepted: 0, cancelled: 1 })
     expect(stats[1]).toMatchObject({ accepted: 1, cancelled: 0 })
   })
+
+  it('averages run cost over the accepted outcomes that recorded it', () => {
+    const recipe = record({ revision: 2, outcomes: [
+      { changeId: 'c-1', title: 'a', revision: 2, result: 'accepted', failedRounds: 0, tokens: 100, wallMs: 1000, at: 5 },
+      { changeId: 'c-2', title: 'b', revision: 2, result: 'accepted', failedRounds: 0, at: 6 },
+      { changeId: 'c-3', title: 'c', revision: 2, result: 'cancelled', failedRounds: 0, tokens: 900, wallMs: 9000, at: 7 },
+    ] })
+    const stats = recipeRevisionStats(recipe, [])
+    // c-2 has no cost fields so only c-1 counts; cancelled rows never feed the averages.
+    expect(stats[0]).toMatchObject({ revision: 2, accepted: 2, cancelled: 1, avgTokens: 100, avgWallMs: 1000 })
+    expect(recipeStatsLine(recipe, [])).toBe('rev2: 2 accepted, 1 cancelled, avg 0.0 failed rounds, avg 100 tok, avg 1.0s')
+    // A live terminal change feeds the same fields through the merge.
+    const liveRow = live({ changeId: 'c-9', terminal: true, accepted: true, revision: 2, tokens: 50, wallMs: 500, at: 9 })
+    expect(mergeRecipeOutcomes(recipe.outcomes, [liveRow])[0]).toMatchObject({ changeId: 'c-9', tokens: 50, wallMs: 500 })
+    expect(recipeRevisionStats(recipe, [liveRow])[0]).toMatchObject({ accepted: 3, avgTokens: 75, avgWallMs: 750 })
+    // No cost recorded anywhere — the averages stay off the line.
+    const plain = record({ revision: 1, outcomes: [{ changeId: 'c-1', title: 'a', revision: 1, result: 'accepted', failedRounds: 0, at: 5 }] })
+    expect(recipeRevisionStats(plain, [])[0]).not.toHaveProperty('avgTokens')
+    expect(recipeStatsLine(plain, [])).toBe('rev1: 1 accepted, 0 cancelled, avg 0.0 failed rounds')
+  })
 })

@@ -634,6 +634,9 @@ export interface RecipeOutcome {
   readonly revision: number
   readonly result: 'accepted' | 'cancelled'
   readonly failedRounds: number
+  /** Cost summed over the change's runs at the moment the outcome was written. */
+  readonly tokens?: number
+  readonly wallMs?: number
   readonly at: number
 }
 

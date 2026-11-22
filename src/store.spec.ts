@@ -459,6 +459,22 @@ describe('task recipe storage', () => {
     expect(new DotStore(domain).recipes).toEqual([])
   })
 
+  it('round-trips outcome cost fields while legacy outcomes stay readable', () => {
+    const { domain } = fakeDomain({ recipes: { 'rcp-abc123': {
+      ...recipeRow,
+      outcomes: [
+        { changeId: 'c-1', title: 'Run', revision: 2, result: 'accepted', failedRounds: 0, tokens: 12_800, wallMs: 252_000, at: 2 },
+        { changeId: 'c-2', title: 'Old', revision: 2, result: 'cancelled', failedRounds: 1, at: 3 },
+      ],
+    } } })
+    const store = new DotStore(domain)
+    const outcomes = store.recipe('rcp-abc123')!.outcomes
+    expect(outcomes[0]).toMatchObject({ changeId: 'c-1', tokens: 12_800, wallMs: 252_000 })
+    expect(outcomes[1]).toMatchObject({ changeId: 'c-2', result: 'cancelled' })
+    expect(outcomes[1]).not.toHaveProperty('tokens')
+    expect(outcomes[1]).not.toHaveProperty('wallMs')
+  })
+
   it('reads a malformed recipe row as absent', () => {
     const { domain } = fakeDomain({ recipes: {
       'rcp-bad': { id: 'rcp-bad', name: 5 },

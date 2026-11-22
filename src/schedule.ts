@@ -142,10 +142,12 @@ export function formatReminders(due: readonly ScheduleRecord[], now: number, opt
       `due ${stamp(record.nextAt)}${now - record.nextAt > LATE_MS ? ', delivered late' : ''}`,
       next === undefined ? 'now removed' : `next ${stamp(next)}`,
     ]
-    const prompt = record.prompt ? `: ${entryText(record.prompt)}` : ''
-    lines.push(`- ${record.id} "${record.title}" (${facts.join('; ')})${recipeTag(record)}${prompt}`)
     const refused = opts?.refusals?.get(record.id)
-    if (refused) lines.push(`  recipe dispatch refused: ${refused}`)
+    // The refusal rides the bullet in brackets: a prompt can never reach that
+    // position, so a quoted "… refused: …" line can't masquerade as a failure.
+    const refusalTag = refused ? ` [dispatch refused: ${refused.replace(/[[\]]/g, '')}]` : ''
+    const prompt = record.prompt ? `: ${entryText(record.prompt)}` : ''
+    lines.push(`- ${record.id} "${record.title}" (${facts.join('; ')})${recipeTag(record)}${refusalTag}${prompt}`)
   }
   lines.push('Do what each one asks now. The human reads your reply in the chat, so tell them what is worth their attention and nothing about the reminder itself.')
   return lines.join('\n')

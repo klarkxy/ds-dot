@@ -103,7 +103,7 @@ describe('recipe-bound schedules', () => {
     const record: ScheduleRecord = { id: 'sch-9', title: 'Report', prompt: 'note', timing: { kind: 'every' as const, minutes: 60, anchor: NOW - MINUTE }, createdAt: NOW - MINUTE, nextAt: NOW, recipe: 'rcp-1' }
     const text = formatReminders([record], NOW, { refusals: new Map([['sch-9', 'previous run still in flight']]), recipeName: () => 'Weekly' })
     expect(text).toContain('recipe rcp-1 "Weekly"')
-    expect(text).toContain('recipe dispatch refused: previous run still in flight')
+    expect(text).toContain(' [dispatch refused: previous run still in flight]')
     const list = scheduleLines([record], () => 'Weekly')
     expect(list).toContain('recipe rcp-1 "Weekly"')
   })

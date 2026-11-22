@@ -199,7 +199,7 @@ describe('recipe-bound reminders', () => {
     await clock.tick()
     expect(delivered).toHaveLength(1)
     expect(delivered[0]).toContain('sch-p1')
-    expect(delivered[0]).toContain('recipe dispatch refused: previous run still in flight')
+    expect(delivered[0]).toContain('[dispatch refused: previous run still in flight]')
     expect(delivered[0]).toContain('rcp-1')
   })
 

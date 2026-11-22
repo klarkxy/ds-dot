@@ -102,10 +102,13 @@ describe('approval risk', () => {
     expect(mcpToolMayWrite('mcp__fs__read-file')).toBe(false)
     expect(mcpToolMayWrite('mcp__github__get_issue_0123456789ab')).toBe(false)
     expect(mcpToolMayWrite('MCP__github__listRepos')).toBe(false)
+    // A server name may itself contain `__`; the raw name is the last segment.
+    expect(mcpToolMayWrite('mcp__team__docs__search_docs')).toBe(false)
     // Anything else may write.
     expect(mcpToolMayWrite('mcp__github__create_issue')).toBe(true)
     expect(mcpToolMayWrite('mcp__agent_bridge__dispatch_task')).toBe(true)
     expect(mcpToolMayWrite('mcp__fs__write_file')).toBe(true)
+    expect(mcpToolMayWrite('mcp__team__docs__delete_page')).toBe(true)
     // Malformed mcp__ names fail closed.
     expect(mcpToolMayWrite('mcp__x')).toBe(true)
     expect(mcpToolMayWrite('mcp__x__')).toBe(true)

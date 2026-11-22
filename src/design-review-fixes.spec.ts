@@ -202,6 +202,24 @@ describe('2. Runtime tools/pre-execute WriteScope enforcement on child sessions'
     // A non-MCP unknown tool still passes the read-only guard.
     expect(guardRunWriteTool(readRun, { name: 'read_file', input: { path: 'a.txt' } }, 'linux')).toEqual({ allow: true })
   })
+
+  it('denies write-shaped MCP tools for each read-only shape on its own', () => {
+    // access: 'read' with a non-empty paths scope — a review-like run.
+    const reviewRun = {
+      id: 'run-review', cwd: '/repo', workspaceRoot: '/repo',
+      access: 'read' as const,
+      writeScope: { kind: 'paths' as const, paths: [{ path: 'src/allowed.ts', type: 'file' as const }] },
+    }
+    // No access and an empty write scope — nothing writable either.
+    const scopelessRun = {
+      id: 'run-scopeless', cwd: '/repo', workspaceRoot: '/repo',
+      writeScope: { kind: 'paths' as const, paths: [] },
+    }
+    for (const run of [reviewRun, scopelessRun]) {
+      expect(guardRunWriteTool(run, { name: 'mcp__github__create_issue', input: {} }, 'linux')).toMatchObject({ allow: false })
+      expect(guardRunWriteTool(run, { name: 'mcp__github__get_issue', input: {} }, 'linux')).toEqual({ allow: true })
+    }
+  })
 })
 
 describe('3. Async snapshot capture, manifest-only reads, size guard, and orphan snapshot GC', () => {

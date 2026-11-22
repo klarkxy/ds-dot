@@ -66,7 +66,10 @@ export function mcpToolMayWrite(toolName: string): boolean {
   const trimmed = toolName.trim()
   if (!trimmed.toLowerCase().startsWith('mcp__')) return false
   const rest = trimmed.slice('mcp__'.length)
-  const sep = rest.indexOf('__')
+  // The server name may itself contain `__` ([A-Za-z0-9_-]{1,32}); the raw
+  // tool name is the segment after the LAST `__`. The lossy-normalization
+  // hash suffix is `_<12hex>` (single underscore), never `__`.
+  const sep = rest.lastIndexOf('__')
   if (sep <= 0) return true
   const raw = rest.slice(sep + 2)
   if (raw === '') return true

@@ -3,6 +3,7 @@ import { RECIPE_HISTORY_MAX, RECIPE_OUTCOMES_MAX, type RecipeRecord } from './co
 import {
   mergeRecipeOutcomes,
   recipeBodyAt,
+  recipeRegression,
   recipeRevisionStats,
   recipeStatsLine,
   recipeVersionAt,
@@ -131,5 +132,113 @@ describe('task recipes', () => {
     const plain = record({ revision: 1, outcomes: [{ changeId: 'c-1', title: 'a', revision: 1, result: 'accepted', failedRounds: 0, at: 5 }] })
     expect(recipeRevisionStats(plain, [])[0]).not.toHaveProperty('avgTokens')
     expect(recipeStatsLine(plain, [])).toBe('rev1: 1 accepted, 0 cancelled, avg 0.0 failed rounds')
+  })
+})
+
+describe('recipeRegression', () => {
+  const stat = (revision: number, partial: Partial<import('./recipes.ts').RecipeRevisionStats> = {}) => ({
+    revision, accepted: 0, cancelled: 0, failedRounds: 0, inFlight: 0, ...partial,
+  })
+  /** Recipe at rev 3 with revs 1 and 2 restorable in history. */
+  const withHistory = () => {
+    let recipe = record({ goal: 'v1' })
+    recipe = reviseRecipe(recipe, { ...recipe, goal: 'v2', name: recipe.name, reason: 'r' }, 2)
+    recipe = reviseRecipe(recipe, { ...recipe, goal: 'v3', name: recipe.name, reason: 'r' }, 3)
+    return recipe
+  }
+
+  it('needs at least three finished outcomes on the current revision', () => {
+    const recipe = withHistory()
+    const early = stat(2, { accepted: 4, cancelled: 1 })
+    expect(recipeRegression(recipe, [stat(3, { accepted: 0, cancelled: 2 }), early])).toBeUndefined()
+  })
+
+  it('needs a restorable earlier revision with three finished outcomes', () => {
+    const recipe = withHistory()
+    // rev 9 was never in history → not restorable even though its rate is great.
+    const stats = [stat(3, { accepted: 0, cancelled: 3 }), stat(9, { accepted: 5 })]
+    expect(recipeRegression(recipe, stats)).toBeUndefined()
+    // rev 1 only has two finished → not a candidate either.
+    expect(recipeRegression(recipe, [stat(3, { accepted: 0, cancelled: 3 }), stat(1, { accepted: 2 })])).toBeUndefined()
+  })
+
+  it('flags an acceptance drop at the 0.34 boundary, not below it', () => {
+    const recipe = withHistory()
+    const early = stat(1, { accepted: 4, cancelled: 1 }) // rate 0.8
+    const onEdge = stat(3, { accepted: 2, cancelled: 3 })  // rate 0.4 → diff 0.4
+    expect(recipeRegression(recipe, [onEdge, early])).toMatchObject({ betterRevision: 1, reason: 'acceptance' })
+    // diff 0.3 → no acceptance flag; rates differ >0.1 so rework/cost stay off.
+    const close = stat(3, { accepted: 5, cancelled: 5 }) // rate 0.5 → diff 0.3
+    expect(recipeRegression(recipe, [close, early])).toBeUndefined()
+  })
+
+  it('flags rework at +1 failed round per finished outcome when rates match', () => {
+    const recipe = withHistory()
+    const early = stat(1, { accepted: 4, cancelled: 1, failedRounds: 1 })  // rate 0.8, rework 0.2
+    const current = stat(3, { accepted: 4, cancelled: 1, failedRounds: 6 }) // rate 0.8, rework 1.2 → +1.0
+    expect(recipeRegression(recipe, [current, early])).toMatchObject({ betterRevision: 1, reason: 'rework' })
+    const notEnough = stat(3, { accepted: 4, cancelled: 1, failedRounds: 5 }) // rework 1.0 → +0.8
+    expect(recipeRegression(recipe, [notEnough, early])).toBeUndefined()
+    // rates differ by more than 0.1 but less than the acceptance bar → no flag
+    const earlyMid = stat(1, { accepted: 2, cancelled: 3, failedRounds: 0 }) // rate 0.4
+    const farRate = stat(3, { accepted: 1, cancelled: 4, failedRounds: 6 })  // rate 0.2 → diff 0.2
+    expect(recipeRegression(recipe, [farRate, earlyMid])).toBeUndefined()
+  })
+
+  it('flags cost at 1.5× average tokens when rates match', () => {
+    const recipe = withHistory()
+    const early = stat(1, { accepted: 4, cancelled: 1, avgTokens: 100 })
+    const onEdge = stat(3, { accepted: 4, cancelled: 1, avgTokens: 150 })
+    expect(recipeRegression(recipe, [onEdge, early])).toMatchObject({ betterRevision: 1, reason: 'cost' })
+    const below = stat(3, { accepted: 4, cancelled: 1, avgTokens: 149 })
+    expect(recipeRegression(recipe, [below, early])).toBeUndefined()
+    // missing averages → no cost flag
+    const noAvg = stat(3, { accepted: 4, cancelled: 1 })
+    expect(recipeRegression(recipe, [noAvg, early])).toBeUndefined()
+    expect(recipeRegression(recipe, [onEdge, stat(1, { accepted: 4, cancelled: 1 })])).toBeUndefined()
+    // a zero earlier average would flag any nonzero spend → not a regression
+    expect(recipeRegression(recipe, [onEdge, stat(1, { accepted: 4, cancelled: 1, avgTokens: 0 })])).toBeUndefined()
+  })
+
+  it('picks the best earlier revision by rate, then lower rework, then lower tokens', () => {
+    const recipe = withHistory()
+    const current = stat(3, { accepted: 0, cancelled: 4 }) // rate 0
+    const stats = [
+      current,
+      stat(1, { accepted: 4, cancelled: 1, failedRounds: 4 }), // rate 0.8, rework 0.8
+      stat(2, { accepted: 4, cancelled: 1, failedRounds: 1 }), // rate 0.8, rework 0.2 → wins
+    ]
+    expect(recipeRegression(recipe, stats)).toMatchObject({ betterRevision: 2 })
+    // equal rate and rework → lower tokens wins
+    const withTokens = [
+      current,
+      stat(1, { accepted: 4, cancelled: 1, failedRounds: 2, avgTokens: 300 }),
+      stat(2, { accepted: 4, cancelled: 1, failedRounds: 2, avgTokens: 100 }),
+    ]
+    expect(recipeRegression(recipe, withTokens)).toMatchObject({ betterRevision: 2 })
+    // higher rate beats lower rework
+    const higherRate = [
+      current,
+      stat(1, { accepted: 4, cancelled: 1, failedRounds: 10 }), // rate 0.8, rework 2.0
+      stat(2, { accepted: 5, cancelled: 0, failedRounds: 5 }),  // rate 1.0 → wins
+    ]
+    expect(recipeRegression(recipe, higherRate)).toMatchObject({ betterRevision: 2 })
+  })
+
+  it('acceptance outranks rework and cost for the same candidate', () => {
+    const recipe = withHistory()
+    const early = stat(1, { accepted: 4, cancelled: 1, failedRounds: 0, avgTokens: 100 })
+    // rate diff 0.8 (acceptance), rework diff +1.4, tokens 1.5× — reason is acceptance.
+    const current = stat(3, { accepted: 0, cancelled: 4, failedRounds: 6, avgTokens: 150 })
+    expect(recipeRegression(recipe, [current, early])?.reason).toBe('acceptance')
+  })
+
+  it('writes one summary line with both revisions\u2019 numbers', () => {
+    const recipe = withHistory()
+    const regression = recipeRegression(recipe, [
+      stat(3, { accepted: 1, cancelled: 3, failedRounds: 10 }),
+      stat(2, { accepted: 4, cancelled: 1, failedRounds: 2 }),
+    ])
+    expect(regression?.summary).toBe('rev 3: 1/4 accepted, 2.5 failed rounds avg; rev 2: 4/5 accepted, 0.4 failed rounds avg')
   })
 })

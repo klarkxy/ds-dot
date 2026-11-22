@@ -98,6 +98,14 @@ export function attentionItems(cards: readonly DotCardRecord[], view: BoardView)
       ...since !== undefined ? { since } : {},
     })
   }
+  for (const proposal of view.recipeProposals ?? []) {
+    items.push({
+      id: `recipe:${proposal.id}`,
+      kind: 'recipe',
+      title: `${proposal.recipeName} — ${proposal.kind}`,
+      since: proposal.createdAt,
+    })
+  }
   return items.sort((a, b) => (a.since ?? Number.POSITIVE_INFINITY) - (b.since ?? Number.POSITIVE_INFINITY) || a.id.localeCompare(b.id))
 }
 

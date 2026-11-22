@@ -214,6 +214,52 @@ export interface ScheduleView extends ScheduleRecord {
   readonly recipeName?: string
 }
 
+/**
+ * A human-gated proposal to restore or revise a recipe. `baseRevision` is the
+ * recipe revision the proposal was made against; once the recipe moves past
+ * it, deciding marks the proposal stale instead of applying.
+ */
+export interface RecipeProposal {
+  readonly id: string
+  readonly recipeId: string
+  readonly baseRevision: number
+  readonly kind: 'restore' | 'revise'
+  readonly targetRevision?: number
+  readonly patch?: {
+    readonly goal?: string
+    readonly requirements?: readonly import('./work.ts').Requirement[]
+    readonly constraints?: readonly import('./work.ts').Constraint[]
+    readonly notes?: string
+  }
+  readonly reason: string
+  readonly origin: 'detector' | 'reflection'
+  /** The regression kind a detector proposal was raised under — the dismiss dedupe key. */
+  readonly regression?: 'acceptance' | 'rework' | 'cost'
+  readonly status: 'pending' | 'approved' | 'dismissed' | 'stale'
+  readonly createdAt: number
+  readonly decidedAt?: number
+}
+
+/** A pending proposal as the Recipes view renders it, with the base body for the revise diff. */
+export interface RecipeProposalView {
+  readonly id: string
+  readonly kind: 'restore' | 'revise'
+  readonly origin: 'detector' | 'reflection'
+  readonly baseRevision: number
+  readonly targetRevision?: number
+  readonly patch?: RecipeProposal['patch']
+  /** Snapshot of the revision the proposal was made against, for the merged diff. */
+  readonly base?: {
+    readonly goal: string
+    readonly notes?: string
+    readonly requirementsFromGoal: boolean
+    readonly requirements: readonly import('./work.ts').Requirement[]
+    readonly constraints: readonly import('./work.ts').Constraint[]
+  }
+  readonly reason: string
+  readonly createdAt: number
+}
+
 /** One recipe as the Tasks panel's Recipes filter renders it. */
 export interface RecipeBoardRow {
   readonly id: string
@@ -223,6 +269,7 @@ export interface RecipeBoardRow {
   readonly stats: readonly import('./recipes.ts').RecipeRevisionStats[]
   readonly inFlight: readonly { readonly changeId: string; readonly title: string; readonly status: string }[]
   readonly reminders: readonly { readonly id: string; readonly title: string; readonly nextAt: number }[]
+  readonly proposal?: RecipeProposalView
 }
 
 export interface BoardView {
@@ -236,6 +283,8 @@ export interface BoardView {
   readonly pending: readonly PendingView[]
   /** dot's reminders, the one due first on top. */
   readonly schedules: readonly ScheduleView[]
+  /** Pending recipe proposals, for the "needs you" attention items. */
+  readonly recipeProposals?: readonly { readonly id: string; readonly recipeId: string; readonly recipeName: string; readonly kind: 'restore' | 'revise'; readonly createdAt: number }[]
 }
 
 /**
@@ -246,7 +295,7 @@ export interface BoardView {
  */
 export interface AttentionItem {
   readonly id: string
-  readonly kind: 'card' | 'work'
+  readonly kind: 'card' | 'work' | 'recipe'
   readonly title: string
   readonly since?: number
 }
@@ -388,6 +437,7 @@ export interface FactoryResetPreview {
   readonly runs: number
   readonly schedules: number
   readonly recipes: number
+  readonly recipeProposals: number
   readonly proposals: number
   readonly cards: number
   /** Pending and delivered external events in the inbox table. */

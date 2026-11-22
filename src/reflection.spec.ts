@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { DEFAULT_SETTINGS, TOOL } from './contracts.ts'
 import type { RawEvent } from './chat.ts'
 import type { DotHost } from './host.ts'
-import { ReflectionRunner, REFLECTION_FAILURE_COOLDOWN_MS, REFLECTION_INSTRUCTIONS, REFLECTION_INTERVAL_MS, REFLECTION_PRESET_ID, REFLECTION_SUBMIT_TOOL, apply as applyReflection, buildReflectionInstruction, reflectionDue } from './reflection.ts'
+import { ReflectionRunner, REFLECTION_FAILURE_COOLDOWN_MS, REFLECTION_INSTRUCTIONS, REFLECTION_INTERVAL_MS, REFLECTION_PRESET_ID, REFLECTION_PROPOSE_TOOL, REFLECTION_SUBMIT_TOOL, apply as applyReflection, buildReflectionInstruction, reflectionDue } from './reflection.ts'
 import { DotStore } from './store.ts'
 
 describe('reflectionDue', () => {
@@ -276,6 +276,15 @@ describe('buildReflectionInstruction', () => {
     expect(text).toContain('dot_reflection_submit')
     expect(text).toContain('never change')
   })
+
+  it('adds the recipes section only when hints exist', () => {
+    const plain = buildReflectionInstruction({ agreements: '', cognition: '', now: 0 })
+    expect(plain).not.toContain('[recipes]')
+    const withRecipes = buildReflectionInstruction({ agreements: '', cognition: '', now: 0, recipes: '- rcp-1 "weekly" rev 2 — 1/4 accepted' })
+    expect(withRecipes).toContain('[recipes]')
+    expect(withRecipes).toContain('rcp-1 "weekly"')
+    expect(withRecipes).toContain('dot_reflection_recipe_propose')
+  })
 })
 
 describe('reflection preset tool row', () => {
@@ -292,7 +301,7 @@ describe('reflection preset tool row', () => {
       effect: (fn: () => unknown) => { fn(); return () => {} },
     }
     applyReflection(ctx as never)
-    expect(registered.map(tool => tool.name).sort()).toEqual([TOOL.searchHistory, TOOL.readHistory, REFLECTION_SUBMIT_TOOL].sort())
+    expect(registered.map(tool => tool.name).sort()).toEqual([TOOL.searchHistory, TOOL.readHistory, REFLECTION_SUBMIT_TOOL, REFLECTION_PROPOSE_TOOL].sort())
     // Model-facing reflection tools never bind cognition to a fixed character.
     expect(JSON.stringify(registered)).not.toMatch(/Dorothy|桃乐丝/)
     // Visibility is no longer restricted on the preset scope (that also hid the

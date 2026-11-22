@@ -81,6 +81,29 @@ export function sameRecipeBody(left: RecipeBody & { readonly name?: string }, ri
   return bodyKey(left) === bodyKey(right)
 }
 
+/**
+ * The body a revise proposal would save: patch fields replace, absent fields
+ * keep the base, and a goal-following requirements list regenerates from the
+ * new goal — the same merge recipeRevise applies on approval. An empty notes
+ * string or constraints list clears the field, like recipeArgsBody does.
+ */
+export function mergedRecipeBody(
+  base: RecipeBody,
+  patch: { readonly goal?: string; readonly requirements?: readonly import('./work.ts').Requirement[]; readonly constraints?: readonly import('./work.ts').Constraint[]; readonly notes?: string },
+): RecipeBody {
+  const goal = patch.goal ?? base.goal
+  const requirementsFromGoal = patch.requirements === undefined && requirementsFollowGoal(base)
+  const requirements = patch.requirements ?? (requirementsFromGoal ? goalRequirements(goal) : base.requirements)
+  const constraints = patch.constraints === undefined ? base.constraints : (patch.constraints.length > 0 ? patch.constraints : undefined)
+  const notes = patch.notes === undefined ? base.notes : (patch.notes || undefined)
+  const { constraints: _c, notes: _n, ...rest } = base
+  return {
+    ...rest, goal, requirements, requirementsFromGoal,
+    ...(constraints !== undefined ? { constraints } : {}),
+    ...(notes !== undefined ? { notes } : {}),
+  }
+}
+
 /** Push the current revision into history (newest first, capped) and stamp the next one. */
 export function reviseRecipe(recipe: RecipeRecord, next: RecipeBody & { readonly name: string; readonly reason: string }, at: number): RecipeRecord {
   const version: RecipeVersion = { ...recipeBody(recipe), revision: recipe.revision, name: recipe.name, ...(recipe.reason !== undefined ? { reason: recipe.reason } : {}), at }
@@ -180,6 +203,43 @@ export function recipeRevisionStats(recipe: RecipeRecord, live: readonly LiveRec
       ...(row.wallCount > 0 ? { avgWallMs: Math.round(row.wallMs / row.wallCount) } : {}),
     }))
     .sort((a, b) => b.revision - a.revision)
+}
+
+/**
+ * Whether the current revision regressed against a still-restorable earlier
+ * one. Both sides need at least three finished outcomes before the rates mean
+ * anything. Acceptance wins; rework and cost apply only when acceptance held.
+ */
+export interface RecipeRegression {
+  readonly betterRevision: number
+  readonly reason: 'acceptance' | 'rework' | 'cost'
+  /** One English line with both revisions' numbers, for the proposal reason. */
+  readonly summary: string
+}
+
+export function recipeRegression(recipe: RecipeRecord, stats: readonly RecipeRevisionStats[]): RecipeRegression | undefined {
+  const finished = (row: RecipeRevisionStats) => row.accepted + row.cancelled
+  const rate = (row: RecipeRevisionStats) => row.accepted / finished(row)
+  const rework = (row: RecipeRevisionStats) => row.failedRounds / finished(row)
+  const current = stats.find(row => row.revision === recipe.revision)
+  if (!current || finished(current) < 3) return undefined
+  const candidates = stats.filter(row =>
+    row.revision < recipe.revision
+    && recipeVersionAt(recipe, row.revision) !== undefined
+    && finished(row) >= 3)
+  if (candidates.length === 0) return undefined
+  const better = [...candidates].sort((left, right) =>
+    rate(right) - rate(left)
+    || rework(left) - rework(right)
+    || (left.avgTokens ?? Number.POSITIVE_INFINITY) - (right.avgTokens ?? Number.POSITIVE_INFINITY))[0]
+  const rateDiff = rate(better) - rate(current)
+  let reason: RecipeRegression['reason'] | undefined
+  if (rateDiff >= 0.34) reason = 'acceptance'
+  else if (Math.abs(rateDiff) <= 0.1 && rework(current) >= rework(better) + 1) reason = 'rework'
+  else if (Math.abs(rateDiff) <= 0.1 && current.avgTokens !== undefined && better.avgTokens !== undefined && better.avgTokens > 0 && current.avgTokens >= better.avgTokens * 1.5) reason = 'cost'
+  if (reason === undefined) return undefined
+  const describe = (row: RecipeRevisionStats) => `rev ${row.revision}: ${row.accepted}/${finished(row)} accepted, ${rework(row).toFixed(1)} failed rounds avg`
+  return { betterRevision: better.revision, reason, summary: `${describe(current)}; ${describe(better)}` }
 }
 
 /** The one-line stats summary list shows for the current revision. */

@@ -7,7 +7,7 @@
 import { defineDomain, domainTable } from '@deepseek-ai/dsh-storage-domain'
 import { z } from 'zod'
 import type { ViewNode } from '@klarkxy/dsh-deep-view/contracts'
-import { SETTING_FIELDS, type CognitionVersion, type DotContextUsage, type DotUsageOffset, type InboxRecord, type RecipeRecord, type TaskLink, type ReflectionRun, type ScheduleRecord, type SettingProposal, type TaskRecord } from './contracts.ts'
+import { SETTING_FIELDS, type CognitionVersion, type DotContextUsage, type DotUsageOffset, type InboxRecord, type RecipeProposal, type RecipeRecord, type TaskLink, type ReflectionRun, type ScheduleRecord, type SettingProposal, type TaskRecord } from './contracts.ts'
 import type { UpdateStatus } from './auto-update.ts'
 import type { PastSegment, Segment } from './segments.ts'
 import { changeSchema, constraintSchema, inputSchema, requirementSchema, runSchema, storedVerificationSchema } from './work.ts'
@@ -339,12 +339,38 @@ export function parseRecipeRecord(value: unknown): RecipeRecord | undefined {
   return parsed.success ? parsed.data as RecipeRecord : undefined
 }
 
+const recipeProposalSchema = z.object({
+  id: z.string().min(1),
+  recipeId: z.string().min(1),
+  baseRevision: z.number().int().positive(),
+  kind: z.enum(['restore', 'revise']),
+  targetRevision: z.number().int().positive().optional(),
+  patch: z.object({
+    goal: z.string().optional(),
+    requirements: z.array(requirementSchema).optional(),
+    constraints: z.array(constraintSchema).optional(),
+    notes: z.string().optional(),
+  }).optional(),
+  reason: z.string(),
+  origin: z.enum(['detector', 'reflection']),
+  regression: z.enum(['acceptance', 'rework', 'cost']).optional(),
+  status: z.enum(['pending', 'approved', 'dismissed', 'stale']),
+  createdAt: z.number(),
+  decidedAt: z.number().optional(),
+})
+
+/** A malformed proposal reads as absent. */
+export function parseRecipeProposal(value: unknown): RecipeProposal | undefined {
+  const parsed = recipeProposalSchema.safeParse(value)
+  return parsed.success ? parsed.data as RecipeProposal : undefined
+}
+
 export const dotDomain = defineDomain({
   name: 'klarkxy_dsh_dot',
-  // v8 added recipe rows; v9 adds task links. Older rows still open: read
+  // v9 adds task links; v10 adds recipe proposals. Older rows still open: read
   // schemas strip keys they no longer declare and dropped tables are never read.
-  version: 9,
-  compatibleVersions: [1, 2, 3, 4, 5, 6, 7, 8],
+  version: 10,
+  compatibleVersions: [1, 2, 3, 4, 5, 6, 7, 8, 9],
   tables: {
     state: domainTable<string, DotState>(stateSchema),
     tasks: domainTable<string, StoredTaskRecord>(storedTaskSchema),
@@ -358,6 +384,7 @@ export const dotDomain = defineDomain({
     inbox: domainTable<string, InboxRecord>(inboxRecordSchema),
     recipes: domainTable<string, RecipeRecord>(recipeSchema),
     links: domainTable<string, TaskLink>(taskLinkSchema),
+    recipe_proposals: domainTable<string, RecipeProposal>(recipeProposalSchema),
   },
 })
 

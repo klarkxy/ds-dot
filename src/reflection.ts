@@ -30,8 +30,10 @@ import { gateToolExecution } from './tool-scope.ts'
 export const REFLECTION_PRESET_ID = 'dot-reflection'
 /** The reflection-only submission tool. Not part of dot's public tools. */
 export const REFLECTION_SUBMIT_TOOL = 'dot_reflection_submit'
-/** Names the reflection agent scope may see: its own three tools only. */
-export const REFLECTION_ALLOW = [TOOL.searchHistory, TOOL.readHistory, REFLECTION_SUBMIT_TOOL] as const
+/** The reflection-only recipe proposal tool. Proposals wait for the human; nothing is applied here. */
+export const REFLECTION_PROPOSE_TOOL = 'dot_reflection_recipe_propose'
+/** Names the reflection agent scope may see: its own tools only. */
+export const REFLECTION_ALLOW = [TOOL.searchHistory, TOOL.readHistory, REFLECTION_SUBMIT_TOOL, REFLECTION_PROPOSE_TOOL] as const
 
 /** One reflection pass runs at most this long before it is treated as failed. */
 export const REFLECTION_TIMEOUT_MS = 10 * 60_000
@@ -86,7 +88,7 @@ export function reflectionDue(input: ReflectionGate): boolean {
 }
 
 /** The private instruction the runner hands the reflection session. */
-export function buildReflectionInstruction(input: { readonly agreements: string; readonly cognition: string; readonly lastReflectedAt?: number; readonly now: number }): string {
+export function buildReflectionInstruction(input: { readonly agreements: string; readonly cognition: string; readonly lastReflectedAt?: number; readonly now: number; readonly recipes?: string }): string {
   const since = input.lastReflectedAt !== undefined ? new Date(input.lastReflectedAt).toISOString() : 'the beginning'
   const agreements = input.agreements.trim() || '(none yet)'
   const cognition = input.cognition.trim() || '(none yet)'
@@ -103,6 +105,11 @@ export function buildReflectionInstruction(input: { readonly agreements: string;
     `Call ${REFLECTION_SUBMIT_TOOL} exactly once with the complete updated cognition. Keep it concise and retain what still holds across both parts: what she understands about the human and their working style, and what she understands about herself — preferences formed here, shared jokes, and what they have accomplished together. Omit transient task details and facts that can be looked up on demand.`,
     'Check [agreements] for stale or conflicting entries; if you find any, pass a brief note in agreementNotes on the same call so dot can surface it to the human next turn. Never edit [agreements] yourself.',
     'If no updates are needed, submit the existing cognition text unchanged and omit agreementNotes.',
+    ...(input.recipes?.trim() ? [
+      '',
+      `[recipes] (saved task recipes that regressed or have enough outcomes to judge — you may file one proposal per recipe with ${REFLECTION_PROPOSE_TOOL}; nothing applies without the human's approval):`,
+      input.recipes.trim(),
+    ] : []),
   ].join('\n')
 }
 
@@ -116,6 +123,8 @@ export interface ReflectionRunnerOptions {
   readonly applyCognition: (text: string, baseVersion: number) => Promise<unknown>
   /** dot must not be mid-turn when a pass starts. */
   readonly isDotIdle: () => boolean
+  /** Pre-formatted [recipes] section for the instruction; empty when nothing qualifies. */
+  readonly recipeHints?: () => string
   readonly timeoutMs?: number
   readonly log?: (message: string) => void
 }
@@ -234,6 +243,7 @@ export class ReflectionRunner {
         cognition: store.cognition,
         ...store.lastReflectedAt !== undefined ? { lastReflectedAt: store.lastReflectedAt } : {},
         now,
+        ...(this.options.recipeHints ? { recipes: this.options.recipeHints() } : {}),
       })
       sessionId = await this.options.host.createInternal(this.options.homeDir, REFLECTION_PRESET_ID)
       const run: ReflectionRun = { sessionId, startedAt: now, ok: false }
@@ -323,7 +333,7 @@ export function apply(ctx: Context): void {
   const dot = () => host[SERVICE_NAME]
   // Execution gate only; visibility is restricted on the agent scope in
   // setupFor, so only the three tools registered below may run here.
-  gateToolExecution(ctx, [TOOL.searchHistory, TOOL.readHistory, REFLECTION_SUBMIT_TOOL])
+  gateToolExecution(ctx, [TOOL.searchHistory, TOOL.readHistory, REFLECTION_SUBMIT_TOOL, REFLECTION_PROPOSE_TOOL])
   const tool = (definition: ToolInput, readOnly = false) => {
     const made = (defineTool as unknown as (input: ToolInput) => Record<string, unknown>)(definition)
     ctx.effect(() => host.tools.register(readOnly ? { ...made, hostEffect: 'read-only' as const } : made))
@@ -406,6 +416,26 @@ export function apply(ctx: Context): void {
       }
     },
     presentCall: () => ({ card: 'generic', title: 'Save reflection', kind: 'other' }),
+  })
+
+  // ── dot_reflection_recipe_propose (proposals wait on the human) ─────────
+  tool({
+    name: REFLECTION_PROPOSE_TOOL,
+    description: 'File a proposal to restore an earlier recipe revision or revise its fields. The proposal waits for the human in the Recipes panel; nothing is applied here.',
+    parameters: {
+      recipe: { type: 'string', required: true, description: 'Recipe id or exact name.' },
+      action: { type: 'string', required: true, enum: ['restore', 'revise'], description: 'restore an earlier revision, or propose new field values.' },
+      revision: { type: 'integer', description: 'For action=restore: the earlier revision number to restore.' },
+      goal: { type: 'string', description: 'For action=revise: replacement goal sentence.' },
+      requirements: { type: 'string', description: 'For action=revise: JSON array of {requirementRef, text, required, scenarios?}.' },
+      constraints: { type: 'string', description: 'For action=revise: JSON array of {constraintRef, text}.' },
+      notes: { type: 'string', description: 'For action=revise: replacement notes.' },
+      reason: { type: 'string', required: true, description: 'Why this proposal, in one sentence.' },
+    },
+    output: TEXT_OUTPUT,
+    isConcurrencySafe: () => false,
+    execute: (args: unknown) => run(() => dot().reflectionRecipePropose((args ?? {}) as Record<string, unknown>)),
+    presentCall: () => ({ card: 'generic', title: 'Propose recipe change', kind: 'other' }),
   })
 }
 

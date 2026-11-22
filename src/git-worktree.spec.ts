@@ -220,6 +220,31 @@ describe.skipIf(!gitAvailable)('git worktrees (real git)', { timeout: 30_000 }, 
     } finally { cleanup() }
   })
 
+  it('commitDelivery handles [id] pathspecs and files inside new directories', async () => {
+    const { repo, home, cleanup } = makeRepo()
+    try {
+      mkdirSync(join(repo, 'app', 'i'), { recursive: true })
+      writeFileSync(join(repo, 'app', 'i', 'page.tsx'), 'look-alike')
+      await runGit(['add', '-A'], repo)
+      await runGit(['commit', '-m', 'look-alike page'], repo)
+      const created = await createTaskWorktree({ dir: repo, homeDir: home })
+      mkdirSync(join(created.worktree, 'app', '[id]'), { recursive: true })
+      writeFileSync(join(created.worktree, 'app', '[id]', 'page.tsx'), 'made')
+      mkdirSync(join(created.worktree, 'newdir'), { recursive: true })
+      writeFileSync(join(created.worktree, 'newdir', 'a.txt'), 'inside new dir')
+      const files = [
+        { path: 'app/[id]/page.tsx', kind: 'added' as const, sha256: sha256(new TextEncoder().encode('made')) },
+        { path: 'newdir/a.txt', kind: 'added' as const, sha256: sha256(new TextEncoder().encode('inside new dir')) },
+      ]
+      const committed = await commitDelivery({ worktree: created.worktree, files, message: 'deliver' })
+      expect(committed).toMatchObject({ ok: true })
+      const names = await runGit(['show', '--name-only', '--format=', 'HEAD'], created.worktree)
+      expect(names.split('\n').sort()).toEqual(['app/[id]/page.tsx', 'newdir/a.txt'])
+      // The glob look-alike was not staged or modified by the delivery.
+      expect(await runGit(['diff', 'HEAD', '--', 'app/i/page.tsx'], created.worktree)).toBe('')
+    } finally { cleanup() }
+  })
+
   it('mergeInto refuses while the checkout has an operation in progress', async () => {
     const { repo, home, cleanup } = makeRepo()
     try {

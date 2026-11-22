@@ -9,7 +9,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { randomUUID } from 'node:crypto'
 import { HarnessError } from '@deepseek-ai/dsh-llm'
 import { mkdir } from 'node:fs/promises'
-import { isAbsolute, join } from 'node:path'
+import { isAbsolute, join, relative, sep } from 'node:path'
 import { APPROVAL_DETAIL_LIMIT, approvalNotice } from './approval-risk.ts'
 import { createTwoFilesPatch } from 'diff'
 import { writerPrior, parseEvidenceRef, reportBullet, deliveryScope, scopeContainsPath, type DeliverySubject, type SubjectLook } from './acceptance.ts'
@@ -24,7 +24,7 @@ import {
   occupantOf, pathScope, plannedOccupant, plannedScope, requirementList, samePathList,
   stepList, verifyRefusal,
 } from './work-actions.ts'
-import { absoluteScopePath, changeIsTerminal, MAX_COMPLETED_CHANGES, InputShapeError, inputContractError, occupantsConflict, runCostTotals, runIsTerminal, scopeWithinRoot, scopeWrites, type ChangeRecord, type Constraint, type Occupant, type Requirement, type RootHint, type RunRecord, type TaskIsolation, type WorkRefusal } from './work.ts'
+import { absoluteScopePath, canonicalPath, changeIsTerminal, MAX_COMPLETED_CHANGES, InputShapeError, inputContractError, occupantsConflict, runCostTotals, runIsTerminal, scopeWithinRoot, scopeWrites, type ChangeRecord, type Constraint, type Occupant, type Requirement, type RootHint, type RunRecord, type TaskIsolation, type WorkRefusal } from './work.ts'
 import type { ShownView, ViewAnswer } from '@klarkxy/dsh-deep-view/contracts'
 import { DotCards, cardAnswerText, type DotCardRecord } from './card-state.ts'
 import { checkChatImages, type ChatImage } from './chat-images.ts'
@@ -924,7 +924,9 @@ export class DotService {
         for (const change of this.store.work.listChanges()) {
           const isolation = change.isolation
           if (isolation?.kind !== 'worktree') continue
-          await removeTaskWorktree({ repoRoot: isolation.repoRoot, worktree: isolation.worktree, branch: isolation.branch, baseSha: isolation.baseSha }, this.git()).catch(() => undefined)
+          // A failure here must propagate into dot/reset-incomplete so the
+          // retained records let the human retry; do not swallow it.
+          await removeTaskWorktree({ repoRoot: isolation.repoRoot, worktree: isolation.worktree, branch: isolation.branch, baseSha: isolation.baseSha }, this.git())
         }
         for (const leftover of listTaskWorktrees(this.options.homeDir)) {
           this.options.log?.(`dsh-dot: factory reset left unmanaged dir ${leftover} under worktrees`)
@@ -2543,9 +2545,14 @@ export class DotService {
     // re-verified against its snapshot hash, and nothing extra may be dirty.
     const subject = this.store.work.verification(change.closeout.verificationId)?.subject
     if (!subject) return { ok: false, code: 'invalid', message: `${changeId} has no delivery subject to integrate` }
+    // Subject paths are relative to the change cwd; a task created in a repo
+    // subdir maps to <worktree>/<sub>, so prefix them for git pathspecs.
+    const inside = relative(canonicalPath(isolation.worktree), change.cwd)
+    const subdir = inside !== '' && !inside.startsWith('..') ? `${inside.split(sep).join('/')}/` : ''
+    const delivered = subject.changes.map(row => ({ ...row, path: `${subdir}${row.path}` }))
     let commitSha: string | undefined
     try {
-      const committed = await commitDelivery({ worktree: isolation.worktree, files: subject.changes, message: `${change.title}\n\nDorothy task ${changeId}` }, git)
+      const committed = await commitDelivery({ worktree: isolation.worktree, files: delivered, message: `${change.title}\n\nDorothy task ${changeId}` }, git)
       if (!committed.ok) return { ok: false, code: 'failed', message: committed.message }
       commitSha = committed.commitSha
     } catch (error) {
@@ -2557,11 +2564,10 @@ export class DotService {
       await withSha({ state: 'committed' })
       return this.integrated(change, `kept branch ${isolation.branch}; the worktree directory was removed`)
     }
-    const delivered = subject.changes.map(row => row.path)
     const merged = await mergeInto({
       repoRoot: isolation.repoRoot, branch: isolation.branch,
-      deliveredPaths: delivered,
-      addedPaths: subject.changes.filter(row => row.kind === 'added').map(row => row.path),
+      deliveredPaths: delivered.map(row => row.path),
+      addedPaths: delivered.filter(row => row.kind === 'added').map(row => row.path),
     }, git)
     if (!merged.ok) {
       return { ok: false, code: merged.conflicts ? 'conflict' : 'invalid', message: merged.message ?? 'merge failed', ...(merged.conflicts ? { conflicts: merged.conflicts } : {}) }

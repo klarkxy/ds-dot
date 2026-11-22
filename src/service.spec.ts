@@ -3389,6 +3389,23 @@ describe.skipIf(!worktreeGitAvailable)('task worktree isolation', { timeout: 30_
     } finally { await h.service.dispose(); cleanup() }
   })
 
+  it('integrate maps a subdir task delivery onto the repo-root paths', async () => {
+    const { repo, home, cleanup } = makeSpecRepo('dot-iso-sub-')
+    const h = setup(undefined, undefined, home, { git: runGit })
+    try {
+      mkdirSync(join(repo, 'sub'))
+      writeFileSync(join(repo, 'sub', 'keep.txt'), 'keep')
+      await runGit(['add', '-A'], repo)
+      await runGit(['commit', '-m', 'sub dir'], repo)
+      const created = JSON.parse(await h.service.manageTask({ action: 'create', title: 'Sub', goal: 'land', dir: join(repo, 'sub'), isolation: 'worktree', human_review: true })) as { id: string }
+      expect(h.store.work.change(created.id)!.cwd.replaceAll('\\', '/')).toMatch(/worktrees\/[^/]+\/sub$/)
+      await finishIsolated(h, created.id, cwd => writeFileSync(join(cwd, 'x.txt'), 'made'))
+      const merged = await h.service.integrateWork(created.id, 'merge')
+      expect(merged).toMatchObject({ ok: true })
+      expect(readFileSync(join(repo, 'sub', 'x.txt'), 'utf-8')).toBe('made')
+    } finally { await h.service.dispose(); cleanup() }
+  })
+
   it('factory reset removes only recorded worktrees, never unmanaged dirs', async () => {
     const { repo, home, cleanup } = makeSpecRepo('dot-iso-stray-')
     const h = setup(undefined, undefined, home, { git: runGit })

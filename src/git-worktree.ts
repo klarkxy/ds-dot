@@ -140,7 +140,9 @@ export async function commitDelivery(input: { readonly worktree: string; readonl
       return { ok: false, message: `worktree changed since acceptance: ${file.path} was edited` }
     }
   }
-  const status = await git(['status', '--porcelain', '-z'], worktree, { raw: true })
+  // -uall lists each new file inside an untracked directory instead of just the
+  // dir name, so a delivered newdir/a.txt is not read as an extra path.
+  const status = await git(['status', '--porcelain', '-z', '--untracked-files=all'], worktree, { raw: true })
   const extra = porcelainPaths(status).filter(name => !touched.has(name))
   if (extra.length > 0) {
     return { ok: false, message: `worktree changed since acceptance: unexpected changes outside the delivery (${extra.join(', ')})` }
@@ -149,8 +151,9 @@ export async function commitDelivery(input: { readonly worktree: string; readonl
   const deleted = input.files.filter(file => file.kind === 'deleted').map(file => file.path)
   // -f so an ignored-but-delivered file is staged; --cached --ignore-unmatch
   // stages each delivered removal without touching other index entries.
-  if (present.length > 0) await git(['add', '-f', '--', ...present], worktree)
-  if (deleted.length > 0) await git(['rm', '-q', '--cached', '--ignore-unmatch', '--', ...deleted], worktree)
+  // --literal-pathspecs keeps names like app/[id]/page.tsx exact, never globs.
+  if (present.length > 0) await git(['--literal-pathspecs', 'add', '-f', '--', ...present], worktree)
+  if (deleted.length > 0) await git(['--literal-pathspecs', 'rm', '-q', '--cached', '--ignore-unmatch', '--', ...deleted], worktree)
   const clean = await git(['diff', '--cached', '--quiet'], worktree).then(() => true, () => false)
   if (clean) return { ok: true }
   await git(['commit', '-m', input.message], worktree)
@@ -205,7 +208,7 @@ export async function mergeInto(input: { readonly repoRoot: string; readonly bra
   if (!current) return { ok: false, message: `${input.repoRoot} is on a detached HEAD; check out a branch first` }
   const busy = await operationInProgress(input.repoRoot, git)
   if (busy) return { ok: false, message: `${input.repoRoot} has ${busy} in progress; finish or abort it first` }
-  const status = await git(['status', '--porcelain', '-z'], input.repoRoot, { raw: true })
+  const status = await git(['status', '--porcelain', '-z', '--untracked-files=all'], input.repoRoot, { raw: true })
   // -z keeps paths verbatim (spaces stay unquoted); a rename/copy entry is
   // `XY <new>` followed by a bare `<old>` field, which also counts as dirty.
   const dirty = porcelainPaths(status)
@@ -219,7 +222,7 @@ export async function mergeInto(input: { readonly repoRoot: string; readonly bra
   const addedPaths = input.addedPaths ?? []
   const present = addedPaths.filter(path => existsSync(join(input.repoRoot, path)))
   if (present.length > 0) {
-    const listed = await git(['ls-files', '-z', '--', ...present], input.repoRoot, { raw: true })
+    const listed = await git(['--literal-pathspecs', 'ls-files', '-z', '--', ...present], input.repoRoot, { raw: true })
     const tracked = new Set(listed.split('\0').filter(name => name !== ''))
     const overwritten = present.filter(path => !tracked.has(path))
     if (overwritten.length > 0) {

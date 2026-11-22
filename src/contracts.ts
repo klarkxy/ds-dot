@@ -233,6 +233,8 @@ export interface RecipeProposal {
   }
   readonly reason: string
   readonly origin: 'detector' | 'reflection'
+  /** The regression kind a detector proposal was raised under — the dismiss dedupe key. */
+  readonly regression?: 'acceptance' | 'rework' | 'cost'
   readonly status: 'pending' | 'approved' | 'dismissed' | 'stale'
   readonly createdAt: number
   readonly decidedAt?: number
@@ -246,12 +248,13 @@ export interface RecipeProposalView {
   readonly baseRevision: number
   readonly targetRevision?: number
   readonly patch?: RecipeProposal['patch']
-  /** Text-level snapshot of the revision the proposal was made against, for the diff. */
+  /** Snapshot of the revision the proposal was made against, for the merged diff. */
   readonly base?: {
     readonly goal: string
     readonly notes?: string
-    readonly requirements: readonly string[]
-    readonly constraints: readonly string[]
+    readonly requirementsFromGoal: boolean
+    readonly requirements: readonly import('./work.ts').Requirement[]
+    readonly constraints: readonly import('./work.ts').Constraint[]
   }
   readonly reason: string
   readonly createdAt: number

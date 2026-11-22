@@ -3351,11 +3351,11 @@ describe('recipe proposals', () => {
   const dir = () => mkdtempSync(join(tmpdir(), 'dsh-dot-proposal-'))
 
   /** Recipe at rev 2 whose current revision regressed against rev 1 (1/4 vs 4/5 accepted). */
-  const regressed = async (h: ReturnType<typeof setup>) => {
+  const regressed = async (h: ReturnType<typeof setup>, name = 'weekly') => {
     const cwd = dir()
-    await h.service.manageRecipe({ action: 'save', name: 'weekly', goal: 'weekly report', dir: cwd })
-    await h.service.manageRecipe({ action: 'revise', recipe: 'weekly', goal: 'weekly report v2', reason: 'try v2' })
-    let recipe = h.store.recipes[0]!
+    await h.service.manageRecipe({ action: 'save', name, goal: `${name} report`, dir: cwd })
+    await h.service.manageRecipe({ action: 'revise', recipe: name, goal: `${name} report v2`, reason: 'try v2' })
+    let recipe = h.store.recipes.find(row => row.name === name)!
     const outcome = (changeId: string, revision: number, result: 'accepted' | 'cancelled', at: number) => {
       recipe = upsertRecipeOutcome(recipe, { changeId, title: changeId, revision, result, failedRounds: 0, at })
     }
@@ -3451,11 +3451,63 @@ describe('recipe proposals', () => {
     expect(h.store.recipeProposal(proposal.id)).toMatchObject({ status: 'dismissed' })
     await h.service.checkRecipeRegressions()
     expect(h.store.recipeProposals).toHaveLength(1)
+    // One more outcome moves the counts inside the summary; the dedupe key
+    // (kind, base/target revision, regression kind) is unchanged → still quiet.
+    let recipe = h.store.recipes.find(row => row.name === 'weekly')!
+    recipe = upsertRecipeOutcome(recipe, { changeId: 'new-9', title: 'new-9', revision: 2, result: 'cancelled', failedRounds: 0, at: 20 })
+    await h.store.putRecipe(recipe)
+    await h.service.checkRecipeRegressions()
+    expect(h.store.recipeProposals).toHaveLength(1)
     // A revision change re-arms the detector.
     await h.service.manageRecipe({ action: 'revise', recipe: 'weekly', goal: 'v3 goal', reason: 'meanwhile' })
     // Rev 3 has no outcomes yet, so the detector stays quiet.
     await h.service.checkRecipeRegressions()
     expect(h.store.recipeProposals).toHaveLength(1)
+    await h.service.dispose()
+  })
+
+  it('a factory reset during the sweep leaves no orphan proposal', async () => {
+    const h = setup()
+    await regressed(h, 'weekly')
+    await regressed(h, 'daily')
+    const token = h.service.previewFactoryReset().token
+    // The first proposal write completes, then the whole reset runs before the
+    // sweep reaches the second recipe — its generation check must stop it.
+    const realPut = h.store.putRecipeProposal.bind(h.store)
+    let reset = false
+    h.store.putRecipeProposal = async (record) => {
+      const out = await realPut(record)
+      if (!reset) { reset = true; await h.service.confirmFactoryReset(token) }
+      return out
+    }
+    await h.service.checkRecipeRegressions()
+    expect(reset).toBe(true)
+    expect(h.store.recipeProposals).toHaveLength(0)
+    await h.service.dispose()
+  })
+
+  it('a held proposal notice does not stop the routine check', async () => {
+    const h = setup({ idleCheckMinutes: 10 })
+    const dot = await h.service.ensureDot()
+    await h.service.createWorkChange({ title: 'Ready', goal: 'g', cwd: '/ready', at: 1 })
+    h.service.onStatus(dot, 'idle')
+    await regressed(h)
+    await h.service.checkRecipeRegressions()
+    expect(h.store.recipeProposals).toHaveLength(1)
+    h.fire()
+    await h.service.flushNotices()
+    const text = h.relayed.map(row => row.text).join('\n')
+    expect(text).toContain('Routine check:')
+    await h.service.dispose()
+  })
+
+  it('a reflection revise proposal that changes nothing is refused at submit', async () => {
+    const h = setup()
+    await regressed(h)
+    await expect(h.service.reflectionRecipePropose({
+      recipe: 'weekly', action: 'revise', goal: 'weekly report v2', reason: 'same body',
+    })).rejects.toThrow(/changes nothing/)
+    expect(h.store.recipeProposals).toHaveLength(0)
     await h.service.dispose()
   })
 

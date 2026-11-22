@@ -48,7 +48,7 @@ import { AGREEMENTS_MAX_CHARS, COGNITION_MAX_CHARS, KnowledgeError, addEntry, ag
 import { deliverPeer, guardRunWriteTool, PeerLedger, refreshChildSeals, sealChildSession, type PeerSendInput } from './peer.ts'
 import { PendingHub, type PendingAnswer } from './pending.ts'
 import { personaSection } from './persona.ts'
-import { goalRequirements, mergeRecipeOutcomes, recipeBody, recipeBodyAt, recipeRegression, recipeRequirements, recipeRevisionStats, recipeStatsLine, recipeVersionAt, requirementsFollowGoal, reviseRecipe as reviseRecipeRecord, sameRecipeBody, upsertRecipeOutcome, type LiveRecipeChange, type RecipeRegression } from './recipes.ts'
+import { goalRequirements, mergedRecipeBody, mergeRecipeOutcomes, recipeBody, recipeBodyAt, recipeRegression, recipeRequirements, recipeRevisionStats, recipeStatsLine, recipeVersionAt, requirementsFollowGoal, reviseRecipe as reviseRecipeRecord, sameRecipeBody, upsertRecipeOutcome, type LiveRecipeChange, type RecipeRegression } from './recipes.ts'
 import { ReflectionRunner } from './reflection.ts'
 import { ReminderClock } from './reminders.ts'
 import { routeRequest } from './rules.ts'
@@ -1073,7 +1073,8 @@ export class DotService {
 
   private canIdleCheck(): boolean {
     const dot = this.store.dotSessionId
-    return !this.closing && this.store.settings.idleCheckMinutes > 0 && !!dot && !this.host.isRunning(dot) && this.batcher.size === 0
+    // Only waking notices gate the patrol; held items ride its delivery.
+    return !this.closing && this.store.settings.idleCheckMinutes > 0 && !!dot && !this.host.isRunning(dot) && this.batcher.waking === 0
   }
   private armIdleCheck(): void {
     if (this.canIdleCheck()) {
@@ -1692,8 +1693,9 @@ export class DotService {
       base: {
         goal: version.goal,
         ...(version.notes !== undefined ? { notes: version.notes } : {}),
-        requirements: (version.requirements ?? []).map(row => row.text),
-        constraints: (version.constraints ?? []).map(row => row.text),
+        requirementsFromGoal: requirementsFollowGoal(version),
+        requirements: version.requirements ?? [],
+        constraints: version.constraints ?? [],
       },
       reason: proposal.reason, createdAt: proposal.createdAt,
     }
@@ -1865,10 +1867,10 @@ export class DotService {
    * on the same revision an identical proposal is not re-raised. A revision
    * change or a different reason re-arms it.
    */
-  private detectorProposalDismissed(input: { recipeId: string; baseRevision: number; targetRevision: number; reason: string }): boolean {
+  private detectorProposalDismissed(input: { recipeId: string; baseRevision: number; targetRevision: number; regression: 'acceptance' | 'rework' | 'cost' }): boolean {
     return this.store.recipeProposals.some(row =>
-      row.recipeId === input.recipeId && row.origin === 'detector' && row.status === 'dismissed'
-      && row.baseRevision === input.baseRevision && row.targetRevision === input.targetRevision && row.reason === input.reason)
+      row.recipeId === input.recipeId && row.origin === 'detector' && row.status === 'dismissed' && row.kind === 'restore'
+      && row.baseRevision === input.baseRevision && row.targetRevision === input.targetRevision && row.regression === input.regression)
   }
 
   /** Persist a pending proposal; at most one pending per recipe. */
@@ -1879,6 +1881,7 @@ export class DotService {
     patch?: RecipeProposal['patch']
     reason: string
     origin: 'detector' | 'reflection'
+    regression?: 'acceptance' | 'rework' | 'cost'
   }): Promise<RecipeProposal | undefined> {
     if (this.store.pendingRecipeProposal(input.recipe.id)) return undefined
     let id = ''
@@ -1888,8 +1891,13 @@ export class DotService {
       kind: input.kind,
       ...(input.targetRevision !== undefined ? { targetRevision: input.targetRevision } : {}),
       ...(input.patch ? { patch: input.patch } : {}),
-      reason: input.reason, origin: input.origin, status: 'pending', createdAt: this.now(),
+      reason: input.reason, origin: input.origin,
+      ...(input.regression !== undefined ? { regression: input.regression } : {}),
+      status: 'pending', createdAt: this.now(),
     }
+    // The recipe may be gone by the write (a reset or a delete raced the sweep);
+    // a proposal without its recipe is an orphan that survives restart.
+    if (!this.store.recipes.some(row => row.id === input.recipe.id)) return undefined
     await this.store.putRecipeProposal(proposal)
     this.holdRecipeNotice(`Recipe proposal ${proposal.id} for ${input.recipe.id} "${input.recipe.name}" (${input.kind}, ${input.origin}): ${input.reason} The human decides in the Recipes panel.`)
     return proposal
@@ -1911,11 +1919,15 @@ export class DotService {
    * pending-proposal and dismissed-key dedupe keep repeats cheap.
    */
   async checkRecipeRegressions(): Promise<void> {
+    // A factory reset bumps the generation before wiping; a sweep that started
+    // earlier stops instead of writing proposals for recipes that no longer exist.
+    const generation = this.resetGeneration
     for (const recipe of this.store.recipes) {
+      if (this.closing || this.resetGeneration !== generation) return
       const regression = recipeRegression(recipe, recipeRevisionStats(recipe, this.liveRecipeChanges(recipe.id)))
       if (!regression) continue
-      if (this.detectorProposalDismissed({ recipeId: recipe.id, baseRevision: recipe.revision, targetRevision: regression.betterRevision, reason: regression.summary })) continue
-      await this.newRecipeProposal({ recipe, kind: 'restore', targetRevision: regression.betterRevision, reason: regression.summary, origin: 'detector' })
+      if (this.detectorProposalDismissed({ recipeId: recipe.id, baseRevision: recipe.revision, targetRevision: regression.betterRevision, regression: regression.reason })) continue
+      await this.newRecipeProposal({ recipe, kind: 'restore', targetRevision: regression.betterRevision, reason: regression.summary, origin: 'detector', regression: regression.reason })
     }
   }
 
@@ -1955,6 +1967,11 @@ export class DotService {
         ...(args.notes !== undefined ? { notes: body.notes ?? '' } : {}),
       }
       if (Object.keys(patch).length === 0) throw new DotError('dot/invalid', 'revise proposal needs at least one of goal, requirements, constraints, notes')
+      // A patch that merges into the current body unchanged is refused at
+      // submit, like recipeRevise's 'revise changes nothing'.
+      if (sameRecipeBody({ ...mergedRecipeBody(recipe, patch), name: recipe.name }, recipe)) {
+        throw new DotError('dot/invalid', 'revise proposal changes nothing')
+      }
       const proposal = await this.newRecipeProposal({ recipe, kind: 'revise', patch, reason, origin: 'reflection' })
       return `Proposed revising recipe ${recipe.id} "${recipe.name}" (proposal ${proposal!.id}); the human decides in the Recipes panel.`
     })

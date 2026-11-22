@@ -353,6 +353,7 @@ const recipeProposalSchema = z.object({
   }).optional(),
   reason: z.string(),
   origin: z.enum(['detector', 'reflection']),
+  regression: z.enum(['acceptance', 'rework', 'cost']).optional(),
   status: z.enum(['pending', 'approved', 'dismissed', 'stale']),
   createdAt: z.number(),
   decidedAt: z.number().optional(),

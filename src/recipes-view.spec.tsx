@@ -162,7 +162,7 @@ describe('RecipesView proposals', () => {
       proposal: {
         id: 'rpp-1', kind: 'restore', origin: 'detector', baseRevision: 2, targetRevision: 1,
         reason: 'rev 2: 1/4 accepted, 2.5 failed rounds avg; rev 1: 4/5 accepted, 0.4 failed rounds avg',
-        base: { goal: 'old goal', requirements: ['req a'], constraints: [] },
+        base: { goal: 'old goal', requirementsFromGoal: false, requirements: [{ requirementRef: 'r1', text: 'req a', required: true }], constraints: [] },
         createdAt: 5,
       },
     })
@@ -188,7 +188,7 @@ describe('RecipesView proposals', () => {
     const withProposal = row({
       proposal: {
         id: 'rpp-2', kind: 'restore', origin: 'reflection', baseRevision: 2, targetRevision: 1,
-        reason: 'suggestion', base: { goal: 'g', requirements: [], constraints: [] }, createdAt: 5,
+        reason: 'suggestion', base: { goal: 'g', requirementsFromGoal: false, requirements: [], constraints: [] }, createdAt: 5,
       },
     })
     const { container } = await mount(<RecipesView locale="en" api={a} rows={[withProposal]} onChanged={() => {}} />)
@@ -207,7 +207,11 @@ describe('RecipesView proposals', () => {
           requirements: [{ requirementRef: 'r2', text: 'covers last month', required: true }],
           constraints: [{ constraintRef: 'c2', text: 'under two pages' }],
         },
-        base: { goal: 'weekly report', requirements: ['covers last week'], constraints: ['under one page'] },
+        base: {
+          goal: 'weekly report', requirementsFromGoal: false,
+          requirements: [{ requirementRef: 'r1', text: 'covers last week', required: true }],
+          constraints: [{ constraintRef: 'c1', text: 'under one page' }],
+        },
         createdAt: 5,
       },
     })
@@ -221,12 +225,65 @@ describe('RecipesView proposals', () => {
     expect(block.textContent).toContain('− under one page')
   })
 
+  it('keeps untouched requirements and constraints out of a goal-only diff', async () => {
+    const withProposal = row({
+      proposal: {
+        id: 'rpp-5', kind: 'revise', origin: 'reflection', baseRevision: 2,
+        reason: 'new cadence',
+        patch: { goal: 'monthly report' },
+        base: {
+          goal: 'weekly report', requirementsFromGoal: false,
+          requirements: [{ requirementRef: 'r1', text: 'covers last week', required: true }],
+          constraints: [{ constraintRef: 'c1', text: 'under one page' }],
+        },
+        createdAt: 5,
+      },
+    })
+    const { container } = await mount(<RecipesView locale="en" api={decideApi(async () => 'ok')} rows={[withProposal]} onChanged={() => {}} />)
+    const block = container.querySelector('[data-proposal="rpp-5"]')!
+    expect(block.textContent).toContain('«weekly report» → «monthly report»')
+    // Approval keeps the explicit lists, so nothing renders as removed.
+    expect(block.textContent).not.toContain('−')
+    expect(block.textContent).not.toContain('covers last week')
+  })
+
+  it('shows a required/scenario flip as a changed requirement, not add+remove', async () => {
+    const withProposal = row({
+      proposal: {
+        id: 'rpp-6', kind: 'revise', origin: 'reflection', baseRevision: 2,
+        reason: 'soften',
+        patch: {
+          requirements: [
+            { requirementRef: 'r1', text: 'covers last week', required: false },
+            { requirementRef: 'r2', text: 'links to the tracker', required: true, scenarios: [{ scenarioRef: 's1', when: 'the tracker moves', then: 'relink' }] },
+          ],
+        },
+        base: {
+          goal: 'weekly report', requirementsFromGoal: false,
+          requirements: [
+            { requirementRef: 'r1', text: 'covers last week', required: true },
+            { requirementRef: 'r2', text: 'links to the tracker', required: true },
+          ],
+          constraints: [],
+        },
+        createdAt: 5,
+      },
+    })
+    const { container } = await mount(<RecipesView locale="en" api={decideApi(async () => 'ok')} rows={[withProposal]} onChanged={() => {}} />)
+    const block = container.querySelector('[data-proposal="rpp-6"]')!
+    expect(block.textContent).toContain('«covers last week» → «covers last week (optional)»')
+    expect(block.textContent).toContain('[the tracker moves]')
+    // Same refs with the same text are changes, not removals.
+    expect(block.textContent).not.toContain('−')
+    expect(block.textContent).not.toContain('+')
+  })
+
   it('shows a decision error inline', async () => {
     const a = decideApi(async () => { throw new Error('proposal rpp-4 is stale') })
     const withProposal = row({
       proposal: {
         id: 'rpp-4', kind: 'restore', origin: 'detector', baseRevision: 2, targetRevision: 1,
-        reason: 'r', base: { goal: 'g', requirements: [], constraints: [] }, createdAt: 5,
+        reason: 'r', base: { goal: 'g', requirementsFromGoal: false, requirements: [], constraints: [] }, createdAt: 5,
       },
     })
     const { container } = await mount(<RecipesView locale="en" api={a} rows={[withProposal]} onChanged={() => {}} />)

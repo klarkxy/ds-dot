@@ -196,6 +196,8 @@ describe('recipeRegression', () => {
     const noAvg = stat(3, { accepted: 4, cancelled: 1 })
     expect(recipeRegression(recipe, [noAvg, early])).toBeUndefined()
     expect(recipeRegression(recipe, [onEdge, stat(1, { accepted: 4, cancelled: 1 })])).toBeUndefined()
+    // a zero earlier average would flag any nonzero spend → not a regression
+    expect(recipeRegression(recipe, [onEdge, stat(1, { accepted: 4, cancelled: 1, avgTokens: 0 })])).toBeUndefined()
   })
 
   it('picks the best earlier revision by rate, then lower rework, then lower tokens', () => {

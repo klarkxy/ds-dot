@@ -151,3 +151,83 @@ describe('ReminderClock', () => {
     expect(h.delivered).toEqual([])
   })
 })
+
+describe('recipe-bound reminders', () => {
+  function setupRecipe(result: { ok: boolean; reason?: string }) {
+    const h = setup()
+    const calls: string[] = []
+    const clock = new ReminderClock({
+      store: h.store,
+      now: () => h.store.schedules.length ? h.store.schedules[0]!.nextAt : 0,
+      deliver: async text => { h.delivered.push(text) },
+      runRecipe: async record => {
+        calls.push(record.id)
+        return result.ok ? { ok: true as const, text: `started ${record.id}` } : { ok: false as const, reason: result.reason ?? 'refused' }
+      },
+    })
+    return { ...h, clock, calls }
+  }
+
+  it('dispatches a recipe reminder directly, holds no model turn', async () => {
+    const h = setupRecipe({ ok: true })
+    const store = h.store
+    let now = START
+    const clock = new ReminderClock({
+      store, now: () => now,
+      deliver: async text => { h.delivered.push(text) },
+      runRecipe: async record => { h.calls.push(record.id); return { ok: true as const, text: 'started' } },
+    })
+    const record = { id: 'sch-r1', title: 'weekly', prompt: 'note', timing: { kind: 'once' as const, at: now - 1 }, createdAt: now - 1000, nextAt: now - 1, recipe: 'rcp-1' }
+    await store.putSchedule(record)
+    await clock.tick()
+    expect(h.calls).toEqual(['sch-r1'])
+    expect(h.delivered).toHaveLength(0)
+    expect(store.schedule('sch-r1')?.deliveredAt).toBe(now)
+  })
+
+  it('delivers the refusal to dot with the reason line', async () => {
+    const store = new DotStore(undefined)
+    const delivered: string[] = []
+    let now = START
+    const clock = new ReminderClock({
+      store, now: () => now,
+      deliver: async text => { delivered.push(text) },
+      runRecipe: async () => ({ ok: false as const, reason: 'previous run still in flight' }),
+    })
+    await store.putSchedule({ id: 'sch-r2', title: 'weekly', prompt: '', timing: { kind: 'once' as const, at: now - 1 }, createdAt: now - 1000, nextAt: now - 1, recipe: 'rcp-1' })
+    await store.putSchedule({ id: 'sch-p1', title: 'plain', prompt: 'do it', timing: { kind: 'once' as const, at: now - 1 }, createdAt: now - 1000, nextAt: now - 1 })
+    await clock.tick()
+    expect(delivered).toHaveLength(1)
+    expect(delivered[0]).toContain('sch-p1')
+    expect(delivered[0]).toContain('recipe dispatch refused: previous run still in flight')
+    expect(delivered[0]).toContain('rcp-1')
+  })
+
+  it('advances a repeating recipe reminder only after a successful dispatch, and never re-dispatches on deliver retry', async () => {
+    const store = new DotStore(undefined)
+    const delivered: string[] = []
+    const calls: string[] = []
+    let now = START
+    let failing = false
+    const clock = new ReminderClock({
+      store, now: () => now,
+      deliver: async text => { if (failing) throw new Error('down'); delivered.push(text) },
+      runRecipe: async record => { calls.push(record.id); return { ok: true as const, text: 'ok' } },
+    })
+    await store.putSchedule({ id: 'sch-rep', title: 'weekly', prompt: '', timing: { kind: 'every' as const, minutes: 60, anchor: now - 60 * MINUTE }, createdAt: now - 1000, nextAt: now - 1, recipe: 'rcp-1' })
+    await store.putSchedule({ id: 'sch-plain', title: 'plain', prompt: 'p', timing: { kind: 'every' as const, minutes: 60, anchor: now - 60 * MINUTE }, createdAt: now - 1000, nextAt: now - 1 })
+    failing = true
+    await clock.tick()
+    // Dispatch ran once; the recipe record already advanced even though deliver threw.
+    expect(calls).toEqual(['sch-rep'])
+    expect(store.schedule('sch-rep')!.nextAt).toBeGreaterThan(now)
+    expect(delivered).toHaveLength(0)
+    failing = false
+    now += 10_000
+    await clock.tick()
+    // Retry delivers the plain list only; no second dispatch.
+    expect(calls).toEqual(['sch-rep'])
+    expect(delivered).toHaveLength(1)
+    expect(delivered[0]).toContain('sch-plain')
+  })
+})

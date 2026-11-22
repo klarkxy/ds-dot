@@ -382,7 +382,7 @@ export function apply(ctx: Context): void {
   // ── dot_schedule (merged from dot_schedule_add + dot_schedule_list + dot_schedule_remove) ──
   tool(defineToolInput({
     name: TOOL.schedule,
-    description: 'Manage persistent reminders that wake your active conversation segment with a [dot reminder] message when due. action=add refuses a duplicate of a still-set reminder (same title, or same timing and prompt); remove the existing one first to change it. action=add requires exactly one timing field: after_minutes, at, every_minutes, or daily_time (optionally paired with weekdays). One-off reminders (after_minutes, at) fire at most once even across late wakes or restarts. All timestamps use host local time; each firing consumes a model turn, so choose sensible intervals and action=remove recurring reminders once their goal is done.',
+    description: 'Manage persistent reminders that wake your active conversation segment with a [dot reminder] message when due. action=add refuses a duplicate of a still-set reminder (same title, or same timing and prompt); remove the existing one first to change it. action=add requires exactly one timing field: after_minutes, at, every_minutes, or daily_time (optionally paired with weekdays). One-off reminders (after_minutes, at) fire at most once even across late wakes or restarts. All timestamps use host local time; each firing consumes a model turn, so choose sensible intervals and action=remove recurring reminders once their goal is done. With recipe set, the reminder instead creates and dispatches that recipe task directly when due — no model turn is consumed for the dispatch; you are told afterwards by a notice and still verify and close out the task; if the direct dispatch is refused you get the ordinary reminder with the refusal reason. prompt becomes optional when recipe is set (an extra note for the run).',
     parameters: {
       action: { type: 'string', enum: ['add', 'list', 'remove'], required: true, description: 'Operation: add, list, or remove.' },
       title: { type: 'string', description: 'add: concise reminder label shown on the board.' },
@@ -392,6 +392,7 @@ export function apply(ctx: Context): void {
       every_minutes: { type: 'integer', description: 'add: repeat every N minutes, starting one interval from now.' },
       daily_time: { type: 'string', description: 'add: repeat at host local time HH:mm.' },
       weekdays: { type: 'string', description: 'add (with daily_time only): comma-separated ISO weekdays 1 (Mon) through 7 (Sun), e.g. "1,2,3,4,5".' },
+      recipe: { type: 'string', description: 'add: bind a saved recipe (id or exact name); the reminder dispatches it directly when due. prompt becomes an optional note for the run.' },
       id: { type: 'string', description: 'remove: reminder id (sch-...).' },
     },
     execute: async (args) => {
@@ -408,6 +409,7 @@ export function apply(ctx: Context): void {
       return dot().scheduleAdd({
         title: str(args, 'title') ?? '',
         prompt: str(args, 'prompt') ?? '',
+        ...str(args, 'recipe') ? { recipe: str(args, 'recipe')! } : {},
         ...afterMinutes === undefined ? {} : { afterMinutes },
         ...str(args, 'at') ? { at: str(args, 'at')! } : {},
         ...everyMinutes === undefined ? {} : { everyMinutes },

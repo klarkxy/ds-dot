@@ -49,7 +49,7 @@ import { goalRequirements, mergeRecipeOutcomes, recipeBody, recipeBodyAt, recipe
 import { ReflectionRunner } from './reflection.ts'
 import { ReminderClock } from './reminders.ts'
 import { routeRequest } from './rules.ts'
-import { ScheduleInputError, describeTiming, scheduleLines, type ScheduleInput } from './schedule.ts'
+import { ScheduleInputError, describeTiming, onceDelivered, scheduleLines, type ScheduleInput } from './schedule.ts'
 import { KEEPALIVE_MAX_PINGS, cacheTtlMinutes, defaultCacheTtl, keepaliveIntervalMs } from './keepalive.ts'
 import { EMPTY_CAPABILITIES_SIGNATURE, IDLE_MIN_TOKENS, openingText, reasonAfterTurn, reasonBeforeDelivery, type Segment } from './segments.ts'
 import { parseInboxRecord } from './storage.ts'
@@ -203,6 +203,7 @@ export class DotService {
       store: options.store,
       now: this.now,
       deliver: text => this.remind(text),
+      runRecipe: record => this.recipeReminderRun(record),
       // The reflection check rides the reminder clock's periodic wake-up.
       onPeriodic: () => { void this.reflection.tick().catch(() => undefined) },
       ...options.timer ? { timer: options.timer } : {},
@@ -1427,7 +1428,13 @@ export class DotService {
 
   private async scheduleAddNow(input: ScheduleInput): Promise<string> {
     try {
-      const record = await this.reminders.add(input)
+      let recipeId: string | undefined
+      if (input.recipe?.trim()) {
+        const recipe = this.store.recipe(input.recipe.trim())
+        if (!recipe) throw new ScheduleInputError(`unknown recipe ${input.recipe}; saved recipes: ${this.store.recipes.map(row => `${row.id} "${row.name}"`).join(', ') || 'none'}`)
+        recipeId = recipe.id
+      }
+      const record = await this.reminders.add({ ...input, ...(recipeId ? { recipe: recipeId } : {}) })
       return `Reminder ${record.id} "${record.title}" set (${describeTiming(record.timing)}); it first comes due ${stamp(record.nextAt)}.`
     } catch (error) {
       if (error instanceof ScheduleInputError) throw new DotError('dot/invalid', error.message)
@@ -1435,7 +1442,7 @@ export class DotService {
     }
   }
 
-  scheduleList(): string { return scheduleLines(this.store.schedules) }
+  scheduleList(): string { return scheduleLines(this.store.schedules, id => this.store.recipe(id)?.name) }
 
   scheduleRemove(id: string): Promise<string> { return this.track(() => this.scheduleRemoveNow(id)) }
 
@@ -1443,6 +1450,78 @@ export class DotService {
     const key = id.trim()
     if (!(await this.reminders.remove(key))) throw new DotError('dot/unknown-reminder', `no reminder ${key || '(empty id)'}; ${TOOL.schedule} (action=list) shows the ones that are set`)
     return `Removed reminder ${key}.`
+  }
+
+  /**
+   * Create + dispatch a recipe-tagged change through the same paths as
+   * `dot_task action=create recipe=` followed by `action=dispatch`: identical
+   * validation, scope reservation, baseline capture and outcome tagging.
+   * Never stacks runs of one recipe: a non-terminal change refuses the call.
+   */
+  runRecipe(ref: string, opts: { readonly origin: 'reminder' | 'human'; readonly note?: string; readonly reminderTitle?: string }): Promise<{ readonly ok: true; readonly changeId: string; readonly runId?: string } | { readonly ok: false; readonly reason: string }> {
+    return this.serial(() => this.runRecipeNow(ref, opts))
+  }
+
+  private async runRecipeNow(ref: string, opts: { readonly origin: 'reminder' | 'human'; readonly note?: string; readonly reminderTitle?: string }): Promise<{ readonly ok: true; readonly changeId: string; readonly runId?: string } | { readonly ok: false; readonly reason: string }> {
+    const recipe = this.store.recipe(ref)
+    if (!recipe) return { ok: false as const, reason: `unknown recipe ${ref}` }
+    const allRuns = this.store.work.listRuns()
+    const inFlight = this.store.work.listChanges().find(change =>
+      change.recipe?.id === recipe.id && !changeIsTerminal(change, allRuns.filter(run => run.changeId === change.id)))
+    if (inFlight) return { ok: false as const, reason: `previous run of ${recipe.id} "${recipe.name}" still in flight: ${inFlight.id}` }
+    const userRequest = opts.origin === 'reminder'
+      ? `[reminder "${opts.reminderTitle ?? ''}"]${opts.note?.trim() ? ` ${opts.note.trim()}` : ''}`
+      : `Run recipe "${recipe.name}" (started from the Tasks panel)`
+    let change: ChangeRecord
+    try {
+      change = await this.createChangeFromTool({ action: 'create', recipe: recipe.id, user_request: userRequest })
+    } catch (error) {
+      return { ok: false as const, reason: messageOf(error) }
+    }
+    try {
+      await this.manageWorkAction({ action: 'dispatch', task_id: change.id, ...(opts.note?.trim() ? { message: opts.note.trim() } : {}) })
+    } catch (error) {
+      const cancelled = await this.cancelWorkChange(change.id).catch(() => undefined)
+      const cancelledNote = cancelled && 'ok' in cancelled && cancelled.ok
+        ? `; fresh change ${change.id} was cancelled`
+        : `; fresh change ${change.id} could not be cancelled`
+      return { ok: false as const, reason: `${messageOf(error)}${cancelledNote}` }
+    }
+    const runId = this.store.work.listRuns().filter(run => run.changeId === change.id).at(-1)?.id
+    return { ok: true as const, changeId: change.id, ...(runId ? { runId } : {}) }
+  }
+
+  /** A recipe-bound reminder fires here: direct dispatch plus a non-waking notice. */
+  private async recipeReminderRun(record: import('./contracts.ts').ScheduleRecord): Promise<{ readonly ok: true; readonly text: string } | { readonly ok: false; readonly reason: string }> {
+    if (!record.recipe) return { ok: false as const, reason: 'no recipe bound' }
+    const result = await this.runRecipe(record.recipe, { origin: 'reminder', note: record.prompt, reminderTitle: record.title })
+    if (!result.ok) return { ok: false as const, reason: result.reason }
+    const run = result.runId ? this.store.work.run(result.runId) : undefined
+    const sessionId = run?.sessionId ?? run?.requestedSessionId ?? ''
+    const text = `Reminder "${record.title}" started recipe task ${result.changeId}${result.runId ? ` (run ${result.runId})` : ''}`
+    this.batcher.hold({
+      sessionId, kind: 'recipe-run', text, at: this.now(), changeId: result.changeId,
+      display: { kind: 'recipe-run', sessionId, summary: text },
+    })
+    return { ok: true as const, text }
+  }
+
+  /** Recipes as the Tasks panel's Recipes filter renders them. */
+  recipeBoard(): readonly import('./contracts.ts').RecipeBoardRow[] {
+    return this.store.recipes.map(recipe => {
+      const live = this.liveRecipeChanges(recipe.id)
+      return {
+        id: recipe.id, name: recipe.name, revision: recipe.revision, updatedAt: recipe.updatedAt,
+        stats: recipeRevisionStats(recipe, live),
+        inFlight: live.filter(row => !row.terminal).map(row => ({
+          changeId: row.changeId, title: row.title,
+          status: this.store.work.workView(row.changeId)?.status ?? 'waiting',
+        })),
+        reminders: this.store.schedules
+          .filter(row => row.recipe === recipe.id && !onceDelivered(row))
+          .map(row => ({ id: row.id, title: row.title, nextAt: row.nextAt })),
+      }
+    })
   }
 
   // ---- task recipes: saved, versioned work orders -----------------------
@@ -2560,38 +2639,8 @@ export class DotService {
       ...(deliverableLanguage !== undefined ? { deliverableLanguage } : {}),
     }
     if (action === 'create') {
-      const recipe = text('recipe') === undefined ? undefined : this.requireRecipe(text('recipe')!)
-      const createTitle = title ?? recipe?.name
-      const createGoal = goal ?? recipe?.goal
-      const createDir = dir ?? recipe?.dir
-      const createConstraints = constraints ?? recipe?.constraints
-      const createLanguage = deliverableLanguage ?? recipe?.deliverableLanguage
-      if (!createTitle?.trim() || !createGoal?.trim() || !createDir || !isAbsolute(createDir)) throw new DotError('dot/invalid', 'title, goal and an absolute dir are required')
-      const requirements = explicitRequirements
-        ?? (recipe ? recipeRequirements(recipe, createGoal) : undefined)
-        ?? goalRequirements(createGoal)
-      let change: ChangeRecord
-      try {
-        change = await this.store.work.createChange({
-          title: createTitle, cwd: createDir, goal: createGoal,
-          requirements,
-          requirementsFromGoal: explicitRequirements === undefined && (recipe === undefined || requirementsFollowGoal(recipe)),
-          ...(steps ? { steps } : {}),
-          ...(createConstraints !== undefined ? { constraints: createConstraints } : {}),
-          ...(userRequest !== undefined ? { userRequest } : {}),
-          ...(createLanguage !== undefined ? { deliverableLanguage: createLanguage } : {}),
-          ...(recipe ? { recipe: { id: recipe.id, revision: recipe.revision } } : {}),
-          ...(maxConcurrentRuns !== undefined ? { maxConcurrentRuns } : {}),
-          ...(typeof args.priority === 'number' ? { priority: args.priority as 1 | 2 | 3 } : {}),
-          at: this.now(),
-        })
-      } catch (error) {
-        if (error instanceof InputShapeError) throw new DotError('dot/invalid', error.message)
-        throw error
-      }
-      const humanReview = args.human_review !== undefined ? args.human_review === true : recipe?.humanReview === true
-      if (humanReview) await this.store.work.requestOversight(change.id, this.now())
-      void this.pruneWorkArtifactsIfNeeded()
+      const change = await this.createChangeFromTool(args)
+      const recipe = change.recipe ? this.store.recipe(change.recipe.id) : undefined
       const view = this.store.work.workView(change.id)
       return JSON.stringify(recipe ? { ...view, recipe: { id: recipe.id, name: recipe.name, revision: recipe.revision } } : view)
     }
@@ -2620,6 +2669,56 @@ export class DotService {
     if (!('id' in revised)) throw new DotError('dot/invalid', revised.message)
     if (args.human_review === true) await this.store.work.requestOversight(revised.id, this.now())
     return JSON.stringify(this.store.work.workView(revised.id))
+  }
+
+  /** The create branch of dot_task: returns the created record so callers (recipe dispatch) need not parse the view JSON. */
+  private async createChangeFromTool(args: Record<string, unknown>): Promise<ChangeRecord> {
+    const text = (key: string) => typeof args[key] === 'string' ? args[key] as string : undefined
+    const title = text('title')
+    const goal = text('goal')
+    const dir = text('dir')
+    const explicitRequirements = requirementList(args.requirements)
+    if (args.requirements !== undefined && explicitRequirements === undefined) {
+      throw new DotError('dot/invalid', 'requirements must be a JSON array')
+    }
+    const steps = args.steps === undefined ? undefined : stepList(args.steps)
+    const constraints = constraintList(args.constraints)
+    const userRequest = text('user_request')
+    const deliverableLanguage = text('deliverable_language')
+    const maxConcurrentRuns = typeof args.max_concurrent === 'number' ? args.max_concurrent : undefined
+    const recipe = text('recipe') === undefined ? undefined : this.requireRecipe(text('recipe')!)
+    const createTitle = title ?? recipe?.name
+    const createGoal = goal ?? recipe?.goal
+    const createDir = dir ?? recipe?.dir
+    const createConstraints = constraints ?? recipe?.constraints
+    const createLanguage = deliverableLanguage ?? recipe?.deliverableLanguage
+    if (!createTitle?.trim() || !createGoal?.trim() || !createDir || !isAbsolute(createDir)) throw new DotError('dot/invalid', 'title, goal and an absolute dir are required')
+    const requirements = explicitRequirements
+      ?? (recipe ? recipeRequirements(recipe, createGoal) : undefined)
+      ?? goalRequirements(createGoal)
+    let change: ChangeRecord
+    try {
+      change = await this.store.work.createChange({
+        title: createTitle, cwd: createDir, goal: createGoal,
+        requirements,
+        requirementsFromGoal: explicitRequirements === undefined && (recipe === undefined || requirementsFollowGoal(recipe)),
+        ...(steps ? { steps } : {}),
+        ...(createConstraints !== undefined ? { constraints: createConstraints } : {}),
+        ...(userRequest !== undefined ? { userRequest } : {}),
+        ...(createLanguage !== undefined ? { deliverableLanguage: createLanguage } : {}),
+        ...(recipe ? { recipe: { id: recipe.id, revision: recipe.revision } } : {}),
+        ...(maxConcurrentRuns !== undefined ? { maxConcurrentRuns } : {}),
+        ...(typeof args.priority === 'number' ? { priority: args.priority as 1 | 2 | 3 } : {}),
+        at: this.now(),
+      })
+    } catch (error) {
+      if (error instanceof InputShapeError) throw new DotError('dot/invalid', error.message)
+      throw error
+    }
+    const humanReview = args.human_review !== undefined ? args.human_review === true : recipe?.humanReview === true
+    if (humanReview) await this.store.work.requestOversight(change.id, this.now())
+    void this.pruneWorkArtifactsIfNeeded()
+    return change
   }
 
   private async reserveFromTool(args: Record<string, unknown>): Promise<{ changeId: string; runId: string; phase: RunRecord['phase']; requestedSessionId: string }> {

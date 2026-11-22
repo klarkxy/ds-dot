@@ -487,6 +487,12 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
           await ensureDot()
           return { ok: true, value: await service.clearUsage() }
         }
+        case 'recipes': return { ok: true, value: service.recipeBoard() }
+        case 'recipe.run': {
+          const id = str(payload, 'id')
+          const result = await service.runRecipe(id ?? '', { origin: 'human' })
+          return { ok: true, value: result }
+        }
         case 'schedule.remove': {
           const id = field(payload, 'id')
           return { ok: true, value: typeof id === 'string' ? await service.removeSchedule(id) : false }

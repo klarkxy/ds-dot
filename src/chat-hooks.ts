@@ -5,7 +5,7 @@
  */
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type React from 'react'
-import type { BoardView, ChatItem, ChatSnapshot, DotSettings } from './contracts.ts'
+import type { BoardView, ChatItem, ChatSnapshot, DotSettings, RecipeBoardRow } from './contracts.ts'
 import type { ChatImage } from './chat-images.ts'
 import type { ChatApi } from './chat-panel.tsx'
 
@@ -79,6 +79,30 @@ export function useBoard(api: ChatApi, feedBoardRev?: number): [BoardView | unde
     return () => { lifetime.abort(); if (timer !== undefined) clearTimeout(timer) }
   }, [api, round, feedBoardRev, pollMs])
   return [view, error, useCallback(() => setRound(value => value + 1), [])]
+}
+
+export function useRecipes(api: ChatApi): [readonly RecipeBoardRow[], () => void] {
+  const [rows, setRows] = useState<readonly RecipeBoardRow[]>([])
+  const [round, setRound] = useState(0)
+  const lastTextRef = useRef('')
+  useEffect(() => {
+    if (!api.recipes) return
+    const lifetime = new AbortController()
+    let timer: ReturnType<typeof setTimeout> | undefined
+    // Same cadence and unchanged-text optimisation as the board poll.
+    const run = () => {
+      api.recipes!(lifetime.signal).then(next => {
+        if (lifetime.signal.aborted) return
+        const text = JSON.stringify(next)
+        if (text !== lastTextRef.current) { lastTextRef.current = text; setRows(next) }
+      }, () => {}).finally(() => {
+        if (!lifetime.signal.aborted) timer = setTimeout(run, BOARD_POLL_MS)
+      })
+    }
+    run()
+    return () => { lifetime.abort(); if (timer !== undefined) clearTimeout(timer) }
+  }, [api, round])
+  return [rows, useCallback(() => setRound(value => value + 1), [])]
 }
 
 export function useSettings(api: ChatApi): [DotSettings | undefined, (next: DotSettings) => void] {

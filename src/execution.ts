@@ -3,6 +3,7 @@
  * record lock. Accepted means the host took the message, not that the work finished.
  */
 import type { DotHost } from './host.ts'
+import type { TaskPermission } from './contracts.ts'
 import { scopeWrites, type RunCursor, type RunPhase, type RunRecord, type WorkBook, type WorkRefusal } from './work.ts'
 
 export interface FoundSession { readonly cwd?: string; readonly preset?: string }
@@ -447,7 +448,7 @@ function countMessages(events: readonly RelayEvent[], accept: (row: Record<strin
 }
 
 /** Adapt the public host. Relay acceptance still has to be proved from the log. */
-export function bindRunSession(host: DotHost, writablePreset = 'default'): RunSessionHost {
+export function bindRunSession(host: DotHost, writablePreset: TaskPermission = 'workspace-write'): RunSessionHost {
   return {
     async findSession(sessionId) {
       if (!host.findSession) throw new Error('session lookup is unavailable')
@@ -466,8 +467,9 @@ export function bindRunSession(host: DotHost, writablePreset = 'default'): RunSe
           return await host.verifyTaskPermission(sessionId, 'read', 'read-only') ? 'ok' : 'rejected'
         }
         if (!host.setWritable || !host.verifyTaskPermission) return 'unknown'
-        if (!await host.setWritable(sessionId, writablePreset)) return 'rejected'
-        return await host.verifyTaskPermission(sessionId, 'write', writablePreset) ? 'ok' : 'rejected'
+        const effective = host.effectiveTaskPermission?.(writablePreset) ?? writablePreset
+        if (!await host.setWritable(sessionId, effective)) return 'rejected'
+        return await host.verifyTaskPermission(sessionId, 'write', effective) ? 'ok' : 'rejected'
       } catch { return 'unknown' }
     },
     async prompt(sessionId, text, requestId) {

@@ -74,7 +74,7 @@ describe('Dorothy self-management controls', () => {
     expect(tabLabels).toEqual(expect.arrayContaining(['桃乐丝管', '我来管', '一律拒绝']))
     // The blanket allow mode is gone; the task permission is its own field.
     expect(tabLabels).not.toContain('一律允许')
-    expect(tabLabels).toEqual(expect.arrayContaining(['工作区写入', '完全访问', '跟随宿主']))
+    expect(tabLabels).toEqual(expect.arrayContaining(['工作区写入', '完全访问']))
 
     const fullAccessTab = [...document.querySelectorAll<HTMLButtonElement>('[role="tab"]')].find(node => node.textContent === '完全访问')!
     await act(async () => fullAccessTab.click())

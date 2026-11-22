@@ -8,7 +8,7 @@ import { Button, Checkbox, IconInfoOutlineRegular, IconSearchOutlineRegular, Inp
 import { createContext, useCallback, useContext, useEffect, useId, useMemo, useRef, useState, type ReactNode } from 'react'
 import type { SettingsSection } from './chat-hooks.ts'
 export type { SettingsSection } from './chat-hooks.ts'
-import { type ApprovalMode, type CapabilityCatalogView, type CapabilityGrant, type CapabilityGroupView, type DotSettings, type FactoryResetPreview, type FactoryResetResult, type KeepaliveInfo, type ModelChoice, type SettingField, type SettingProposal, type TakeoverMode, type TaskModelRule, type TaskPermission } from './contracts.ts'
+import { type ApprovalMode, type CapabilityCatalogView, type CapabilityGrant, type CapabilityGroupView, type CapabilityToolView, type DotSettings, type FactoryResetPreview, type FactoryResetResult, type KeepaliveInfo, type ModelChoice, type SettingField, type SettingProposal, type TakeoverMode, type TaskModelRule, type TaskPermission } from './contracts.ts'
 import type { UpdateResult, UpdateStatus } from './auto-update.ts'
 import { factoryResetScope, formatWhen, t, type CopyLocale, type TextKey } from './ui-copy.ts'
 
@@ -26,6 +26,8 @@ export interface SettingsApi {
   decideSetting(id: string, allow: boolean): Promise<string>
   /** Extra-capability catalog + what the live segment applied; absent in tests. */
   capabilities?(signal: AbortSignal): Promise<CapabilityCatalogView>
+  /** Live task-permission options; absent in tests. */
+  taskPermissionOptions?(signal: AbortSignal): Promise<{ options: TaskPermission[] }>
   settings(signal: AbortSignal): Promise<DotSettings>
   previewFactoryReset?(): Promise<FactoryResetPreview>
   confirmFactoryReset?(token: string): Promise<FactoryResetResult>
@@ -176,7 +178,7 @@ function formatProposalValue(locale: CopyLocale, field: SettingProposal['field']
       if (value === 'dot' || value === 'human' || value === 'off') return { text: t(locale, `sQuestions_${value}`), block: false }
       break
     case 'taskPermission':
-      if (value === 'workspace-write' || value === 'danger-full-access' || value === 'default') return { text: t(locale, `sTaskPermission_${value}`), block: false }
+      if (value === 'workspace-write' || value === 'danger-full-access' || value === 'safe-auto' || value === 'auto') return { text: t(locale, `sTaskPermission_${value}`), block: false }
       break
     case 'reflection':
       if (typeof value === 'boolean') return { text: t(locale, value ? 'sReflection_on' : 'sReflection_off'), block: false }
@@ -342,6 +344,7 @@ function Capabilities({ locale, api, grants, onPick }: {
 }) {
   const [view, setView] = useState<CapabilityCatalogView>()
   const [error, setError] = useState('')
+  const [capFilter, setCapFilter] = useState('')
   // Choosing `auto` on a self-escalating row takes one more explicit confirm.
   const [confirmAuto, setConfirmAuto] = useState<{ selector: string; label: string } | undefined>()
   useEffect(() => {
@@ -356,7 +359,20 @@ function Capabilities({ locale, api, grants, onPick }: {
     return () => { life.abort(); clearInterval(timer) }
   }, [api])
   if (api.capabilities === undefined) return null
+  if (view === undefined && !error) return <PaneSkeleton label={t(locale, 'settingsLoading')} />
   const applied = view?.applied ?? {}
+  const capNeedle = capFilter.trim().toLowerCase()
+  const matchesTool = (tool: CapabilityToolView) => capNeedle === '' || tool.name.toLowerCase().includes(capNeedle) || (tool.description ?? '').toLowerCase().includes(capNeedle)
+  const groupHits = (group: CapabilityGroupView): boolean =>
+    group.label.toLowerCase().includes(capNeedle) || group.id.toLowerCase().includes(capNeedle)
+      || group.tools.some(matchesTool) || (group.children ?? []).some(groupHits)
+  const countTools = (group: CapabilityGroupView): number =>
+    group.tools.length + (group.children ?? []).reduce((sum, child) => sum + countTools(child), 0)
+  const kindLabel = (group: CapabilityGroupView): string =>
+    group.kind === 'mcp' ? t(locale, 'sCapKind_mcp')
+    : group.kind === 'builtin' ? t(locale, 'sCapKind_builtin')
+    : group.kind === 'plugin' || group.kind === 'entry' ? t(locale, 'sCapKind_plugin')
+    : t(locale, 'sCapKind_unknown')
   const pick = (selector: string, grant: CapabilityGrant | undefined, label: string, highRisk: boolean) => {
     if (grant === 'auto' && highRisk) { setConfirmAuto({ selector, label }); return }
     onPick(selector, grant)
@@ -366,35 +382,46 @@ function Capabilities({ locale, api, grants, onPick }: {
     return 'off'
   }
   const groupRows = (group: CapabilityGroupView, parents: readonly string[]): ReactNode => {
-    // The host group is display-only: unattributed tools grant one by one.
-    const chain = group.kind === 'host' ? parents : [group.id, ...parents]
+    // The host and builtin groups are display-only: their tools grant one by one / via children.
+    const chain = group.kind === 'host' || group.id === 'builtin' ? parents : [group.id, ...parents]
     const changed = group.tools.some(tool => (applied[tool.name] ?? 'off') !== effectiveFor([`tool:${tool.name}`, ...chain]))
     const granted = group.tools.some(tool => effectiveFor([`tool:${tool.name}`, ...chain]) !== 'off')
       || (group.children ?? []).some(child => child.tools.some(tool => effectiveFor([`tool:${tool.name}`, child.id, ...chain]) !== 'off'))
-    const label = group.kind === 'host' ? t(locale, 'sCapHostGroup') : group.label
+    const label = group.kind === 'host' ? t(locale, 'sCapHostGroup')
+      : group.id === 'builtin' ? t(locale, 'sCapBuiltinGroup')
+      : group.id.startsWith('builtin:') ? t(locale, `sCapBuiltin_${group.id.slice('builtin:'.length)}` as TextKey)
+      : group.label
+    if (capNeedle !== '' && !groupHits(group)) return null
+    const tools = capNeedle === '' ? group.tools : group.tools.filter(matchesTool)
     return (
-      <details key={group.id} className="dsh-dot-cap-group" open={granted}>
+      <details key={group.id} className="dsh-dot-cap-group" open={granted || capNeedle !== ''}>
         <summary className="dsh-dot-cap-head">
-          <span className="dsh-dot-cap-name">{label}<span className="dsh-dot-cap-id">{group.id}</span></span>
+          <span className="dsh-dot-cap-name" title={group.id}>{label}{group.kind === 'builtin' && group.id !== 'builtin' ? null : <span className="dsh-dot-cap-tag">{kindLabel(group)}</span>}<span className="dsh-dot-cap-count">{t(locale, 'sCapToolCount').replace('{n}', String(countTools(group)))}</span></span>
           {group.missing === true ? <span className="dsh-dot-cap-badge">{t(locale, 'sCapMissing')}</span> : null}
           {group.highRisk === true ? <span className="dsh-dot-cap-badge dsh-dot-cap-badge--warn">{t(locale, 'sCapHighRisk')}</span> : null}
           {changed ? <span className="dsh-dot-cap-badge">{t(locale, 'sCapNext')}</span> : null}
-          {group.kind === 'host' ? null : (
+          {group.kind === 'host' || group.id === 'builtin' ? null : (
             <span className="dsh-dot-cap-control" onClick={event => event.preventDefault()}>
               <GrantPicker locale={locale} label={label} chain={chain} grants={grants} applied={undefined} onPick={(selector, grant) => pick(selector, grant, label, group.highRisk === true)} />
             </span>
           )}
         </summary>
         <div className="dsh-dot-cap-body">
-          {group.tools.map(tool => {
+          {tools.map(tool => {
             const toolChain = [`tool:${tool.name}`, ...chain]
+            // A single-tool group already carries the one grantable selector;
+            // show the second picker only when the tool has a grant of its own.
+            const soloNoOwnGrant = tools.length === 1 && (group.children ?? []).length === 0 && grants[`tool:${tool.name}`] === undefined
             return (
               <div key={tool.name} className="dsh-dot-cap-row">
-                <span className="dsh-dot-cap-name" title={tool.description}>{tool.name}</span>
+                <span className="dsh-dot-cap-name dsh-dot-cap-tool">
+                  <code>{tool.name}</code>
+                  {tool.description !== undefined ? <span className="dsh-dot-cap-desc">{tool.description}</span> : null}
+                </span>
                 {tool.missing === true ? <span className="dsh-dot-cap-badge">{t(locale, 'sCapMissing')}</span> : null}
                 {tool.conditional ? <span className="dsh-dot-cap-badge">{t(locale, 'sCapConditional')}</span> : null}
                 {tool.highRisk === true ? <span className="dsh-dot-cap-badge dsh-dot-cap-badge--warn">{t(locale, 'sCapHighRisk')}</span> : null}
-                <GrantPicker locale={locale} label={tool.name} chain={toolChain} grants={grants} applied={tool.missing === true ? undefined : (applied[tool.name] ?? 'off')} onPick={(selector, grant) => pick(selector, grant, tool.name, tool.highRisk === true)} />
+                {soloNoOwnGrant ? null : <GrantPicker locale={locale} label={tool.name} chain={toolChain} grants={grants} applied={tool.missing === true ? undefined : (applied[tool.name] ?? 'off')} onPick={(selector, grant) => pick(selector, grant, tool.name, tool.highRisk === true)} />}
               </div>
             )
           })}
@@ -405,6 +432,16 @@ function Capabilities({ locale, api, grants, onPick }: {
   }
   return (
     <div className="dsh-dot-caps">
+      <p className="dsh-dot-cap-intro">{t(locale, 'sCapIntro')}</p>
+      <Input
+        className="dsh-dot-cap-search"
+        icon={<IconSearchOutlineRegular size={13} />}
+        type="search"
+        aria-label={t(locale, 'sCapFilter')}
+        placeholder={t(locale, 'sCapFilter')}
+        value={capFilter}
+        onChange={event => setCapFilter(event.target.value)}
+      />
       {error ? <div className="dsh-ui-error" role="alert">{error}</div> : null}
       {confirmAuto !== undefined ? (
         <div className="dsh-dot-cap-confirm" role="alert">
@@ -417,7 +454,7 @@ function Capabilities({ locale, api, grants, onPick }: {
         <>
           <details className="dsh-dot-cap-group dsh-dot-cap-group--locked">
             <summary className="dsh-dot-cap-head">
-              <span className="dsh-dot-cap-name">{t(locale, 'sCapLockedTitle')}</span>
+              <span className="dsh-dot-cap-name">{t(locale, 'sCapLockedTitle')}<span className="dsh-dot-cap-count">{t(locale, 'sCapToolCount').replace('{n}', String(view.locked.length))}</span></span>
               <span className="dsh-dot-cap-badge dsh-dot-cap-badge--on">{t(locale, 'sCapAlways')}</span>
             </summary>
             <div className="dsh-dot-cap-body dsh-dot-cap-locked">{view.locked.map(name => <span key={name} className="dsh-dot-cap-locked-name">{name}</span>)}</div>
@@ -619,6 +656,7 @@ export function SettingsPanel({ locale, api, settings, section = 'all', proposal
   const [modelFilter, setModelFilter] = useState('')
   const [keepalive, setKeepalive] = useState<KeepaliveInfo>()
   const [keepaliveRefresh, setKeepaliveRefresh] = useState(0)
+  const [livePermissions, setLivePermissions] = useState<TaskPermission[]>(['workspace-write', 'danger-full-access'])
   const show = (target: SettingsSection) => section === 'all' || section === target
   const reloadSettings = useCallback(() => {
     api.settings(new AbortController().signal).then(onSaved, () => {})
@@ -637,6 +675,15 @@ export function SettingsPanel({ locale, api, settings, section = 'all', proposal
     )
     return () => { life.abort() }
   }, [api, keepaliveRefresh, hasSettings, modelKey, cacheTtlSig, proposalState.revision])
+  useEffect(() => {
+    if (!api.taskPermissionOptions) return
+    const life = new AbortController()
+    api.taskPermissionOptions(life.signal).then(
+      value => { if (!life.signal.aborted && Array.isArray(value?.options)) setLivePermissions(value.options) },
+      () => {},
+    )
+    return () => { life.abort() }
+  }, [api])
   const reportStatus = useCallback((next: SaveNotice | undefined) => {
     setStatus(next)
     onStatusChange?.(next)
@@ -664,7 +711,9 @@ export function SettingsPanel({ locale, api, settings, section = 'all', proposal
   }
   const approvalModes: readonly [ApprovalMode, ApprovalMode, ApprovalMode] = ['dot', 'human', 'deny']
   const questionModes: readonly [TakeoverMode, TakeoverMode, TakeoverMode] = ['dot', 'human', 'off']
-  const permissionModes: readonly [TaskPermission, TaskPermission, TaskPermission] = ['workspace-write', 'danger-full-access', 'default']
+  const permissionModes: readonly [TaskPermission, ...TaskPermission[]] = (livePermissions.includes(settings.taskPermission)
+    ? livePermissions
+    : [...livePermissions, settings.taskPermission]) as [TaskPermission, ...TaskPermission[]]
   const lock = (field: SettingField) => ({ locked: settings?.locks?.[field] === true, onLock: (locked: boolean) => save({ locks: { ...settings?.locks, [field]: locked } }) })
 
   // Models dot may start tasks on: provider-grouped catalog choices, followed by listed entries the catalog no longer has.
@@ -676,6 +725,11 @@ export function SettingsPanel({ locale, api, settings, section = 'all', proposal
   const staleKeys = rule.list.filter(key => !catalogKeys.has(key) && (!needle || key.toLowerCase().includes(needle)))
   const toggleTaskModel = (key: string, checked: boolean) => {
     const list = checked ? [...rule.list.filter(item => item !== key), key] : rule.list.filter(item => item !== key)
+    save({ taskModels: { mode: rule.mode, list } })
+  }
+  const toggleTaskGroup = (keys: readonly string[], checked: boolean) => {
+    const drop = new Set(keys)
+    const list = checked ? [...rule.list, ...keys.filter(key => !rule.list.includes(key))] : rule.list.filter(key => !drop.has(key))
     save({ taskModels: { mode: rule.mode, list } })
   }
   const emptyAllowList = rule.mode === 'allow' && rule.list.length === 0
@@ -773,13 +827,13 @@ export function SettingsPanel({ locale, api, settings, section = 'all', proposal
         <div className="dsh-dot-pane-section">
           {allSections ? <h3 className="dsh-dot-pane-section-title">{t(locale, 'sRequests')}</h3> : null}
           <div className="dsh-ui-form">
-            <Field label={t(locale, 'sScope')} {...lock('scope')}>
+            <Field label={t(locale, 'sScope')} tip={t(locale, 'sScopeDesc')} {...lock('scope')}>
               <SegmentedChoice locale={locale} label={t(locale, 'sScope')} value={settings.scope} options={['all', 'tracked']} labelKeyOf={opt => `sScope_${opt}`} onChange={next => save({ scope: next })} />
             </Field>
             <Field label={t(locale, 'sApprovals')} tip={approvalHelp} {...lock('approvals')}>
               <SegmentedChoice locale={locale} label={t(locale, 'sApprovals')} value={settings.approvals} options={approvalModes} labelKeyOf={opt => `sApprovals_${opt}`} onChange={next => save({ approvals: next })} />
             </Field>
-            <Field label={t(locale, 'sQuestions')} tip={settings.questions === 'dot' ? t(locale, 'sQuestionsDesc_dot') : undefined} {...lock('questions')}>
+            <Field label={t(locale, 'sQuestions')} tip={t(locale, `sQuestionsDesc_${settings.questions}` as TextKey)} {...lock('questions')}>
               <SegmentedChoice locale={locale} label={t(locale, 'sQuestions')} value={settings.questions} options={questionModes} labelKeyOf={opt => `sQuestions_${opt}`} onChange={next => save({ questions: next })} />
             </Field>
           </div>
@@ -789,7 +843,13 @@ export function SettingsPanel({ locale, api, settings, section = 'all', proposal
         <div className="dsh-dot-pane-section">
           {allSections ? <h3 className="dsh-dot-pane-section-title">{t(locale, 'sTasks')}</h3> : null}
           <div className="dsh-ui-form">
-            <Field label={t(locale, 'sTaskPermission')} tip={t(locale, 'sTaskPermissionDesc')} {...lock('taskPermission')}>
+            <Field
+              label={t(locale, 'sTaskPermission')}
+              tip={t(locale, `sTaskPermissionDesc_${settings.taskPermission}` as TextKey)}
+              help={livePermissions.includes(settings.taskPermission) ? undefined : t(locale, 'sTaskPermissionUnavailable').replace('{name}', t(locale, `sTaskPermission_${settings.taskPermission}` as TextKey))}
+              helpTone={livePermissions.includes(settings.taskPermission) ? undefined : 'warn'}
+              {...lock('taskPermission')}
+            >
               <SegmentedChoice locale={locale} label={t(locale, 'sTaskPermission')} value={settings.taskPermission} options={permissionModes} labelKeyOf={opt => `sTaskPermission_${opt}`} onChange={next => save({ taskPermission: next })} />
             </Field>
             <Field label={t(locale, 'sTaskModels')} help={taskModelsHelp} helpTone={taskModelsHelp ? 'warn' : undefined} {...lock('taskModels')}>
@@ -811,28 +871,50 @@ export function SettingsPanel({ locale, api, settings, section = 'all', proposal
                       <Button variant="ghost" size="sm" onClick={() => save({ taskModels: { mode: rule.mode, list: [] } })}>{t(locale, 'sTaskModelsClear')}</Button>
                     ) : null}
                   </div>
+                  {rule.list.length > 0 ? (
+                    <div className="dsh-dot-model-chips" data-tone={rule.mode} aria-label={t(locale, 'sTaskModelsSelected').replace('{n}', String(rule.list.length))}>
+                      {rule.list.map(key => {
+                        const choice = catalogChoices.find(item => taskModelKey(item) === key)
+                        const stale = choice === undefined
+                        return (
+                          <span key={key} className="dsh-dot-model-chip" data-stale={stale ? '' : undefined} title={stale ? `${key} ${t(locale, 'sTaskModelsGone')}` : choice.label}>
+                            <span className="dsh-dot-model-chip-name">{choice ? modelMenuShortName(choice) : key}</span>
+                            {choice ? <span className="dsh-dot-model-chip-provider">{choice.providerLabel ?? choice.provider}</span> : null}
+                            <button type="button" className="dsh-dot-model-chip-remove" aria-label={t(locale, 'sTaskModelsRemove').replace('{name}', choice ? modelMenuShortName(choice) : key)} onClick={() => toggleTaskModel(key, false)}>×</button>
+                          </span>
+                        )
+                      })}
+                    </div>
+                  ) : null}
                   <div className="dsh-dot-model-list">
                     {filteredGroups.length === 0 && staleKeys.length === 0 ? (
                       <div className="dsh-dot-model-empty">{catalogChoices.length === 0 && !models.failed ? t(locale, 'sModelLoading') : t(locale, 'sTaskModelsNoMatch')}</div>
                     ) : null}
-                    {filteredGroups.map(group => (
-                      <div className="dsh-dot-model-group" key={group.provider}>
-                        <div className="dsh-dot-model-group-title">{group.name}</div>
-                        {group.items.map(choice => {
-                          const key = taskModelKey(choice)
-                          return (
-                            <Checkbox
-                              key={key}
-                              className="dsh-dot-model-item"
-                              checked={rule.list.includes(key)}
-                              label={modelMenuShortName(choice)}
-                              title={choice.label}
-                              onChange={checked => toggleTaskModel(key, checked)}
-                            />
-                          )
-                        })}
-                      </div>
-                    ))}
+                    {filteredGroups.map(group => {
+                      const keys = group.items.map(taskModelKey)
+                      const selected = keys.filter(key => rule.list.includes(key))
+                      return (
+                        <details className="dsh-dot-model-group" key={group.provider} open={modelFilter.trim() !== '' || selected.length > 0}>
+                          <summary className="dsh-dot-model-group-title">
+                            <span className="dsh-dot-model-group-label">{group.name}<span className="dsh-dot-model-group-count">{selected.length}/{keys.length}</span></span>
+                            <button type="button" className="dsh-dot-model-group-toggle" onClick={event => { event.preventDefault(); event.stopPropagation(); toggleTaskGroup(keys, selected.length !== keys.length) }}>{t(locale, selected.length === keys.length ? 'sTaskModelsGroupNone' : 'sTaskModelsGroupAll')}</button>
+                          </summary>
+                          {group.items.map(choice => {
+                            const key = taskModelKey(choice)
+                            return (
+                              <Checkbox
+                                key={key}
+                                className="dsh-dot-model-item"
+                                checked={rule.list.includes(key)}
+                                label={modelMenuShortName(choice)}
+                                title={choice.label}
+                                onChange={checked => toggleTaskModel(key, checked)}
+                              />
+                            )
+                          })}
+                        </details>
+                      )
+                    })}
                     {staleKeys.length > 0 ? (
                       <div className="dsh-dot-model-group">
                         <div className="dsh-dot-model-group-title">{t(locale, 'sTaskModelsStaleGroup')}</div>
@@ -941,7 +1023,23 @@ export const settingsCss = `
 .dsh-dot-chat .dsh-dot-model-toolbar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .dsh-dot-chat .dsh-dot-model-toolbar > button { flex-shrink: 0; white-space: nowrap; }
 .dsh-dot-chat .dsh-dot-model-search { flex: 1 1 160px; min-width: 0; height: 28px; }
-.dsh-dot-chat .dsh-dot-model-list { display: flex; flex-direction: column; gap: 8px; max-height: 220px; overflow-y: auto; padding: 2px; }
+.dsh-dot-chat .dsh-dot-model-list { display: flex; flex-direction: column; gap: 8px; max-height: 320px; overflow-y: auto; padding: 2px; }
+.dsh-dot-chat .dsh-dot-model-chips { display: flex; flex-wrap: wrap; gap: 4px; max-height: 96px; overflow-y: auto; }
+.dsh-dot-chat .dsh-dot-model-chip { display: inline-flex; align-items: center; gap: 4px; min-width: 0; max-width: 100%; padding: 1px 4px 1px 7px; border-radius: var(--dsw-radius-sm); background: var(--dsw-alias-bg-layer-2); font-size: 11px; line-height: 16px; color: var(--dsw-alias-label-primary); }
+.dsh-dot-chat .dsh-dot-model-chip[data-stale] { color: var(--dsw-alias-label-tertiary); }
+.dsh-dot-chat .dsh-dot-model-chip[data-stale] .dsh-dot-model-chip-name { text-decoration: line-through; }
+.dsh-dot-chat .dsh-dot-model-chips[data-tone='deny'] .dsh-dot-model-chip { color: var(--dsw-alias-state-warn-primary); }
+.dsh-dot-chat .dsh-dot-model-chip-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dsh-dot-chat .dsh-dot-model-chip-provider { flex-shrink: 0; font-size: 10px; color: var(--dsw-alias-label-tertiary); }
+.dsh-dot-chat .dsh-dot-model-chip-remove { border: 0; background: none; padding: 0 2px; color: inherit; cursor: pointer; font-size: 13px; line-height: 1; }
+.dsh-dot-chat .dsh-dot-model-group > summary { display: flex; align-items: center; gap: 6px; list-style: none; cursor: pointer; }
+.dsh-dot-chat .dsh-dot-model-group > summary::-webkit-details-marker { display: none; }
+.dsh-dot-chat .dsh-dot-model-group > summary::before { content: '›'; display: inline-block; transition: transform 0.12s; color: var(--dsw-alias-label-tertiary); }
+.dsh-dot-chat .dsh-dot-model-group[open] > summary::before { transform: rotate(90deg); }
+.dsh-dot-chat .dsh-dot-model-group-label { flex: 1 1 auto; min-width: 0; }
+.dsh-dot-chat .dsh-dot-model-group-count { margin-left: 6px; font-weight: 400; color: var(--dsw-alias-label-tertiary); }
+.dsh-dot-chat .dsh-dot-model-group-toggle { flex-shrink: 0; border: 0; background: none; padding: 0 6px; color: var(--dsw-alias-label-tertiary); font-size: 11px; line-height: 16px; cursor: pointer; }
+.dsh-dot-chat .dsh-dot-model-group-toggle:hover { color: var(--dsw-alias-label-primary); }
 .dsh-dot-chat .dsh-dot-model-empty { padding: 12px 8px; text-align: center; font-size: 12px; color: var(--dsw-alias-label-tertiary); }
 .dsh-dot-chat .dsh-dot-model-group { display: flex; flex-direction: column; gap: 2px; }
 .dsh-dot-chat .dsh-dot-model-group-title { padding: 4px 6px 2px; font-size: 11px; line-height: 16px; font-weight: 600; color: var(--dsw-alias-label-tertiary); }
@@ -958,19 +1056,23 @@ export const settingsCss = `
 .dsh-dot-chat .dsh-dot-factory-preview { display: flex; flex-direction: column; gap: 8px; margin: 8px 0; padding: 10px 12px; border-radius: var(--dsw-radius-md); background: var(--dsw-alias-bg-layer-1); box-shadow: var(--dsw-elevation-stroke); }
 .dsh-dot-chat .dsh-dot-factory-preview ul { margin: 0; padding-left: 18px; font-size: 12px; line-height: 18px; color: var(--dsw-alias-label-secondary); }
 .dsh-dot-chat .dsh-dot-caps { display: flex; flex-direction: column; gap: 8px; margin-top: 4px; }
+.dsh-dot-chat .dsh-dot-cap-intro { margin: 0; font-size: 12px; line-height: 18px; color: var(--dsw-alias-label-secondary); }
+.dsh-dot-chat .dsh-dot-cap-search { height: 28px; }
 .dsh-dot-chat .dsh-dot-cap-group { border-radius: var(--dsw-radius-md); background: var(--dsw-alias-bg-layer-1); box-shadow: var(--dsw-elevation-stroke); }
 .dsh-dot-chat .dsh-dot-cap-group > summary { list-style: none; }
 .dsh-dot-chat .dsh-dot-cap-group > summary::-webkit-details-marker { display: none; }
 .dsh-dot-chat .dsh-dot-cap-head { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 8px; padding: 8px 12px; cursor: pointer; }
-.dsh-dot-chat .dsh-dot-cap-head .dsh-dot-cap-name { flex-basis: 100%; }
 .dsh-dot-chat .dsh-dot-cap-group--locked .dsh-dot-cap-head { cursor: pointer; }
 .dsh-dot-chat .dsh-dot-cap-name { flex: 1 1 auto; min-width: 0; font-size: 13px; line-height: 20px; color: var(--dsw-alias-label-primary); overflow-wrap: anywhere; }
-.dsh-dot-chat .dsh-dot-cap-id { margin-left: 6px; font-size: 11px; color: var(--dsw-alias-label-tertiary); font-family: var(--ds-font-family-code); }
-.dsh-dot-chat .dsh-dot-cap-control { flex: 0 0 auto; }
+.dsh-dot-chat .dsh-dot-cap-tag { margin-left: 6px; padding: 0 5px; border-radius: var(--dsw-radius-sm); font-size: 10px; line-height: 14px; background: var(--dsw-alias-bg-layer-2); color: var(--dsw-alias-label-tertiary); }
+.dsh-dot-chat .dsh-dot-cap-count { margin-left: 6px; font-size: 11px; color: var(--dsw-alias-label-tertiary); }
+.dsh-dot-chat .dsh-dot-cap-control { flex: 0 0 auto; margin-left: auto; }
 .dsh-dot-chat .dsh-dot-cap-body { display: flex; flex-direction: column; gap: 2px; padding: 0 12px 10px; }
 .dsh-dot-chat .dsh-dot-cap-body .dsh-dot-cap-group { box-shadow: none; background: var(--dsw-alias-bg-layer-2); }
-.dsh-dot-chat .dsh-dot-cap-row { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 8px; padding: 4px 0 4px 8px; }
-.dsh-dot-chat .dsh-dot-cap-row .dsh-dot-cap-name { flex-basis: 100%; }
+.dsh-dot-chat .dsh-dot-cap-row { display: flex; align-items: flex-start; flex-wrap: wrap; gap: 4px 8px; padding: 4px 0 4px 8px; }
+.dsh-dot-chat .dsh-dot-cap-tool { flex: 1 1 auto; display: flex; flex-direction: column; min-width: 0; }
+.dsh-dot-chat .dsh-dot-cap-tool code { font-family: var(--ds-font-family-code); font-size: 12px; }
+.dsh-dot-chat .dsh-dot-cap-desc { font-size: 11px; line-height: 15px; color: var(--dsw-alias-label-tertiary); }
 .dsh-dot-chat .dsh-dot-cap-grant { display: inline-flex; align-items: center; gap: 6px; flex-shrink: 0; }
 .dsh-dot-chat .dsh-dot-cap-grant[data-inherited] [role='tablist'] { opacity: 0.55; }
 .dsh-dot-chat .dsh-dot-cap-badge {
@@ -982,6 +1084,6 @@ export const settingsCss = `
 .dsh-dot-chat .dsh-dot-cap-confirm { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding: 8px 12px; border-radius: var(--dsw-radius-md); background: var(--dsw-alias-bg-layer-1); box-shadow: var(--dsw-elevation-stroke); }
 .dsh-dot-chat .dsh-dot-cap-confirm-text { flex: 1 1 240px; font-size: 12px; line-height: 18px; color: var(--dsw-alias-state-warn-primary); }
 .dsh-dot-chat .dsh-dot-cap-clear { flex-shrink: 0; }
-.dsh-dot-chat .dsh-dot-cap-locked { display: flex; flex-wrap: wrap; gap: 4px; }
+.dsh-dot-chat .dsh-dot-cap-locked { flex-direction: row; flex-wrap: wrap; gap: 4px; }
 .dsh-dot-chat .dsh-dot-cap-locked-name { padding: 1px 6px; border-radius: var(--dsw-radius-sm); background: var(--dsw-alias-bg-layer-2); font-size: 11px; font-family: var(--ds-font-family-code); color: var(--dsw-alias-label-secondary); }
 `

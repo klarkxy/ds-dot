@@ -22,7 +22,7 @@ const FIELDS = {
     mode: z.enum(['all', 'allow', 'deny']),
     list: z.array(z.string().trim().min(1).max(400)).max(TASK_MODEL_LIST_MAX),
   }).strict(),
-  taskPermission: z.enum(['workspace-write', 'danger-full-access', 'default']),
+  taskPermission: z.enum(['workspace-write', 'danger-full-access', 'safe-auto', 'auto']),
   reflection: z.boolean(),
   autoUpdate: z.boolean(),
   idleCheckMinutes: z.number().int().min(0).max(1440),
@@ -51,12 +51,12 @@ export class SettingsError extends Error {
 
 const isRecord = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === 'object' && !Array.isArray(value)
 
-const TASK_PERMISSIONS = new Set<string>(['workspace-write', 'danger-full-access', 'default'])
+const TASK_PERMISSIONS = new Set<string>(['workspace-write', 'danger-full-access', 'safe-auto', 'auto'])
 
 /**
  * The stored settings; read field by field. A value that is not one of the
- * known presets leaves the default in place, so a saved 'default' or
- * 'danger-full-access' is never quietly replaced.
+ * known presets leaves the default in place; a stored 'default' from before
+ * the option was dropped migrates to 'workspace-write'.
  */
 export function parseSettings(value: unknown): DotSettings {
   const row = isRecord(value) ? value : {}
@@ -76,7 +76,8 @@ export function parseSettings(value: unknown): DotSettings {
     out[key] = parsed.data
   }
   const permission = row.taskPermission
-  if (typeof permission === 'string' && TASK_PERMISSIONS.has(permission)) out.taskPermission = permission as TaskPermission
+  if (permission === 'default') out.taskPermission = 'workspace-write'
+  else if (typeof permission === 'string' && TASK_PERMISSIONS.has(permission)) out.taskPermission = permission as TaskPermission
   return out as unknown as DotSettings
 }
 

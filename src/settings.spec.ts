@@ -37,7 +37,7 @@ describe('parseSettings', () => {
     expect(DEFAULT_SETTINGS.taskPermission).toBe('workspace-write')
     expect(parseSettings({}).taskPermission).toBe('workspace-write')
     expect(parseSettings({ taskPermission: 'danger-full-access' }).taskPermission).toBe('danger-full-access')
-    expect(parseSettings({ taskPermission: 'default' }).taskPermission).toBe('default')
+    expect(parseSettings({ taskPermission: 'default' }).taskPermission).toBe('workspace-write')
     // An unknown value never replaces a known one.
     expect(parseSettings({ taskPermission: 'inherit' }).taskPermission).toBe('workspace-write')
   })

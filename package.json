@@ -94,7 +94,7 @@
     "prepare": "tsdown"
   },
   "dependencies": {
-    "@klarkxy/dsh-deep-view": "^0.3.4",
+    "@klarkxy/dsh-deep-view": "^0.3.5",
     "@klarkxy/dsh-plugin-kit": "^0.8.1",
     "zod": "4.6.6"
   },

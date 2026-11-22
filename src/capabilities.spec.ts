@@ -504,6 +504,7 @@ describe('capability application', () => {
     expect(calls).toBe(1)
     caps.invalidateBundles()
     await caps.catalog()
+    await new Promise(resolve => setTimeout(resolve, 0))
     expect(calls).toBe(2)
   })
 

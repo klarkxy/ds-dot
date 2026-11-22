@@ -5,5 +5,5 @@
 
 - [external-cli.md](external-cli.md)：通过 Agent Bridge 让任务会话调用其他本机 CLI
 - [factories.md](factories.md)：任务配方第一期刻意没做的部分
-- [im.md](im.md)：接入 IM 消息（飞书 / Telegram / Slack 等）
+- [im.md](im.md)：接入 IM 消息（飞书 / Telegram / Slack 等），含对 dsh-im-connect 的调研结论
 - [inbox-followups.md](inbox-followups.md)：收件箱第一期刻意没做的部分

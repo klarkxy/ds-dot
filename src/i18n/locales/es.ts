@@ -100,6 +100,7 @@ const esUi: UiText = {
   recipeRunConfirm: 'Confirmar ejecución',
   recipeRunDone: '{id} despachado',
   recipeRunFailed: 'Despacho rechazado: {reason}',
+  recipesRefreshFailed: 'No se pudo actualizar la lista de recetas',
   recipeEmpty: 'No hay recetas guardadas. Pide a Dorothy que guarde una con dot_recipe.',
   recipeNoRuns: 'sin ejecuciones aún',
   recipeAccepted: 'aceptadas',

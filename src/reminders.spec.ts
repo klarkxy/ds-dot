@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import type { Timer } from './batcher.ts'
 import { REMINDER_HEAD } from './contracts.ts'
 import { ReminderClock } from './reminders.ts'
@@ -201,6 +201,40 @@ describe('recipe-bound reminders', () => {
     expect(delivered[0]).toContain('sch-p1')
     expect(delivered[0]).toContain('recipe dispatch refused: previous run still in flight')
     expect(delivered[0]).toContain('rcp-1')
+  })
+
+  it('skips records removed from the board while an earlier dispatch is awaited', async () => {
+    const store = new DotStore(undefined)
+    const delivered: string[] = []
+    const calls: string[] = []
+    let now = START
+    let release: () => void = () => {}
+    const gate = new Promise<void>(resolve => { release = resolve })
+    const clock = new ReminderClock({
+      store, now: () => now,
+      deliver: async text => { delivered.push(text) },
+      runRecipe: async record => {
+        calls.push(record.id)
+        if (record.id === 'sch-a') await gate
+        return { ok: true as const, text: 'ok' }
+      },
+    })
+    const timing = { kind: 'every' as const, minutes: 60, anchor: now - 60 * MINUTE }
+    await store.putSchedule({ id: 'sch-a', title: 'a', prompt: '', timing, createdAt: now - 1000, nextAt: now - 1, recipe: 'rcp-a' })
+    await store.putSchedule({ id: 'sch-b', title: 'b', prompt: '', timing, createdAt: now - 1000, nextAt: now - 1, recipe: 'rcp-b' })
+    await store.putSchedule({ id: 'sch-c', title: 'c', prompt: 'p', timing, createdAt: now - 1000, nextAt: now - 1 })
+    const tick = clock.tick()
+    await vi.waitFor(() => expect(calls).toEqual(['sch-a']))
+    // The human removes the other two while the first dispatch is parked.
+    await store.deleteSchedule('sch-b')
+    await store.deleteSchedule('sch-c')
+    release()
+    await tick
+    // The removed recipe record never dispatched; the removed plain one never delivered.
+    expect(calls).toEqual(['sch-a'])
+    expect(delivered).toHaveLength(0)
+    // The surviving record still advanced on schedule.
+    expect(store.schedule('sch-a')!.nextAt).toBeGreaterThan(now)
   })
 
   it('advances a repeating recipe reminder only after a successful dispatch, and never re-dispatches on deliver retry', async () => {

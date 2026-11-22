@@ -2685,6 +2685,29 @@ describe('runRecipe', () => {
     await h.service.dispose()
   })
 
+  it('treats a dispatch that returned without starting as a refusal', async () => {
+    const h = setup()
+    const cwd = dir()
+    await h.service.manageRecipe({ action: 'save', name: 'report', goal: 'g', dir: cwd })
+    // The host refuses the run's permission: startWorkSession reports it as a
+    // "reserved …; not started: …" text instead of throwing.
+    h.failPermission()
+    const result = await h.service.runRecipe('report', { origin: 'human' })
+    expect(result).toMatchObject({ ok: false })
+    if (!result.ok) {
+      expect(result.reason).toContain('not started')
+      expect(result.reason).toContain('permission')
+    }
+    const change = h.store.work.listChanges().find(row => row.recipe?.id === h.store.recipe('report')!.id)!
+    expect(change.control).toBe('cancelled')
+    // No session was prompted and the cancelled change frees the recipe.
+    expect(h.calls.some(call => call.startsWith('prompt '))).toBe(false)
+    const retry = await h.service.runRecipe('report', { origin: 'human' })
+    expect(retry).toMatchObject({ ok: false }) // still refused — the host still refuses — but not on the in-flight rule
+    if (!retry.ok) expect(retry.reason).not.toContain('in flight')
+    await h.service.dispose()
+  })
+
   it('does not hold the serial lane while dispatch awaits the host', async () => {
     const h = setup()
     const cwd = dir()
@@ -2727,6 +2750,23 @@ describe('recipe-bound reminders', () => {
     // board projection carries the resolved name
     const view = h.store.board()
     expect(view.schedules[0]?.recipeName).toBe('weekly')
+    await h.service.dispose()
+  })
+
+  it('allows the same timing for different recipes but refuses one recipe twice', async () => {
+    const h = setup()
+    const cwd = dir()
+    await h.service.manageRecipe({ action: 'save', name: 'weekly', goal: 'g', dir: cwd })
+    await h.service.manageRecipe({ action: 'save', name: 'daily', goal: 'g', dir: cwd })
+    await h.service.scheduleAdd({ title: 'run weekly', prompt: '', recipe: 'weekly', everyMinutes: 60 })
+    // A different recipe at the same timing, both without a note, is allowed.
+    await h.service.scheduleAdd({ title: 'run daily', prompt: '', recipe: 'daily', everyMinutes: 60 })
+    // The same recipe at the same timing stays a duplicate, whatever the note.
+    await expect(h.service.scheduleAdd({ title: 'weekly again', prompt: 'a note', recipe: 'weekly', everyMinutes: 60 }))
+      .rejects.toThrow(/set already/)
+    // A plain reminder at that timing does not collide with the recipe ones.
+    await h.service.scheduleAdd({ title: 'standup', prompt: 'post it', everyMinutes: 60 })
+    expect(h.store.schedules).toHaveLength(3)
     await h.service.dispose()
   })
 

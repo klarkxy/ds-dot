@@ -3,6 +3,7 @@ import { Simulate } from 'react-dom/test-utils'
 import { JSDOM } from 'jsdom'
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 import { RecipesView, type ChatApi } from './chat-panel.tsx'
+import { useRecipes } from './chat-hooks.ts'
 import type { RecipeBoardRow } from './contracts.ts'
 
 const dom = new JSDOM('<div id="root"></div>', { url: 'https://local.test' })
@@ -70,6 +71,74 @@ describe('RecipesView', () => {
     const button = container.querySelector<HTMLButtonElement>('.dsh-dot-recipe-head button')!
     expect(button.disabled).toBe(true)
     expect(container.textContent).toContain('chg-1')
+  })
+
+  it('shows a retryable error when nothing loaded and a refresh hint over stale rows', async () => {
+    let changed = 0
+    const a = api(async () => ({ ok: false, reason: 'x' }))
+    const { container } = await mount(<RecipesView locale="en" api={a} rows={[]} error="offline" onChanged={() => { changed += 1 }} />)
+    expect(container.textContent).toContain('Could not reach Dorothy')
+    expect(container.textContent).not.toContain('No recipes')
+    const retry = [...container.querySelectorAll('button')].find(button => button.textContent === 'Retry')!
+    await act(async () => { Simulate.click(retry) })
+    expect(changed).toBe(1)
+
+    const stale = await mount(<RecipesView locale="en" api={a} rows={[row()]} error="offline" onChanged={() => {}} />)
+    expect(stale.container.textContent).toContain('Weekly report')
+    expect(stale.container.textContent).toContain('Could not refresh the recipe list')
+  })
+
+  it('exposes poll failures through useRecipes and clears them on a good pass', async () => {
+    let calls = 0
+    const a = {
+      recipes: async () => {
+        calls += 1
+        if (calls === 1) throw new Error('offline')
+        return [row()]
+      },
+    } as unknown as ChatApi
+    function Probe() {
+      const [rows, error, refresh] = useRecipes(a)
+      return <div>
+        <span data-part="rows">{rows.length}</span>
+        <span data-part="error">{error ?? ''}</span>
+        <button onClick={refresh}>refresh</button>
+      </div>
+    }
+    const { container } = await mount(<Probe />)
+    await act(async () => { await Promise.resolve() })
+    expect(container.querySelector('[data-part="rows"]')!.textContent).toBe('0')
+    expect(container.querySelector('[data-part="error"]')!.textContent).toBe('offline')
+    // A manual refresh reruns the poll; a good pass clears the error.
+    const button = container.querySelector('button')!
+    await act(async () => { Simulate.click(button); await Promise.resolve() })
+    expect(container.querySelector('[data-part="rows"]')!.textContent).toBe('1')
+    expect(container.querySelector('[data-part="error"]')!.textContent).toBe('')
+  })
+
+  it('keeps stale rows and re-shows the error when a later poll fails', async () => {
+    let calls = 0
+    const a = {
+      recipes: async () => {
+        calls += 1
+        return calls === 1 ? [row()] : Promise.reject(new Error('gone'))
+      },
+    } as unknown as ChatApi
+    function Probe() {
+      const [rows, error, refresh] = useRecipes(a)
+      return <div>
+        <span data-part="rows">{rows.length}</span>
+        <span data-part="error">{error ?? ''}</span>
+        <button onClick={refresh}>refresh</button>
+      </div>
+    }
+    const { container } = await mount(<Probe />)
+    await act(async () => { await Promise.resolve() })
+    expect(container.querySelector('[data-part="rows"]')!.textContent).toBe('1')
+    const button = container.querySelector('button')!
+    await act(async () => { Simulate.click(button); await Promise.resolve() })
+    expect(container.querySelector('[data-part="rows"]')!.textContent).toBe('1')
+    expect(container.querySelector('[data-part="error"]')!.textContent).toBe('gone')
   })
 
   it('shows the refusal message inline on failure', async () => {

@@ -100,6 +100,7 @@ const ruUi: UiText = {
   recipeRunConfirm: 'Подтвердить запуск',
   recipeRunDone: 'Запущено {id}',
   recipeRunFailed: 'Запуск отклонён: {reason}',
+  recipesRefreshFailed: 'Не удалось обновить список рецептов',
   recipeEmpty: 'Сохранённых рецептов нет. Попросите Dorothy сохранить рецепт через dot_recipe.',
   recipeNoRuns: 'запусков ещё не было',
   recipeAccepted: 'принято',

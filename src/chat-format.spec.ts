@@ -64,6 +64,26 @@ describe('chat-format', () => {
       once: true,
     })
 
+    const recipeBatch = parseNotice([
+      '[dot reminder] Reminders you set for yourself are due:',
+      '- sch-aaa111 "周报" (every 60 min; due 2026-11-11 10:00; next 2026-11-11 11:00) recipe rcp-1 "weekly"',
+      '  recipe dispatch refused: previous run of rcp-1 "weekly" still in flight: chg-4',
+      '- sch-bbb222 "站会" (daily at 09:00; due 2026-11-11 09:00; next 2026-11-12 09:00): 写一下纪要',
+      'Do what each one asks now. The human reads your reply in the chat, so tell them what is worth their attention and nothing about the reminder itself.',
+    ].join('\n'))
+    expect(recipeBatch.entries).toHaveLength(2)
+    expect(recipeBatch.entries[0]).toEqual({
+      kind: 'reminder',
+      id: 'sch-aaa111',
+      title: '周报',
+      prompt: '',
+      refused: 'previous run of rcp-1 "weekly" still in flight: chg-4',
+      due: '10:00',
+      next: '11:00',
+    })
+    expect(recipeBatch.entries[1]).toMatchObject({ kind: 'reminder', id: 'sch-bbb222', prompt: '写一下纪要' })
+    expect(recipeBatch.fallback).toBeUndefined()
+
     const question = parseNotice([
       '[dot notice] Updates from other sessions:',
       '- question · session-q1: q-2 · question from task "配置整理" · "保留旧字段吗？"',

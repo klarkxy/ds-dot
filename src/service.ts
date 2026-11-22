@@ -1485,19 +1485,29 @@ export class DotService {
     })
     if (!started.ok) return started
     const change = started.change
-    try {
-      await this.manageWorkAction({ action: 'dispatch', task_id: change.id, ...(opts.note?.trim() ? { message: opts.note.trim() } : {}) })
-    } catch (error) {
+    const cancelFresh = async (reason: string): Promise<{ readonly ok: false; readonly reason: string }> => {
       const cancelled = await this.cancelWorkChange(change.id).catch(() => undefined)
       const cancelledNote = cancelled && 'ok' in cancelled && cancelled.ok
         ? `; fresh change ${change.id} was cancelled`
         : `; fresh change ${change.id} could not be cancelled`
-      return { ok: false as const, reason: `${messageOf(error)}${cancelledNote}` }
+      return { ok: false as const, reason: `${reason}${cancelledNote}` }
+    }
+    let dispatchText = ''
+    try {
+      dispatchText = await this.manageWorkAction({ action: 'dispatch', task_id: change.id, ...(opts.note?.trim() ? { message: opts.note.trim() } : {}) })
+    } catch (error) {
+      return cancelFresh(messageOf(error))
     } finally {
       this.recipeStarting.delete(recipe.id)
     }
-    const runId = this.store.work.listRuns().filter(run => run.changeId === change.id).at(-1)?.id
-    return { ok: true as const, changeId: change.id, ...(runId ? { runId } : {}) }
+    // The dispatch branch reports a refused launch (e.g. the host denied the
+    // run's permission) as a "reserved …; not started: …" text, not a throw:
+    // no run past `reserved` means the dispatch is a refusal, not a success.
+    const run = this.store.work.listRuns().filter(row => row.changeId === change.id).at(-1)
+    if (!run || run.phase === 'reserved') {
+      return cancelFresh(dispatchText || `no run of ${change.id} was launched`)
+    }
+    return { ok: true as const, changeId: change.id, runId: run.id }
   }
 
   /** A recipe-bound reminder fires here: direct dispatch plus a non-waking notice. */

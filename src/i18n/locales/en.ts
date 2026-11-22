@@ -101,6 +101,7 @@ const enUi: UiText = {
   recipeRunConfirm: 'Confirm run',
   recipeRunDone: 'Dispatched {id}',
   recipeRunFailed: 'Dispatch refused: {reason}',
+  recipesRefreshFailed: 'Could not refresh the recipe list',
   recipeEmpty: 'No recipes saved. Ask Dorothy to save one with dot_recipe.',
   recipeNoRuns: 'no runs yet',
   recipeAccepted: 'accepted',

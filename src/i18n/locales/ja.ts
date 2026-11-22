@@ -100,6 +100,7 @@ const jaUi: UiText = {
   recipeRunConfirm: '実行を確認',
   recipeRunDone: '{id} をディスパッチしました',
   recipeRunFailed: 'ディスパッチ拒否: {reason}',
+  recipesRefreshFailed: 'レシピ一覧を更新できませんでした',
   recipeEmpty: '保存済みレシピはありません。Dorothy に dot_recipe で保存させてください。',
   recipeNoRuns: '実行履歴なし',
   recipeAccepted: '受理',

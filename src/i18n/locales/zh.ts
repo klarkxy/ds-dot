@@ -101,6 +101,7 @@ export const zhUi = {
   recipeRunConfirm: '确认运行',
   recipeRunDone: '已派发 {id}',
   recipeRunFailed: '派发被拒：{reason}',
+  recipesRefreshFailed: '配方列表刷新失败',
   recipeEmpty: '尚无配方。可让 Dorothy 用 dot_recipe 保存一个。',
   recipeNoRuns: '尚无运行记录',
   recipeAccepted: '已验收',

@@ -74,7 +74,9 @@ export class ReminderClock {
     if (active.length >= MAX_SCHEDULES) throw new ScheduleInputError(`${MAX_SCHEDULES} reminders are set already; remove one first`)
     const now = this.options.now()
     const parsed = parseSchedule(input, now)
-    const duplicate = active.find(record => fold(record.title) === fold(parsed.title) || (sameTiming(record.timing, parsed.timing) && fold(record.prompt) === fold(parsed.prompt)) || (parsed.recipe !== undefined && record.recipe === parsed.recipe && sameTiming(record.timing, parsed.timing)))
+    // Two recipe-bound reminders collide on recipe + timing alone; two plain
+    // reminders still need the same prompt. Different recipes never collide.
+    const duplicate = active.find(record => fold(record.title) === fold(parsed.title) || (record.recipe === parsed.recipe && sameTiming(record.timing, parsed.timing) && (parsed.recipe !== undefined || fold(record.prompt) === fold(parsed.prompt))))
     if (duplicate) throw new ScheduleInputError(`reminder ${duplicate.id} "${duplicate.title}" (${describeTiming(duplicate.timing)}) is set already; remove it first to change it`)
     let id = ''
     do { id = `sch-${randomUUID().slice(0, 6)}` } while (store.schedule(id))
@@ -110,7 +112,7 @@ export class ReminderClock {
       // restart must not deliver it again. Repeating reminders still move only
       // after a wake that did not throw, so a failed one stays due.
       for (const record of due) {
-        if (record.timing.kind !== 'once' || onceDelivered(record)) continue
+        if (record.timing.kind !== 'once' || onceDelivered(record) || !store.schedule(record.id)) continue
         await store.putSchedule({ ...record, deliveredAt: now, lastFiredAt: now })
       }
       // Recipe-bound reminders dispatch directly; a refusal still goes to dot.
@@ -119,6 +121,9 @@ export class ReminderClock {
       const dispatched: ScheduleRecord[] = []
       const refusals = new Map<string, string>()
       for (const record of due) {
+        // Removed from the board while an earlier dispatch was awaited: the
+        // stale due snapshot must not fire it anyway.
+        if (!store.schedule(record.id)) continue
         if (!record.recipe || !this.options.runRecipe) { plain.push(record); continue }
         try {
           const result = await this.options.runRecipe(record)
@@ -138,9 +143,10 @@ export class ReminderClock {
         if (next === undefined) await store.deleteSchedule(record.id)
         else await store.putSchedule({ ...record, nextAt: next, lastFiredAt: now })
       }
-      if (plain.length > 0) {
-        await this.options.deliver(formatReminders(plain, now, { refusals, recipeName }))
-        for (const record of plain) {
+      const livePlain = plain.filter(record => store.schedule(record.id) !== undefined)
+      if (livePlain.length > 0) {
+        await this.options.deliver(formatReminders(livePlain, now, { refusals, recipeName }))
+        for (const record of livePlain) {
           // Removed while the delivery was underway: it stays removed.
           if (!store.schedule(record.id)) continue
           if (record.timing.kind === 'once') continue

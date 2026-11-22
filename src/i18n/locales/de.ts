@@ -100,6 +100,7 @@ const deUi: UiText = {
   recipeRunConfirm: 'Ausführung bestätigen',
   recipeRunDone: '{id} gestartet',
   recipeRunFailed: 'Start abgelehnt: {reason}',
+  recipesRefreshFailed: 'Rezeptliste konnte nicht aktualisiert werden',
   recipeEmpty: 'Keine Rezepte gespeichert. Dorothy mit dot_recipe eines speichern lassen.',
   recipeNoRuns: 'noch keine Läufe',
   recipeAccepted: 'akzeptiert',

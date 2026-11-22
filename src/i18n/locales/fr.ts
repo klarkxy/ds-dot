@@ -100,6 +100,7 @@ const frUi: UiText = {
   recipeRunConfirm: "Confirmer l'exécution",
   recipeRunDone: '{id} lancée',
   recipeRunFailed: 'Lancement refusé : {reason}',
+  recipesRefreshFailed: "Impossible d'actualiser la liste des recettes",
   recipeEmpty: "Aucune recette enregistrée. Demandez à Dorothy d'en enregistrer une avec dot_recipe.",
   recipeNoRuns: 'aucune exécution',
   recipeAccepted: 'acceptées',

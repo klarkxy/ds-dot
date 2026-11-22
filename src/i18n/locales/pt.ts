@@ -100,6 +100,7 @@ const ptUi: UiText = {
   recipeRunConfirm: 'Confirmar execução',
   recipeRunDone: '{id} despachada',
   recipeRunFailed: 'Despacho recusado: {reason}',
+  recipesRefreshFailed: 'Não foi possível atualizar a lista de receitas',
   recipeEmpty: 'Nenhuma receita salva. Peça a Dorothy para salvar uma com dot_recipe.',
   recipeNoRuns: 'sem execuções ainda',
   recipeAccepted: 'aceitas',

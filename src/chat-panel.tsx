@@ -286,8 +286,8 @@ function WorkDrawer({ locale, api, tab, wide, settings, trajectoryRev, running, 
 }
 
 /** The Recipes filter: saved work orders with stats, bound reminders and a two-step Run now. */
-export function RecipesView({ locale, api, rows, onChanged }: {
-  locale: CopyLocale; api: ChatApi; rows: readonly RecipeBoardRow[]; onChanged: () => void
+export function RecipesView({ locale, api, rows, error, onChanged }: {
+  locale: CopyLocale; api: ChatApi; rows: readonly RecipeBoardRow[]; error?: string; onChanged: () => void
 }) {
   const [arm, setArm] = useState<string>()
   const [busy, setBusy] = useState<string>()
@@ -318,9 +318,13 @@ export function RecipesView({ locale, api, rows, onChanged }: {
       setRefusals(prev => ({ ...prev, [row.id]: failure instanceof Error ? failure.message : String(failure) }))
     }).finally(() => setBusy(undefined))
   }
-  if (rows.length === 0) return <p className="dsh-ui-hint">{t(locale, 'recipeEmpty')}</p>
+  if (rows.length === 0) {
+    if (error === undefined) return <p className="dsh-ui-hint">{t(locale, 'recipeEmpty')}</p>
+    return <div className="dsh-ui-row" role="alert"><span className="dsh-ui-error">{t(locale, 'loadFailed')}: {error}</span><Button variant="ghost" onClick={onChanged}>{t(locale, 'retry')}</Button></div>
+  }
   return (
     <div className="dsh-dot-recipes">
+      {error !== undefined ? <p className="dsh-ui-hint" role="status">{t(locale, 'recipesRefreshFailed')}: {error}</p> : null}
       {rows.map(row => {
         const inFlight = row.inFlight.length > 0
         const armed = arm === row.id
@@ -378,7 +382,7 @@ function TasksTab({ locale, view, api, workApi, boardError, pendingRemoveTitle, 
     const openWork = (view.work ?? []).filter(w => w.status !== 'done' && w.status !== 'cancelled').length
     return openWork + groups.requests.length + groups.watched.length + view.schedules.length
   }, [view])
-  const [recipes, refreshRecipes] = useRecipes(api)
+  const [recipes, recipesError, refreshRecipes] = useRecipes(api)
   const filters: readonly { value: BoardFilter | 'recipes'; label: string }[] = [
     { value: 'all', label: totalCount > 0 ? `${t(locale, 'filterAll')} (${totalCount})` : t(locale, 'filterAll') },
     { value: 'waiting', label: `${t(locale, 'filterWaiting')} (${counts.waiting})` },
@@ -397,7 +401,7 @@ function TasksTab({ locale, view, api, workApi, boardError, pendingRemoveTitle, 
           <Button variant="ghost" size="sm" onClick={onUndoRemove}>{t(locale, 'undoAction')}</Button>
         </div>
       ) : null}
-      {filter === 'recipes' ? <RecipesView locale={locale} api={api} rows={recipes} onChanged={() => { refreshRecipes(); onRetry() }} /> : null}
+      {filter === 'recipes' ? <RecipesView locale={locale} api={api} rows={recipes} {...recipesError === undefined ? {} : { error: recipesError }} onChanged={() => { refreshRecipes(); onRetry() }} /> : null}
       {workApi && filter !== 'watch' && filter !== 'recipes' ? <WorkBoardPanel locale={locale} api={workApi} filter={filter} items={view?.work ?? NO_WORK} pending={view?.pending ?? NO_PENDING} onChanged={onRetry} onOpenSession={onOpen} /> : null}
       {filter !== 'recipes' ? <Board locale={locale} view={view} filter={filter} suppressEmpty={(view?.work?.length ?? 0) > 0 || (Boolean(workApi) && filter === 'all')} {...boardError === undefined ? {} : { error: boardError }} onOpen={onOpen} onRetry={onRetry} onRemoveSchedule={onRemoveSchedule} /> : null}
     </div>
@@ -885,6 +889,7 @@ function NoticeCard({ entry, locale, tasks, onOpenSession }: { entry: NoticeEntr
           ) : null}
         </div>
         {entry.prompt ? <div className="dsh-dot-card-body">{entry.prompt}</div> : null}
+        {entry.refused ? <div className="dsh-dot-card-body">{fillText(t(locale, 'recipeRunFailed'), { reason: entry.refused })}</div> : null}
       </div>
     )
   }

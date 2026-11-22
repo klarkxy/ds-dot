@@ -55,6 +55,8 @@ export type NoticeEntry =
       readonly next?: string
       readonly once?: boolean
       readonly late?: boolean
+      /** A recipe-bound reminder whose direct dispatch was refused. */
+      readonly refused?: string
     }
 
 export interface ParsedNotice {
@@ -67,7 +69,7 @@ const NOTICE_HEAD = /^\[dot notice\]/i
 const REMINDER_PREFIX = /^\[dot reminder\]/i
 const MODEL_FOOTER = /^Do what each one asks now\./
 const SESSION_BULLET = /^- (approval|question|turn-end|error|task-human|idle-check|inbox)\s*·\s*([^:]+):\s*(.*)$/
-const REMINDER_BULLET = /^- (\S+)\s+"([^"]+)"\s*\(([^)]*)\):\s*(.*)$/
+const REMINDER_BULLET = /^- (\S+)\s+"([^"]+)"\s*\(([^)]*)\)(?:\s+recipe\s+\S+\s+"[^"]*")?(?::\s*(.*))?$/
 const REQUEST_HEAD = /^(\S+)\s*·\s*(?:approval|question) from (?:task "(.+?)"|untracked session(?: in (.+?))?)\s*·\s*"(.*)"$/
 const CHANGE_REQUEST_HEAD = /^(\S+) for task (\S+) "(.*?)": (?:approval|question)\s*·\s*"(.*)"$/
 const TURN_END_HEAD = /^"(.+?)" finished a turn:\s*(.*)$/
@@ -328,13 +330,16 @@ export function parseNotice(text: string): ParsedNotice {
     if (item.section === 'reminder') {
       const m = REMINDER_BULLET.exec(item.head)
       if (m) {
-        const promptLines = [m[4]!, ...item.sublines].join('\n').trim()
+        const REFUSAL_PREFIX = 'recipe dispatch refused:'
+        const refusedLine = item.sublines.find(line => line.trim().startsWith(REFUSAL_PREFIX))
+        const promptLines = [m[4] ?? '', ...item.sublines.filter(line => line !== refusedLine)].join('\n').trim()
         entries.push({
           kind: 'reminder',
           id: m[1]!,
           title: m[2]!,
           prompt: promptLines,
           ...parseReminderFacts(m[3]!),
+          ...refusedLine ? { refused: refusedLine.trim().slice(REFUSAL_PREFIX.length).trim() } : {},
         })
         continue
       }

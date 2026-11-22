@@ -494,6 +494,7 @@ const ptUi: UiText = {
   workScope: 'Escopo de escrita',
   workScopeExclusive: 'Espaço de trabalho inteiro',
   workScopeNone: 'Sem escrita',
+  workTokens: 'tok',
   workEvidence: 'Evidência',
   workFiles: 'Arquivos entregues',
   workKindWork: 'Trabalho',

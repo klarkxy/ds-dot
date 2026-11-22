@@ -1,9 +1,10 @@
-import { Button, Input, SegmentedTabs, StateDot, Tag, type SegmentedTab, type StateDotState, type TagTone } from '@deepseek-ai/dsh-client-ui-primitives'
+import { Button, Input, SegmentedTabs, StateDot, Tag, Tooltip, type SegmentedTab, type StateDotState, type TagTone } from '@deepseek-ai/dsh-client-ui-primitives'
 import { useCallback, useEffect, useId, useMemo, useRef, useState, type MouseEvent } from 'react'
 import { parseEvidenceRef } from './acceptance.ts'
 import { BOARD_ROOT } from './board.tsx'
 import { FINISHED_SHOWN } from './board-groups.ts'
-import { t, type CopyLocale, type TextKey } from './ui-copy.ts'
+import { totalUsage } from './context.ts'
+import { formatDuration, formatTokens, t, type CopyLocale, type TextKey } from './ui-copy.ts'
 import {
   acceptPayload, forceReleasePayload, groupWork, lookRequest, rejectPayload, resumePayload, scopeText, shortId, workFactKey, workFactTone, workFailure,
   type PendingGlance, type WorkAcceptPayload, type WorkBoardItem, type WorkChangeView, type WorkReadRequest, type WorkRejectPayload, type WorkRunView, type WorkStatus,
@@ -517,6 +518,26 @@ function FileGlyph() {
   )
 }
 
+/** Tooltip body for a finished run: the usage breakdown the Context panel names. */
+function runUsageTip(locale: CopyLocale, usage: NonNullable<WorkRunView['usage']>): string {
+  return [
+    `${t(locale, 'ctxInput')} ${formatTokens(usage.input)}`,
+    `${t(locale, 'ctxCacheRead')} ${formatTokens(usage.cacheRead)}`,
+    `${t(locale, 'ctxCacheWrite')} ${formatTokens(usage.cacheWrite)}`,
+    `${t(locale, 'ctxOutput')} ${formatTokens(usage.output)}`,
+  ].join(' · ')
+}
+
+/** Elapsed time of a live run, re-rendered at most once per 30s. */
+function LiveElapsed({ startedAt }: { readonly startedAt: number }) {
+  const [now, setNow] = useState(() => Date.now())
+  useEffect(() => {
+    const handle = setInterval(() => setNow(Date.now()), 30_000)
+    return () => clearInterval(handle)
+  }, [])
+  return <>{formatDuration(Math.max(0, now - startedAt))}</>
+}
+
 function RunFacts({ locale, run, onOpenSession }: { readonly locale: CopyLocale; readonly run: WorkRunView; readonly onOpenSession?: (sessionId: string) => void }) {
   const paths = scopeText(run.writeScope)
   const exclusive = run.writeScope?.kind === 'workspace-exclusive'
@@ -525,6 +546,19 @@ function RunFacts({ locale, run, onOpenSession }: { readonly locale: CopyLocale;
       <span className="dsh-dot-work-run-line">
         <span className="dsh-dot-work-mono">{run.id}</span> {factLabel(locale, 'kind', run.kind)}/{factLabel(locale, 'phase', run.phase)}
         {run.writeScope ? ` · ${t(locale, 'workScope')} ${exclusive ? t(locale, 'workScopeExclusive') : paths || t(locale, 'workScopeNone')}` : ''}
+        {run.usage ? (
+          <>
+            {' · '}
+            <Tooltip label={runUsageTip(locale, run.usage)} side="top">
+              <span>{formatTokens(totalUsage(run.usage))} {t(locale, 'workTokens')}{run.wallMs !== undefined ? ` · ${formatDuration(run.wallMs)}` : ''}</span>
+            </Tooltip>
+          </>
+        ) : run.startedAt !== undefined ? (
+          <>
+            {' · '}
+            <span>{t(locale, 'workStatusRunning')} <LiveElapsed startedAt={run.startedAt} /></span>
+          </>
+        ) : null}
         {run.sessionId && onOpenSession ? (
           <>
             {' · '}
@@ -621,6 +655,9 @@ function WorkRow({ locale, item, pending, onAccept, onReject, onAnswer, onResume
           <span className="dsh-dot-work-meta">
             <Tag tone={STATUS_TONE[item.status]}>{t(locale, STATUS_KEY[item.status])}</Tag>
             {item.priority === 3 ? <Tag tone="warning">{t(locale, 'priorityHigh')}</Tag> : null}
+            {item.tokens !== undefined && item.tokens > 0 ? (
+              <Tag tone="neutral">{formatTokens(item.tokens)} {t(locale, 'workTokens')}{item.wallMs !== undefined ? ` · ${formatDuration(item.wallMs)}` : ''}</Tag>
+            ) : null}
             {item.verification ? <Tag tone={workFactTone(item.verification.verdict)}>{t(locale, 'workVerification')} {factLabel(locale, 'verdict', item.verification.verdict)}</Tag> : null}
             {delivery && delivery.status !== 'accepted' ? <Tag tone={workFactTone(delivery.status)}>{t(locale, 'workDispatch')}{locale === 'zh' || locale === 'ja' ? '：' : ': '}{factLabel(locale, 'dispatch', delivery.status)}</Tag> : null}
           </span>

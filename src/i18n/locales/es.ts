@@ -494,6 +494,7 @@ const esUi: UiText = {
   workScope: 'Ámbito de escritura',
   workScopeExclusive: 'Todo el espacio de trabajo',
   workScopeNone: 'Sin escritura',
+  workTokens: 'tok',
   workEvidence: 'Evidencia',
   workFiles: 'Archivos entregados',
   workKindWork: 'Trabajo',

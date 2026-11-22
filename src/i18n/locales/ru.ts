@@ -494,6 +494,7 @@ const ruUi: UiText = {
   workScope: 'Область записи',
   workScopeExclusive: 'Вся рабочая область',
   workScopeNone: 'Без записи',
+  workTokens: 'tok',
   workEvidence: 'Подтверждения',
   workFiles: 'Переданные файлы',
   workKindWork: 'Работа',

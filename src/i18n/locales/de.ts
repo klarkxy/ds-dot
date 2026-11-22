@@ -494,6 +494,7 @@ const deUi: UiText = {
   workScope: 'Schreibbereich',
   workScopeExclusive: 'Gesamter Arbeitsbereich',
   workScopeNone: 'Keine Schreibrechte',
+  workTokens: 'tok',
   workEvidence: 'Nachweise',
   workFiles: 'Gelieferte Dateien',
   workKindWork: 'Arbeit',

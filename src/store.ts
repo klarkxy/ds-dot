@@ -611,6 +611,9 @@ export class DotStore {
     return () => { this.listeners.delete(listener) }
   }
 
+  /** A work-row mutation that bypassed a DotStore write still needs the board signal. */
+  workChanged(): void { this.changed() }
+
   /** Wait for queued writes; used on shutdown and in tests. */
   async flush(): Promise<void> { await this.tail.catch(() => undefined) }
 
@@ -622,14 +625,14 @@ export class DotStore {
   }
 
   /** Evict oldest terminal WorkBook changes from both memory and durable storage. */
-  pruneWorkHistory(maxKeep?: number, beforeRemove?: (change: ChangeRecord, failedRounds: number) => Promise<void>): Promise<{ readonly prunedChanges: readonly string[]; readonly keptArtifacts: ReadonlySet<string> }> {
+  pruneWorkHistory(maxKeep?: number, beforeRemove?: (change: ChangeRecord, failedRounds: number) => Promise<void>, at = Date.now()): Promise<{ readonly prunedChanges: readonly string[]; readonly keptArtifacts: ReadonlySet<string> }> {
     return this.work.pruneCompletedChanges(maxKeep, async (table, key) => {
       const domain = this.domain
       if (!domain) return
       const op = this.tail.then(() => this.durable(() => domain.table(table).delete(key)))
       this.tail = op.catch(() => undefined)
       await op
-    }, beforeRemove)
+    }, beforeRemove, at)
   }
 
   private prune(): void {

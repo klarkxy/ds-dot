@@ -1047,7 +1047,8 @@ describe('DotService reminders', () => {
     expect(h.relayed[0]!.text.startsWith(REMINDER_HEAD)).toBe(true)
     expect(h.relayed[0]!.text).toContain('Read the release task and report.')
     await vi.waitFor(() => expect(h.store.schedules.map(record => record.deliveredAt)).toEqual([1000 + 10 * 60_000]))
-    // The periodic reflection check keeps the clock armed even with no reminders.
+    // The periodic reflection check keeps the clock armed even with no reminders;
+    // usage capture runs inside the periodic wake itself (no debounce timer).
     expect(h.delays()).toEqual([30 * 60_000])
   })
 
@@ -1936,10 +1937,62 @@ describe('DotService work dispatch', () => {
     rmSync(dir, { recursive: true, force: true })
     rmSync(home, { recursive: true, force: true })
   })
+
+  it('captures usage and wall time of settled runs once the board sees the work change', async () => {
+    const h = setup()
+    await h.service.ensureDot()
+    h.service.board()
+    await h.service.manageTask({ action: 'dispatch', dir: '/proj', title: 'one', message: 'go' })
+    const run = h.store.work.sessionRun(h.store.list()[0]!.sessionId)!
+    h.events.set(run.sessionId!, [
+      { type: 'assistant/message', time: 1000, data: { usage: { inputTokens: 10, outputTokens: 5, cacheReadTokens: 20, cacheWriteTokens: 2 } } },
+      { type: 'assistant/message', time: 5000, data: { usage: { inputTokens: 4, outputTokens: 3 } } },
+    ])
+    await h.service.finishWorkRun(run.id, 'completed')
+    h.service.board()
+    expect(h.delays()).toContain(2000)
+    h.fire()
+    await vi.waitFor(() => expect(h.store.work.run(run.id)?.usage).toEqual({ input: 14, cacheRead: 20, cacheWrite: 2, output: 8 }))
+    expect(h.store.work.run(run.id)?.wallMs).toBe(4000)
+    await h.service.dispose()
+  })
+
+  it('skips live and unreadable runs, retries a failed read on the next pass, and never runs two passes at once', async () => {
+    const h = setup()
+    await h.service.ensureDot()
+    await h.service.manageTask({ action: 'dispatch', dir: '/proj', title: 'one', message: 'go' })
+    const done = h.store.work.sessionRun(h.store.list()[0]!.sessionId)!
+    h.events.set(done.sessionId!, [
+      { type: 'assistant/message', time: 1000, data: { usage: { inputTokens: 7, outputTokens: 3 } } },
+      { type: 'assistant/message', time: 4000, data: { usage: { inputTokens: 1, outputTokens: 1 } } },
+    ])
+    await h.service.manageTask({ action: 'dispatch', dir: '/proj', title: 'two', message: 'go' })
+    const liveRun = h.store.work.listRuns().find(row => row.id !== done.id)!
+    h.events.set(liveRun.sessionId!, [{ type: 'assistant/message', time: 1, data: { usage: { inputTokens: 9, outputTokens: 9 } } }])
+    await h.service.finishWorkRun(done.id, 'completed')
+    // A session that cannot be read is skipped, not marked; the next pass retries it.
+    h.unreadable.add(done.sessionId!)
+    await h.service.reconcile()
+    expect(h.store.work.run(done.id)?.usage).toBeUndefined()
+    h.unreadable.delete(done.sessionId!)
+    // Two overlapping reconciles share one capture pass per session.
+    const readSessions: string[] = []
+    const original = h.host.readEvents.bind(h.host)
+    h.host.readEvents = async id => { readSessions.push(id); return original(id) }
+    await Promise.all([h.service.reconcile(), h.service.reconcile()])
+    expect(readSessions.filter(id => id === done.sessionId)).toHaveLength(1)
+    // The live run's session was never read: it is not a capture candidate.
+    expect(readSessions).not.toContain(liveRun.sessionId)
+    const stored = h.store.work.run(done.id)!
+    expect(stored.usage).toEqual({ input: 8, cacheRead: 0, cacheWrite: 0, output: 4 })
+    expect(stored.wallMs).toBe(3000)
+    expect(h.store.work.run(liveRun.id)?.usage).toBeUndefined()
+    await h.service.dispose()
+  })
 })
 
 function memoryDomain(seed: Record<string, Record<string, unknown>> = {}) {
-  const names = ['state', 'tasks', 'tickets', 'schedules', 'proposals', 'recipes', 'changes', 'inputs', 'runs', 'verifications']
+  const names = ['state', 'tasks', 'tickets', 'schedules', 'proposals', 'recipes', 'changes', 'inputs', 'runs', 'verifications', 'peers', 'inbox']
   const tables: Record<string, Map<string, unknown>> = {}
   for (const name of names) tables[name] = new Map(Object.entries(seed[name] ?? {}))
   const domain: DotDomainHandle = {
@@ -2592,6 +2645,268 @@ describe('task recipes', () => {
     await h.service.confirmFactoryReset(armed.token)
     expect(h.store.recipes).toEqual([])
     expect(h.service.previewFactoryReset().recipes).toBe(0)
+    await h.service.dispose()
+  })
+})
+
+describe('run usage capture triggers', () => {
+  const dir = () => mkdtempSync(join(tmpdir(), 'dsh-dot-usage-'))
+
+  async function settledRun(h: ReturnType<typeof setup>, events: import('./storage.ts').RawEvent[], title = 'one') {
+    await h.service.manageTask({ action: 'dispatch', dir: '/proj', title, message: 'go' })
+    const run = h.store.work.listRuns().at(-1)!
+    h.events.set(run.sessionId!, events)
+    await h.service.finishWorkRun(run.id, 'completed')
+    return run
+  }
+
+  it('a usage pass in flight cannot resurrect a run wiped by factory reset', async () => {
+    const h = setup()
+    const { domain, tables } = memoryDomain()
+    const store = new DotStore(domain)
+    await store.setSettings({ ...DEFAULT_SETTINGS, reflection: false, idleCheckMinutes: 0 })
+    const service = new DotService({ host: h.host, store, homeDir: join(tmpdir(), 'dsh-dot-spec'), approvalGraceMs: 0, timer: h.timer, now: () => 1000 })
+    await service.ensureDot()
+    await service.manageTask({ action: 'dispatch', dir: '/proj', title: 'one', message: 'go' })
+    const run = store.work.listRuns()[0]!
+    h.events.set(run.sessionId!, [{ type: 'assistant/message', time: 1, data: { usage: { inputTokens: 5, outputTokens: 1 } } }])
+    await service.finishWorkRun(run.id, 'completed')
+    // Park the capture pass inside readEvents; the reset must wait for it.
+    let release: () => void = () => {}
+    const gate = new Promise<void>(resolve => { release = resolve })
+    const original = h.host.readEvents.bind(h.host)
+    h.host.readEvents = async id => { await gate; return original(id) }
+    const pass = service.reconcile()
+    await new Promise(resolve => setTimeout(resolve, 20))
+    let resetDone = false
+    const reset = service.confirmFactoryReset(service.previewFactoryReset().token).then(result => { resetDone = true; return result })
+    await new Promise(resolve => setTimeout(resolve, 60))
+    // Blocked on the in-flight pass: the wipe cannot run while usage is landing.
+    expect(resetDone).toBe(false)
+    release()
+    await pass
+    const result = await reset
+    expect(result.archiveFailed).toEqual([])
+    expect(store.work.run(run.id)).toBeUndefined()
+    // Nothing was committed after the wipe: a reload finds no run row.
+    expect(tables.runs!.has(run.id)).toBe(false)
+    const reloaded = new DotStore(domain)
+    expect(reloaded.work.run(run.id)).toBeUndefined()
+    await service.dispose()
+    await h.service.dispose()
+  })
+
+  it('schedules a capture pass after work actions without waiting for the panel', async () => {
+    const h = setup()
+    await h.service.ensureDot()
+    const run = await settledRun(h, [
+      { type: 'assistant/message', time: 1000, data: { usage: { inputTokens: 10, outputTokens: 5 } } },
+      { type: 'assistant/message', time: 4000, data: { usage: { inputTokens: 1, outputTokens: 1 } } },
+    ])
+    // manageTask itself armed the debounce; no board() call was needed.
+    expect(h.delays()).toContain(2000)
+    h.fire()
+    await vi.waitFor(() => expect(h.store.work.run(run.id)?.usage).toEqual({ input: 11, cacheRead: 0, cacheWrite: 0, output: 6 }))
+    await h.service.dispose()
+  })
+
+  it('dot_read captures a settled run cost before formatting', async () => {
+    const h = setup()
+    await h.service.ensureDot()
+    const run = await settledRun(h, [
+      { type: 'assistant/message', time: 1000, data: { usage: { inputTokens: 10, outputTokens: 5 } } },
+      { type: 'assistant/message', time: 3000, data: { usage: { inputTokens: 2, outputTokens: 1 } } },
+    ])
+    expect(h.store.work.run(run.id)!.usage).toBeUndefined()
+    const text = await h.service.read(run.sessionId!)
+    expect(text).toContain(`run ${run.id} cost:`)
+    expect(text).toContain('tok')
+    expect(h.store.work.run(run.id)!.usage).toEqual({ input: 12, cacheRead: 0, cacheWrite: 0, output: 6 })
+    await h.service.dispose()
+  })
+
+  it('dot_recipe list runs a capture pass so costs land in stats', async () => {
+    const h = setup()
+    await h.service.ensureDot()
+    const run = await settledRun(h, [
+      { type: 'assistant/message', time: 1000, data: { usage: { inputTokens: 4, outputTokens: 2 } } },
+    ])
+    expect(h.store.work.run(run.id)!.usage).toBeUndefined()
+    await h.service.manageRecipe({ action: 'list' })
+    expect(h.store.work.run(run.id)!.usage).toEqual({ input: 4, cacheRead: 0, cacheWrite: 0, output: 2 })
+    await h.service.dispose()
+  })
+
+  it('pruning a tagged change captures its terminal runs cost into the outcome', async () => {
+    const h = setup()
+    const cwd = dir()
+    await h.service.ensureDot()
+    await h.service.manageRecipe({ action: 'save', name: 'stats', goal: 'run the pass', dir: cwd })
+    const first = JSON.parse(await h.service.manageTask({ action: 'create', recipe: 'stats' })) as { id: string }
+    const second = JSON.parse(await h.service.manageTask({ action: 'create', recipe: 'stats' })) as { id: string }
+    const started = await h.service.manageTask({ action: 'dispatch', task_id: first.id })
+    const runId = /started (run-\d+)/.exec(started)?.[1]!
+    const run = h.store.work.run(runId)!
+    h.events.set(run.sessionId!, [
+      { type: 'assistant/message', time: 1000, data: { usage: { inputTokens: 10, outputTokens: 5 } } },
+      { type: 'assistant/message', time: 3000, data: { usage: { inputTokens: 2, outputTokens: 1 } } },
+    ])
+    await h.service.manageTask({ action: 'cancel', task_id: first.id })
+    await h.service.manageTask({ action: 'cancel', task_id: second.id })
+    expect(h.store.work.run(runId)!.usage).toBeUndefined()
+    const prune = h.service as unknown as { pruneWorkArtifactsIfNeeded(maxKeep?: number): Promise<void> }
+    await prune.pruneWorkArtifactsIfNeeded(1)
+    const recipe = h.store.recipes[0]!
+    expect(recipe.outcomes[0]).toMatchObject({ changeId: first.id, result: 'cancelled', tokens: 18, wallMs: 2000 })
+    await h.service.dispose()
+  })
+
+  it('defers a change that closed mid-capture instead of pruning it without cost', async () => {
+    const h = setup()
+    const cwd = dir()
+    await h.service.ensureDot()
+    await h.service.manageRecipe({ action: 'save', name: 'stats', goal: 'run the pass', dir: cwd })
+    // The still-open change is created first so it sorts ahead of the terminal
+    // ones by id and becomes the victim selection's first row once it closes.
+    const late = JSON.parse(await h.service.manageTask({ action: 'create', recipe: 'stats' })) as { id: string }
+    const done = JSON.parse(await h.service.manageTask({ action: 'create', recipe: 'stats' })) as { id: string }
+    const tail = JSON.parse(await h.service.manageTask({ action: 'create', recipe: 'stats' })) as { id: string }
+    const startedLate = await h.service.manageTask({ action: 'dispatch', task_id: late.id })
+    const runLate = h.store.work.run(/started (run-\d+)/.exec(startedLate)?.[1]!)!
+    h.events.set(runLate.sessionId!, [{ type: 'assistant/message', time: 1000, data: { usage: { inputTokens: 7, outputTokens: 3 } } }])
+    const startedDone = await h.service.manageTask({ action: 'dispatch', task_id: done.id })
+    const runDone = h.store.work.run(/started (run-\d+)/.exec(startedDone)?.[1]!)!
+    h.events.set(runDone.sessionId!, [{ type: 'assistant/message', time: 1, data: { usage: { inputTokens: 1, outputTokens: 1 } } }])
+    await h.service.manageTask({ action: 'cancel', task_id: done.id })
+    await h.service.manageTask({ action: 'cancel', task_id: tail.id })
+    // Park the pre-prune capture inside readEvents so `late` can close in between.
+    let entered = false
+    let release: () => void = () => {}
+    const gate = new Promise<void>(resolve => { release = resolve })
+    const original = h.host.readEvents.bind(h.host)
+    h.host.readEvents = async id => {
+      if (!entered) { entered = true; await gate }
+      return original(id)
+    }
+    const prune = h.service as unknown as { pruneWorkArtifactsIfNeeded(maxKeep?: number): Promise<void> }
+    const first = prune.pruneWorkArtifactsIfNeeded(1)
+    await vi.waitFor(() => expect(entered).toBe(true))
+    await h.service.manageTask({ action: 'cancel', task_id: late.id })
+    release()
+    await first
+    // `late` closed while its capture was parked: it was skipped this pass, not
+    // pruned empty; the already-captured change went instead.
+    expect(h.store.work.change(late.id)).toBeDefined()
+    expect(h.store.work.change(done.id)).toBeUndefined()
+    expect(h.store.work.change(tail.id)).toBeDefined()
+    expect(h.store.recipes[0]!.outcomes).toEqual([expect.objectContaining({ changeId: done.id })])
+    // Next prune captures it first and records the cost into the outcome.
+    await prune.pruneWorkArtifactsIfNeeded(1)
+    expect(h.store.work.change(late.id)).toBeUndefined()
+    // Outcomes list the newest prune first.
+    expect(h.store.recipes[0]!.outcomes).toEqual([
+      expect.objectContaining({ changeId: late.id, tokens: 10 }),
+      expect.objectContaining({ changeId: done.id }),
+    ])
+    await h.service.dispose()
+  })
+
+  it('drains a usage backlog larger than one pass without a work change', async () => {
+    const h = setup()
+    await h.service.ensureDot()
+    for (let i = 0; i < 45; i++) {
+      await settledRun(h, [{ type: 'assistant/message', time: 1, data: { usage: { inputTokens: 1, outputTokens: 1 } } }], `r${i}`)
+    }
+    expect(h.store.work.listRuns().filter(run => run.usage === undefined)).toHaveLength(45)
+    // A single pass takes 20; full batches chain follow-ups on their own.
+    await h.service.reconcile()
+    await vi.waitFor(() => expect(h.store.work.listRuns().filter(run => run.usage === undefined)).toHaveLength(0))
+    await h.service.dispose()
+  })
+
+  it('skips runs that already failed once during the same drain', async () => {
+    const h = setup()
+    await h.service.ensureDot()
+    for (let i = 0; i < 25; i++) await settledRun(h, [], `r${i}`)
+    for (const run of h.store.work.listRuns()) h.unreadable.add(run.sessionId!)
+    let reads = 0
+    const original = h.host.readEvents.bind(h.host)
+    h.host.readEvents = async id => { reads += 1; return original(id) }
+    await h.service.reconcile()
+    // Pass one failed all 20; the chained pass skips them and fails the last 5.
+    await vi.waitFor(() => expect(reads).toBe(25))
+    await new Promise(resolve => setTimeout(resolve, 50))
+    expect(reads).toBe(25)
+    await h.service.dispose()
+  })
+
+  it('prunes a change whose owing run settled beyond the usage grace', async () => {
+    const h = setup()
+    const cwd = dir()
+    await h.service.ensureDot()
+    await h.service.manageRecipe({ action: 'save', name: 'stats', goal: 'run the pass', dir: cwd })
+    const owed = JSON.parse(await h.service.manageTask({ action: 'create', recipe: 'stats' })) as { id: string }
+    const spare = JSON.parse(await h.service.manageTask({ action: 'create', recipe: 'stats' })) as { id: string }
+    const started = await h.service.manageTask({ action: 'dispatch', task_id: owed.id })
+    const run = h.store.work.run(/started (run-\d+)/.exec(started)?.[1]!)!
+    // A session that can never be read: the run owes usage forever.
+    h.unreadable.add(run.sessionId!)
+    await h.service.manageTask({ action: 'cancel', task_id: owed.id })
+    await h.service.manageTask({ action: 'cancel', task_id: spare.id })
+    // 25 h later the grace is over: the prune proceeds and the outcome lands
+    // without cost fields.
+    h.advance(25 * 60 * 60_000)
+    const prune = h.service as unknown as { pruneWorkArtifactsIfNeeded(maxKeep?: number): Promise<void> }
+    await prune.pruneWorkArtifactsIfNeeded(1)
+    expect(h.store.work.change(owed.id)).toBeUndefined()
+    expect(h.store.work.change(spare.id)).toBeDefined()
+    expect(h.store.recipes[0]!.outcomes).toEqual([
+      expect.objectContaining({ changeId: owed.id, result: 'cancelled' }),
+    ])
+    expect(h.store.recipes[0]!.outcomes[0]!.tokens).toBeUndefined()
+    await h.service.dispose()
+  })
+
+  it('still defers pruning while an owing run settled inside the usage grace', async () => {
+    const h = setup()
+    const cwd = dir()
+    await h.service.ensureDot()
+    await h.service.manageRecipe({ action: 'save', name: 'stats', goal: 'run the pass', dir: cwd })
+    const owed = JSON.parse(await h.service.manageTask({ action: 'create', recipe: 'stats' })) as { id: string }
+    const spare = JSON.parse(await h.service.manageTask({ action: 'create', recipe: 'stats' })) as { id: string }
+    const started = await h.service.manageTask({ action: 'dispatch', task_id: owed.id })
+    const run = h.store.work.run(/started (run-\d+)/.exec(started)?.[1]!)!
+    h.unreadable.add(run.sessionId!)
+    await h.service.manageTask({ action: 'cancel', task_id: owed.id })
+    await h.service.manageTask({ action: 'cancel', task_id: spare.id })
+    // 1 min old: still inside the 24 h grace, so the change survives this pass.
+    h.advance(60_000)
+    const prune = h.service as unknown as { pruneWorkArtifactsIfNeeded(maxKeep?: number): Promise<void> }
+    await prune.pruneWorkArtifactsIfNeeded(1)
+    expect(h.store.work.change(owed.id)).toBeDefined()
+    expect(h.store.recipes[0]!.outcomes).toEqual([])
+    // Past the grace the very next pass lets it go.
+    h.advance(25 * 60 * 60_000)
+    await prune.pruneWorkArtifactsIfNeeded(1)
+    expect(h.store.work.change(owed.id)).toBeUndefined()
+    expect(h.store.recipes[0]!.outcomes).toEqual([expect.objectContaining({ changeId: owed.id })])
+    await h.service.dispose()
+  })
+
+  it('signals the store change after a pass records usage', async () => {
+    const h = setup()
+    await h.service.ensureDot()
+    await settledRun(h, [{ type: 'assistant/message', time: 1, data: { usage: { inputTokens: 3, outputTokens: 1 } } }])
+    let bumped = 0
+    const off = h.store.onChange(() => { bumped += 1 })
+    await h.service.reconcile()
+    off()
+    expect(bumped).toBeGreaterThan(0)
+    // A pass that records nothing stays quiet.
+    await h.service.reconcile()
+    const after = bumped
+    await h.service.reconcile()
+    expect(bumped).toBe(after)
     await h.service.dispose()
   })
 })

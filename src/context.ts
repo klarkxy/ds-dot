@@ -96,6 +96,11 @@ export function usageFromEvents(events: Iterable<RawEvent>): DotContextUsage | u
   return totals
 }
 
+/** All four buckets summed — the total the Context panel and run rows show. */
+export function totalUsage(usage: DotContextUsage | undefined): number {
+  return (usage?.input ?? 0) + (usage?.cacheRead ?? 0) + (usage?.cacheWrite ?? 0) + (usage?.output ?? 0)
+}
+
 /** Fold events after `scan.seq`; `next` is the seq the scan has reached afterwards. */
 export function foldScan(scan: ContextScan, events: Iterable<RawEvent>, next: number): ContextScan {
   let out: { -readonly [K in keyof ContextScan]: ContextScan[K] } = { ...scan, seq: next }

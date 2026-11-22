@@ -374,6 +374,8 @@ export interface FactoryResetPreview {
   readonly cards: number
   /** Pending and delivered external events in the inbox table. */
   readonly inbox: number
+  /** Task-to-event links in the links table. */
+  readonly links: number
   readonly ownedSessions: number
   readonly pastSegments: number
   readonly reflections: number
@@ -556,6 +558,8 @@ export interface InboxEventInput {
   /** Short detail, whitespace collapsed. */
   readonly summary: string
   readonly receivedAt: number
+  /** PR head branch carried for link matching; never shown to the model. */
+  readonly headRef?: string
 }
 
 /** A stored inbox row: one pending record per source+sourceId+subject, merged deliveries folded in. */
@@ -572,6 +576,38 @@ export interface InboxRecord extends InboxEventInput {
 }
 
 export type InboxSubmitResult = 'stored' | 'merged' | 'duplicate'
+
+// ---- task links: inbox events bound to the change that owns the PR/branch ----
+
+/** The newest event that reached a link, kept so the board can show it. */
+export interface LinkEvent {
+  readonly type: string
+  readonly title: string
+  readonly summary: string
+  readonly url?: string
+  readonly at: number
+  /** Events folded into the matched inbox record. */
+  readonly count: number
+}
+
+/**
+ * A durable binding between a change and a GitHub target. `number` names a
+ * pull request or issue; `branch` a head branch learned from a PR event or
+ * attached directly. At least one of the two is set.
+ */
+export interface TaskLink {
+  readonly id: string
+  readonly changeId: string
+  /** owner/repo, lower-cased. */
+  readonly repo: string
+  readonly number?: number
+  readonly branch?: string
+  readonly url?: string
+  readonly origin: 'dot' | 'auto'
+  readonly state: 'open' | 'closed' | 'merged'
+  readonly addedAt: number
+  readonly lastEvent?: LinkEvent
+}
 
 // ---- dot's task recipes --------------------------------------------------
 

@@ -15,6 +15,7 @@ export interface FactoryResetSource {
   work: { listChanges(): readonly unknown[]; listRuns(): readonly unknown[] }
   schedules: readonly unknown[]
   recipes: readonly unknown[]
+  links: readonly unknown[]
   settingProposals: readonly unknown[]
   cards: readonly unknown[]
   pastSegments: readonly { readonly sessionId: string }[]
@@ -32,6 +33,7 @@ export function factoryResetCounts(source: FactoryResetSource, inbox = 0): Facto
     runs: source.work.listRuns().length,
     schedules: source.schedules.length,
     recipes: source.recipes.length,
+    links: source.links.length,
     proposals: source.settingProposals.length,
     cards: source.cards.length,
     inbox,
@@ -92,6 +94,7 @@ export function formatFactoryResetPreview(preview: FactoryResetPreview): string 
     `${preview.proposals} setting proposal(s)`,
     `${preview.cards} card(s)`,
     `${preview.inbox} inbox event(s)`,
+    `${preview.links} task link(s)`,
     `${preview.pastSegments} past segment(s)`,
     `${preview.reflections} reflection run(s)`,
     preview.hasAgreements ? 'agreements will be cleared' : 'no agreements',

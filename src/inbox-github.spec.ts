@@ -19,7 +19,7 @@ function pullRequestPayload(over: Record<string, unknown> = {}): Record<string, 
     pull_request: {
       number: 12,
       title: 'Add feature',
-      head: { sha: 'abc123def4567890' },
+      head: { sha: 'abc123def4567890', ref: 'feature/add' },
       base: { ref: 'main' },
       html_url: 'https://gh/acme/widgets/pull/12',
       user: { login: 'alice' },
@@ -40,6 +40,7 @@ describe('normalizeGithub', () => {
     })
     expect(event.summary).toContain('head abc123def4')
     expect(event.summary).toContain('→ main')
+    expect(event.headRef).toBe('feature/add')
   })
 
   it('drops pull_request synchronize', () => {

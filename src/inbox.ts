@@ -106,6 +106,7 @@ export class InboxLedger {
         url: input.url,
         summary: input.summary,
         receivedAt: input.receivedAt,
+        ...(input.headRef !== undefined ? { headRef: input.headRef } : {}),
         deliveryIds: [...pending.deliveryIds.slice(-(INBOX_DELIVERY_IDS_MAX - 1)), input.deliveryId],
         count: pending.count + 1,
         updatedAt: now,

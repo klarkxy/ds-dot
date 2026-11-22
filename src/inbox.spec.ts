@@ -15,7 +15,7 @@ import { parseInboxRecord } from './storage.ts'
 import { DotStore, type DotDomainHandle } from './store.ts'
 
 function memoryDomain() {
-  const names = ['state', 'tasks', 'tickets', 'schedules', 'proposals', 'recipes', 'changes', 'inputs', 'runs', 'verifications', 'peers', 'inbox']
+  const names = ['state', 'tasks', 'tickets', 'schedules', 'proposals', 'recipes', 'links', 'changes', 'inputs', 'runs', 'verifications', 'peers', 'inbox']
   const tables: Record<string, Map<string, unknown>> = {}
   for (const name of names) tables[name] = new Map()
   const domain: DotDomainHandle = {

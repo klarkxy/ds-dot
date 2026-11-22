@@ -8,7 +8,7 @@
 
 ## 安装
 
-需要 DSH `0.2.2-rc.3` 及以上版本。将插件添加到你正在使用的 profile：
+需要 DSH `0.2.2-rc.5` 及以上版本。将插件添加到你正在使用的 profile：
 
 ```sh
 dsh plugin --profile web add ds-dot
@@ -76,6 +76,54 @@ dsh plugin --profile web add ds-dot
 ### 出厂设置
 
 位于设置页底部，先预览将清除的内容——受跟踪的任务、变更与运行、提醒、任务配方、提案、卡片、将归档的会话（含她自己的对话与后台会话）、约定、认知与设置——确认后才执行清空；你本人的会话、项目文件与宿主人格均不受影响。
+
+## GitHub 事件（可选）
+
+桃乐丝可以跟进 Pull Request、Issue、评论、代码评审、CI 运行、默认分支的推送和 Release。事件先写入持久化的收件箱：重复投递会被丢弃，同一个 PR 或 Issue 的事件会合并，等她空闲时再交给她。事件内容一律按不可信数据处理，可以促使她去查看或向你请示，但本身不构成任何授权。ping、star、fork、watch、check run，以及结论为成功、跳过或中性的 CI 结果会被过滤；接收哪些仓库、哪些事件类型，由你在 GitHub webhook 里选择。
+
+1. 在同一个 profile 中安装 webhook 运行时和 GitHub 适配器：
+
+   ```sh
+   dsh plugin --profile web add @deepseek-ai/dsh-webhook @deepseek-ai/dsh-webhook-github
+   ```
+
+2. 将下面的叠加配置保存为 `$DSH_HOME/profiles/web/dot-github/cordis.yml`（未设置 `DSH_HOME` 时为 `~/.dsh`）。它会在 `127.0.0.1:3081` 另开一个只响应 `POST /github` 的监听端口：
+
+   ```yaml
+   - insert:
+       - id: webhook-runtime
+         name: '@deepseek-ai/dsh-webhook'
+
+       - id: github-webhook-ingress
+         name: cordis:group
+         group: true
+         isolate:
+           webServer: true
+         config:
+           - id: github-webhook-server
+             name: '@deepseek-ai/dsh-host-webserver'
+             config:
+               host: '127.0.0.1'
+               port: 3081
+
+           - id: github-webhook-adapter
+             name: '@deepseek-ai/dsh-webhook-github'
+             config:
+               source: primary-github
+               path: /github
+               secretEnv: DSH_GITHUB_WEBHOOK_SECRET
+               maxBodyBytes: 1048576
+   ```
+
+3. 在 `DSH_GITHUB_WEBHOOK_SECRET` 中放一段足够长的随机密钥（环境变量或 `$DSH_HOME/.env` 均可），重启后保持不变，然后带上叠加配置启动 DSH：
+
+   ```sh
+   dsh web --patch "$DSH_HOME/profiles/web/dot-github/cordis.yml"
+   ```
+
+4. 通过 TLS 反向代理或隧道只对外暴露 `127.0.0.1:3081/github`，3080 端口上的界面保持不公开。
+
+5. 在仓库的 GitHub webhook 设置中，Payload URL 填 `https://<你的域名>/github`，Content type 选 `application/json`，Secret 填同一个密钥，再勾选希望桃乐丝接收的事件。
 
 ## 从旧版本升级
 

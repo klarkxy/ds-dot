@@ -87,7 +87,7 @@ const num = (args: unknown, key: string): number | undefined => {
 const bool = (args: unknown, key: string): boolean =>
   (args as Record<string, unknown> | null)?.[key] === true
 
-export const TASK_ACTIONS = ['create', 'revise', 'dispatch', 'check', 'read', 'list', 'supplement', 'finish', 'step', 'closeout', 'pause', 'resume', 'cancel', 'decide', 'reject'] as const
+export const TASK_ACTIONS = ['create', 'revise', 'dispatch', 'check', 'read', 'list', 'supplement', 'finish', 'step', 'closeout', 'pause', 'resume', 'cancel', 'decide', 'reject', 'link', 'unlink'] as const
 
 export function apply(ctx: Context): void {
   installDotWeb(ctx)
@@ -249,10 +249,11 @@ export function apply(ctx: Context): void {
   // ── dot_task ──────────────────────────────────────────────────────────────
   tool(defineToolInput({
     name: TOOL.task,
-    description: `Drive a contract-backed change from goal definition to verified closeout. create/revise define or update the input contract; dispatch reserves scope, captures the baseline, and launches a run (omit task_id to open a quick run on a new change in dir/workspace_id, or pass run_id to launch a saved reservation); finish settles a writer run once its report arrives; closeout snapshots the delivery, evaluates checks, and accepts it (or opens human oversight when human_review is set). check reports conflicting run reservations and active user sessions for dir/workspace_id (+ optional paths) without starting anything; with task_id it inherits the same pinned recipe access as dispatch. When overriding access or paths, pass the same values to check that you will pass to dispatch so the preflight evaluates the planned write scope rather than the recipe/default scope. Optional independent review: dispatch with role=review, then closeout or reject. read/list inspect state; supplement delivers context once to an active run without changing requirements; step records progress notes; pause/resume/cancel control execution; decide requests a human decision on a recorded verification. create accepts recipe=<id or name> to fill the order from a saved recipe (see ${TOOL.recipe}). Recipe-created dispatches start from the saved work order even without message; other dispatches without message still only reserve. Service refusals preserve scope and version invariants.`,
+    description: `Drive a contract-backed change from goal definition to verified closeout. create/revise define or update the input contract; dispatch reserves scope, captures the baseline, and launches a run (omit task_id to open a quick run on a new change in dir/workspace_id, or pass run_id to launch a saved reservation); finish settles a writer run once its report arrives; closeout snapshots the delivery, evaluates checks, and accepts it (or opens human oversight when human_review is set). check reports conflicting run reservations and active user sessions for dir/workspace_id (+ optional paths) without starting anything; with task_id it inherits the same pinned recipe access as dispatch. When overriding access or paths, pass the same values to check that you will pass to dispatch so the preflight evaluates the planned write scope rather than the recipe/default scope. Optional independent review: dispatch with role=review, then closeout or reject. read/list inspect state; supplement delivers context once to an active run without changing requirements; step records progress notes; pause/resume/cancel control execution; decide requests a human decision on a recorded verification. link attaches the PR/issue/branch a task works on and unlink removes it, so follow-up inbox events arrive with the task's context. create accepts recipe=<id or name> to fill the order from a saved recipe (see ${TOOL.recipe}). Recipe-created dispatches start from the saved work order even without message; other dispatches without message still only reserve. Service refusals preserve scope and version invariants.`,
     parameters: {
       action: { type: 'string', enum: [...TASK_ACTIONS], required: true, description: 'Lifecycle action to perform.' },
       task_id: { type: 'string', description: 'Change id (required except on create, list, or initial dispatch of a new change).' },
+      ref: { type: 'string', description: 'link/unlink: the GitHub target the task works on — a pull/issue URL, owner/repo#N, or owner/repo@branch — so follow-up events reach you with task context.' },
       title: { type: 'string', description: 'create/revise/dispatch: concise human-facing change title.' },
       goal: { type: 'string', description: 'create/revise/dispatch: one English sentence stating what the finished delivery must achieve.' },
       dir: { type: 'string', description: 'create/dispatch/check: absolute project directory.' },
@@ -261,10 +262,11 @@ export function apply(ctx: Context): void {
       steps: { type: 'string', description: 'create/revise: JSON array of {stepRef,text,covers?,after?} for planning notes (never treated as delivery proof). covers lists requirement/scenario ids served; after lists prerequisite step ids (acyclic).' },
       constraints: { type: 'string', description: 'create/revise: JSON array of {constraintRef,text} in English specifying execution boundaries (order, untouched paths, forbidden tools). Modifying constraints creates a new input revision.' },
       user_request: { type: 'string', description: "create/revise: the human's exact unedited, untranslated request text, passed verbatim to runs as the source of truth." },
-      recipe: { type: 'string', description: "create: recipe id or name; fills title, goal, requirements, constraints, dir, deliverable_language and human_review from the recipe — pass a field only to override it for this task." },
+      recipe: { type: 'string', description: "create: recipe id or name; fills title, goal, requirements, constraints, dir, deliverable_language, human_review and isolation from the recipe — pass a field only to override it for this task." },
       deliverable_language: { type: 'string', description: 'create/revise: target language for deliverable files/copy/commits (e.g. "Simplified Chinese"); omit to follow user_request and existing project files. Run reports stay in English.' },
       priority: { type: 'integer', description: 'create/revise: priority from 1 (normal) to 3 (urgent).' },
       human_review: { type: 'boolean', description: 'create/revise: set true when the human asked to decide before acceptance. The first closeout records the verification and opens that decision; a later closeout accepts it.' },
+      isolation: { type: 'string', enum: ['none', 'worktree'], description: 'create: run the task in an isolated git worktree on a dot/task-* branch so the human checkout stays untouched; the human integrates it from the panel after acceptance. Use when the human asked for an isolated branch/worktree or the checkout is dirty.' },
       max_concurrent: { type: 'integer', description: 'create/revise: maximum concurrent open runs (1 to 8).' },
       role: { type: 'string', enum: ['work', 'rework', 'review'], description: 'dispatch/check: run role. review is optional and reserves the whole workspace exclusively but launches read-only; verification needing writes (e.g. builds) belongs in a writer run.' },
       access: { type: 'string', enum: ['read', 'write'], description: 'dispatch/check: set "write" when the run will create, edit, or delete files; "read" is strictly read-only.' },
@@ -382,7 +384,7 @@ export function apply(ctx: Context): void {
   // ── dot_schedule (merged from dot_schedule_add + dot_schedule_list + dot_schedule_remove) ──
   tool(defineToolInput({
     name: TOOL.schedule,
-    description: 'Manage persistent reminders that wake your active conversation segment with a [dot reminder] message when due. action=add refuses a duplicate of a still-set reminder (same title, or same timing and prompt); remove the existing one first to change it. action=add requires exactly one timing field: after_minutes, at, every_minutes, or daily_time (optionally paired with weekdays). One-off reminders (after_minutes, at) fire at most once even across late wakes or restarts. All timestamps use host local time; each firing consumes a model turn, so choose sensible intervals and action=remove recurring reminders once their goal is done.',
+    description: 'Manage persistent reminders that wake your active conversation segment with a [dot reminder] message when due. action=add refuses a duplicate of a still-set reminder (same title, or same timing and prompt); remove the existing one first to change it. action=add requires exactly one timing field: after_minutes, at, every_minutes, or daily_time (optionally paired with weekdays). One-off reminders (after_minutes, at) fire at most once even across late wakes or restarts. All timestamps use host local time; each firing consumes a model turn, so choose sensible intervals and action=remove recurring reminders once their goal is done. With recipe set, the reminder instead creates and dispatches that recipe task directly when due — no model turn is consumed for the dispatch; you are told afterwards by a notice and still verify and close out the task; if the direct dispatch is refused you get the ordinary reminder with the refusal reason. prompt becomes optional when recipe is set (an extra note for the run).',
     parameters: {
       action: { type: 'string', enum: ['add', 'list', 'remove'], required: true, description: 'Operation: add, list, or remove.' },
       title: { type: 'string', description: 'add: concise reminder label shown on the board.' },
@@ -392,6 +394,7 @@ export function apply(ctx: Context): void {
       every_minutes: { type: 'integer', description: 'add: repeat every N minutes, starting one interval from now.' },
       daily_time: { type: 'string', description: 'add: repeat at host local time HH:mm.' },
       weekdays: { type: 'string', description: 'add (with daily_time only): comma-separated ISO weekdays 1 (Mon) through 7 (Sun), e.g. "1,2,3,4,5".' },
+      recipe: { type: 'string', description: 'add: bind a saved recipe (id or exact name); the reminder dispatches it directly when due. prompt becomes an optional note for the run.' },
       id: { type: 'string', description: 'remove: reminder id (sch-...).' },
     },
     execute: async (args) => {
@@ -408,6 +411,7 @@ export function apply(ctx: Context): void {
       return dot().scheduleAdd({
         title: str(args, 'title') ?? '',
         prompt: str(args, 'prompt') ?? '',
+        ...str(args, 'recipe') ? { recipe: str(args, 'recipe')! } : {},
         ...afterMinutes === undefined ? {} : { afterMinutes },
         ...str(args, 'at') ? { at: str(args, 'at')! } : {},
         ...everyMinutes === undefined ? {} : { everyMinutes },
@@ -548,6 +552,7 @@ export function apply(ctx: Context): void {
       model: { type: 'string', description: 'save/revise: default provider/model key for dispatches; empty string clears.' },
       access: { type: 'string', enum: ['read', 'write'], description: 'save/revise: default run access for work and rework dispatches (review stays read-only).' },
       human_review: { type: 'boolean', description: 'save/revise: created tasks open human oversight before acceptance.' },
+      isolation: { type: 'string', enum: ['none', 'worktree'], description: 'save/revise: created tasks run in an isolated git worktree on a dot/task-* branch.' },
       revision: { type: 'integer', description: 'restore: earlier revision number from action=read history.' },
       reason: { type: 'string', description: 'revise/restore: required — why this revision exists (name the failure it fixes).' },
     },

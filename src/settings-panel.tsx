@@ -9,6 +9,7 @@ import { createContext, useCallback, useContext, useEffect, useId, useMemo, useR
 import type { SettingsSection } from './chat-hooks.ts'
 export type { SettingsSection } from './chat-hooks.ts'
 import { type ApprovalMode, type CapabilityCatalogView, type CapabilityGrant, type CapabilityGroupView, type CapabilityToolView, type DotSettings, type FactoryResetPreview, type FactoryResetResult, type KeepaliveInfo, type ModelChoice, type SettingField, type SettingProposal, type TakeoverMode, type TaskModelRule, type TaskPermission } from './contracts.ts'
+import { DESKTOP_NOTIFY_KEY } from './attention-client.ts'
 import type { UpdateResult, UpdateStatus } from './auto-update.ts'
 import { factoryResetScope, formatWhen, t, type CopyLocale, type TextKey } from './ui-copy.ts'
 
@@ -625,6 +626,45 @@ function FactoryResetField({ locale, api, onSaved }: { locale: CopyLocale; api: 
   )
 }
 
+/**
+ * Browser-local desktop-notification switch. The pref lives in localStorage of
+ * this browser only — it is not a DotSettings field, so there is no lock and
+ * Dorothy cannot propose it. The permission request stays inside the click's
+ * user gesture; a non-granted result leaves the switch off with an inline note.
+ */
+function DesktopNotifyField({ locale }: { locale: CopyLocale }) {
+  const supported = typeof Notification !== 'undefined' && typeof Notification.requestPermission === 'function'
+  const [enabled, setEnabled] = useState(() => {
+    try { return localStorage.getItem(DESKTOP_NOTIFY_KEY) === '1' } catch { return false }
+  })
+  const [status, setStatus] = useState<'blocked' | 'unsupported'>()
+  const shown = status ?? (enabled ? (supported ? (Notification.permission === 'granted' ? undefined : 'blocked') : 'unsupported') : undefined)
+  const onChange = (next: boolean) => {
+    if (!next) {
+      try { localStorage.removeItem(DESKTOP_NOTIFY_KEY) } catch { /* storage may be unavailable */ }
+      setEnabled(false)
+      setStatus(undefined)
+      return
+    }
+    const ok = typeof Notification !== 'undefined' && typeof Notification.requestPermission === 'function'
+    if (!ok) { setStatus('unsupported'); return }
+    void Notification.requestPermission().then(permission => {
+      if (permission !== 'granted') { setStatus('blocked'); return }
+      try { localStorage.setItem(DESKTOP_NOTIFY_KEY, '1') } catch { /* storage may be unavailable */ }
+      setEnabled(true)
+      setStatus(undefined)
+    }, () => setStatus('blocked'))
+  }
+  return (
+    <InlineField
+      label={t(locale, 'sNotify')}
+      tip={t(locale, 'sNotifyDesc')}
+      control={<Switch checked={enabled} label={t(locale, 'sNotify')} onChange={onChange} />}
+      below={shown ? <span className="dsh-ui-help">{t(locale, shown === 'blocked' ? 'sNotifyBlocked' : 'sNotifyUnsupported')}</span> : null}
+    />
+  )
+}
+
 /** Placeholder blocks while a drawer page reads its data; the label stays for screen readers. */
 export function PaneSkeleton({ label, rows = 4 }: { label: string; rows?: number }) {
   return (
@@ -818,6 +858,7 @@ export function SettingsPanel({ locale, api, settings, section = 'all', proposal
                 control={<Switch checked={settings.autoUpdate} label={t(locale, 'sAutoUpdate')} onChange={next => save({ autoUpdate: next })} />}
                 below={api.updateStatus ? <AutoUpdateLine locale={locale} api={api} /> : null}
               />
+              <DesktopNotifyField locale={locale} />
             </div>
           </div>
           {api.previewFactoryReset && api.confirmFactoryReset ? <FactoryResetField locale={locale} api={api} onSaved={onSaved} /> : null}

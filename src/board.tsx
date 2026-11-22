@@ -106,7 +106,7 @@ export function Board({ locale, view, error, filter = 'all', onOpen, onRetry, on
             {view.schedules.map(item => (
               <div key={item.id} className="dsh-dot-reminder">
                 <span className="dsh-dot-main">
-                  <span className="dsh-ui-compact dsh-ui-truncate" title={item.prompt}>{item.title}</span>
+                  <span className="dsh-ui-compact dsh-ui-truncate" title={item.prompt}>{item.title}{item.recipeName ? ` → ${item.recipeName}` : ''}</span>
                   <span className="dsh-ui-hint dsh-ui-truncate">{timingLabel(locale, item.timing)} · {t(locale, 'reminderNext').replace('{when}', formatWhen(item.nextAt))}</span>
                 </span>
                 <span className="dsh-ui-spacer" />
@@ -156,6 +156,8 @@ export const boardCss = `
 .dsh-dot-board .dsh-dot-work-mono { font: 11px/16px var(--ds-font-family-code); color: var(--dsw-alias-label-tertiary); }
 .dsh-dot-board .dsh-dot-work-diag > summary { cursor: pointer; font-size: 11px; line-height: 16px; color: var(--dsw-alias-label-tertiary); }
 .dsh-dot-board .dsh-dot-work-facts-line { font: 11px/16px var(--ds-font-family-code); color: var(--dsw-alias-label-tertiary); overflow-wrap: anywhere; }
+.dsh-dot-board .dsh-dot-work-link { display: inline-flex; align-items: center; gap: 4px; font: 11px/16px var(--ds-font-family-code); color: var(--dsw-alias-label-tertiary); text-decoration: none; }
+.dsh-dot-board a.dsh-dot-work-link:hover { color: var(--dsw-alias-label-primary); }
 .dsh-dot-board .dsh-dot-work-title { font-size: 13px; line-height: 19px; font-weight: 500; color: var(--dsw-alias-label-primary); overflow-wrap: anywhere; }
 .dsh-dot-board .dsh-dot-work-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; padding: 2px 12px 8px 28px; }
 .dsh-dot-board .dsh-dot-work-actions > button { white-space: nowrap; }
@@ -215,4 +217,39 @@ export const boardCss = `
   padding: 0 4px; border: 0; border-radius: var(--dsw-radius-sm); background: transparent;
   color: var(--dsw-alias-state-business-primary); font: inherit; font-size: 11px; cursor: pointer;
 }
-.dsh-dot-board .dsh-dot-work-session-link:hover { background: var(--dsw-alias-interactive-bg-hover); text-decoration: underline; }`
+.dsh-dot-board .dsh-dot-work-session-link:hover { background: var(--dsw-alias-interactive-bg-hover); text-decoration: underline; }
+.dsh-dot-board .dsh-dot-work-view { display: inline-flex; align-self: flex-start; flex-shrink: 0; border-radius: var(--dsw-radius-sm); overflow: hidden; box-shadow: var(--dsw-elevation-stroke); }
+.dsh-dot-board .dsh-dot-work-view > button {
+  padding: 1px 8px; border: 0; background: var(--dsw-alias-bg-layer-1);
+  color: var(--dsw-alias-label-tertiary); font: 10px/16px var(--ds-font-family-code); cursor: pointer;
+}
+.dsh-dot-board .dsh-dot-work-view > button:hover:not(:disabled):not([data-active]) { background: var(--dsw-alias-interactive-bg-hover); color: var(--dsw-alias-label-primary); }
+.dsh-dot-board .dsh-dot-work-view > button[data-active] { background: var(--dsw-alias-state-business-primary); color: var(--dsw-alias-label-primary-foreground); }
+.dsh-dot-board .dsh-dot-work-view > button:disabled { opacity: 0.45; cursor: default; }
+.dsh-dot-board .dsh-dot-work-diff {
+  padding: 4px 0; max-height: 280px; overflow: auto;
+  border-radius: var(--dsw-radius-sm); background: var(--dsw-alias-bg-layer-1); box-shadow: var(--dsw-elevation-stroke);
+  font: 11px/17px var(--ds-font-family-code); color: var(--dsw-alias-label-secondary);
+}
+.dsh-dot-board .dsh-dot-work-diff-trunc {
+  display: flex; align-items: center; gap: 8px; padding: 2px 0 0;
+  font: 11px/17px var(--ds-font-family-code); color: var(--dsw-alias-label-tertiary);
+}
+.dsh-dot-board .dsh-dot-work-diff-line { display: flex; min-width: 0; white-space: pre; }
+.dsh-dot-board .dsh-dot-work-diff-line[data-sign='add'] { background: color-mix(in srgb, var(--dsw-alias-state-success-primary) 14%, transparent); }
+.dsh-dot-board .dsh-dot-work-diff-line[data-sign='add'] .dsh-dot-work-diff-text,
+.dsh-dot-board .dsh-dot-work-diff-line[data-sign='add'] .dsh-dot-work-diff-sign { color: var(--dsw-alias-state-success-primary); }
+.dsh-dot-board .dsh-dot-work-diff-line[data-sign='del'] { background: color-mix(in srgb, var(--dsw-alias-state-error-primary) 12%, transparent); }
+.dsh-dot-board .dsh-dot-work-diff-line[data-sign='del'] .dsh-dot-work-diff-text,
+.dsh-dot-board .dsh-dot-work-diff-line[data-sign='del'] .dsh-dot-work-diff-sign { color: var(--dsw-alias-state-error-primary); }
+.dsh-dot-board .dsh-dot-work-diff-no { flex-shrink: 0; width: 32px; padding: 0 6px 0 10px; text-align: right; color: var(--dsw-alias-label-tertiary); user-select: none; }
+.dsh-dot-board .dsh-dot-work-diff-sign { flex-shrink: 0; width: 14px; text-align: center; color: var(--dsw-alias-label-tertiary); user-select: none; }
+.dsh-dot-board .dsh-dot-work-diff-text { flex: 1; padding-right: 8px; }
+.dsh-dot-board .dsh-dot-work-diff-hunk { padding: 0 10px; color: var(--dsw-alias-label-tertiary); white-space: pre; }
+.dsh-dot-board .dsh-dot-work-diff-quote {
+  flex-shrink: 0; margin-right: 6px; padding: 0 5px; border: 0; border-radius: var(--dsw-radius-sm);
+  background: transparent; color: var(--dsw-alias-label-tertiary); font: inherit; cursor: pointer; opacity: 0;
+}
+.dsh-dot-board .dsh-dot-work-diff-line:hover .dsh-dot-work-diff-quote,
+.dsh-dot-board .dsh-dot-work-diff-quote:focus-visible { opacity: 1; }
+.dsh-dot-board .dsh-dot-work-diff-quote:hover { background: var(--dsw-alias-interactive-bg-hover); color: var(--dsw-alias-label-primary); }`

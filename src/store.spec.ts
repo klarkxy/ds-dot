@@ -10,6 +10,7 @@ function fakeDomain(seed: Record<string, Record<string, unknown>> = {}) {
     tickets: new Map(Object.entries(seed.tickets ?? {})),
     schedules: new Map(Object.entries(seed.schedules ?? {})),
     recipes: new Map(Object.entries(seed.recipes ?? {})),
+    recipe_proposals: new Map(Object.entries(seed.recipe_proposals ?? {})),
     proposals: new Map(Object.entries(seed.proposals ?? {})),
     changes: new Map(Object.entries(seed.changes ?? {})),
     inputs: new Map(Object.entries(seed.inputs ?? {})),
@@ -17,6 +18,7 @@ function fakeDomain(seed: Record<string, Record<string, unknown>> = {}) {
     verifications: new Map(Object.entries(seed.verifications ?? {})),
     peers: new Map(Object.entries(seed.peers ?? {})),
     inbox: new Map(Object.entries(seed.inbox ?? {})),
+    links: new Map(Object.entries(seed.links ?? {})),
   }
   const puts: string[] = []
   const domain: DotDomainHandle = {
@@ -97,6 +99,37 @@ describe('DotStore', () => {
   })
 
 
+  it('round-trips task links and deletes them for good', async () => {
+    const { domain, tables, puts } = fakeDomain()
+    const store = new DotStore(domain)
+    await store.putLink({ id: 'link-a', changeId: 'c-1', repo: 'acme/widgets', number: 12, origin: 'dot', state: 'open', addedAt: 1 })
+    await store.putLink({ id: 'link-b', changeId: 'c-1', repo: 'acme/widgets', branch: 'feature/x', url: 'https://gh/x', origin: 'auto', state: 'merged', addedAt: 2, lastEvent: { type: 'workflow_run.completed', title: 'CI failure', summary: 's', url: 'https://gh/ci', at: 5, count: 3 } })
+    await store.putLink({ id: 'link-bad', changeId: 'c-1', repo: 'acme/widgets', origin: 'dot', state: 'open', addedAt: 0.5 })
+    const reloaded = new DotStore(domain)
+    expect(reloaded.links.map(link => link.id)).toEqual(['link-bad', 'link-a', 'link-b'])
+    expect(reloaded.linksFor('c-1')).toHaveLength(3)
+    expect(reloaded.link('link-b')).toMatchObject({ branch: 'feature/x', state: 'merged', lastEvent: { count: 3 } })
+    expect(reloaded.linksFor('c-404')).toEqual([])
+    await reloaded.deleteLink('link-a')
+    await reloaded.deleteLink('link-a')
+    expect(tables.links!.has('link-a')).toBe(false)
+    expect(puts.at(-1)).toBe('links:-link-a')
+    expect(new DotStore(domain).links.map(link => link.id)).toEqual(['link-bad', 'link-b'])
+  })
+
+  it('attaches links to work rows on the board', async () => {
+    const { domain } = fakeDomain()
+    const store = new DotStore(domain)
+    const change = await store.work.createChange({ title: 'Linked', cwd: '/repo', goal: 'g', at: 1 })
+    const bare = await store.work.createChange({ title: 'Bare', cwd: '/repo', goal: 'g', at: 2 })
+    await store.putLink({ id: 'link-a', changeId: change.id, repo: 'acme/widgets', number: 12, origin: 'dot', state: 'open', addedAt: 1 })
+    const board = store.board([])
+    const linked = board.work!.find(row => row.id === change.id)!
+    expect(linked.links).toHaveLength(1)
+    expect(linked.links![0]).toMatchObject({ repo: 'acme/widgets', number: 12, state: 'open' })
+    expect(board.work!.find(row => row.id === bare.id)!.links).toBeUndefined()
+  })
+
   it('keeps reminders across a reload, the one due first on top, and deletes them for good', async () => {
     const { domain, tables, puts } = fakeDomain({ schedules: { broken: { id: 'broken' }, moved: { id: 'other', title: 't', prompt: 'p', timing: { kind: 'once', at: 5 }, createdAt: 1, nextAt: 5 } } })
     const store = new DotStore(domain)
@@ -112,6 +145,19 @@ describe('DotStore', () => {
     expect(tables.schedules!.has('sch-a')).toBe(false)
     expect(puts.at(-1)).toBe('schedules:-sch-a')
     expect(new DotStore(domain).schedules.map(record => record.id)).toEqual(['sch-b'])
+  })
+
+  it('round-trips a recipe-bound reminder and resolves its name on the board', async () => {
+    const { domain } = fakeDomain()
+    const store = new DotStore(domain)
+    await store.putSchedule({ id: 'sch-r', title: 'bound', prompt: '', timing: { kind: 'every', minutes: 60, anchor: 1 }, createdAt: 3, nextAt: 600, recipe: 'rcp-1' })
+    await store.putSchedule({ id: 'sch-p', title: 'plain', prompt: 'p', timing: { kind: 'every', minutes: 30, anchor: 1 }, createdAt: 2, nextAt: 300 })
+    const reloaded = new DotStore(domain)
+    expect(reloaded.schedule('sch-r')?.recipe).toBe('rcp-1')
+    expect(reloaded.schedule('sch-p')?.recipe).toBeUndefined()
+    await reloaded.putRecipe({ id: 'rcp-1', name: 'Weekly', revision: 1, history: [], outcomes: [], goal: 'g', requirements: [{ requirementRef: 'g', text: 'g', required: true }], createdAt: 1, updatedAt: 1 })
+    expect(reloaded.board([]).schedules.find(row => row.id === 'sch-r')?.recipeName).toBe('Weekly')
+    expect(reloaded.board([]).schedules.find(row => row.id === 'sch-p')?.recipeName).toBeUndefined()
   })
 
   it('keeps a capabilities-changed rollover reason on current and past segments across a reload', async () => {
@@ -444,6 +490,22 @@ describe('task recipe storage', () => {
     expect(await reloaded.deleteRecipe('rcp-abc123')).toBe(true)
     expect(reloaded.recipe('rcp-abc123')).toBeUndefined()
     expect(new DotStore(domain).recipes).toEqual([])
+  })
+
+  it('round-trips outcome cost fields while legacy outcomes stay readable', () => {
+    const { domain } = fakeDomain({ recipes: { 'rcp-abc123': {
+      ...recipeRow,
+      outcomes: [
+        { changeId: 'c-1', title: 'Run', revision: 2, result: 'accepted', failedRounds: 0, tokens: 12_800, wallMs: 252_000, at: 2 },
+        { changeId: 'c-2', title: 'Old', revision: 2, result: 'cancelled', failedRounds: 1, at: 3 },
+      ],
+    } } })
+    const store = new DotStore(domain)
+    const outcomes = store.recipe('rcp-abc123')!.outcomes
+    expect(outcomes[0]).toMatchObject({ changeId: 'c-1', tokens: 12_800, wallMs: 252_000 })
+    expect(outcomes[1]).toMatchObject({ changeId: 'c-2', result: 'cancelled' })
+    expect(outcomes[1]).not.toHaveProperty('tokens')
+    expect(outcomes[1]).not.toHaveProperty('wallMs')
   })
 
   it('reads a malformed recipe row as absent', () => {

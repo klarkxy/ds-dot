@@ -4,6 +4,7 @@
  * survives pruning, and the per-revision stats list/read report.
  */
 import { RECIPE_HISTORY_MAX, RECIPE_OUTCOMES_MAX, type RecipeBody, type RecipeOutcome, type RecipeRecord, type RecipeVersion } from './contracts.ts'
+import { formatDuration, formatTokens } from './ui-copy.ts'
 
 /** Just the versioned content of a stored recipe or one of its earlier versions. */
 export function recipeBody(row: RecipeBody): RecipeBody {
@@ -19,6 +20,7 @@ export function recipeBody(row: RecipeBody): RecipeBody {
     ...(row.model !== undefined ? { model: row.model } : {}),
     ...(row.access !== undefined ? { access: row.access } : {}),
     ...(row.humanReview !== undefined ? { humanReview: row.humanReview } : {}),
+    ...(row.isolation !== undefined ? { isolation: row.isolation } : {}),
   }
 }
 
@@ -72,12 +74,36 @@ function bodyKey(row: RecipeBody & { readonly name?: string }): string {
     model: row.model ?? null,
     access: row.access ?? null,
     humanReview: row.humanReview ?? null,
+    isolation: row.isolation ?? null,
   })
 }
 
 /** Whether a revise would record exactly the same revision again. */
 export function sameRecipeBody(left: RecipeBody & { readonly name?: string }, right: RecipeBody & { readonly name?: string }): boolean {
   return bodyKey(left) === bodyKey(right)
+}
+
+/**
+ * The body a revise proposal would save: patch fields replace, absent fields
+ * keep the base, and a goal-following requirements list regenerates from the
+ * new goal — the same merge recipeRevise applies on approval. An empty notes
+ * string or constraints list clears the field, like recipeArgsBody does.
+ */
+export function mergedRecipeBody(
+  base: RecipeBody,
+  patch: { readonly goal?: string; readonly requirements?: readonly import('./work.ts').Requirement[]; readonly constraints?: readonly import('./work.ts').Constraint[]; readonly notes?: string },
+): RecipeBody {
+  const goal = patch.goal ?? base.goal
+  const requirementsFromGoal = patch.requirements === undefined && requirementsFollowGoal(base)
+  const requirements = patch.requirements ?? (requirementsFromGoal ? goalRequirements(goal) : base.requirements)
+  const constraints = patch.constraints === undefined ? base.constraints : (patch.constraints.length > 0 ? patch.constraints : undefined)
+  const notes = patch.notes === undefined ? base.notes : (patch.notes || undefined)
+  const { constraints: _c, notes: _n, ...rest } = base
+  return {
+    ...rest, goal, requirements, requirementsFromGoal,
+    ...(constraints !== undefined ? { constraints } : {}),
+    ...(notes !== undefined ? { notes } : {}),
+  }
 }
 
 /** Push the current revision into history (newest first, capped) and stamp the next one. */
@@ -112,6 +138,9 @@ export interface LiveRecipeChange {
   /** Meaningful only when terminal: closeout set. */
   readonly accepted: boolean
   readonly failedRounds: number
+  /** Cost summed over the change's runs so far, when any run recorded it. */
+  readonly tokens?: number
+  readonly wallMs?: number
   readonly at: number
 }
 
@@ -124,7 +153,10 @@ export function mergeRecipeOutcomes(stored: readonly RecipeOutcome[], live: read
   const merged: RecipeOutcome[] = [
     ...live.filter(row => row.terminal).map(row => ({
       changeId: row.changeId, title: row.title, revision: row.revision,
-      result: row.accepted ? 'accepted' as const : 'cancelled' as const, failedRounds: row.failedRounds, at: row.at,
+      result: row.accepted ? 'accepted' as const : 'cancelled' as const, failedRounds: row.failedRounds,
+      ...(row.tokens !== undefined ? { tokens: row.tokens } : {}),
+      ...(row.wallMs !== undefined ? { wallMs: row.wallMs } : {}),
+      at: row.at,
     })),
     ...stored.filter(row => !liveIds.has(row.changeId)),
   ]
@@ -138,28 +170,78 @@ export interface RecipeRevisionStats {
   readonly cancelled: number
   readonly failedRounds: number
   readonly inFlight: number
+  /** Mean cost over the accepted outcomes that recorded it; omitted when none did. */
+  readonly avgTokens?: number
+  readonly avgWallMs?: number
 }
 
 /** Stats per revision, newest revision first; revisions with nothing recorded are omitted. */
 export function recipeRevisionStats(recipe: RecipeRecord, live: readonly LiveRecipeChange[]): RecipeRevisionStats[] {
-  const byRevision = new Map<number, { accepted: number; cancelled: number; failedRounds: number; inFlight: number }>()
+  const byRevision = new Map<number, { accepted: number; cancelled: number; failedRounds: number; inFlight: number; tokens: number; tokenCount: number; wallMs: number; wallCount: number }>()
   const cell = (revision: number) => {
     let row = byRevision.get(revision)
-    if (!row) { row = { accepted: 0, cancelled: 0, failedRounds: 0, inFlight: 0 }; byRevision.set(revision, row) }
+    if (!row) { row = { accepted: 0, cancelled: 0, failedRounds: 0, inFlight: 0, tokens: 0, tokenCount: 0, wallMs: 0, wallCount: 0 }; byRevision.set(revision, row) }
     return row
   }
   for (const outcome of mergeRecipeOutcomes(recipe.outcomes, live)) {
     const row = cell(outcome.revision)
-    if (outcome.result === 'accepted') row.accepted += 1
-    else row.cancelled += 1
+    if (outcome.result === 'accepted') {
+      row.accepted += 1
+      if (outcome.tokens !== undefined) { row.tokens += outcome.tokens; row.tokenCount += 1 }
+      if (outcome.wallMs !== undefined) { row.wallMs += outcome.wallMs; row.wallCount += 1 }
+    } else {
+      row.cancelled += 1
+    }
     row.failedRounds += outcome.failedRounds
   }
   for (const row of live) {
     if (!row.terminal) cell(row.revision).inFlight += 1
   }
   return [...byRevision.entries()]
-    .map(([revision, row]) => ({ revision, ...row }))
+    .map(([revision, row]) => ({
+      revision,
+      accepted: row.accepted, cancelled: row.cancelled, failedRounds: row.failedRounds, inFlight: row.inFlight,
+      ...(row.tokenCount > 0 ? { avgTokens: Math.round(row.tokens / row.tokenCount) } : {}),
+      ...(row.wallCount > 0 ? { avgWallMs: Math.round(row.wallMs / row.wallCount) } : {}),
+    }))
     .sort((a, b) => b.revision - a.revision)
+}
+
+/**
+ * Whether the current revision regressed against a still-restorable earlier
+ * one. Both sides need at least three finished outcomes before the rates mean
+ * anything. Acceptance wins; rework and cost apply only when acceptance held.
+ */
+export interface RecipeRegression {
+  readonly betterRevision: number
+  readonly reason: 'acceptance' | 'rework' | 'cost'
+  /** One English line with both revisions' numbers, for the proposal reason. */
+  readonly summary: string
+}
+
+export function recipeRegression(recipe: RecipeRecord, stats: readonly RecipeRevisionStats[]): RecipeRegression | undefined {
+  const finished = (row: RecipeRevisionStats) => row.accepted + row.cancelled
+  const rate = (row: RecipeRevisionStats) => row.accepted / finished(row)
+  const rework = (row: RecipeRevisionStats) => row.failedRounds / finished(row)
+  const current = stats.find(row => row.revision === recipe.revision)
+  if (!current || finished(current) < 3) return undefined
+  const candidates = stats.filter(row =>
+    row.revision < recipe.revision
+    && recipeVersionAt(recipe, row.revision) !== undefined
+    && finished(row) >= 3)
+  if (candidates.length === 0) return undefined
+  const better = [...candidates].sort((left, right) =>
+    rate(right) - rate(left)
+    || rework(left) - rework(right)
+    || (left.avgTokens ?? Number.POSITIVE_INFINITY) - (right.avgTokens ?? Number.POSITIVE_INFINITY))[0]
+  const rateDiff = rate(better) - rate(current)
+  let reason: RecipeRegression['reason'] | undefined
+  if (rateDiff >= 0.34) reason = 'acceptance'
+  else if (Math.abs(rateDiff) <= 0.1 && rework(current) >= rework(better) + 1) reason = 'rework'
+  else if (Math.abs(rateDiff) <= 0.1 && current.avgTokens !== undefined && better.avgTokens !== undefined && better.avgTokens > 0 && current.avgTokens >= better.avgTokens * 1.5) reason = 'cost'
+  if (reason === undefined) return undefined
+  const describe = (row: RecipeRevisionStats) => `rev ${row.revision}: ${row.accepted}/${finished(row)} accepted, ${rework(row).toFixed(1)} failed rounds avg`
+  return { betterRevision: better.revision, reason, summary: `${describe(current)}; ${describe(better)}` }
 }
 
 /** The one-line stats summary list shows for the current revision. */
@@ -171,6 +253,8 @@ export function recipeStatsLine(recipe: RecipeRecord, live: readonly LiveRecipeC
   const parts = [
     `rev${recipe.revision}: ${current.accepted} accepted, ${current.cancelled} cancelled`,
     ...(done > 0 ? [`avg ${(current.failedRounds / done).toFixed(1)} failed rounds`] : []),
+    ...(current.avgTokens !== undefined ? [`avg per accepted ${formatTokens(current.avgTokens)} tok`] : []),
+    ...(current.avgWallMs !== undefined ? [`avg per accepted ${formatDuration(current.avgWallMs)}`] : []),
     ...(current.inFlight > 0 ? [`${current.inFlight} in flight`] : []),
   ]
   return parts.join(', ')

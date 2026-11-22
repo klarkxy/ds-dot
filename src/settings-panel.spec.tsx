@@ -421,3 +421,78 @@ describe('sectioned settings, switches, and help tips', () => {
     await act(async () => root.unmount())
   })
 })
+
+describe('desktop notifications switch', () => {
+  const apiStub = () => ({
+    models: async () => ({ groups: [] }),
+    settings: async () => DEFAULT_SETTINGS,
+    settingProposals: async () => [],
+    decideSetting: async () => 'ok',
+    setSettings: async () => DEFAULT_SETTINGS,
+  })
+  const restoreBaseGlobals = () => {
+    vi.unstubAllGlobals()
+    vi.stubGlobal('window', dom.window)
+    vi.stubGlobal('document', dom.window.document)
+    vi.stubGlobal('navigator', dom.window.navigator)
+  }
+
+  it('asks for permission inside the click and keeps the pref browser-local', async () => {
+    vi.stubGlobal('localStorage', dom.window.localStorage)
+    dom.window.localStorage.clear()
+    const fakeNotification = {
+      permission: 'default' as string,
+      requestPermission: vi.fn(async () => { fakeNotification.permission = 'granted'; return 'granted' as const }),
+    }
+    vi.stubGlobal('Notification', fakeNotification)
+    try {
+      const api = apiStub()
+      const root = createRoot(document.getElementById('root')!)
+      await act(async () => root.render(<SettingsPanel locale="en" section="general" api={api as never} settings={DEFAULT_SETTINGS} onSaved={() => {}} />))
+      await act(async () => { await Promise.resolve() })
+      const toggle = () => document.querySelector<HTMLButtonElement>('button[role="switch"][aria-label="Desktop notifications"]')!
+      expect(toggle().getAttribute('aria-checked')).toBe('false')
+
+      await act(async () => toggle().click())
+      await act(async () => { await Promise.resolve() })
+      expect(fakeNotification.requestPermission).toHaveBeenCalledTimes(1)
+      expect(dom.window.localStorage.getItem('dsh-dot:desktop-notify')).toBe('1')
+      expect(toggle().getAttribute('aria-checked')).toBe('true')
+
+      await act(async () => toggle().click())
+      expect(dom.window.localStorage.getItem('dsh-dot:desktop-notify')).toBeNull()
+      expect(toggle().getAttribute('aria-checked')).toBe('false')
+      await act(async () => root.unmount())
+    } finally {
+      restoreBaseGlobals()
+    }
+  })
+
+  it('stays off with an inline note when the browser refuses or lacks support', async () => {
+    vi.stubGlobal('localStorage', dom.window.localStorage)
+    dom.window.localStorage.clear()
+    vi.stubGlobal('Notification', { permission: 'default', requestPermission: async () => 'denied' as const })
+    try {
+      const api = apiStub()
+      const root = createRoot(document.getElementById('root')!)
+      await act(async () => root.render(<SettingsPanel locale="en" section="general" api={api as never} settings={DEFAULT_SETTINGS} onSaved={() => {}} />))
+      await act(async () => { await Promise.resolve() })
+      const toggle = () => document.querySelector<HTMLButtonElement>('button[role="switch"][aria-label="Desktop notifications"]')!
+
+      await act(async () => toggle().click())
+      await act(async () => { await Promise.resolve() })
+      expect(toggle().getAttribute('aria-checked')).toBe('false')
+      expect(dom.window.localStorage.getItem('dsh-dot:desktop-notify')).toBeNull()
+      expect(document.body.textContent).toContain('Blocked by the browser')
+
+      vi.stubGlobal('Notification', undefined)
+      await act(async () => toggle().click())
+      await act(async () => { await Promise.resolve() })
+      expect(toggle().getAttribute('aria-checked')).toBe('false')
+      expect(document.body.textContent).toContain('Not supported by this browser')
+      await act(async () => root.unmount())
+    } finally {
+      restoreBaseGlobals()
+    }
+  })
+})

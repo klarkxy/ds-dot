@@ -416,7 +416,7 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
   const str = (payload: unknown, key: string): string => { const value = field(payload, key); return typeof value === 'string' ? value : '' }
   // The kit's 64 KiB default answers 413 before `say` runs. A PNG of about
   // 51 KB does not fit after base64; the cap below fits the advertised images.
-  const PASSIVE_ENDPOINTS = new Set(['wait', 'board', 'work.list', 'work.read', 'card.pending', 'card.detail'])
+  const PASSIVE_ENDPOINTS = new Set(['wait', 'board', 'attention', 'work.list', 'work.read', 'card.pending', 'card.detail', 'recipes'])
   ctx.effect(() => registerHostRpc(ctx as unknown as HostRpcContext, RPC_CHANNEL, async (endpoint, payload, signal) => {
     try {
       const reqLocale = field(payload, 'uiLocale')
@@ -426,6 +426,7 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
       switch (endpoint) {
         case 'locale.sync': return { ok: true, value: await service.syncLocale(str(payload, 'locale') || str(payload, 'uiLocale')) }
         case 'board': return { ok: true, value: service.board() }
+        case 'attention': return { ok: true, value: service.attention() }
         case 'ensure': return { ok: true, value: { sessionId: await ensureDot() } }
         case 'chat': {
           await ensureDot()
@@ -503,20 +504,28 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
           await ensureDot()
           return { ok: true, value: await service.clearUsage() }
         }
+        case 'recipes': return { ok: true, value: service.recipeBoard() }
+        case 'recipe.run': {
+          const id = str(payload, 'id')
+          const result = await service.runRecipe(id ?? '', { origin: 'human' })
+          return { ok: true, value: result }
+        }
+        case 'recipe.proposal.decide': return { ok: true, value: await service.decideRecipeProposal(payload !== null && typeof payload === 'object' ? payload as Record<string, unknown> : {}) }
         case 'schedule.remove': {
           const id = field(payload, 'id')
           return { ok: true, value: typeof id === 'string' ? await service.removeSchedule(id) : false }
         }
         case 'work.list': {
-          const rows = service.store.work.listChanges().map(change => service.workBoard(change.id)).filter(row => row !== undefined)
-          return { ok: true, value: rows }
+          return { ok: true, value: service.workList() }
         }
         case 'work.read': {
           const kind = field(payload, 'kind')
           if (kind !== 'evidence' && kind !== 'change') return { ok: false, error: { code: 'dot/invalid', message: 'kind must be evidence or change' } }
+          const view = field(payload, 'view')
+          if (view !== undefined && view !== 'diff') return { ok: false, error: { code: 'dot/invalid', message: 'view must be diff' } }
           const read = service.readWorkSource(str(payload, 'id'), kind, str(payload, 'ref'), {
             verificationId: str(payload, 'verificationId'), inputRef: str(payload, 'inputRef'), inputRevision: num(payload, 'inputRevision'),
-          }, { forceFull: field(payload, 'forceFull') === true })
+          }, { forceFull: field(payload, 'forceFull') === true, ...(view === 'diff' ? { view: 'diff' as const } : {}) })
           if (!read.ok) return { ok: false, error: { code: `dot/${read.code}`, message: read.message } }
           return { ok: true, value: { source: read.source, body: read.body, truncated: read.truncated, totalBytes: read.totalBytes } }
         }
@@ -567,6 +576,13 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
           const result = await service.forceReleaseWork(str(payload, 'id'))
           if (result && 'ok' in result && result.ok === false) return { ok: false, error: { code: result.code, message: result.message } }
           return { ok: true, value: true }
+        }
+        case 'work.integrate': {
+          const mode = field(payload, 'mode')
+          if (mode !== 'merge' && mode !== 'keep' && mode !== 'discard') return { ok: false, error: { code: 'dot/invalid', message: 'mode must be merge, keep or discard' } }
+          const result = await service.integrateWork(str(payload, 'id'), mode)
+          if (!result.ok) return { ok: false, error: { code: `dot/${result.code}`, message: result.message } }
+          return { ok: true, value: result.text }
         }
         case 'knowledge': return { ok: true, value: await service.knowledgeView() }
         // Panel edits of the agreements/cognition do not switch segments at once: the change is

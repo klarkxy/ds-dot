@@ -12,9 +12,8 @@ Codex、Claude Code、Kimi Code 等 CLI 各有专长。Agent Bridge（AB）已�
 
 ## 动手前必须补的
 
-1. **只读运行会被绕过**：只读边界靠 DSH 沙箱强制，但 AB 的 MCP server 是独立进程，它拉起的 CLI 不受沙箱约束。`assessApprovalRisk` 的 `read-only-write`（`src/approval-risk.ts`）只认写类工具名和 shell 写命令，拦不住一条自然语言的 `dispatch_task`。
-   做法：只读运行里禁止调用 `mcp__agent_bridge__*`，或者强制交给用户审批。补对应测试。
-2. **确认 DSH 对 MCP 工具调用的默认审批策略**：如果默认自动批准，上面这个漏洞是一定会被绕过，而不只是可能。
+1. **已补**：只读运行（`access === 'read'` 或写范围为空）在工具预执行处拒绝名称不像查询的 `mcp__*` 工具——`mcpToolMayWrite`（`src/approval-risk.ts`）按 `mcp__<server>__<tool>` 名字取首词，非 `get`/`list`/`search` 等查询词一律当作可能写入；`guardRunWriteTool`（`src/peer.ts`）据此直接拒绝，`assessApprovalRisk` 也会把这类审批记 `read-only-write`。`mcp__agent_bridge__dispatch_task` 因此在只读运行里被拦下。
+2. **确认 DSH 对 MCP 工具调用的默认审批策略**：第 1 条的预执行拦截独立于审批策略，只读运行无论如何都会被拦；待确认的只是 DSH 是否对可写运行和非 dot 会话的 MCP 调用默认自动批准——若会，AB 在这些路径上仍可能不经提示被触达。
 
 ## 待核实
 

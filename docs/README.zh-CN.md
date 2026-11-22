@@ -8,7 +8,7 @@
 
 ## 安装
 
-需要 DSH `0.2.2-rc.3` 及以上版本。将插件添加到你正在使用的 profile：
+需要 DSH `0.2.2-rc.5` 及以上版本。将插件添加到你正在使用的 profile：
 
 ```sh
 dsh plugin --profile web add ds-dot
@@ -29,9 +29,9 @@ dsh plugin --profile web add ds-dot
 在 D:\work\site 建个工作区，修好文档页里失效的链接，做完告诉我改了什么。
 ```
 
-- **派发与推进任务**：桃乐丝会启动普通 DSH 会话执行具体工作；当不同任务修改的路径互不重叠时，她会自动并行推进。她会核对每次运行的报告，也能以只读方式亲自打开交付文件——验收结论必须引用运行报告或交付文件作为依据；可选的独立复核运行同样只读。同一套要求连续失败三轮后，她会停下来向你请示。任务进行中可随时补充背景、修改要求、暂停或取消，也可以要求由你亲自确认后再验收。
+- **派发与推进任务**：桃乐丝会启动普通 DSH 会话执行具体工作；当不同任务修改的路径互不重叠时，她会自动并行推进。她会核对每次运行的报告，也能以只读方式亲自打开交付文件——验收结论必须引用运行报告或交付文件作为依据；可选的独立复核运行同样只读。同一套要求连续失败三轮后，她会停下来向你请示。任务进行中可随时补充背景、修改要求、暂停或取消，也可以要求由你亲自确认后再验收。任务还可以跑在隔离的 git worktree 中（在任务或配方上设 `isolation: 'worktree'`）：桃乐丝会在 `dot/task-*` 分支上创建受管 worktree；你验收交付后，任务卡片提供「合并到主检出」「保留分支」「丢弃」三个操作——是否并回你的检出永远由你决定，而不是由她决定。
 
-- **代管审批与提问**：可选择只接管她派出的任务，或接管全部 DSH 会话。按默认设置（审批「桃乐丝管」、提问「可逆的自己定」），目标范围内常规、可逆的选项，她会先核对约定、历史对话与工作区现状后自行决定，已获授权的操作不会重复打扰。把握再大的猜测也不能替代缺失的授权；涉及不可逆、外部影响或产生费用的操作仍须具备明确授权。有些审批一律直送你本人确认：被截断的请求，或命中高危模式的命令——沙箱提权、发布/推送、递归或破坏性删除（含容器、Kubernetes 资源与 SQL DROP）、凭据与 `.env` 读取、远程下载管道进入 shell 执行、子代理 Shell 调用、只读运行中的写入。静态检查只覆盖特定模式而非所有危险操作，其余请求仍由她结合授权边界与后果审慎判断。需要请示你时，她会附上一项明确建议，且绝不把沉默当成同意。将审批切换为「我来管」会逐条转交审批卡片；将提问设为「一律转问我」或「不接管」时，请在原会话中直接作答。
+- **代管审批与提问**：可选择只接管她派出的任务，或接管全部 DSH 会话。按默认设置（审批「桃乐丝管」、提问「可逆的自己定」），目标范围内常规、可逆的选项，她会先核对约定、历史对话与工作区现状后自行决定，已获授权的操作不会重复打扰。把握再大的猜测也不能替代缺失的授权；涉及不可逆、外部影响或产生费用的操作仍须具备明确授权。有些审批一律直送你本人确认：被截断的请求，或命中高危模式的命令——沙箱提权、发布/推送、递归或破坏性删除（含容器、Kubernetes 资源与 SQL DROP）、凭据与 `.env` 读取、远程下载管道进入 shell 执行、子代理 Shell 调用、只读运行中的写入——只读运行还会直接拒绝名称不像查询的 MCP 工具（`get_…`、`list_…`、`search_…` 等）。静态检查只覆盖特定模式而非所有危险操作，其余请求仍由她结合授权边界与后果审慎判断。需要请示你时，她会附上一项明确建议，且绝不把沉默当成同意。将审批切换为「我来管」会逐条转交审批卡片；将提问设为「一律转问我」或「不接管」时，请在原会话中直接作答。
 
 - **关注会话与检索历史**：可以让她跟进你手动开启的会话、巡检当前所有运行中的任务，或检索过往分段与任务会话的完整记录。
 
@@ -77,6 +77,54 @@ dsh plugin --profile web add ds-dot
 ### 出厂设置
 
 位于设置页底部，先预览将清除的内容——受跟踪的任务、变更与运行、提醒、任务配方、提案、卡片、将归档的会话（含她自己的对话与后台会话）、约定、认知与设置——确认后才执行清空；你本人的会话、项目文件与宿主人格均不受影响。
+
+## GitHub 事件（可选）
+
+桃乐丝可以跟进 Pull Request、Issue、评论、代码评审、CI 运行、默认分支的推送和 Release。事件先写入持久化的收件箱：重复投递会被丢弃，同一个 PR 或 Issue 的事件会合并，等她空闲时再交给她。事件内容一律按不可信数据处理，可以促使她去查看或向你请示，但本身不构成任何授权。ping、star、fork、watch、check run，以及结论为成功、跳过或中性的 CI 结果会被过滤；接收哪些仓库、哪些事件类型，由你在 GitHub webhook 里选择。
+
+1. 在同一个 profile 中安装 webhook 运行时和 GitHub 适配器，版本要与你的 DSH 一致（这两个包在 npm 上的 `latest` 仍指向旧的 0.1 版本）：
+
+   ```sh
+   dsh plugin --profile web add @deepseek-ai/dsh-webhook@0.2.2-rc.5 @deepseek-ai/dsh-webhook-github@0.2.2-rc.5
+   ```
+
+2. 将下面的叠加配置保存为 `$DSH_HOME/profiles/web/dot-github/cordis.yml`（未设置 `DSH_HOME` 时为 `~/.dsh`）。它会在 `127.0.0.1:3081` 另开一个只响应 `POST /github` 的监听端口：
+
+   ```yaml
+   - insert:
+       - id: webhook-runtime
+         name: '@deepseek-ai/dsh-webhook'
+
+       - id: github-webhook-ingress
+         name: cordis:group
+         group: true
+         isolate:
+           webServer: true
+         config:
+           - id: github-webhook-server
+             name: '@deepseek-ai/dsh-host-webserver'
+             config:
+               host: '127.0.0.1'
+               port: 3081
+
+           - id: github-webhook-adapter
+             name: '@deepseek-ai/dsh-webhook-github'
+             config:
+               source: primary-github
+               path: /github
+               secretEnv: DSH_GITHUB_WEBHOOK_SECRET
+               maxBodyBytes: 1048576
+   ```
+
+3. 在 `DSH_GITHUB_WEBHOOK_SECRET` 中放一段足够长的随机密钥（环境变量或 `$DSH_HOME/.env` 均可），重启后保持不变，然后带上叠加配置启动 DSH：
+
+   ```sh
+   dsh web --patch "${DSH_HOME:-$HOME/.dsh}/profiles/web/dot-github/cordis.yml"
+   ```
+
+4. 通过 TLS 反向代理或隧道只对外暴露 `127.0.0.1:3081/github`，3080 端口上的界面保持不公开。
+
+5. 在仓库的 GitHub webhook 设置中，Payload URL 填 `https://<你的域名>/github`，Content type 选 `application/json`，Secret 填同一个密钥，再勾选希望桃乐丝接收的事件。
 
 ## 从旧版本升级
 

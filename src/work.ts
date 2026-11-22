@@ -5,6 +5,8 @@
  */
 import path from 'node:path'
 import { subjectKey, subjectMaterial, type DeliverySubject, type SubjectLook } from './acceptance.ts'
+import { totalUsage } from './context.ts'
+import type { DotContextUsage } from './contracts.ts'
 import { z } from 'zod'
 
 export type ChangeControl = 'open' | 'paused' | 'cancelled'
@@ -18,6 +20,29 @@ export type VerificationVerdict = 'accept' | 'rework' | 'unverified'
 
 const TERMINAL: ReadonlySet<RunPhase> = new Set(['completed', 'failed', 'stopped'])
 export const MAX_COMPLETED_CHANGES = 200
+/** How long a terminal run that still owes usage can defer its change's prune. */
+export const USAGE_PRUNE_GRACE_MS = 24 * 60 * 60_000
+
+/** Terminal run — usage and wall time can be recorded against it. */
+export function runIsTerminal(run: Pick<RunRecord, 'phase'>): boolean { return TERMINAL.has(run.phase) }
+
+/**
+ * Tokens and wall time summed over a change's finished runs. Only runs that
+ * recorded the fields contribute, so the totals track the terminal set and a
+ * run that never reported usage simply does not count.
+ */
+export function runCostTotals(runs: readonly RunRecord[]): { readonly tokens?: number; readonly wallMs?: number } {
+  let tokens = 0
+  let counted = false
+  let wallMs = 0
+  let timed = false
+  for (const run of runs) {
+    if (!TERMINAL.has(run.phase)) continue
+    if (run.usage) { tokens += totalUsage(run.usage); counted = true }
+    if (run.wallMs !== undefined) { wallMs += run.wallMs; timed = true }
+  }
+  return { ...(counted ? { tokens } : {}), ...(timed ? { wallMs } : {}) }
+}
 
 export interface WritePath { readonly path: string; readonly type: 'file' | 'directory' }
 export type WriteScope = { readonly kind: 'paths'; readonly paths: readonly WritePath[] } | { readonly kind: 'workspace-exclusive' }
@@ -72,8 +97,22 @@ export interface ChangeRecord {
   readonly oversight?: OversightRecord
   /** The recipe and revision this change was created from; kept after the recipe is removed or revised. */
   readonly recipe?: { readonly id: string; readonly revision: number }
+  /** A change whose runs wrote into a dot-managed git worktree instead of the checkout. */
+  readonly isolation?: TaskIsolation
   readonly createdAt: number
   readonly updatedAt: number
+}
+/** Where an isolated change's worktree lives and how the human chose to integrate it. */
+export interface TaskIsolation {
+  readonly kind: 'worktree'
+  readonly repoRoot: string
+  readonly worktree: string
+  readonly branch: string
+  readonly baseSha: string
+  readonly state: 'active' | 'committed' | 'merged' | 'discarded'
+  readonly commitSha?: string
+  readonly mergedInto?: string
+  readonly at: number
 }
 export interface InputRecord {
   readonly id: string
@@ -132,6 +171,10 @@ export interface RunRecord {
   readonly reworkOf?: string
   readonly createdAt: number
   readonly updatedAt: number
+  /** Folded provider usage from the run's session events, captured once the run is terminal. */
+  readonly usage?: DotContextUsage
+  /** Wall time of the run's session — first to last event, else updatedAt − createdAt. */
+  readonly wallMs?: number
 }
 export interface CheckRecord {
   readonly requirementRef: string
@@ -229,6 +272,12 @@ export const changeSchema = z.object({
     }).optional(),
   }).optional(),
   recipe: z.object({ id: z.string().min(1), revision: z.number().int().positive() }).optional(),
+  isolation: z.object({
+    kind: z.literal('worktree'), repoRoot: z.string().min(1), worktree: z.string().min(1),
+    branch: z.string().min(1), baseSha: z.string().min(1),
+    state: z.enum(['active', 'committed', 'merged', 'discarded']),
+    commitSha: z.string().min(1).optional(), mergedInto: z.string().min(1).optional(), at: z.number(),
+  }).optional(),
   createdAt: z.number(), updatedAt: z.number(),
 })
 export const inputSchema = z.object({
@@ -263,6 +312,8 @@ export const runSchema = z.object({
   }).optional(),
   reworkOf: z.string().optional(),
   createdAt: z.number(), updatedAt: z.number(),
+  usage: z.object({ input: z.number(), cacheRead: z.number(), cacheWrite: z.number(), output: z.number() }).optional(),
+  wallMs: z.number().optional(),
 })
 const subjectSchema = z.object({
   workspaceRoot: z.string().min(1), cwd: z.string().min(1),
@@ -711,10 +762,14 @@ export class WorkBook {
       id: change.id, title: change.title, priority: change.priority, revision: change.currentRevision,
       inputRef: change.currentInputRef, control: change.control, status,
       ...(material?.goal ? { summary: material.goal } : {}),
+      ...runCostTotals(runs),
       runs: runs.map(run => ({
         id: run.id, kind: run.kind, phase: run.phase, cwd: run.cwd,
         ...(run.sessionId ? { sessionId: run.sessionId } : {}),
         writeScope: run.writeScope,
+        ...(run.usage ? { usage: run.usage } : {}),
+        ...(run.wallMs !== undefined ? { wallMs: run.wallMs } : {}),
+        ...(!TERMINAL.has(run.phase) ? { startedAt: run.createdAt } : {}),
         deliveries: run.deliveries.map(item => ({
           id: item.id, kind: item.kind, status: item.status, contentRef: item.contentRef,
           ...(item.evidence ? { evidence: item.evidence } : {}),
@@ -737,6 +792,7 @@ export class WorkBook {
         } : {}),
       } : undefined,
       closeout: closeoutCurrent ? change.closeout : undefined,
+      ...(change.isolation ? { isolation: change.isolation } : {}),
       oversight: change.oversight,
       humanAction: !change.closeout && !verdictBlocks && !awaitsHumanDecision && verification?.verdict === 'accept' && verification.subjectKey
         && verification.inputRef === change.currentInputRef && verification.inputRevision === change.currentRevision ? {
@@ -795,7 +851,7 @@ export class WorkBook {
     })
   }
 
-  createChange(input: { title: string; cwd: string; goal: string; requirements?: readonly Requirement[]; requirementsFromGoal?: boolean; steps?: readonly StepSpec[]; source?: string; priority?: 1 | 2 | 3; maxConcurrentRuns?: number; constraints?: readonly Constraint[]; userRequest?: string; deliverableLanguage?: string; recipe?: { readonly id: string; readonly revision: number }; at?: number }): Promise<ChangeRecord> {
+  createChange(input: { title: string; cwd: string; goal: string; requirements?: readonly Requirement[]; requirementsFromGoal?: boolean; steps?: readonly StepSpec[]; source?: string; priority?: 1 | 2 | 3; maxConcurrentRuns?: number; constraints?: readonly Constraint[]; userRequest?: string; deliverableLanguage?: string; recipe?: { readonly id: string; readonly revision: number }; isolation?: TaskIsolation; at?: number }): Promise<ChangeRecord> {
     return this.exclusive(async () => {
       this.assertRecovered()
       const requirements = input.requirements ?? []
@@ -818,6 +874,7 @@ export class WorkBook {
         steps: inputRow.steps.map(step => ({ stepRef: step.stepRef, done: false, inputRef: inputRow.id })),
         maxConcurrentRuns: clampConcurrency(input.maxConcurrentRuns), priority: input.priority ?? 2,
         ...(input.recipe ? { recipe: input.recipe } : {}),
+        ...(input.isolation ? { isolation: input.isolation } : {}),
         createdAt: at, updatedAt: at,
       }
       await this.commit('changes', change.id, change)
@@ -1874,6 +1931,28 @@ export class WorkBook {
     })
   }
 
+  /**
+   * Recorded once, after the run is terminal: folded session usage and wall
+   * time. A no-op on a live run and on a run that already carries usage, so
+   * later capture passes never rewrite a committed number. Usage is metadata,
+   * not a state transition, so the revision does not move — a baseline
+   * published against the revision read before this write still applies.
+   */
+  recordRunUsage(runId: string, usage: DotContextUsage, wallMs: number): Promise<RunRecord | WorkRefusal> {
+    return this.exclusive(async () => {
+      const refused = this.recoveryRefusal()
+      if (refused) return refused
+      const run = this.runs.get(runId)
+      if (!run) return { ok: false, code: 'missing', message: `unknown run ${runId}` }
+      if (!TERMINAL.has(run.phase)) return { ok: false, code: 'invalid', message: `run ${runId} is still ${run.phase}; usage is recorded once it settles` }
+      if (run.usage) return run
+      const next: RunRecord = { ...run, usage, wallMs }
+      await this.commit('runs', next.id, next)
+      this.runs.set(next.id, next)
+      return next
+    })
+  }
+
   /** Remember a session the host created after the run was no longer dispatchable. Does not prompt or reopen it. */
   noteHostSession(runId: string, sessionId: string, at = Date.now()): Promise<RunRecord | WorkRefusal> {
     return this.exclusive(async () => {
@@ -1899,6 +1978,22 @@ export class WorkBook {
    * so a permanently unreachable session or missing host job registry cannot
    * brick the workspace forever. Never called automatically by model tools.
    */
+  /** Patch an isolated change's integration state (merge/keep/discard outcomes). */
+  updateIsolation(changeId: string, patch: Partial<Omit<TaskIsolation, 'kind' | 'repoRoot' | 'worktree' | 'branch' | 'baseSha'>>, at = Date.now()): Promise<{ readonly ok: true } | WorkRefusal> {
+    return this.exclusive(async () => {
+      const refused = this.recoveryRefusal()
+      if (refused) return refused
+      const current = this.changes.get(changeId)
+      if (!current) return { ok: false, code: 'missing', message: `unknown change ${changeId}` }
+      if (!current.isolation) return { ok: false, code: 'invalid', message: `${changeId} is not an isolated change` }
+      const next: ChangeRecord = { ...current, isolation: { ...current.isolation, ...patch, at }, updatedAt: at }
+      await this.commit('changes', next.id, next)
+      this.changes.set(next.id, next)
+      this.currentRevision += 1
+      return { ok: true }
+    })
+  }
+
   forceReleaseChange(changeId: string, at = Date.now()): Promise<{ readonly ok: true; readonly released: readonly string[] } | WorkRefusal> {
     return this.exclusive(async () => {
       const refused = this.recoveryRefusal()
@@ -1953,6 +2048,7 @@ export class WorkBook {
     maxKeep = MAX_COMPLETED_CHANGES,
     removeDurable?: (table: 'changes' | 'inputs' | 'runs' | 'verifications', key: string) => Promise<void>,
     beforeRemove?: (change: ChangeRecord, failedRounds: number) => Promise<void>,
+    at = Date.now(),
   ): Promise<{ readonly prunedChanges: readonly string[]; readonly keptArtifacts: ReadonlySet<string> }> {
     return this.exclusive(async () => {
       if (this.recovery) return { prunedChanges: [], keptArtifacts: this.referencedArtifacts() }
@@ -1964,10 +2060,16 @@ export class WorkBook {
       const victims = terminalChanges.slice(0, excess)
       const prunedChanges: string[] = []
       for (const change of victims) {
+        const changeRuns = [...this.runs.values()].filter(run => run.changeId === change.id)
+        // A run that still owes usage keeps its change for a later prune: usage
+        // capture runs outside this exclusive lane and must commit first, or a
+        // change that closed between capture and selection loses its cost. The
+        // deferral is bounded — a run whose session can never be read again
+        // must not pin its change in history forever.
+        if (changeRuns.some(run => runIsTerminal(run) && run.sessionId !== undefined && run.usage === undefined && at - run.updatedAt < USAGE_PRUNE_GRACE_MS)) continue
         if (beforeRemove) {
           try { await beforeRemove(change, this.failedRounds(change.id)) } catch { /* outcome recording is best-effort */ }
         }
-        const changeRuns = [...this.runs.values()].filter(run => run.changeId === change.id)
         const changeInputs = [...this.inputs.values()].filter(inp => inp.changeId === change.id)
         const changeVers = [...this.verifications.values()].filter(ver => ver.changeId === change.id)
         for (const ver of changeVers) {

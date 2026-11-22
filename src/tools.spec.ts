@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 import { SHOW_VIEW_MIXED_SUMMARY, showViewSharesStep } from './card-step.ts'
 import { apply, TASK_ACTIONS } from './tools.ts'
-import { apply as applyReflection, REFLECTION_SUBMIT_TOOL } from './reflection.ts'
+import { apply as applyReflection, REFLECTION_PROPOSE_TOOL, REFLECTION_SUBMIT_TOOL } from './reflection.ts'
 import { DEFAULT_SETTINGS, TOOL, type DotSettings } from './contracts.ts'
 import { DEFAULT_PERSONA } from './persona.ts'
 import { settingsSnapshotBlock, SelfSettings } from './self-settings.ts'
@@ -83,7 +83,7 @@ const allSchemas = () => [...load(), ...loadReflection()]
 
 describe('dot tools', () => {
   it('keeps the private reflection preset to history reads and one restricted submission', () => {
-    expect(loadReflection().map(tool => tool.name).sort()).toEqual([TOOL.searchHistory, TOOL.readHistory, REFLECTION_SUBMIT_TOOL].sort())
+    expect(loadReflection().map(tool => tool.name).sort()).toEqual([TOOL.searchHistory, TOOL.readHistory, REFLECTION_SUBMIT_TOOL, REFLECTION_PROPOSE_TOOL].sort())
   })
   it('compiles every dot tool definition through defineTool and keeps 19 dot_* plus show_view', () => {
     const names = load().map(tool => tool.name)
@@ -287,7 +287,7 @@ describe('dot tools', () => {
 
   it('exposes exactly the high-level task operations and rejects removed actions', async () => {
     const tool = load().find(row => row.name === TOOL.task) as { parameters: { properties: Record<string, { enum?: string[] }> }; execute(args: unknown): Promise<string> }
-    expect(tool.parameters.properties.action.enum).toEqual(['create', 'revise', 'dispatch', 'check', 'read', 'list', 'supplement', 'finish', 'step', 'closeout', 'pause', 'resume', 'cancel', 'decide', 'reject'])
+    expect(tool.parameters.properties.action.enum).toEqual(['create', 'revise', 'dispatch', 'check', 'read', 'list', 'supplement', 'finish', 'step', 'closeout', 'pause', 'resume', 'cancel', 'decide', 'reject', 'link', 'unlink'])
     expect(tool.parameters.properties.action.enum).toEqual([...TASK_ACTIONS])
     for (const action of ['reserve', 'baseline', 'subject', 'evidence', 'verify', 'hold', 'accept', 'move', 'note', 'delete', 'board', 'update', 'start']) await expect(tool.execute({ action })).rejects.toThrow()
     for (const field of ['subject', 'subject_ref', 'evidence_ref', 'to', 'status', 'summary', 'session_id']) expect(tool.parameters.properties).not.toHaveProperty(field)

@@ -525,6 +525,12 @@ const ruUi: UiText = {
   workEvidenceFailed: 'Не удалось прочитать: ',
   workEvidenceFull: 'Показать полностью',
   workEvidenceRetry: 'Повторить',
+  workViewDiff: 'Диф',
+  workViewFull: 'Полный',
+  workFileView: 'Вид файла',
+  workQuoteLine: 'Цитировать в заметку',
+  workDiffShowAll: 'Показать всё',
+  workDiffTruncated: 'Показано {shown} из {total} строк',
   workEvidenceLoading: 'Загрузка…',
   workExcluded: 'Исключено из снимка',
   workExcludeDir: 'Игнорируемый каталог',
@@ -545,6 +551,12 @@ const ruUi: UiText = {
   workOpenSession: 'Открыть сессию',
   workSourceExpandAll: 'Развернуть всё',
   workSourceCollapseAll: 'Свернуть всё',
+  attentionTitle: 'Дороти ждёт вас',
+  attentionBadge: '{n} ждут вас',
+  sNotify: 'Уведомления рабочего стола',
+  sNotifyDesc: 'Показывает уведомление браузера, когда Дороти ждёт вас, а это окно скрыто или не в фокусе.',
+  sNotifyBlocked: 'Заблокировано браузером',
+  sNotifyUnsupported: 'Не поддерживается этим браузером',
 }
 
 const ruCard: CardCopy = {

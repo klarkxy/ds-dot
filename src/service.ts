@@ -5,7 +5,7 @@
  * entry wires host events into it; the preset child plugin exposes its
  * operations as model tools.
  */
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
 import { randomUUID } from 'node:crypto'
 import { HarnessError } from '@deepseek-ai/dsh-llm'
 import { mkdir } from 'node:fs/promises'
@@ -2622,8 +2622,11 @@ export class DotService {
     if (!subject) return { ok: false, code: 'invalid', message: `${changeId} has no delivery subject to integrate` }
     // Subject paths are relative to the change cwd; a task created in a repo
     // subdir maps to <worktree>/<sub>, so prefix them for git pathspecs.
-    const inside = relative(canonicalPath(isolation.worktree), change.cwd)
-    const subdir = inside !== '' && !inside.startsWith('..') ? `${inside.split(sep).join('/')}/` : ''
+    // The stored cwd is case-folded on win32, so take the on-disk spelling
+    // from realpath; git pathspecs are case-sensitive.
+    if (!existsSync(change.cwd)) return { ok: false, code: 'failed', message: `the task worktree ${isolation.worktree} is missing` }
+    const inside = relative(realpathSync.native(isolation.worktree), realpathSync.native(change.cwd))
+    const subdir = inside !== '' && inside !== '..' && !inside.startsWith(`..${sep}`) && !isAbsolute(inside) ? `${inside.split(sep).join('/')}/` : ''
     const delivered = subject.changes.map(row => ({ ...row, path: `${subdir}${row.path}` }))
     let commitSha: string | undefined
     try {

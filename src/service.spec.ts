@@ -3630,16 +3630,16 @@ describe.skipIf(!worktreeGitAvailable)('task worktree isolation', { timeout: 30_
     const { repo, home, cleanup } = makeSpecRepo('dot-iso-sub-')
     const h = setup(undefined, undefined, home, { git: runGit })
     try {
-      mkdirSync(join(repo, 'sub'))
-      writeFileSync(join(repo, 'sub', 'keep.txt'), 'keep')
+      mkdirSync(join(repo, 'Sub'))
+      writeFileSync(join(repo, 'Sub', 'keep.txt'), 'keep')
       await runGit(['add', '-A'], repo)
       await runGit(['commit', '-m', 'sub dir'], repo)
-      const created = JSON.parse(await h.service.manageTask({ action: 'create', title: 'Sub', goal: 'land', dir: join(repo, 'sub'), isolation: 'worktree', human_review: true })) as { id: string }
-      expect(h.store.work.change(created.id)!.cwd.replaceAll('\\', '/')).toMatch(/worktrees\/[^/]+\/sub$/)
+      const created = JSON.parse(await h.service.manageTask({ action: 'create', title: 'Sub', goal: 'land', dir: join(repo, 'Sub'), isolation: 'worktree', human_review: true })) as { id: string }
+      expect(h.store.work.change(created.id)!.cwd.replaceAll('\\', '/')).toMatch(/worktrees\/[^/]+\/sub$/i)
       await finishIsolated(h, created.id, cwd => writeFileSync(join(cwd, 'x.txt'), 'made'))
       const merged = await h.service.integrateWork(created.id, 'merge')
       expect(merged).toMatchObject({ ok: true })
-      expect(readFileSync(join(repo, 'sub', 'x.txt'), 'utf-8')).toBe('made')
+      expect(readFileSync(join(repo, 'Sub', 'x.txt'), 'utf-8')).toBe('made')
     } finally { await h.service.dispose(); cleanup() }
   })
 

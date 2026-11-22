@@ -258,7 +258,7 @@ export async function removeTaskWorktree(input: { readonly repoRoot: string; rea
   await git(['worktree', 'remove', '--force', input.worktree], input.repoRoot).catch(() => {
     // The dir may already be gone (a removed entry is not an error worth surfacing).
     rmSync(input.worktree, { recursive: true, force: true })
-    git(['worktree', 'prune'], input.repoRoot).catch(() => undefined)
+    return git(['worktree', 'prune'], input.repoRoot).then(() => undefined, () => undefined)
   })
   if (!input.branch) return
   if (input.force) {

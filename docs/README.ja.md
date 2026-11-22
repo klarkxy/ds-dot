@@ -81,10 +81,10 @@ D:\work\site にワークスペースを作成し、ドキュメントページ�
 
 ドロシーは Pull Request、Issue、コメント、レビュー、CI の実行、デフォルトブランチへの push、Release を追跡できます。イベントはまず永続的な受信箱に入り、再配信されたものは破棄され、同じ PR や Issue のイベントはまとめられ、ドロシーの手が空いたときに届きます。イベントの内容は常に信頼できないデータとして扱われ、確認や相談のきっかけにはなっても、それ自体が何かを許可することはありません。ping、star、fork、watch、check run、成功・スキップ・neutral となった CI 結果は除外されます。どのリポジトリとイベントを受け取るかは GitHub の webhook 設定で選びます。
 
-1. 同じプロファイルに webhook ランタイムと GitHub アダプターをインストールします：
+1. 同じプロファイルに webhook ランタイムと GitHub アダプターを、DSH と同じバージョンでインストールします（npm の `latest` タグはまだ古い 0.1 系を指しています）：
 
    ```sh
-   dsh plugin --profile web add @deepseek-ai/dsh-webhook @deepseek-ai/dsh-webhook-github
+   dsh plugin --profile web add @deepseek-ai/dsh-webhook@0.2.2-rc.5 @deepseek-ai/dsh-webhook-github@0.2.2-rc.5
    ```
 
 2. 次のオーバーレイを `$DSH_HOME/profiles/web/dot-github/cordis.yml`（`DSH_HOME` 未設定時は `~/.dsh`）として保存します。`127.0.0.1:3081` に `POST /github` だけを受け付ける別のリスナーを開きます：
@@ -118,7 +118,7 @@ D:\work\site にワークスペースを作成し、ドキュメントページ�
 3. 十分に長いランダムなシークレットを `DSH_GITHUB_WEBHOOK_SECRET`（環境変数または `$DSH_HOME/.env`）に設定し、再起動後も同じ値を保ったまま、オーバーレイ付きで DSH を起動します：
 
    ```sh
-   dsh web --patch "$DSH_HOME/profiles/web/dot-github/cordis.yml"
+   dsh web --patch "${DSH_HOME:-$HOME/.dsh}/profiles/web/dot-github/cordis.yml"
    ```
 
 4. TLS リバースプロキシまたはトンネル経由で `127.0.0.1:3081/github` だけを公開します。ポート 3080 の UI は非公開のままにします。

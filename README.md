@@ -57,10 +57,10 @@ Dorothy replies in your language while writing project deliverables in the langu
 
 Dorothy can follow pull requests, issues, comments, reviews, CI runs, pushes to the default branch, and releases. Events land in a durable inbox, where redelivered events are dropped and events about the same pull request or issue are merged, and reach Dorothy once she is idle. She treats event content as untrusted data: an event can prompt her to look into something or ask you, but never authorizes anything on its own. Pings, stars, forks, watches, check runs, and successful, skipped, or neutral CI results are filtered out; which repositories and event types arrive is set in your GitHub webhook.
 
-1. Install the webhook runtime and the GitHub adapter into the same profile:
+1. Install the webhook runtime and the GitHub adapter into the same profile, pinned to your DSH version (their npm `latest` tag still points at an older 0.1 build):
 
    ```sh
-   dsh plugin --profile web add @deepseek-ai/dsh-webhook @deepseek-ai/dsh-webhook-github
+   dsh plugin --profile web add @deepseek-ai/dsh-webhook@0.2.2-rc.5 @deepseek-ai/dsh-webhook-github@0.2.2-rc.5
    ```
 
 2. Save this overlay as `$DSH_HOME/profiles/web/dot-github/cordis.yml` (`~/.dsh` when `DSH_HOME` is unset). It opens a second listener on `127.0.0.1:3081` that serves only `POST /github`:
@@ -94,7 +94,7 @@ Dorothy can follow pull requests, issues, comments, reviews, CI runs, pushes to 
 3. Put a long random secret in `DSH_GITHUB_WEBHOOK_SECRET` (your environment or `$DSH_HOME/.env`), keep it the same across restarts, and start DSH with the overlay:
 
    ```sh
-   dsh web --patch "$DSH_HOME/profiles/web/dot-github/cordis.yml"
+   dsh web --patch "${DSH_HOME:-$HOME/.dsh}/profiles/web/dot-github/cordis.yml"
    ```
 
 4. Expose only `127.0.0.1:3081/github` through a TLS reverse proxy or tunnel. The UI on port 3080 stays private.

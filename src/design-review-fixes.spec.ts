@@ -179,6 +179,29 @@ describe('2. Runtime tools/pre-execute WriteScope enforcement on child sessions'
     expect(await gates[0]!({ name: 'write_file', input: { path: 'src/allowed.ts' } }, async () => ({ kind: 'allow' }))).toEqual({ kind: 'allow' })
     expect((await gates[0]!({ name: 'write_file', input: { path: 'src/forbidden.ts' } }, async () => ({ kind: 'allow' }))).kind).toBe('deny')
   })
+
+  it('blocks write-shaped MCP tools on read-only runs while writer runs keep them', () => {
+    const baseRun = {
+      id: 'run-1',
+      cwd: '/repo',
+      workspaceRoot: '/repo',
+      writeScope: { kind: 'paths' as const, paths: [{ path: 'src/allowed.ts', type: 'file' as const }] },
+      access: 'write' as const,
+    }
+    const readRun = { ...baseRun, access: 'read' as const, writeScope: { kind: 'paths' as const, paths: [] } }
+    // MCP servers run outside the sandbox: read-only refuses write-shaped names.
+    const denied = guardRunWriteTool(readRun, { name: 'mcp__agent_bridge__dispatch_task', input: { task: 'x' } }, 'linux')
+    expect(denied).toMatchObject({ allow: false })
+    expect((denied as { reason?: string }).reason).toContain('may write outside the sandbox')
+    expect(guardRunWriteTool(readRun, { name: 'mcp__fs__write_file', input: { path: 'a.txt' } }, 'linux')).toMatchObject({ allow: false })
+    expect(guardRunWriteTool(readRun, { name: 'mcp__github__get_issue', input: {} }, 'linux')).toEqual({ allow: true })
+    expect(guardRunWriteTool(readRun, { name: 'mcp__fs__listDirectory', input: {} }, 'linux')).toEqual({ allow: true })
+    // Writer runs are unaffected either way.
+    expect(guardRunWriteTool(baseRun, { name: 'mcp__agent_bridge__dispatch_task', input: { task: 'x' } }, 'linux')).toEqual({ allow: true })
+    expect(guardRunWriteTool(baseRun, { name: 'mcp__github__get_issue', input: {} }, 'linux')).toEqual({ allow: true })
+    // A non-MCP unknown tool still passes the read-only guard.
+    expect(guardRunWriteTool(readRun, { name: 'read_file', input: { path: 'a.txt' } }, 'linux')).toEqual({ allow: true })
+  })
 })
 
 describe('3. Async snapshot capture, manifest-only reads, size guard, and orphan snapshot GC', () => {

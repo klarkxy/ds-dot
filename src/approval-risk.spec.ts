@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { approvalNotice, assessApprovalRisk, fenceUntrusted } from './approval-risk.ts'
+import { approvalNotice, assessApprovalRisk, fenceUntrusted, mcpToolMayWrite } from './approval-risk.ts'
 
 describe('approval risk', () => {
   it('leaves a routine command to the model', () => {
@@ -92,6 +92,31 @@ describe('approval risk', () => {
     expect(assessApprovalRisk({ toolName: 'read', arguments: 'echo hi', viaSubagent: true }).forced).toBe(false)
     expect(assessApprovalRisk({ toolName: 'pwsh', arguments: 'mkdir out', readOnly: true }).reasons).toContain('read-only-write')
     expect(assessApprovalRisk({ toolName: 'pwsh', arguments: 'echo hi', readOnly: true }).forced).toBe(false)
+  })
+
+  it('judges MCP tool write risk by name, failing closed on odd shapes', () => {
+    // Lookup-shaped first words pass: snake, kebab, camelCase, hashed suffix.
+    expect(mcpToolMayWrite('mcp__github__get_issue')).toBe(false)
+    expect(mcpToolMayWrite('mcp__github__search_code')).toBe(false)
+    expect(mcpToolMayWrite('mcp__fs__listDirectory')).toBe(false)
+    expect(mcpToolMayWrite('mcp__fs__read-file')).toBe(false)
+    expect(mcpToolMayWrite('mcp__github__get_issue_0123456789ab')).toBe(false)
+    expect(mcpToolMayWrite('MCP__github__listRepos')).toBe(false)
+    // Anything else may write.
+    expect(mcpToolMayWrite('mcp__github__create_issue')).toBe(true)
+    expect(mcpToolMayWrite('mcp__agent_bridge__dispatch_task')).toBe(true)
+    expect(mcpToolMayWrite('mcp__fs__write_file')).toBe(true)
+    // Malformed mcp__ names fail closed.
+    expect(mcpToolMayWrite('mcp__x')).toBe(true)
+    expect(mcpToolMayWrite('mcp__x__')).toBe(true)
+    expect(mcpToolMayWrite('mcp____get_thing')).toBe(true)
+    // Non-MCP tools are not this gate's concern.
+    expect(mcpToolMayWrite('write_file')).toBe(false)
+    expect(mcpToolMayWrite('get_issue')).toBe(false)
+    // Only read-only sessions flag them in the risk assessment.
+    expect(assessApprovalRisk({ toolName: 'mcp__agent_bridge__dispatch_task', readOnly: true }).reasons).toContain('read-only-write')
+    expect(assessApprovalRisk({ toolName: 'mcp__github__get_issue', readOnly: true }).forced).toBe(false)
+    expect(assessApprovalRisk({ toolName: 'mcp__github__create_issue' }).forced).toBe(false)
   })
 
   it('fences requester text and marks a cut tail as truncated', () => {

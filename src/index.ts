@@ -499,8 +499,7 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
           return { ok: true, value: typeof id === 'string' ? await service.removeSchedule(id) : false }
         }
         case 'work.list': {
-          const rows = service.store.work.listChanges().map(change => service.workBoard(change.id)).filter(row => row !== undefined)
-          return { ok: true, value: rows }
+          return { ok: true, value: service.workList() }
         }
         case 'work.read': {
           const kind = field(payload, 'kind')

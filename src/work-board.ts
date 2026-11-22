@@ -90,6 +90,16 @@ export interface WorkHumanAction {
   readonly expectedSubjectKey: string
 }
 
+/** A link chip the card shows: the bound GitHub target, its state, and the newest event. */
+export interface WorkLinkView {
+  readonly repo: string
+  readonly number?: number
+  readonly branch?: string
+  readonly url?: string
+  readonly state: 'open' | 'closed' | 'merged'
+  readonly lastEvent?: import('./contracts.ts').LinkEvent
+}
+
 export interface WorkBoardItem {
   readonly id: string
   readonly title: string
@@ -108,6 +118,7 @@ export interface WorkBoardItem {
   readonly closeout?: WorkCloseoutView
   readonly oversight?: WorkOversightView
   readonly humanAction?: WorkHumanAction
+  readonly links?: readonly WorkLinkView[]
 }
 
 export interface WorkReadRequest {

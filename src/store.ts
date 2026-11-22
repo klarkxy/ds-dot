@@ -3,18 +3,18 @@
  * the durable copy follows the in-memory order; reads never wait on disk.
  */
 import { APPROVAL_DETAIL_LIMIT } from './approval-risk.ts'
-import { COGNITION_HISTORY_MAX, type BoardView, type CognitionVersion, type DotContextUsage, type DotSettings, type DotUsageOffset, type PendingView, type RecipeRecord, type ReflectionRun, type ScheduleRecord, type SettingProposal, type TaskRecord } from './contracts.ts'
+import { COGNITION_HISTORY_MAX, type BoardView, type CognitionVersion, type DotContextUsage, type DotSettings, type DotUsageOffset, type PendingView, type RecipeRecord, type ReflectionRun, type ScheduleRecord, type SettingProposal, type TaskLink, type TaskRecord } from './contracts.ts'
 import { ZERO_USAGE, addUsage } from './context.ts'
 import { applyEvent, createTask, ledgerSummary, markSeen, sortTasks, withPending, type LedgerEvent, type NewTask } from './ledger.ts'
 import { MAX_PAST_SEGMENTS, type PastSegment, type Segment } from './segments.ts'
 import { parseSettings } from './settings.ts'
 import { isCopyLocale, type CopyLocale } from './i18n/index.ts'
-import { STATE_KEY, parseRecipeRecord, parseScheduleRecord, parseSettingProposal, parseState, parseTask, type DotState } from './storage.ts'
+import { STATE_KEY, parseRecipeRecord, parseScheduleRecord, parseSettingProposal, parseState, parseTask, parseTaskLink, type DotState } from './storage.ts'
 import { ownedSessionIds, sessionIsOwned } from './peer.ts'
 import { WorkBook, isUnknownState, type ChangeRecord, type WorkPersist } from './work.ts'
 import { projectWorkIdle, projectWorkLedger } from './work-actions.ts'
 
-type TableName = 'state' | 'tasks' | 'schedules' | 'proposals' | 'changes' | 'inputs' | 'runs' | 'verifications' | 'peers' | 'inbox' | 'recipes'
+type TableName = 'state' | 'tasks' | 'schedules' | 'proposals' | 'changes' | 'inputs' | 'runs' | 'verifications' | 'peers' | 'inbox' | 'recipes' | 'links'
 
 export interface DotTable {
   entries(): IterableIterator<[unknown, unknown]>
@@ -45,6 +45,7 @@ export class DotStore {
   private readonly tasks = new Map<string, TaskRecord>()
   private readonly reminders = new Map<string, ScheduleRecord>()
   private readonly recipeRows = new Map<string, RecipeRecord>()
+  private readonly linkRows = new Map<string, TaskLink>()
   private readonly proposals = new Map<string, SettingProposal>()
   private tail: Promise<unknown> = Promise.resolve()
   private cognitionRevision = 0
@@ -74,6 +75,10 @@ export class DotStore {
       for (const [key, value] of domain.table('recipes').entries()) {
         const recipe = parseRecipeRecord(value)
         if (recipe && recipe.id === key) this.recipeRows.set(recipe.id, recipe)
+      }
+      for (const [key, value] of domain.table('links').entries()) {
+        const link = parseTaskLink(value)
+        if (link && link.id === key) this.linkRows.set(link.id, link)
       }
     }
     this.work = WorkBook.restore({
@@ -408,7 +413,7 @@ export class DotStore {
    */
   async factoryReset(now = Date.now()): Promise<void> {
     await this.flush()
-    const names: TableName[] = ['tasks', 'schedules', 'recipes', 'proposals', 'changes', 'inputs', 'runs', 'verifications', 'peers']
+    const names: TableName[] = ['tasks', 'schedules', 'recipes', 'links', 'proposals', 'changes', 'inputs', 'runs', 'verifications', 'peers']
     const domain = this.domain
     const op = this.tail.then(async () => {
       if (domain) {
@@ -421,6 +426,7 @@ export class DotStore {
       this.tasks.clear()
       this.reminders.clear()
       this.recipeRows.clear()
+      this.linkRows.clear()
       this.proposals.clear()
       this.work.clear()
       this.localePref = undefined
@@ -557,6 +563,46 @@ export class DotStore {
     return [...this.recipeRows.values()].sort((a, b) => a.name.toLowerCase().localeCompare(b.name.toLowerCase()) || a.id.localeCompare(b.id))
   }
 
+  /** Links between a change and a GitHub target, oldest first. */
+  get links(): readonly TaskLink[] {
+    return [...this.linkRows.values()].sort((a, b) => a.addedAt - b.addedAt || a.id.localeCompare(b.id))
+  }
+
+  /** The board's work row for one change: workView plus its link chips. */
+  workViewWithLinks(changeId: string) {
+    const row = this.work.workView(changeId)
+    if (!row) return undefined
+    const links = this.linksFor(changeId)
+    return links.length > 0 ? { ...row, links } : row
+  }
+
+  linksFor(changeId: string): readonly TaskLink[] {
+    return this.links.filter(link => link.changeId === changeId)
+  }
+
+  link(id: string): TaskLink | undefined { return this.linkRows.get(id) }
+
+  putLink(record: TaskLink): Promise<void> {
+    this.linkRows.set(record.id, record)
+    this.changed()
+    return this.write('links', record.id, record)
+  }
+
+  deleteLink(id: string): Promise<void> {
+    if (!this.linkRows.delete(id)) return Promise.resolve()
+    this.changed()
+    const domain = this.domain
+    if (!domain) return Promise.resolve()
+    const op = this.tail.then(() => this.durable(() => domain.table('links').delete(id)))
+    this.tail = op.catch(() => undefined)
+    return op
+  }
+
+  /** Drop every link a pruned change owned. */
+  async deleteLinksFor(changeId: string): Promise<void> {
+    for (const link of this.linksFor(changeId)) await this.deleteLink(link.id)
+  }
+
   /** Look a recipe up by id, or by exact name case-insensitively. */
   recipe(idOrName: string): RecipeRecord | undefined {
     const direct = this.recipeRows.get(idOrName)
@@ -594,7 +640,7 @@ export class DotStore {
     const watched = all.filter(task => task.origin === 'watched')
     const started = all.filter(task => task.origin === 'started')
     const work = this.work.listChanges()
-      .map(change => this.work.workView(change.id))
+      .map(change => this.workViewWithLinks(change.id))
       .filter((row): row is NonNullable<typeof row> => row !== undefined)
     return {
       ...this.state.dotSessionId === undefined ? {} : { dotSessionId: this.state.dotSessionId },

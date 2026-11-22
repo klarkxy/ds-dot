@@ -4,10 +4,11 @@ import { parseEvidenceRef } from './acceptance.ts'
 import { BOARD_ROOT } from './board.tsx'
 import { FINISHED_SHOWN } from './board-groups.ts'
 import { totalUsage } from './context.ts'
+import { formatAge } from './ledger.ts'
 import { formatDuration, formatTokens, t, type CopyLocale, type TextKey } from './ui-copy.ts'
 import {
   acceptPayload, forceReleasePayload, groupWork, lookRequest, rejectPayload, resumePayload, scopeText, shortId, workFactKey, workFactTone, workFailure,
-  type PendingGlance, type WorkAcceptPayload, type WorkBoardItem, type WorkChangeView, type WorkReadRequest, type WorkRejectPayload, type WorkRunView, type WorkStatus,
+  type PendingGlance, type WorkAcceptPayload, type WorkBoardItem, type WorkChangeView, type WorkLinkView, type WorkReadRequest, type WorkRejectPayload, type WorkRunView, type WorkStatus,
 } from './work-board.ts'
 
 const STATUS_KEY: Record<WorkStatus, TextKey> = {
@@ -579,6 +580,20 @@ function RunFacts({ locale, run, onOpenSession }: { readonly locale: CopyLocale;
   )
 }
 
+function LinkChip({ locale, link, now }: { readonly locale: CopyLocale; readonly link: WorkLinkView; readonly now: number }) {
+  const label = `${link.repo}${link.number !== undefined ? `#${link.number}` : `@${link.branch}`}`
+  const event = link.lastEvent
+  const inner = <>
+    {label}
+    {event ? ` · ${event.title || event.type} ${t(locale, 'workLinkAgo').replace('{t}', formatAge(Math.max(0, now - event.at)))}` : ''}
+    {link.state === 'merged' ? <Tag tone="success">{t(locale, 'workLinkMerged')}</Tag> : null}
+    {link.state === 'closed' ? <Tag tone="quiet">{t(locale, 'workLinkClosed')}</Tag> : null}
+  </>
+  return link.url
+    ? <a className="dsh-dot-work-link" href={link.url} target="_blank" rel="noreferrer">{inner}</a>
+    : <span className="dsh-dot-work-link">{inner}</span>
+}
+
 function itemDot(item: WorkBoardItem, needsHuman: boolean): StateDotState {
   if (item.status === 'done') return 'done'
   if (item.status === 'cancelled') return 'idle'
@@ -660,6 +675,7 @@ function WorkRow({ locale, item, pending, onAccept, onReject, onAnswer, onResume
             ) : null}
             {item.verification ? <Tag tone={workFactTone(item.verification.verdict)}>{t(locale, 'workVerification')} {factLabel(locale, 'verdict', item.verification.verdict)}</Tag> : null}
             {delivery && delivery.status !== 'accepted' ? <Tag tone={workFactTone(delivery.status)}>{t(locale, 'workDispatch')}{locale === 'zh' || locale === 'ja' ? '：' : ': '}{factLabel(locale, 'dispatch', delivery.status)}</Tag> : null}
+            {item.links?.map(link => <LinkChip key={link.url ?? `${link.repo}${link.number ?? ''}${link.branch ?? ''}`} locale={locale} link={link} now={Date.now()} />)}
           </span>
         </div>
       </div>

@@ -287,7 +287,7 @@ describe('dot tools', () => {
 
   it('exposes exactly the high-level task operations and rejects removed actions', async () => {
     const tool = load().find(row => row.name === TOOL.task) as { parameters: { properties: Record<string, { enum?: string[] }> }; execute(args: unknown): Promise<string> }
-    expect(tool.parameters.properties.action.enum).toEqual(['create', 'revise', 'dispatch', 'check', 'read', 'list', 'supplement', 'finish', 'step', 'closeout', 'pause', 'resume', 'cancel', 'decide', 'reject'])
+    expect(tool.parameters.properties.action.enum).toEqual(['create', 'revise', 'dispatch', 'check', 'read', 'list', 'supplement', 'finish', 'step', 'closeout', 'pause', 'resume', 'cancel', 'decide', 'reject', 'link', 'unlink'])
     expect(tool.parameters.properties.action.enum).toEqual([...TASK_ACTIONS])
     for (const action of ['reserve', 'baseline', 'subject', 'evidence', 'verify', 'hold', 'accept', 'move', 'note', 'delete', 'board', 'update', 'start']) await expect(tool.execute({ action })).rejects.toThrow()
     for (const field of ['subject', 'subject_ref', 'evidence_ref', 'to', 'status', 'summary', 'session_id']) expect(tool.parameters.properties).not.toHaveProperty(field)

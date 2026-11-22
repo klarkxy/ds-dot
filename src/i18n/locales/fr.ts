@@ -498,6 +498,7 @@ const frUi: UiText = {
   workScope: 'Périmètre d’écriture',
   workScopeExclusive: 'Tout l’espace de travail',
   workScopeNone: 'Aucune écriture',
+  workTokens: 'tok',
   workEvidence: 'Preuve',
   workFiles: 'Fichiers livrés',
   workKindWork: 'Travail',

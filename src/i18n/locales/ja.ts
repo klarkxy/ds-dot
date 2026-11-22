@@ -498,6 +498,7 @@ const jaUi: UiText = {
   workScope: '書き込み範囲',
   workScopeExclusive: 'ワークスペース全体',
   workScopeNone: '書き込みなし',
+  workTokens: 'tok',
   workEvidence: '証跡',
   workFiles: '納品ファイル',
   workKindWork: '作業',

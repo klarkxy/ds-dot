@@ -746,6 +746,27 @@ describe('WorkBoard', () => {
     await act(async () => root.unmount())
   })
 
+  it('shows the cost of each run and the total over the change', async () => {
+    const costed: WorkBoardItem = {
+      ...item, id: 'c-11', title: 'Metered', status: 'done', blockers: [], verification: undefined, oversight: undefined, humanAction: undefined,
+      tokens: 128_000, wallMs: 252_000,
+      runs: [
+        { id: 'run-1', kind: 'work', phase: 'completed', cwd: 'H:/repo', usage: { input: 1_000, cacheRead: 126_000, cacheWrite: 0, output: 1_000 }, wallMs: 250_000 },
+        { id: 'run-2', kind: 'work', phase: 'active', cwd: 'H:/repo', startedAt: Date.now() - 180_000 },
+      ],
+    }
+    const root = createRoot(document.getElementById('root')!)
+    await act(async () => root.render(<WorkBoard locale="en" items={[costed]} pending={[]} onAccept={vi.fn()} onReject={vi.fn()} onAnswer={vi.fn()} onResume={vi.fn()} />))
+    await click('Finished · 1')
+    const text = document.body.textContent ?? ''
+    // Change header sums finished runs; the finished run shows its own cost with the breakdown on hover.
+    expect(text).toContain('128K tok · 4m 12s')
+    expect(text).toContain('128K tok · 4m 10s')
+    // The live run shows elapsed time instead.
+    expect(text).toContain('Running 3m 00s')
+    await act(async () => root.unmount())
+  })
+
   const diffed: WorkBoardItem = {
     ...item, id: 'c-diff',
     verification: {

@@ -4,6 +4,7 @@
  * survives pruning, and the per-revision stats list/read report.
  */
 import { RECIPE_HISTORY_MAX, RECIPE_OUTCOMES_MAX, type RecipeBody, type RecipeOutcome, type RecipeRecord, type RecipeVersion } from './contracts.ts'
+import { formatDuration, formatTokens } from './ui-copy.ts'
 
 /** Just the versioned content of a stored recipe or one of its earlier versions. */
 export function recipeBody(row: RecipeBody): RecipeBody {
@@ -112,6 +113,9 @@ export interface LiveRecipeChange {
   /** Meaningful only when terminal: closeout set. */
   readonly accepted: boolean
   readonly failedRounds: number
+  /** Cost summed over the change's runs so far, when any run recorded it. */
+  readonly tokens?: number
+  readonly wallMs?: number
   readonly at: number
 }
 
@@ -124,7 +128,10 @@ export function mergeRecipeOutcomes(stored: readonly RecipeOutcome[], live: read
   const merged: RecipeOutcome[] = [
     ...live.filter(row => row.terminal).map(row => ({
       changeId: row.changeId, title: row.title, revision: row.revision,
-      result: row.accepted ? 'accepted' as const : 'cancelled' as const, failedRounds: row.failedRounds, at: row.at,
+      result: row.accepted ? 'accepted' as const : 'cancelled' as const, failedRounds: row.failedRounds,
+      ...(row.tokens !== undefined ? { tokens: row.tokens } : {}),
+      ...(row.wallMs !== undefined ? { wallMs: row.wallMs } : {}),
+      at: row.at,
     })),
     ...stored.filter(row => !liveIds.has(row.changeId)),
   ]
@@ -138,27 +145,40 @@ export interface RecipeRevisionStats {
   readonly cancelled: number
   readonly failedRounds: number
   readonly inFlight: number
+  /** Mean cost over the accepted outcomes that recorded it; omitted when none did. */
+  readonly avgTokens?: number
+  readonly avgWallMs?: number
 }
 
 /** Stats per revision, newest revision first; revisions with nothing recorded are omitted. */
 export function recipeRevisionStats(recipe: RecipeRecord, live: readonly LiveRecipeChange[]): RecipeRevisionStats[] {
-  const byRevision = new Map<number, { accepted: number; cancelled: number; failedRounds: number; inFlight: number }>()
+  const byRevision = new Map<number, { accepted: number; cancelled: number; failedRounds: number; inFlight: number; tokens: number; tokenCount: number; wallMs: number; wallCount: number }>()
   const cell = (revision: number) => {
     let row = byRevision.get(revision)
-    if (!row) { row = { accepted: 0, cancelled: 0, failedRounds: 0, inFlight: 0 }; byRevision.set(revision, row) }
+    if (!row) { row = { accepted: 0, cancelled: 0, failedRounds: 0, inFlight: 0, tokens: 0, tokenCount: 0, wallMs: 0, wallCount: 0 }; byRevision.set(revision, row) }
     return row
   }
   for (const outcome of mergeRecipeOutcomes(recipe.outcomes, live)) {
     const row = cell(outcome.revision)
-    if (outcome.result === 'accepted') row.accepted += 1
-    else row.cancelled += 1
+    if (outcome.result === 'accepted') {
+      row.accepted += 1
+      if (outcome.tokens !== undefined) { row.tokens += outcome.tokens; row.tokenCount += 1 }
+      if (outcome.wallMs !== undefined) { row.wallMs += outcome.wallMs; row.wallCount += 1 }
+    } else {
+      row.cancelled += 1
+    }
     row.failedRounds += outcome.failedRounds
   }
   for (const row of live) {
     if (!row.terminal) cell(row.revision).inFlight += 1
   }
   return [...byRevision.entries()]
-    .map(([revision, row]) => ({ revision, ...row }))
+    .map(([revision, row]) => ({
+      revision,
+      accepted: row.accepted, cancelled: row.cancelled, failedRounds: row.failedRounds, inFlight: row.inFlight,
+      ...(row.tokenCount > 0 ? { avgTokens: Math.round(row.tokens / row.tokenCount) } : {}),
+      ...(row.wallCount > 0 ? { avgWallMs: Math.round(row.wallMs / row.wallCount) } : {}),
+    }))
     .sort((a, b) => b.revision - a.revision)
 }
 
@@ -171,6 +191,8 @@ export function recipeStatsLine(recipe: RecipeRecord, live: readonly LiveRecipeC
   const parts = [
     `rev${recipe.revision}: ${current.accepted} accepted, ${current.cancelled} cancelled`,
     ...(done > 0 ? [`avg ${(current.failedRounds / done).toFixed(1)} failed rounds`] : []),
+    ...(current.avgTokens !== undefined ? [`avg ${formatTokens(current.avgTokens)} tok`] : []),
+    ...(current.avgWallMs !== undefined ? [`avg ${formatDuration(current.avgWallMs)}`] : []),
     ...(current.inFlight > 0 ? [`${current.inFlight} in flight`] : []),
   ]
   return parts.join(', ')

@@ -499,6 +499,7 @@ const enUi: UiText = {
   workScope: 'Write scope',
   workScopeExclusive: 'Whole workspace',
   workScopeNone: 'Read-only (no writes)',
+  workTokens: 'tok',
   workEvidence: 'Evidence',
   workFiles: 'Delivered files',
   workKindWork: 'Work',

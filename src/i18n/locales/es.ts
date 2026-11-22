@@ -544,6 +544,12 @@ const esUi: UiText = {
   workOpenSession: 'Abrir sesión',
   workSourceExpandAll: 'Expandir todo',
   workSourceCollapseAll: 'Contraer todo',
+  attentionTitle: 'Dorothy te necesita',
+  attentionBadge: '{n} te necesitan',
+  sNotify: 'Notificaciones de escritorio',
+  sNotifyDesc: 'Muestra una notificación del navegador cuando Dorothy te necesita mientras su panel está en segundo plano.',
+  sNotifyBlocked: 'Bloqueado por el navegador',
+  sNotifyUnsupported: 'Este navegador no lo admite',
 }
 
 const esCard: CardCopy = {

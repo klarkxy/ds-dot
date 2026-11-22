@@ -544,6 +544,12 @@ const jaUi: UiText = {
   workOpenSession: 'セッションを開く',
   workSourceExpandAll: 'すべて展開',
   workSourceCollapseAll: 'すべて折りたたむ',
+  attentionTitle: 'ドロシーがあなたを待っています',
+  attentionBadge: '{n} 件の要対応',
+  sNotify: 'デスクトップ通知',
+  sNotifyDesc: 'パネルがバックグラウンドにある間にドロシーがあなたを必要としたとき、ブラウザー通知を表示します。',
+  sNotifyBlocked: 'ブラウザーでブロックされています',
+  sNotifyUnsupported: 'このブラウザーではサポートされていません',
 }
 
 const jaCard: CardCopy = {

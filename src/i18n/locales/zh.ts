@@ -545,6 +545,12 @@ export const zhUi = {
   workOpenSession: '打开会话',
   workSourceExpandAll: '全部展开',
   workSourceCollapseAll: '全部收起',
+  attentionTitle: '桃乐丝需要你',
+  attentionBadge: '{n} 项待你处理',
+  sNotify: '桌面通知',
+  sNotifyDesc: '当桃乐丝需要你而面板处于后台时，显示一条浏览器通知。',
+  sNotifyBlocked: '已被浏览器阻止',
+  sNotifyUnsupported: '此浏览器不支持',
 } as const
 
 export const zh: LocalePack = {

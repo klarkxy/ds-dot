@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 import { SHOW_VIEW_MIXED_SUMMARY, showViewSharesStep } from './card-step.ts'
 import { apply, TASK_ACTIONS } from './tools.ts'
-import { apply as applyReflection, REFLECTION_SUBMIT_TOOL } from './reflection.ts'
+import { apply as applyReflection, REFLECTION_PROPOSE_TOOL, REFLECTION_SUBMIT_TOOL } from './reflection.ts'
 import { DEFAULT_SETTINGS, TOOL, type DotSettings } from './contracts.ts'
 import { DEFAULT_PERSONA } from './persona.ts'
 import { settingsSnapshotBlock, SelfSettings } from './self-settings.ts'
@@ -83,7 +83,7 @@ const allSchemas = () => [...load(), ...loadReflection()]
 
 describe('dot tools', () => {
   it('keeps the private reflection preset to history reads and one restricted submission', () => {
-    expect(loadReflection().map(tool => tool.name).sort()).toEqual([TOOL.searchHistory, TOOL.readHistory, REFLECTION_SUBMIT_TOOL].sort())
+    expect(loadReflection().map(tool => tool.name).sort()).toEqual([TOOL.searchHistory, TOOL.readHistory, REFLECTION_SUBMIT_TOOL, REFLECTION_PROPOSE_TOOL].sort())
   })
   it('compiles every dot tool definition through defineTool and keeps 19 dot_* plus show_view', () => {
     const names = load().map(tool => tool.name)

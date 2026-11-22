@@ -119,6 +119,7 @@ function makeFakeDomain(seed: Record<string, Record<string, unknown>> = {}) {
     tickets: new Map(Object.entries(seed.tickets ?? {})),
     schedules: new Map(Object.entries(seed.schedules ?? {})),
     recipes: new Map(Object.entries(seed.recipes ?? {})),
+    recipe_proposals: new Map(Object.entries(seed.recipe_proposals ?? {})),
     proposals: new Map(Object.entries(seed.proposals ?? {})),
     changes: new Map(Object.entries(seed.changes ?? {})),
     inputs: new Map(Object.entries(seed.inputs ?? {})),

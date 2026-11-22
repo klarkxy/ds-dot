@@ -3,18 +3,18 @@
  * the durable copy follows the in-memory order; reads never wait on disk.
  */
 import { APPROVAL_DETAIL_LIMIT } from './approval-risk.ts'
-import { COGNITION_HISTORY_MAX, type BoardView, type CognitionVersion, type DotContextUsage, type DotSettings, type DotUsageOffset, type PendingView, type RecipeRecord, type ReflectionRun, type ScheduleRecord, type SettingProposal, type TaskRecord } from './contracts.ts'
+import { COGNITION_HISTORY_MAX, type BoardView, type CognitionVersion, type DotContextUsage, type DotSettings, type DotUsageOffset, type PendingView, type RecipeProposal, type RecipeRecord, type ReflectionRun, type ScheduleRecord, type SettingProposal, type TaskRecord } from './contracts.ts'
 import { ZERO_USAGE, addUsage } from './context.ts'
 import { applyEvent, createTask, ledgerSummary, markSeen, sortTasks, withPending, type LedgerEvent, type NewTask } from './ledger.ts'
 import { MAX_PAST_SEGMENTS, type PastSegment, type Segment } from './segments.ts'
 import { parseSettings } from './settings.ts'
 import { isCopyLocale, type CopyLocale } from './i18n/index.ts'
-import { STATE_KEY, parseRecipeRecord, parseScheduleRecord, parseSettingProposal, parseState, parseTask, type DotState } from './storage.ts'
+import { STATE_KEY, parseRecipeProposal, parseRecipeRecord, parseScheduleRecord, parseSettingProposal, parseState, parseTask, type DotState } from './storage.ts'
 import { ownedSessionIds, sessionIsOwned } from './peer.ts'
 import { WorkBook, isUnknownState, type ChangeRecord, type WorkPersist } from './work.ts'
 import { projectWorkIdle, projectWorkLedger } from './work-actions.ts'
 
-type TableName = 'state' | 'tasks' | 'schedules' | 'proposals' | 'changes' | 'inputs' | 'runs' | 'verifications' | 'peers' | 'inbox' | 'recipes'
+type TableName = 'state' | 'tasks' | 'schedules' | 'proposals' | 'changes' | 'inputs' | 'runs' | 'verifications' | 'peers' | 'inbox' | 'recipes' | 'recipe_proposals'
 
 export interface DotTable {
   entries(): IterableIterator<[unknown, unknown]>
@@ -45,6 +45,7 @@ export class DotStore {
   private readonly tasks = new Map<string, TaskRecord>()
   private readonly reminders = new Map<string, ScheduleRecord>()
   private readonly recipeRows = new Map<string, RecipeRecord>()
+  private readonly recipeProposalRows = new Map<string, RecipeProposal>()
   private readonly proposals = new Map<string, SettingProposal>()
   private tail: Promise<unknown> = Promise.resolve()
   private cognitionRevision = 0
@@ -74,6 +75,10 @@ export class DotStore {
       for (const [key, value] of domain.table('recipes').entries()) {
         const recipe = parseRecipeRecord(value)
         if (recipe && recipe.id === key) this.recipeRows.set(recipe.id, recipe)
+      }
+      for (const [key, value] of domain.table('recipe_proposals').entries()) {
+        const proposal = parseRecipeProposal(value)
+        if (proposal && proposal.id === key) this.recipeProposalRows.set(proposal.id, proposal)
       }
     }
     this.work = WorkBook.restore({
@@ -408,7 +413,7 @@ export class DotStore {
    */
   async factoryReset(now = Date.now()): Promise<void> {
     await this.flush()
-    const names: TableName[] = ['tasks', 'schedules', 'recipes', 'proposals', 'changes', 'inputs', 'runs', 'verifications', 'peers']
+    const names: TableName[] = ['tasks', 'schedules', 'recipes', 'recipe_proposals', 'proposals', 'changes', 'inputs', 'runs', 'verifications', 'peers']
     const domain = this.domain
     const op = this.tail.then(async () => {
       if (domain) {
@@ -421,6 +426,7 @@ export class DotStore {
       this.tasks.clear()
       this.reminders.clear()
       this.recipeRows.clear()
+      this.recipeProposalRows.clear()
       this.proposals.clear()
       this.work.clear()
       this.localePref = undefined
@@ -571,15 +577,42 @@ export class DotStore {
     return this.write('recipes', record.id, record)
   }
 
-  /** @returns false when no recipe has that id. */
+  /** @returns false when no recipe has that id. Its proposals go with it. */
   deleteRecipe(id: string): Promise<boolean> {
     if (!this.recipeRows.delete(id)) return Promise.resolve(false)
     this.changed()
     const domain = this.domain
-    if (domain === undefined) return Promise.resolve(true)
-    const op = this.tail.then(() => this.durable(() => domain.table('recipes').delete(id)))
+    const op = this.tail.then(async () => {
+      if (domain) await this.durable(() => domain.table('recipes').delete(id))
+      for (const proposal of this.recipeProposalRows.values()) {
+        if (proposal.recipeId !== id) continue
+        this.recipeProposalRows.delete(proposal.id)
+        if (domain) await this.durable(() => domain.table('recipe_proposals').delete(proposal.id))
+      }
+    })
     this.tail = op.catch(() => undefined)
     return op.then(() => true)
+  }
+
+  get recipeProposals(): readonly RecipeProposal[] {
+    return [...this.recipeProposalRows.values()].sort((a, b) => a.createdAt - b.createdAt || a.id.localeCompare(b.id))
+  }
+
+  recipeProposalsFor(recipeId: string): readonly RecipeProposal[] {
+    return this.recipeProposals.filter(row => row.recipeId === recipeId)
+  }
+
+  /** At most one pending proposal per recipe: the human decides one at a time. */
+  pendingRecipeProposal(recipeId: string): RecipeProposal | undefined {
+    return this.recipeProposals.find(row => row.recipeId === recipeId && row.status === 'pending')
+  }
+
+  recipeProposal(id: string): RecipeProposal | undefined { return this.recipeProposalRows.get(id) }
+
+  putRecipeProposal(record: RecipeProposal): Promise<void> {
+    this.recipeProposalRows.set(record.id, record)
+    this.changed()
+    return this.write('recipe_proposals', record.id, record)
   }
 
   workLedger() { return projectWorkLedger(this.work) }
@@ -606,6 +639,12 @@ export class DotStore {
         const recipe = row.recipe ? this.recipe(row.recipe) : undefined
         return recipe ? { ...row, recipeName: recipe.name } : row
       }),
+      ...(this.recipeProposalRows.size > 0 ? {
+        recipeProposals: this.recipeProposals.filter(row => row.status === 'pending').map(row => ({
+          id: row.id, recipeId: row.recipeId, recipeName: this.recipeRows.get(row.recipeId)?.name ?? row.recipeId,
+          kind: row.kind, createdAt: row.createdAt,
+        })),
+      } : {}),
     }
   }
 

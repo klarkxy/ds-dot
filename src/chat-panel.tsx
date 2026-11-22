@@ -52,6 +52,8 @@ export interface ChatApi extends SettingsApi, ContextApi, TrajectoryApi, Knowled
   recipes?(signal: AbortSignal): Promise<readonly RecipeBoardRow[]>
   /** Create + dispatch a recipe task from the Tasks panel. */
   recipeRun?(id: string): Promise<{ readonly ok: true; readonly changeId: string; readonly runId?: string } | { readonly ok: false; readonly reason: string }>
+  /** Approve or dismiss a pending recipe proposal. */
+  recipeProposalDecide?(id: string, allow: boolean): Promise<string>
   workAccept?(payload: WorkAcceptPayload): Promise<void>
   workReject?(payload: WorkRejectPayload): Promise<void>
   workAnswer?(payload: { readonly id: string; readonly allow: boolean; readonly note?: string }): Promise<void>
@@ -286,6 +288,37 @@ function WorkDrawer({ locale, api, tab, wide, settings, trajectoryRev, running, 
 }
 
 /** The Recipes filter: saved work orders with stats, bound reminders and a two-step Run now. */
+/** Old→new for one text field, or added/removed lines for requirement/constraint lists. */
+function ProposalDiff({ locale, proposal }: { locale: CopyLocale; proposal: NonNullable<RecipeBoardRow['proposal']> }) {
+  const base = proposal.base ?? { goal: '', requirements: [], constraints: [] }
+  const patch = proposal.patch ?? {}
+  const rows: { label: string; before?: string; after?: string; added?: readonly string[]; removed?: readonly string[] }[] = []
+  if (patch.goal !== undefined && patch.goal !== base.goal) rows.push({ label: t(locale, 'proposalGoal'), before: base.goal, after: patch.goal })
+  if (patch.notes !== undefined && patch.notes !== (base.notes ?? '')) rows.push({ label: t(locale, 'proposalNotes'), before: base.notes ?? '', after: patch.notes })
+  const list = (key: 'requirements' | 'constraints', label: string) => {
+    const want = (patch[key] ?? []).map(row => row.text)
+    const have = base[key]
+    const added = want.filter(text => !have.includes(text))
+    const removed = have.filter(text => !want.includes(text))
+    if (added.length > 0 || removed.length > 0) rows.push({ label, added, removed })
+  }
+  list('requirements', t(locale, 'proposalRequirements'))
+  list('constraints', t(locale, 'proposalConstraints'))
+  if (rows.length === 0) return null
+  return (
+    <div className="dsh-dot-recipe-proposal-diff">
+      {rows.map(row => (
+        <div key={row.label} className="dsh-dot-recipe-proposal-field">
+          <span className="dsh-ui-meta">{row.label}</span>
+          {row.before !== undefined ? <span className="dsh-ui-meta">«{row.before}» → «{row.after}»</span> : null}
+          {row.added?.map(text => <span key={`+${text}`} className="dsh-ui-meta">+ {text}</span>)}
+          {row.removed?.map(text => <span key={`-${text}`} className="dsh-ui-meta">− {text}</span>)}
+        </div>
+      ))}
+    </div>
+  )
+}
+
 export function RecipesView({ locale, api, rows, error, onChanged }: {
   locale: CopyLocale; api: ChatApi; rows: readonly RecipeBoardRow[]; error?: string; onChanged: () => void
 }) {
@@ -293,8 +326,29 @@ export function RecipesView({ locale, api, rows, error, onChanged }: {
   const [busy, setBusy] = useState<string>()
   const [refusals, setRefusals] = useState<Readonly<Record<string, string>>>({})
   const [ran, setRan] = useState<Readonly<Record<string, string>>>({})
+  const [approveArm, setApproveArm] = useState<string>()
+  const [proposalBusy, setProposalBusy] = useState<string>()
+  const [proposalErrors, setProposalErrors] = useState<Readonly<Record<string, string>>>({})
   const armTimer = useRef<ReturnType<typeof setTimeout>>()
   useEffect(() => () => { if (armTimer.current !== undefined) clearTimeout(armTimer.current) }, [])
+  const decide = (proposalId: string, allow: boolean) => {
+    if (!api.recipeProposalDecide || proposalBusy) return
+    if (allow && approveArm !== proposalId) {
+      setApproveArm(proposalId)
+      if (armTimer.current !== undefined) clearTimeout(armTimer.current)
+      armTimer.current = setTimeout(() => setApproveArm(current => current === proposalId ? undefined : current), 5000)
+      return
+    }
+    setApproveArm(undefined)
+    setProposalBusy(proposalId)
+    api.recipeProposalDecide(proposalId, allow).then(() => {
+      setProposalErrors(prev => { const next = { ...prev }; delete next[proposalId]; return next })
+      onChanged()
+    }, (failure: unknown) => {
+      setProposalErrors(prev => ({ ...prev, [proposalId]: failure instanceof Error ? failure.message : String(failure) }))
+      onChanged()
+    }).finally(() => setProposalBusy(undefined))
+  }
   const run = (row: RecipeBoardRow) => {
     if (!api.recipeRun || busy) return
     if (arm !== row.id) {
@@ -359,6 +413,28 @@ export function RecipesView({ locale, api, rows, error, onChanged }: {
             {row.inFlight.map(item => (
               <span key={item.changeId} className="dsh-ui-meta">{t(locale, 'recipeInFlightLabel')} {item.changeId} {item.title} ({item.status})</span>
             ))}
+            {row.proposal ? (
+              <div className="dsh-dot-recipe-proposal" data-proposal={row.proposal.id}>
+                <div className="dsh-dot-recipe-proposal-head">
+                  <Tag tone="warning">{row.proposal.kind === 'restore' ? t(locale, 'proposalKindRestore') : t(locale, 'proposalKindRevise')}</Tag>
+                  <Tag tone="neutral">{row.proposal.origin === 'detector' ? t(locale, 'proposalOriginDetector') : t(locale, 'proposalOriginReflection')}</Tag>
+                  {row.proposal.kind === 'restore' && row.proposal.targetRevision !== undefined
+                    ? <span className="dsh-ui-meta">{fillText(t(locale, 'proposalRestoreLine'), { n: String(row.proposal.targetRevision) })}</span>
+                    : null}
+                </div>
+                <span className="dsh-ui-hint">{row.proposal.reason}</span>
+                {row.proposal.kind === 'revise' ? <ProposalDiff locale={locale} proposal={row.proposal} /> : null}
+                <div className="dsh-dot-recipe-proposal-actions">
+                  <Button variant="primary" size="sm" disabled={proposalBusy === row.proposal.id || !api.recipeProposalDecide} onClick={() => decide(row.proposal!.id, true)}>
+                    {approveArm === row.proposal.id ? t(locale, 'proposalApproveConfirm') : t(locale, 'proposalApprove')}
+                  </Button>
+                  <Button variant="ghost" size="sm" disabled={proposalBusy === row.proposal.id || !api.recipeProposalDecide} onClick={() => decide(row.proposal!.id, false)}>
+                    {t(locale, 'proposalDismiss')}
+                  </Button>
+                </div>
+                {proposalErrors[row.proposal.id] ? <p className="dsh-ui-hint dsh-dot-recipe-refusal" role="alert">{proposalErrors[row.proposal.id]}</p> : null}
+              </div>
+            ) : null}
             {ran[row.id] ? <span className="dsh-ui-hint">{fillText(t(locale, 'recipeRunDone'), { id: ran[row.id]! })}</span> : null}
             {refusals[row.id] ? <p className="dsh-ui-hint dsh-dot-recipe-refusal">{fillText(t(locale, 'recipeRunFailed'), { reason: refusals[row.id]! })}</p> : null}
           </div>
@@ -854,6 +930,7 @@ const NOTICE_TAG_TONE: Record<Exclude<NoticeEntry['kind'], 'reminder'>, TagTone>
   'idle-check': 'quiet',
   inbox: 'info',
   'recipe-run': 'success',
+  'recipe-proposal': 'info',
 }
 
 function noticeTagLabel(locale: CopyLocale, kind: Exclude<NoticeEntry['kind'], 'reminder'>): string {
@@ -866,6 +943,7 @@ function noticeTagLabel(locale: CopyLocale, kind: Exclude<NoticeEntry['kind'], '
     case 'idle-check': return t(locale, 'idleCheck')
     case 'inbox': return t(locale, 'inboxEvent')
     case 'recipe-run': return t(locale, 'recipeRunTag')
+    case 'recipe-proposal': return t(locale, 'recipeProposalTag')
   }
 }
 

@@ -2,7 +2,7 @@
 import type { NoticeEntry, ParsedNotice } from './chat-format.ts'
 export interface Notice {
   readonly sessionId: string
-  readonly kind: 'turn-end' | 'error' | 'approval' | 'question' | 'task-human' | 'idle-check' | 'inbox' | 'recipe-run'
+  readonly kind: 'turn-end' | 'error' | 'approval' | 'question' | 'task-human' | 'idle-check' | 'inbox' | 'recipe-run' | 'recipe-proposal'
   readonly text: string
   readonly display?: NoticeEntry
   readonly at: number
@@ -135,6 +135,7 @@ export function formatNotices(items: readonly Notice[], ready: readonly string[]
     ['Errors:', item => item.kind === 'error'],
     ['External events:', item => item.kind === 'inbox'],
     ['Tasks:', item => !['approval', 'question', 'error'].includes(item.kind) && (!!item.changeId || item.kind === 'task-human' || item.kind === 'idle-check')],
+    ['Recipes:', item => item.kind === 'recipe-proposal'],
     ['Watched sessions:', item => !item.changeId && item.kind === 'turn-end'],
   ]
   const lines = ['[dot notice] Updates:']

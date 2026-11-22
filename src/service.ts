@@ -31,7 +31,7 @@ import { approvalDisplay, parseNotice } from './chat-format.ts'
 import { cardText } from './cards.ts'
 import { NoticeBatcher, formatNotices, formatNoticeDisplay, realTimer, type Notice, type Timer } from './batcher.ts'
 import { ZERO_USAGE, addUsage, combineUsage, netSegmentUsage, totalUsage, usageFromEvents } from './context.ts'
-import { PRESET_ID, TOOL, type AttentionView, type BoardView, type DotContextSections, type DotContextUsage, type DotContextView, type FactoryResetPreview, type FactoryResetResult, type InboxEventInput, type InboxRecord, type InboxSubmitResult, type KeepaliveInfo, type KnowledgeView, type ModelChoice, type PendingKind, type PendingQuestionItem, type RecipeBody, type RecipeRecord, type ReflectionRun, type RolloverReason, type RuleConfig, type TrajectoryView } from './contracts.ts'
+import { PRESET_ID, TOOL, type AttentionView, type BoardView, type DotContextSections, type DotContextUsage, type DotContextView, type FactoryResetPreview, type FactoryResetResult, type InboxEventInput, type InboxRecord, type InboxSubmitResult, type KeepaliveInfo, type KnowledgeView, type ModelChoice, type PendingKind, type PendingQuestionItem, type RecipeBody, type RecipeProposal, type RecipeProposalView, type RecipeRecord, type ReflectionRun, type RolloverReason, type RuleConfig, type TrajectoryView } from './contracts.ts'
 import { SUMMARY_INSTRUCTION, SUMMARY_MAX_TOKENS, buildHandoff, type Handoff } from './handoff.ts'
 import { READ_ROWS_DEFAULT, READ_ROWS_MAX, SEARCH_LIMIT_DEFAULT, SEARCH_LIMIT_MAX, SEARCH_SESSIONS_MAX, formatRead, formatSearch, historyRows, queryTerms, searchRows, windowRows, type SessionHits } from './history.ts'
 import { InboxLedger, inboxNotice, memoryInboxTable } from './inbox.ts'
@@ -47,7 +47,7 @@ import { AGREEMENTS_MAX_CHARS, COGNITION_MAX_CHARS, KnowledgeError, addEntry, ag
 import { deliverPeer, guardRunWriteTool, PeerLedger, refreshChildSeals, sealChildSession, type PeerSendInput } from './peer.ts'
 import { PendingHub, type PendingAnswer } from './pending.ts'
 import { personaSection } from './persona.ts'
-import { goalRequirements, mergeRecipeOutcomes, recipeBody, recipeBodyAt, recipeRequirements, recipeRevisionStats, recipeStatsLine, recipeVersionAt, requirementsFollowGoal, reviseRecipe as reviseRecipeRecord, sameRecipeBody, upsertRecipeOutcome, type LiveRecipeChange } from './recipes.ts'
+import { goalRequirements, mergeRecipeOutcomes, recipeBody, recipeBodyAt, recipeRegression, recipeRequirements, recipeRevisionStats, recipeStatsLine, recipeVersionAt, requirementsFollowGoal, reviseRecipe as reviseRecipeRecord, sameRecipeBody, upsertRecipeOutcome, type LiveRecipeChange, type RecipeRegression } from './recipes.ts'
 import { ReflectionRunner } from './reflection.ts'
 import { ReminderClock } from './reminders.ts'
 import { routeRequest } from './rules.ts'
@@ -180,6 +180,7 @@ export class DotService {
         const dot = this.store.dotSessionId
         return dot !== undefined && !this.options.host.isRunning(dot)
       },
+      recipeHints: () => this.reflectionRecipeHints(),
       ...options.log ? { log: options.log } : {},
     })
     this.pending.onChange(() => {
@@ -210,7 +211,7 @@ export class DotService {
       // The reflection check and a usage pass ride the reminder clock's
       // periodic wake-up; usage goes straight in (not revision-gated) so a
       // drained backlog still resumes on the next tick.
-      onPeriodic: () => { void this.captureRunUsage(); void this.reflection.tick().catch(() => undefined) },
+      onPeriodic: () => { void this.captureRunUsage(); void this.checkRecipeRegressions().catch(() => undefined); void this.reflection.tick().catch(() => undefined) },
       ...options.timer ? { timer: options.timer } : {},
       ...options.log ? { log: options.log } : {},
     })
@@ -1668,8 +1669,29 @@ export class DotService {
         reminders: this.store.schedules
           .filter(row => row.recipe === recipe.id && !onceDelivered(row))
           .map(row => ({ id: row.id, title: row.title, nextAt: row.nextAt })),
+        ...(this.recipeProposalView(recipe) ? { proposal: this.recipeProposalView(recipe) } : {}),
       }
     })
+  }
+
+  /** The pending proposal as the Recipes view renders it, with the base body for the revise diff. */
+  private recipeProposalView(recipe: RecipeRecord): RecipeProposalView | undefined {
+    const proposal = this.store.pendingRecipeProposal(recipe.id)
+    if (!proposal) return undefined
+    const version = recipeVersionAt(recipe, proposal.baseRevision) ?? recipe
+    return {
+      id: proposal.id, kind: proposal.kind, origin: proposal.origin,
+      baseRevision: proposal.baseRevision,
+      ...(proposal.targetRevision !== undefined ? { targetRevision: proposal.targetRevision } : {}),
+      ...(proposal.patch ? { patch: proposal.patch } : {}),
+      base: {
+        goal: version.goal,
+        ...(version.notes !== undefined ? { notes: version.notes } : {}),
+        requirements: (version.requirements ?? []).map(row => row.text),
+        constraints: (version.constraints ?? []).map(row => row.text),
+      },
+      reason: proposal.reason, createdAt: proposal.createdAt,
+    }
   }
 
   // ---- task recipes: saved, versioned work orders -----------------------
@@ -1831,6 +1853,183 @@ export class DotService {
     return `Restored recipe ${recipe.id} "${version.name}" to rev ${revision} content as rev ${next.revision}.`
   }
 
+  // ---- recipe proposals: detector + reflection suggest, the human decides --
+
+  /**
+   * The key a dismissed detector proposal leaves behind: while the recipe sits
+   * on the same revision an identical proposal is not re-raised. A revision
+   * change or a different reason re-arms it.
+   */
+  private detectorProposalDismissed(input: { recipeId: string; baseRevision: number; targetRevision: number; reason: string }): boolean {
+    return this.store.recipeProposals.some(row =>
+      row.recipeId === input.recipeId && row.origin === 'detector' && row.status === 'dismissed'
+      && row.baseRevision === input.baseRevision && row.targetRevision === input.targetRevision && row.reason === input.reason)
+  }
+
+  /** Persist a pending proposal; at most one pending per recipe. */
+  private async newRecipeProposal(input: {
+    recipe: RecipeRecord
+    kind: 'restore' | 'revise'
+    targetRevision?: number
+    patch?: RecipeProposal['patch']
+    reason: string
+    origin: 'detector' | 'reflection'
+  }): Promise<RecipeProposal | undefined> {
+    if (this.store.pendingRecipeProposal(input.recipe.id)) return undefined
+    let id = ''
+    do { id = `rpp-${randomUUID().slice(0, 6)}` } while (this.store.recipeProposal(id))
+    const proposal: RecipeProposal = {
+      id, recipeId: input.recipe.id, baseRevision: input.recipe.revision,
+      kind: input.kind,
+      ...(input.targetRevision !== undefined ? { targetRevision: input.targetRevision } : {}),
+      ...(input.patch ? { patch: input.patch } : {}),
+      reason: input.reason, origin: input.origin, status: 'pending', createdAt: this.now(),
+    }
+    await this.store.putRecipeProposal(proposal)
+    this.holdRecipeNotice(`Recipe proposal ${proposal.id} for ${input.recipe.id} "${input.recipe.name}" (${input.kind}, ${input.origin}): ${input.reason} The human decides in the Recipes panel.`)
+    return proposal
+  }
+
+  /** A non-waking notice for dot, like the recipe-run reminder hold. */
+  private holdRecipeNotice(text: string): void {
+    const sessionId = this.store.dotSessionId ?? ''
+    this.batcher.hold({
+      sessionId, kind: 'recipe-proposal', text, at: this.now(),
+      display: { kind: 'recipe-proposal', sessionId, summary: text },
+    })
+  }
+
+  /**
+   * The regression detector sweeps every recipe's live stats — the same rows
+   * the Recipes panel shows — and files one restore proposal per regressed
+   * recipe. Called after an outcome lands and on the reminder clock's tick;
+   * pending-proposal and dismissed-key dedupe keep repeats cheap.
+   */
+  async checkRecipeRegressions(): Promise<void> {
+    for (const recipe of this.store.recipes) {
+      const regression = recipeRegression(recipe, recipeRevisionStats(recipe, this.liveRecipeChanges(recipe.id)))
+      if (!regression) continue
+      if (this.detectorProposalDismissed({ recipeId: recipe.id, baseRevision: recipe.revision, targetRevision: regression.betterRevision, reason: regression.summary })) continue
+      await this.newRecipeProposal({ recipe, kind: 'restore', targetRevision: regression.betterRevision, reason: regression.summary, origin: 'detector' })
+    }
+  }
+
+  /**
+   * The reflection pass files one recipe proposal. `restore` names an earlier
+   * revision; `revise` carries the same fields dot_recipe revise accepts, with
+   * requirements/constraints as JSON strings like the tool schema declares.
+   */
+  async reflectionRecipePropose(args: Record<string, unknown>): Promise<string> {
+    return this.serial(async () => {
+      const recipe = this.requireRecipe(typeof args.recipe === 'string' ? args.recipe : '')
+      const reason = (typeof args.reason === 'string' ? args.reason : '').trim()
+      if (!reason) throw new DotError('dot/invalid', 'propose requires reason')
+      const action = args.action
+      if (action !== 'restore' && action !== 'revise') throw new DotError('dot/invalid', 'action must be "restore" or "revise"')
+      if (this.store.pendingRecipeProposal(recipe.id)) throw new DotError('dot/invalid', `a proposal is already pending for recipe ${recipe.id}; the human decides it first`)
+      if (action === 'restore') {
+        const revision = typeof args.revision === 'number' && Number.isInteger(args.revision) ? args.revision : undefined
+        if (revision === undefined || !recipeVersionAt(recipe, revision)) {
+          throw new DotError('dot/invalid', `no revision ${revision ?? '?'} in ${recipe.id} history (recorded: ${recipe.history.map(row => row.revision).join(', ') || 'none'})`)
+        }
+        const proposal = await this.newRecipeProposal({ recipe, kind: 'restore', targetRevision: revision, reason, origin: 'reflection' })
+        return `Proposed restoring recipe ${recipe.id} "${recipe.name}" to rev ${revision} content (proposal ${proposal!.id}); the human decides in the Recipes panel.`
+      }
+      const body = this.recipeArgsBody(recipe, args)
+      // Parse the JSON-string fields through the same validators a revise
+      // uses; requirementList tolerates unparsable strings, so an explicit
+      // value that parsed to nothing is rejected like recipeRevise does.
+      const patchRequirements = args.requirements !== undefined ? requirementList(args.requirements) : undefined
+      if (args.requirements !== undefined && patchRequirements === undefined) {
+        throw new DotError('dot/invalid', 'requirements must be a JSON array')
+      }
+      const patch: NonNullable<RecipeProposal['patch']> = {
+        ...(args.goal !== undefined ? { goal: body.goal } : {}),
+        ...(patchRequirements !== undefined ? { requirements: patchRequirements } : {}),
+        ...(args.constraints !== undefined ? { constraints: constraintList(args.constraints) ?? [] } : {}),
+        ...(args.notes !== undefined ? { notes: body.notes ?? '' } : {}),
+      }
+      if (Object.keys(patch).length === 0) throw new DotError('dot/invalid', 'revise proposal needs at least one of goal, requirements, constraints, notes')
+      const proposal = await this.newRecipeProposal({ recipe, kind: 'revise', patch, reason, origin: 'reflection' })
+      return `Proposed revising recipe ${recipe.id} "${recipe.name}" (proposal ${proposal!.id}); the human decides in the Recipes panel.`
+    })
+  }
+
+  /**
+   * The human approves or dismisses a proposal from the Recipes panel.
+   * Approval applies through the same revise/restore paths dot uses; a recipe
+   * that moved past baseRevision marks the proposal stale instead of applying.
+   */
+  async decideRecipeProposal(args: Record<string, unknown>): Promise<string> {
+    return this.serial(async () => {
+      const id = typeof args.id === 'string' ? args.id.trim() : ''
+      const proposal = this.store.recipeProposal(id)
+      if (!proposal) throw new DotError('dot/invalid', `unknown recipe proposal ${id || '(missing id)'}`)
+      if (proposal.status !== 'pending') throw new DotError('dot/invalid', `proposal ${id} is already ${proposal.status}`)
+      if (args.allow !== true) {
+        await this.store.putRecipeProposal({ ...proposal, status: 'dismissed', decidedAt: this.now() })
+        this.holdRecipeNotice(`Recipe proposal ${id} for ${proposal.recipeId} was dismissed by the human.`)
+        return `Dismissed recipe proposal ${id}.`
+      }
+      const recipe = this.store.recipes.find(row => row.id === proposal.recipeId)
+      if (!recipe) throw new DotError('dot/invalid', `recipe ${proposal.recipeId} no longer exists`)
+      if (recipe.revision !== proposal.baseRevision) {
+        await this.store.putRecipeProposal({ ...proposal, status: 'stale', decidedAt: this.now() })
+        throw new DotError('dot/invalid', `recipe ${recipe.id} is now rev ${recipe.revision}; proposal ${id} was made against rev ${proposal.baseRevision} and is stale`)
+      }
+      const reason = `Approved proposal ${id}: ${proposal.reason}`
+      let text: string
+      if (proposal.kind === 'restore') {
+        text = await this.recipeRestore(recipe, { revision: proposal.targetRevision, reason })
+      } else {
+        const patchArgs: Record<string, unknown> = { reason }
+        if (proposal.patch?.goal !== undefined) patchArgs.goal = proposal.patch.goal
+        if (proposal.patch?.requirements !== undefined) patchArgs.requirements = proposal.patch.requirements
+        if (proposal.patch?.constraints !== undefined) patchArgs.constraints = proposal.patch.constraints
+        if (proposal.patch?.notes !== undefined) patchArgs.notes = proposal.patch.notes
+        text = await this.recipeRevise(recipe, patchArgs)
+      }
+      await this.store.putRecipeProposal({ ...proposal, status: 'approved', decidedAt: this.now() })
+      this.holdRecipeNotice(`Recipe proposal ${id} for ${recipe.id} "${recipe.name}" was approved by the human. ${text}`)
+      return `${text} Proposal ${id} approved.`
+    })
+  }
+
+  /**
+   * The [recipes] section of the reflection instruction: up to three recipes
+   * that regressed or have at least three finished outcomes on the current
+   * revision. Regressed rows add the current and better revision's goal and
+   * requirement texts, clipped, so the pass can judge without a second read.
+   */
+  private reflectionRecipeHints(): string {
+    const clip = (text: string, max = 160) => text.length > max ? `${text.slice(0, max - 1)}…` : text
+    const requirementTexts = (body: { readonly requirements?: readonly { readonly text: string }[] }) =>
+      (body.requirements ?? []).map(row => `"${clip(row.text, 80)}"`).join(', ') || '(none)'
+    const rows: string[] = []
+    for (const recipe of this.store.recipes) {
+      if (rows.length >= 3) break
+      const live = this.liveRecipeChanges(recipe.id)
+      const stats = recipeRevisionStats(recipe, live)
+      const regression = recipeRegression(recipe, stats)
+      const current = stats.find(row => row.revision === recipe.revision)
+      const finished = current ? current.accepted + current.cancelled : 0
+      if (!regression && finished < 3) continue
+      const lines = [`- ${recipe.id} "${recipe.name}" rev ${recipe.revision} — ${recipeStatsLine(recipe, live)}`]
+      if (regression) {
+        const better = recipeVersionAt(recipe, regression.betterRevision)
+        lines.push(`  regression (${regression.reason}): ${regression.summary}`)
+        if (better) {
+          lines.push(`  goal now: ${clip(recipe.goal)}`)
+          lines.push(`  goal rev ${regression.betterRevision}: ${clip(better.goal)}`)
+          lines.push(`  requirements now: ${requirementTexts(recipe)}`)
+          lines.push(`  requirements rev ${regression.betterRevision}: ${requirementTexts(better)}`)
+        }
+      }
+      rows.push(lines.join('\n'))
+    }
+    return rows.join('\n')
+  }
+
   /** Live changes tagged with a recipe, reduced to what its stats need. */
   private liveRecipeChanges(recipeId: string): LiveRecipeChange[] {
     const runs = this.store.work.listRuns()
@@ -1881,6 +2080,7 @@ export class DotService {
       })),
       stats: recipeRevisionStats(recipe, live),
       outcomes: mergeRecipeOutcomes(recipe.outcomes, live).slice(0, 10),
+      ...(this.store.pendingRecipeProposal(recipe.id) ? { pendingProposal: this.store.pendingRecipeProposal(recipe.id) } : {}),
     })
   }
 
@@ -2512,7 +2712,10 @@ export class DotService {
           at: change.updatedAt,
         }))
       }, this.now())
-      if (prunedChanges.length > 0) pruneSnapshots(this.options.homeDir, keptArtifacts)
+      if (prunedChanges.length > 0) {
+        pruneSnapshots(this.options.homeDir, keptArtifacts)
+        await this.checkRecipeRegressions()
+      }
     } catch { /* best-effort background retention cleanup */ }
   }
 

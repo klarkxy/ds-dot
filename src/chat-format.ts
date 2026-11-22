@@ -31,7 +31,7 @@ export interface QuestionRow {
 
 export type NoticeEntry =
   | {
-      readonly kind: 'approval' | 'question' | 'turn-end' | 'error' | 'task-human' | 'idle-check' | 'inbox' | 'recipe-run'
+      readonly kind: 'approval' | 'question' | 'turn-end' | 'error' | 'task-human' | 'idle-check' | 'inbox' | 'recipe-run' | 'recipe-proposal'
       readonly sessionId: string
       readonly requestId?: string
       readonly subject?: string

@@ -494,6 +494,7 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
           const result = await service.runRecipe(id ?? '', { origin: 'human' })
           return { ok: true, value: result }
         }
+        case 'recipe.proposal.decide': return { ok: true, value: await service.decideRecipeProposal(payload !== null && typeof payload === 'object' ? payload as Record<string, unknown> : {}) }
         case 'schedule.remove': {
           const id = field(payload, 'id')
           return { ok: true, value: typeof id === 'string' ? await service.removeSchedule(id) : false }

@@ -204,6 +204,16 @@ export const chatCss = settingsCss + `
 .dsh-dot-chat .dsh-dot-recipe-stats { display: flex; flex-direction: column; gap: 2px; }
 .dsh-dot-chat .dsh-dot-recipe-reminders { display: flex; flex-direction: column; gap: 2px; }
 .dsh-dot-chat .dsh-dot-recipe-refusal { color: var(--dsw-alias-danger); margin: 0; }
+.dsh-dot-chat .dsh-dot-recipe-proposal {
+  display: flex; flex-direction: column; gap: 6px; min-width: 0;
+  border-radius: var(--dsw-radius-md); padding: 8px 10px;
+  background: var(--dsw-alias-bg-layer-3, var(--dsw-alias-bg-layer-1));
+  box-shadow: inset 0 0 0 1px var(--dsw-alias-warning, var(--dsw-alias-accent));
+}
+.dsh-dot-chat .dsh-dot-recipe-proposal-head { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.dsh-dot-chat .dsh-dot-recipe-proposal-diff { display: flex; flex-direction: column; gap: 4px; }
+.dsh-dot-chat .dsh-dot-recipe-proposal-field { display: flex; flex-direction: column; gap: 1px; }
+.dsh-dot-chat .dsh-dot-recipe-proposal-actions { display: flex; gap: 6px; }
 .dsh-dot-chat .dsh-dot-tasks .dsh-dot-board { padding: 0; height: auto; overflow: visible; }
 .dsh-dot-chat .dsh-dot-filters { display: flex; gap: 2px; overflow-x: auto; scrollbar-width: none; }
 .dsh-dot-chat .dsh-dot-filters button { padding: 3px 9px; font-size: 12px; line-height: 18px; }

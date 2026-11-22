@@ -13,6 +13,7 @@ import { launchReservedRun } from './execution.ts'
 import { agreementsSection } from './memory.ts'
 import { PACKAGE_NAME, type PluginManagerLike } from './auto-update.ts'
 import { DotStore, type DotDomainHandle } from './store.ts'
+import { upsertRecipeOutcome } from './recipes.ts'
 
 /** Manual timer: tests fire scheduled callbacks explicitly. */
 function manualTimer() {
@@ -1992,7 +1993,7 @@ describe('DotService work dispatch', () => {
 })
 
 function memoryDomain(seed: Record<string, Record<string, unknown>> = {}) {
-  const names = ['state', 'tasks', 'tickets', 'schedules', 'proposals', 'recipes', 'changes', 'inputs', 'runs', 'verifications', 'peers', 'inbox']
+  const names = ['state', 'tasks', 'tickets', 'schedules', 'proposals', 'recipes', 'recipe_proposals', 'changes', 'inputs', 'runs', 'verifications', 'peers', 'inbox']
   const tables: Record<string, Map<string, unknown>> = {}
   for (const name of names) tables[name] = new Map(Object.entries(seed[name] ?? {}))
   const domain: DotDomainHandle = {
@@ -3106,5 +3107,162 @@ describe('run usage capture triggers', () => {
     await h.service.reconcile()
     expect(bumped).toBe(after)
     await h.service.dispose()
+  })
+})
+
+describe('recipe proposals', () => {
+  const dir = () => mkdtempSync(join(tmpdir(), 'dsh-dot-proposal-'))
+
+  /** Recipe at rev 2 whose current revision regressed against rev 1 (1/4 vs 4/5 accepted). */
+  const regressed = async (h: ReturnType<typeof setup>) => {
+    const cwd = dir()
+    await h.service.manageRecipe({ action: 'save', name: 'weekly', goal: 'weekly report', dir: cwd })
+    await h.service.manageRecipe({ action: 'revise', recipe: 'weekly', goal: 'weekly report v2', reason: 'try v2' })
+    let recipe = h.store.recipes[0]!
+    const outcome = (changeId: string, revision: number, result: 'accepted' | 'cancelled', at: number) => {
+      recipe = upsertRecipeOutcome(recipe, { changeId, title: changeId, revision, result, failedRounds: 0, at })
+    }
+    for (let i = 0; i < 4; i++) outcome(`old-${i}`, 1, 'accepted', i + 1)
+    outcome('old-4', 1, 'cancelled', 5)
+    for (let i = 0; i < 3; i++) outcome(`new-${i}`, 2, 'cancelled', 6 + i)
+    outcome('new-3', 2, 'accepted', 9)
+    await h.store.putRecipe(recipe)
+    return recipe
+  }
+
+  it('files one detector restore proposal per regressed recipe and surfaces it', async () => {
+    const h = setup()
+    await h.service.ensureDot()
+    const recipe = await regressed(h)
+    await h.service.checkRecipeRegressions()
+    const proposals = h.store.recipeProposals
+    expect(proposals).toHaveLength(1)
+    expect(proposals[0]).toMatchObject({
+      recipeId: recipe.id, baseRevision: 2, kind: 'restore', targetRevision: 1,
+      origin: 'detector', status: 'pending',
+    })
+    expect(proposals[0]!.reason).toContain('rev 2: 1/4 accepted')
+    // A second sweep does not duplicate while one is pending.
+    await h.service.checkRecipeRegressions()
+    expect(h.store.recipeProposals).toHaveLength(1)
+    // Board row, dot's read view and the attention projection all see it.
+    expect(h.service.recipeBoard()[0]!.proposal).toMatchObject({ id: proposals[0]!.id, kind: 'restore', origin: 'detector' })
+    const read = JSON.parse(await h.service.manageRecipe({ action: 'read', recipe: 'weekly' })) as { pendingProposal?: { id: string; kind: string } }
+    expect(read.pendingProposal).toMatchObject({ id: proposals[0]!.id, kind: 'restore' })
+    expect(h.service.attention().items.map(item => item.id)).toContain(`recipe:${proposals[0]!.id}`)
+    // The held (non-waking) notice rides the next turn.
+    await h.service.say('ping')
+    expect(h.said.at(-1)?.carriedNotices).toContain(`Recipe proposal ${proposals[0]!.id}`)
+    await h.service.dispose()
+  })
+
+  it('approves a restore proposal through the restore path with a proposal reason', async () => {
+    const h = setup()
+    const recipe = await regressed(h)
+    await h.service.checkRecipeRegressions()
+    const proposal = h.store.recipeProposals[0]!
+    const text = await h.service.decideRecipeProposal({ id: proposal.id, allow: true })
+    expect(text).toContain(`Restored recipe ${recipe.id} "weekly" to rev 1 content as rev 3`)
+    const stored = h.store.recipes[0]!
+    expect(stored.goal).toBe('weekly report')
+    expect(stored.revision).toBe(3)
+    expect(stored.reason).toBe(`Approved proposal ${proposal.id}: ${proposal.reason}`)
+    expect(h.store.recipeProposal(proposal.id)).toMatchObject({ status: 'approved' })
+    await expect(h.service.decideRecipeProposal({ id: proposal.id, allow: false })).rejects.toThrow(/already approved/)
+    await h.service.dispose()
+  })
+
+  it('approves a revise proposal through the revise path', async () => {
+    const h = setup()
+    const recipe = await regressed(h)
+    const message = await h.service.reflectionRecipePropose({
+      recipe: 'weekly', action: 'revise', goal: 'monthly report',
+      requirements: JSON.stringify([{ requirementRef: 'r1', text: 'covers last month', required: true }]),
+      notes: 'shorter', reason: 'cadence changed',
+    })
+    expect(message).toContain('proposal')
+    const proposal = h.store.recipeProposals[0]!
+    expect(proposal).toMatchObject({ kind: 'revise', origin: 'reflection', baseRevision: 2 })
+    const text = await h.service.decideRecipeProposal({ id: proposal.id, allow: true })
+    expect(text).toContain(`Revised recipe ${recipe.id}`)
+    const stored = h.store.recipes[0]!
+    expect(stored.goal).toBe('monthly report')
+    expect(stored.requirements).toEqual([{ requirementRef: 'r1', text: 'covers last month', required: true }])
+    expect(stored.notes).toBe('shorter')
+    await h.service.dispose()
+  })
+
+  it('marks a proposal stale when the recipe moved past its base revision', async () => {
+    const h = setup()
+    await regressed(h)
+    await h.service.checkRecipeRegressions()
+    const proposal = h.store.recipeProposals[0]!
+    await h.service.manageRecipe({ action: 'revise', recipe: 'weekly', goal: 'v3 goal', reason: 'meanwhile' })
+    await expect(h.service.decideRecipeProposal({ id: proposal.id, allow: true })).rejects.toThrow(/stale/)
+    expect(h.store.recipeProposal(proposal.id)).toMatchObject({ status: 'stale' })
+    expect(h.store.recipes[0]!.goal).toBe('v3 goal')
+    await h.service.dispose()
+  })
+
+  it('dismissed detector proposals are not re-raised on the same revision', async () => {
+    const h = setup()
+    await regressed(h)
+    await h.service.checkRecipeRegressions()
+    const proposal = h.store.recipeProposals[0]!
+    const text = await h.service.decideRecipeProposal({ id: proposal.id, allow: false })
+    expect(text).toContain('Dismissed')
+    expect(h.store.recipeProposal(proposal.id)).toMatchObject({ status: 'dismissed' })
+    await h.service.checkRecipeRegressions()
+    expect(h.store.recipeProposals).toHaveLength(1)
+    // A revision change re-arms the detector.
+    await h.service.manageRecipe({ action: 'revise', recipe: 'weekly', goal: 'v3 goal', reason: 'meanwhile' })
+    // Rev 3 has no outcomes yet, so the detector stays quiet.
+    await h.service.checkRecipeRegressions()
+    expect(h.store.recipeProposals).toHaveLength(1)
+    await h.service.dispose()
+  })
+
+  it('deleting a recipe deletes its proposals; factory reset counts and wipes them', async () => {
+    const h = setup()
+    await regressed(h)
+    await h.service.checkRecipeRegressions()
+    expect(h.store.recipeProposals).toHaveLength(1)
+    const preview = h.service.previewFactoryReset()
+    expect(preview.recipeProposals).toBe(1)
+    await h.service.manageRecipe({ action: 'remove', recipe: 'weekly' })
+    expect(h.store.recipeProposals).toHaveLength(0)
+    await h.service.dispose()
+  })
+
+  it('reflection proposals validate the patch and refuse while one is pending', async () => {
+    const h = setup()
+    const cwd = dir()
+    await h.service.manageRecipe({ action: 'save', name: 'weekly', goal: 'weekly report', dir: cwd })
+    await expect(h.service.reflectionRecipePropose({ recipe: 'weekly', action: 'revise', goal: 'x' })).rejects.toThrow(/reason/)
+    await expect(h.service.reflectionRecipePropose({ recipe: 'weekly', action: 'restore', revision: 9, reason: 'r' })).rejects.toThrow(/no revision 9/)
+    // Bad requirements JSON is rejected through the same validation path.
+    await expect(h.service.reflectionRecipePropose({ recipe: 'weekly', action: 'revise', requirements: 'not json', reason: 'r' })).rejects.toThrow(/requirements/)
+    await expect(h.service.reflectionRecipePropose({ recipe: 'weekly', action: 'revise', goal: 'x', reason: 'r' })).resolves.toContain('proposal')
+    // Now pending: a second proposal is refused.
+    await expect(h.service.reflectionRecipePropose({ recipe: 'weekly', action: 'revise', goal: 'y', reason: 'r' })).rejects.toThrow(/already pending/)
+    await h.service.dispose()
+  })
+
+  it('persists proposals across a restart', async () => {
+    const { domain, tables } = memoryDomain()
+    const store = new DotStore(domain)
+    await store.putRecipeProposal({
+      id: 'rpp-1', recipeId: 'rcp-1', baseRevision: 2, kind: 'restore', targetRevision: 1,
+      reason: 'rev 2 regressed', origin: 'detector', status: 'pending', createdAt: 3,
+    })
+    expect(tables['recipe_proposals']!.has('rpp-1')).toBe(true)
+    const seed: Record<string, Record<string, unknown>> = {}
+    for (const [name, table] of Object.entries(tables)) {
+      seed[name] = {}
+      for (const [key, value] of table) seed[name]![key] = structuredClone(value)
+    }
+    const reopened = new DotStore(memoryDomain(seed).domain)
+    expect(reopened.recipeProposals).toHaveLength(1)
+    expect(reopened.recipeProposals[0]).toMatchObject({ id: 'rpp-1', kind: 'restore', targetRevision: 1, status: 'pending' })
   })
 })

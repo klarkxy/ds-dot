@@ -31,6 +31,20 @@ class SourceDirTests(unittest.TestCase):
         self.assertEqual(BUILD.source_dir_for(None, revision), Path('.scratch') / 'arena-source' / revision)
 
 
+class RevisionTests(unittest.TestCase):
+    def test_rejects_non_hex_and_path_like_sha(self) -> None:
+        with self.assertRaises(ValueError):
+            BUILD.require_full_revision('/tmp/abs')
+        with self.assertRaises(ValueError):
+            BUILD.require_full_revision('../../tmp/evil')
+        with self.assertRaises(ValueError):
+            BUILD.require_full_revision('not-a-commit')
+        revision = 'c' * 40
+        self.assertEqual(BUILD.require_full_revision(revision), revision)
+        source = (ROOT / 'build-model-arena.py').read_text(encoding='utf-8')
+        self.assertIn("require_full_revision(metadata['sha'])", source)
+
+
 class LastModifiedTests(unittest.TestCase):
     def test_new_revision_does_not_reuse_the_pinned_timestamp(self) -> None:
         other = 'b' * 40

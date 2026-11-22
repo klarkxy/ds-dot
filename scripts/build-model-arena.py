@@ -70,6 +70,12 @@ def display_name(value: str) -> str:
     return re.sub(r'\s*\((?:' + '|'.join(re.escape(x) for x in EFFORT_LABELS) + r')\)\s*$', '', value, flags=re.I).strip()
 
 
+def require_full_revision(revision: str) -> str:
+    if not re.fullmatch(r'[0-9a-f]{40}', revision):
+        raise ValueError('revision must be "latest" or a full 40-character dataset commit')
+    return revision
+
+
 def source_dir_for(source_dir: Path | None, revision: str) -> Path:
     root = source_dir or Path('.scratch') / 'arena-source'
     return root / revision
@@ -139,11 +145,12 @@ def main() -> None:
     revision = args.revision
     if revision == 'latest':
         metadata = json.loads(download_json(f'{args.base_url}/api/datasets/{DATASET}'))
-        revision = metadata['sha']
+        # Check the resolved sha, not the "latest" token: Path('/cache') / '/tmp/abs'
+        # would escape --source-dir.
+        revision = require_full_revision(metadata['sha'])
         last_modified = metadata['lastModified']
     else:
-        if not re.fullmatch(r'[0-9a-f]{40}', revision):
-            raise ValueError('revision must be "latest" or a full 40-character dataset commit')
+        revision = require_full_revision(revision)
         try:
             last_modified = last_modified_for(
                 revision,

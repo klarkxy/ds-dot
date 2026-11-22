@@ -16,7 +16,7 @@ import { createAttentionWatcher, DESKTOP_NOTIFY_KEY, type AttentionWatcher } fro
 import { contextCss } from './context-panel.tsx'
 import { personaCss } from './persona-panel.tsx'
 import { trajectoryCss } from './trajectory-panel.tsx'
-import { PLUGIN_NAME, RPC_CHANNEL, type AttentionView, type BoardView, type CapabilityCatalogView, type ChatSnapshot, type DotContextView, type DotSettings, type FactoryResetPreview, type FactoryResetResult, type KeepaliveInfo, type KnowledgeView, type ReflectionRun, type SettingProposal, type TrajectoryView } from './contracts.ts'
+import { PLUGIN_NAME, RPC_CHANNEL, type AttentionView, type BoardView, type RecipeBoardRow, type CapabilityCatalogView, type ChatSnapshot, type DotContextView, type DotSettings, type FactoryResetPreview, type FactoryResetResult, type KeepaliveInfo, type KnowledgeView, type ReflectionRun, type SettingProposal, type TrajectoryView } from './contracts.ts'
 import type { UpdateStatus } from './auto-update.ts'
 import { copyLocale, t, type CopyLocale } from './ui-copy.ts'
 import { DotIcon } from './whale.tsx'
@@ -76,6 +76,8 @@ export function apply(ctx: Context): void {
     stop: async () => { await call('stop') },
     board: signal => call<BoardView>('board', {}, signal),
     removeSchedule: id => call<boolean>('schedule.remove', { id }),
+    recipes: signal => call<RecipeBoardRow[]>('recipes', {}, signal),
+    recipeRun: id => call<{ ok: true; changeId: string; runId?: string } | { ok: false; reason: string }>('recipe.run', { id }),
     workAccept: async payload => { await call('work.accept', payload) },
     workReject: async payload => { await call('work.reject', payload) },
     workAnswer: async payload => { await call('work.answer', payload) },

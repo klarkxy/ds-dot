@@ -106,7 +106,7 @@ export function Board({ locale, view, error, filter = 'all', onOpen, onRetry, on
             {view.schedules.map(item => (
               <div key={item.id} className="dsh-dot-reminder">
                 <span className="dsh-dot-main">
-                  <span className="dsh-ui-compact dsh-ui-truncate" title={item.prompt}>{item.title}</span>
+                  <span className="dsh-ui-compact dsh-ui-truncate" title={item.prompt}>{item.title}{item.recipeName ? ` → ${item.recipeName}` : ''}</span>
                   <span className="dsh-ui-hint dsh-ui-truncate">{timingLabel(locale, item.timing)} · {t(locale, 'reminderNext').replace('{when}', formatWhen(item.nextAt))}</span>
                 </span>
                 <span className="dsh-ui-spacer" />

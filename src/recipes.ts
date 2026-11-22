@@ -191,8 +191,8 @@ export function recipeStatsLine(recipe: RecipeRecord, live: readonly LiveRecipeC
   const parts = [
     `rev${recipe.revision}: ${current.accepted} accepted, ${current.cancelled} cancelled`,
     ...(done > 0 ? [`avg ${(current.failedRounds / done).toFixed(1)} failed rounds`] : []),
-    ...(current.avgTokens !== undefined ? [`avg ${formatTokens(current.avgTokens)} tok`] : []),
-    ...(current.avgWallMs !== undefined ? [`avg ${formatDuration(current.avgWallMs)}`] : []),
+    ...(current.avgTokens !== undefined ? [`avg per accepted ${formatTokens(current.avgTokens)} tok`] : []),
+    ...(current.avgWallMs !== undefined ? [`avg per accepted ${formatDuration(current.avgWallMs)}`] : []),
     ...(current.inFlight > 0 ? [`${current.inFlight} in flight`] : []),
   ]
   return parts.join(', ')

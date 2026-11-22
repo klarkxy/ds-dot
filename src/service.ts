@@ -2486,8 +2486,8 @@ export class DotService {
     }
     let left: Uint8Array = new Uint8Array()
     if (named.kind !== 'added') {
-      const runs = this.store.work.listRuns().filter(run => run.changeId === change.id)
-      const prior = writerPrior(subject.baselineRefs, runs, ref => this.subjectLook().read(ref))
+      const prior = this.diffPrior(change, subject)
+      if (prior.missing) return { ok: false, code: 'missing', message: `baseline ${prior.missing} is missing or incomplete` }
       const entry = prior.files.find(file => foldRel(file.path) === foldRel(named.path))
       if (entry) {
         let before: Uint8Array | undefined
@@ -2503,7 +2503,24 @@ export class DotService {
       leftText = decoder.decode(left)
       rightText = decoder.decode(right)
     } catch { return invalid }
-    return { ok: true, source: `diff:${named.path}`, body: createTwoFilesPatch(`a/${named.path}`, `b/${named.path}`, leftText, rightText, undefined, undefined, { context: 3 }) }
+    // Heavy rewrites can take seconds of main-loop time even under the side cap;
+    // jsdiff gives up past the timeout instead.
+    const patch = createTwoFilesPatch(`a/${named.path}`, `b/${named.path}`, leftText, rightText, undefined, undefined, { context: 3, timeout: 1500 })
+    if (patch === undefined) return { ok: false, code: 'invalid', message: `${named.path} has too many changes for a diff; open the full file` }
+    return { ok: true, source: `diff:${named.path}`, body: patch }
+  }
+
+  /** writerPrior re-reads every baseline manifest per file; a subject's baseline set is immutable, so one lookup serves all its files. */
+  private readonly diffPriors = new Map<string, ReturnType<typeof writerPrior>>()
+  private diffPrior(change: ChangeRecord, subject: DeliverySubject): ReturnType<typeof writerPrior> {
+    const key = `${change.id}|${subject.artifactRef}`
+    const cached = this.diffPriors.get(key)
+    if (cached) return cached
+    const runs = this.store.work.listRuns().filter(run => run.changeId === change.id)
+    const prior = writerPrior(subject.baselineRefs, runs, ref => this.subjectLook().read(ref))
+    if (this.diffPriors.size >= 8) this.diffPriors.delete(this.diffPriors.keys().next().value!)
+    this.diffPriors.set(key, prior)
+    return prior
   }
 
   /** Check the review, close it to new deliveries, then stop. A late delivery cannot reuse this stop. */

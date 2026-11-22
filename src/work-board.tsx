@@ -92,8 +92,8 @@ type SourcePane = 'evidence' | 'files'
 type FileView = 'diff' | 'full'
 type SourceSlot = { readonly identity: string; readonly loaded: Readonly<Record<string, SourceBody>>; readonly full: Readonly<Record<string, FullBody>>; readonly views: Readonly<Record<string, FileView>>; readonly denied: Readonly<Record<string, string>> }
 
-function previewFrom(result: { readonly body: string; readonly truncated?: boolean; readonly totalBytes?: number }): SourceBody {
-  const cut = result.body.length > PREVIEW_LIMIT
+function previewFrom(result: { readonly body: string; readonly truncated?: boolean; readonly totalBytes?: number }, cap = true): SourceBody {
+  const cut = cap && result.body.length > PREVIEW_LIMIT
   const body = cut ? `${result.body.slice(0, PREVIEW_LIMIT)}\n… [truncated]` : result.body
   const truncated = cut || result.truncated === true
   return { ok: true, body, truncated, ...(typeof result.totalBytes === 'number' ? { totalBytes: result.totalBytes } : {}) }
@@ -165,7 +165,8 @@ function WorkFacts({ locale, item, onRead, onOpenSession, onQuote }: {
     const snapshot = life.current
     void onRead({ id: item.id, kind, ref, verificationId, inputRef, inputRevision, ...(view ? { view } : {}) }).then(result => {
       if (isCancelled?.() || life.current !== snapshot) return
-      const row = previewFrom(result)
+      // Diff bodies stay whole: both sides are already capped server-side.
+      const row = previewFrom(result, view !== 'diff')
       setSlot(current => current.identity === token ? { ...current, loaded: { ...current.loaded, [key]: row } } : current)
     }, failure => {
       if (isCancelled?.() || life.current !== snapshot) return
@@ -224,32 +225,29 @@ function WorkFacts({ locale, item, onRead, onOpenSession, onQuote }: {
     const known = slotRef.current.identity === token ? slotRef.current.loaded : {}
     const pendingJobs = [...evidenceJobs, ...changeJobs].filter(job => known[job.view === 'diff' ? `diff:${job.ref}` : `${job.kind}:${job.ref}`]?.ok !== true)
     let cursor = 0
-    const pump = async () => {
-      while (!cancel && cursor < pendingJobs.length) {
-        const job = pendingJobs[cursor++]!
-        await new Promise<void>(resolve => {
-          const key = job.view === 'diff' ? `diff:${job.ref}` : `${job.kind}:${job.ref}`
-          const snapshot = life.current
-          onRead({ id: item.id, kind: job.kind, ref: job.ref, verificationId, inputRef, inputRevision, ...(job.view ? { view: job.view } : {}) }).then(result => {
-            if (!cancel && life.current === snapshot) {
-              const row = previewFrom(result)
-              setSlot(current => current.identity === token ? { ...current, loaded: { ...current.loaded, [key]: row } } : current)
-            }
-            resolve()
-          }, failure => {
-            if (!cancel && life.current === snapshot) {
-              const message = failure instanceof Error ? failure.message : String(failure)
-              const code = typeof (failure as { readonly code?: unknown })?.code === 'string' ? (failure as { readonly code: string }).code : undefined
-              setSlot(current => current.identity === token ? { ...current, loaded: { ...current.loaded, [key]: { ok: false, message, ...(code ? { code } : {}) } } } : current)
-              if (job.view === 'diff' && code === 'dot/invalid') {
-                setSlot(current => current.identity === token ? { ...current, views: { ...current.views, [job.ref]: 'full' }, denied: { ...current.denied, [job.ref]: message } } : current)
-                loadSource('change', job.ref, token, undefined, () => cancel)
-              }
-            }
-            resolve()
-          })
-        })
+    // A refused diff's Full fallback read runs inside this same job, so a
+    // worker never starts the next file while its fallback is still reading.
+    const readJob = async (job: { kind: 'evidence' | 'change'; ref: string; view?: 'diff' }) => {
+      const key = job.view === 'diff' ? `diff:${job.ref}` : `${job.kind}:${job.ref}`
+      const snapshot = life.current
+      try {
+        const result = await onRead({ id: item.id, kind: job.kind, ref: job.ref, verificationId, inputRef, inputRevision, ...(job.view ? { view: job.view } : {}) })
+        if (cancel || life.current !== snapshot) return
+        const row = previewFrom(result, job.view !== 'diff')
+        setSlot(current => current.identity === token ? { ...current, loaded: { ...current.loaded, [key]: row } } : current)
+      } catch (failure) {
+        if (cancel || life.current !== snapshot) return
+        const message = failure instanceof Error ? failure.message : String(failure)
+        const code = typeof (failure as { readonly code?: unknown })?.code === 'string' ? (failure as { readonly code: string }).code : undefined
+        setSlot(current => current.identity === token ? { ...current, loaded: { ...current.loaded, [key]: { ok: false, message, ...(code ? { code } : {}) } } } : current)
+        if (job.view === 'diff' && code === 'dot/invalid') {
+          setSlot(current => current.identity === token ? { ...current, views: { ...current.views, [job.ref]: 'full' }, denied: { ...current.denied, [job.ref]: message } } : current)
+          await readJob({ kind: job.kind, ref: job.ref })
+        }
       }
+    }
+    const pump = async () => {
+      while (!cancel && cursor < pendingJobs.length) await readJob(pendingJobs[cursor++]!)
     }
     for (let worker = 0; worker < Math.min(4, pendingJobs.length); worker++) void pump()
     return () => { cancel = true }
@@ -439,15 +437,19 @@ function parsePatch(body: string): DiffLine[] {
   const rows: DiffLine[] = []
   let oldNo = 0
   let newNo = 0
+  let inHunks = false
   for (const raw of body.split('\n')) {
     const hunk = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(raw)
     if (hunk) {
+      inHunks = true
       oldNo = Number(hunk[1])
       newNo = Number(hunk[2])
       rows.push({ kind: 'hunk', text: raw })
       continue
     }
-    if (raw.startsWith('--- ') || raw.startsWith('+++ ') || raw.startsWith('===') || raw.startsWith('Index:')) { rows.push({ kind: 'meta', text: raw }); continue }
+    // ---/+++/Index:/=== are file headers only before the first hunk; inside a
+    // hunk a removed '-- x' or added '++ x' line must not be swallowed as one.
+    if (!inHunks) { rows.push({ kind: 'meta', text: raw }); continue }
     if (raw.startsWith('\\')) { rows.push({ kind: 'hunk', text: raw }); continue }
     if (raw.startsWith('-')) { rows.push({ kind: 'line', sign: 'del', oldNo: oldNo++, text: raw.slice(1) }); continue }
     if (raw.startsWith('+')) { rows.push({ kind: 'line', sign: 'add', newNo: newNo++, text: raw.slice(1) }); continue }

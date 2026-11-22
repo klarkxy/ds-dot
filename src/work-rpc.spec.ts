@@ -6,11 +6,23 @@
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { DotService } from './service.ts'
 import { DotStore } from './store.ts'
 import { DEFAULT_SETTINGS } from './contracts.ts'
 import { rejectPayload } from './work-board.ts'
+
+/** Lets one test drive jsdiff's abortable return without a pathological input. */
+const diffControl = vi.hoisted(() => ({ fail: false, options: [] as unknown[] }))
+vi.mock('diff', async importOriginal => {
+  const actual = await importOriginal<typeof import('diff')>()
+  const patched = (...args: Parameters<typeof actual.createTwoFilesPatch>) => {
+    diffControl.options.push(args[6])
+    if (diffControl.fail) return undefined
+    return actual.createTwoFilesPatch(...args)
+  }
+  return { ...actual, createTwoFilesPatch: patched as typeof actual.createTwoFilesPatch }
+})
 
 const str = (payload: unknown, key: string): string => typeof (payload as Record<string, unknown> | null)?.[key] === 'string' ? (payload as Record<string, string>)[key] : ''
 const num = (payload: unknown, key: string): number | undefined => typeof (payload as Record<string, unknown> | null)?.[key] === 'number' ? (payload as Record<string, number>)[key] : undefined
@@ -434,6 +446,55 @@ describe('work.read diff view', () => {
     // Staleness and kind checks apply before any diff work.
     expect(h.service.readWorkSource(change.id, 'change', 'a.ts', { ...bound, verificationId: 'v-nope' }, { view: 'diff' })).toMatchObject({ ok: false, code: 'stale' })
     expect(h.service.readWorkSource(change.id, 'evidence', 'file:a.ts', bound, { view: 'diff' })).toMatchObject({ ok: false, code: 'invalid' })
+    rmSync(h.project, { recursive: true, force: true })
+    rmSync(h.home, { recursive: true, force: true })
+  })
+
+  it('bounds the diff computation and refuses when jsdiff gives up', async () => {
+    const h = await setup()
+    const { change, verified, current } = await readyDiffChange(h)
+    const bound = { verificationId: verified.id, inputRef: current.currentInputRef, inputRevision: current.currentRevision }
+    diffControl.fail = true
+    try {
+      const refused = h.service.readWorkSource(change.id, 'change', 'a.ts', bound, { view: 'diff' })
+      expect(refused).toMatchObject({ ok: false, code: 'invalid' })
+      if (!refused.ok) expect(refused.message).toContain('too many changes')
+    } finally {
+      diffControl.fail = false
+    }
+    // The patch call carries a timeout so heavy rewrites cannot stall the loop.
+    expect(h.service.readWorkSource(change.id, 'change', 'a.ts', bound, { view: 'diff' }).ok).toBe(true)
+    expect(diffControl.options.at(-1)).toMatchObject({ timeout: 1500 })
+    rmSync(h.project, { recursive: true, force: true })
+    rmSync(h.home, { recursive: true, force: true })
+  })
+
+  it('reads baseline manifests once per subject across file diffs', async () => {
+    const h = await setup()
+    const { change, verified, current } = await readyDiffChange(h)
+    const bound = { verificationId: verified.id, inputRef: current.currentInputRef, inputRevision: current.currentRevision }
+    let manifestReads = 0
+    const service = h.service as unknown as { subjectLook: () => { read: (ref: string) => unknown } }
+    const realLook = service.subjectLook.bind(h.service)
+    vi.spyOn(service, 'subjectLook').mockImplementation(() => {
+      const look = realLook() as { read: (ref: string) => unknown }
+      return { ...look, read: (ref: string) => { manifestReads += 1; return look.read(ref) } }
+    })
+    expect(h.service.readWorkSource(change.id, 'change', 'a.ts', bound, { view: 'diff' }).ok).toBe(true)
+    const afterFirst = manifestReads
+    expect(afterFirst).toBeGreaterThan(0)
+    expect(h.service.readWorkSource(change.id, 'change', 'gone.ts', bound, { view: 'diff' }).ok).toBe(true)
+    expect(manifestReads).toBe(afterFirst)
+    rmSync(h.project, { recursive: true, force: true })
+    rmSync(h.home, { recursive: true, force: true })
+  })
+
+  it('refuses the diff as missing when a baseline snapshot is unreadable', async () => {
+    const h = await setup()
+    const { change, subject, verified, current } = await readyDiffChange(h)
+    const bound = { verificationId: verified.id, inputRef: current.currentInputRef, inputRevision: current.currentRevision }
+    rmSync(join(h.home, 'artifacts', subject.baselineRefs[0]!.artifactRef), { recursive: true, force: true })
+    expect(h.service.readWorkSource(change.id, 'change', 'a.ts', bound, { view: 'diff' })).toMatchObject({ ok: false, code: 'missing' })
     rmSync(h.project, { recursive: true, force: true })
     rmSync(h.home, { recursive: true, force: true })
   })

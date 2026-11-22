@@ -839,4 +839,99 @@ describe('WorkBoard', () => {
     expect(document.querySelectorAll('.dsh-dot-work-diff-quote')).toHaveLength(0)
     await act(async () => silent.unmount())
   })
+
+  it('renders header-shaped hunk lines as content with correct numbers', async () => {
+    // A removed '-- text' line renders '--- text' and an added '++ text' line
+    // '+++ text'; inside a hunk they are content, not file headers.
+    const tricky: WorkBoardItem = {
+      ...item, id: 'c-tricky',
+      verification: {
+        id: 'v-3', verdict: 'accept', subjectKey: 'subject-key-long', inputRef: 'in-4', inputRevision: 4,
+        changes: [{ path: 'tricky.ts', kind: 'modified' }],
+      },
+    }
+    const body = '===\n--- a/tricky.ts\n+++ b/tricky.ts\n@@ -1,3 +1,3 @@\n context a\n--- content gone\n+++ content new\n context z\n'
+    const onRead = (request: WorkReadRequest) => Promise.resolve({ source: `diff:${request.ref}`, body })
+    const root = createRoot(document.getElementById('root')!)
+    await act(async () => {
+      root.render(<WorkBoard locale="en" items={[tricky]} pending={[]} onAccept={vi.fn()} onReject={vi.fn()} onAnswer={vi.fn()} onResume={vi.fn()} onRead={onRead} />)
+      await Promise.resolve(); await Promise.resolve()
+    })
+    await openDetails()
+    const view = document.querySelector('[data-diff-body="tricky.ts"]')!
+    const del = view.querySelector('.dsh-dot-work-diff-line[data-sign="del"]')!
+    expect(del.textContent).toContain('-- content gone')
+    expect(del.querySelectorAll('.dsh-dot-work-diff-no')[0]!.textContent).toBe('2')
+    const add = view.querySelector('.dsh-dot-work-diff-line[data-sign="add"]')!
+    expect(add.textContent).toContain('++ content new')
+    expect(add.querySelectorAll('.dsh-dot-work-diff-no')[1]!.textContent).toBe('2')
+    const ctx = [...view.querySelectorAll('.dsh-dot-work-diff-line[data-sign="ctx"]')].find(node => node.textContent?.includes('context z'))!
+    expect(ctx.textContent).toContain('context z')
+    expect(ctx.querySelectorAll('.dsh-dot-work-diff-no')[0]!.textContent).toBe('3')
+    expect(ctx.querySelectorAll('.dsh-dot-work-diff-no')[1]!.textContent).toBe('3')
+    await act(async () => root.unmount())
+  })
+
+  it('shows a long diff body in full instead of the preview cap', async () => {
+    const big: WorkBoardItem = {
+      ...item, id: 'c-big',
+      verification: {
+        id: 'v-3', verdict: 'accept', subjectKey: 'subject-key-long', inputRef: 'in-4', inputRevision: 4,
+        changes: [{ path: 'big.ts', kind: 'modified' }],
+      },
+    }
+    const body = `===\n--- a/big.ts\n+++ b/big.ts\n@@ -1,5000 +1,5001 @@\n${' context row\n'.repeat(6000)}+tail marker row\n`
+    expect(body.length).toBeGreaterThan(65_536)
+    const onRead = (request: WorkReadRequest) => Promise.resolve({ source: `diff:${request.ref}`, body })
+    const root = createRoot(document.getElementById('root')!)
+    await act(async () => {
+      root.render(<WorkBoard locale="en" items={[big]} pending={[]} onAccept={vi.fn()} onReject={vi.fn()} onAnswer={vi.fn()} onResume={vi.fn()} onRead={onRead} />)
+      await Promise.resolve(); await Promise.resolve()
+    })
+    await openDetails()
+    const rendered = document.querySelector('[data-diff-body="big.ts"]')!
+    expect(rendered.textContent).toContain('tail marker row')
+    await act(async () => root.unmount())
+  })
+
+  it('keeps refused-diff full fallbacks inside the bounded read queue', async () => {
+    const paths = ['f1.ts', 'f2.ts', 'f3.ts', 'f4.ts', 'f5.ts', 'f6.ts', 'f7.ts', 'f8.ts']
+    const many: WorkBoardItem = {
+      ...item, id: 'c-many',
+      verification: {
+        id: 'v-3', verdict: 'accept', subjectKey: 'subject-key-long', inputRef: 'in-4', inputRevision: 4,
+        changes: paths.map(path => ({ path, kind: 'modified' as const })),
+      },
+    }
+    let inFlight = 0
+    let maxInFlight = 0
+    const onRead = (request: WorkReadRequest) => {
+      inFlight += 1
+      maxInFlight = Math.max(maxInFlight, inFlight)
+      return new Promise((resolve, reject) => {
+        setTimeout(() => {
+          inFlight -= 1
+          if (request.view === 'diff') {
+            const failure = new Error('binary or larger than 256 KiB; open the full file') as Error & { code?: string }
+            failure.code = 'dot/invalid'
+            reject(failure)
+          } else {
+            resolve({ source: `change:${request.ref}`, body: `FULL_${request.ref}` })
+          }
+        }, 2)
+      })
+    }
+    const root = createRoot(document.getElementById('root')!)
+    await act(async () => {
+      root.render(<WorkBoard locale="en" items={[many]} pending={[]} onAccept={vi.fn()} onReject={vi.fn()} onAnswer={vi.fn()} onResume={vi.fn()} onRead={onRead} />)
+      await Promise.resolve(); await Promise.resolve()
+    })
+    await openDetails()
+    await act(async () => { await new Promise(done => setTimeout(done, 250)) })
+    expect(maxInFlight).toBeLessThanOrEqual(4)
+    for (const path of paths) {
+      expect(document.querySelector(`[data-evidence-body="change:${path}"]`)?.textContent).toContain(`FULL_${path}`)
+    }
+    await act(async () => root.unmount())
+  })
 })

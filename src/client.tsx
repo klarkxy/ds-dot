@@ -78,6 +78,7 @@ export function apply(ctx: Context): void {
     removeSchedule: id => call<boolean>('schedule.remove', { id }),
     recipes: signal => call<RecipeBoardRow[]>('recipes', {}, signal),
     recipeRun: id => call<{ ok: true; changeId: string; runId?: string } | { ok: false; reason: string }>('recipe.run', { id }),
+    recipeProposalDecide: (id: string, allow: boolean) => call<string>('recipe.proposal.decide', { id, allow }),
     workAccept: async payload => { await call('work.accept', payload) },
     workReject: async payload => { await call('work.reject', payload) },
     workAnswer: async payload => { await call('work.answer', payload) },

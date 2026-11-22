@@ -100,4 +100,53 @@ describe('old data directory', () => {
       await rm(root, { recursive: true, force: true })
     }
   })
+
+  it('opens a v9 directory holding a links row, then writes and rereads a recipe proposal', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dot-v9-open-'))
+    const backend = new JsonStorageBackend(root)
+    const facility = new DomainFacility({
+      storage: { backend: { get: (name: string) => {
+        if (name !== 'json') throw new Error('unexpected backend')
+        return backend
+      } } }, logger: { error() {}, warn() {} }, emit() {},
+    } as never, { backend: 'json' })
+    const v9Document = {
+      unit: { name: 'klarkxy_dsh_dot', version: 9 },
+      global: null,
+      tables: {
+        state: { [STATE_KEY]: { dotSessionId: 'dot-1' } },
+        links: {
+          'lnk-1': { id: 'lnk-1', changeId: 'chg-1', repo: 'org/repo', number: 7, origin: 'auto', state: 'open', addedAt: 1 },
+        },
+        recipes: {
+          'rcp-1': {
+            id: 'rcp-1', name: 'weekly', revision: 1, goal: 'weekly report', requirements: [],
+            requirementsFromGoal: true, history: [], outcomes: [], createdAt: 1, updatedAt: 1,
+          },
+        },
+      },
+    }
+    await writeFile(join(root, 'klarkxy_dsh_dot.json'), JSON.stringify(v9Document), 'utf8')
+    try {
+      const domain = await openCompatibleDomain(spec => facility.open(spec), dotDomain)
+      const store = new DotStore(domain)
+      expect(store.link('lnk-1')).toMatchObject({ changeId: 'chg-1', repo: 'org/repo', number: 7 })
+      await store.putRecipeProposal({
+        id: 'rpp-1', recipeId: 'rcp-1', baseRevision: 1, kind: 'restore', targetRevision: 1,
+        reason: 'rev 1: 1/4 accepted; rev 2 better', origin: 'detector', regression: 'acceptance',
+        status: 'pending', createdAt: 2,
+      })
+      await domain.close()
+      // Reopen over the same directory: both tables read back under v10.
+      const again = await openCompatibleDomain(spec => facility.open(spec), dotDomain)
+      const store2 = new DotStore(again)
+      expect(store2.link('lnk-1')).toMatchObject({ repo: 'org/repo', number: 7 })
+      expect(store2.recipeProposal('rpp-1')).toMatchObject({ recipeId: 'rcp-1', status: 'pending', regression: 'acceptance' })
+      await again.close()
+    } finally {
+      await facility.closeAll()
+      await backend.close()
+      await rm(root, { recursive: true, force: true })
+    }
+  })
 })

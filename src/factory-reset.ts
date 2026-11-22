@@ -16,6 +16,7 @@ export interface FactoryResetSource {
   schedules: readonly unknown[]
   recipes: readonly unknown[]
   links: readonly unknown[]
+  recipeProposals: readonly unknown[]
   settingProposals: readonly unknown[]
   cards: readonly unknown[]
   pastSegments: readonly { readonly sessionId: string }[]
@@ -34,6 +35,7 @@ export function factoryResetCounts(source: FactoryResetSource, inbox = 0, worktr
     schedules: source.schedules.length,
     recipes: source.recipes.length,
     links: source.links.length,
+    recipeProposals: source.recipeProposals.length,
     proposals: source.settingProposals.length,
     cards: source.cards.length,
     inbox,
@@ -92,6 +94,7 @@ export function formatFactoryResetPreview(preview: FactoryResetPreview): string 
     `${preview.runs} run(s)`,
     `${preview.schedules} reminder(s)`,
     `${preview.recipes} task recipe(s)`,
+    `${preview.recipeProposals} recipe proposal(s)`,
     `${preview.proposals} setting proposal(s)`,
     `${preview.cards} card(s)`,
     `${preview.inbox} inbox event(s)`,

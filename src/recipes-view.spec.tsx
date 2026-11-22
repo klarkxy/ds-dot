@@ -150,3 +150,148 @@ describe('RecipesView', () => {
     expect(container.textContent).toContain('directory locked by run-3')
   })
 })
+
+describe('RecipesView proposals', () => {
+  const decideApi = (decide: ChatApi['recipeProposalDecide']) => ({ recipeProposalDecide: decide } as unknown as ChatApi)
+
+  it('renders a pending detector restore proposal and approves in two clicks', async () => {
+    const calls: { id: string; allow: boolean }[] = []
+    let changed = 0
+    const a = decideApi(async (id, allow) => { calls.push({ id, allow }); return 'ok' })
+    const withProposal = row({
+      proposal: {
+        id: 'rpp-1', kind: 'restore', origin: 'detector', baseRevision: 2, targetRevision: 1,
+        reason: 'rev 2: 1/4 accepted, 2.5 failed rounds avg; rev 1: 4/5 accepted, 0.4 failed rounds avg',
+        base: { goal: 'old goal', requirementsFromGoal: false, requirements: [{ requirementRef: 'r1', text: 'req a', required: true }], constraints: [] },
+        createdAt: 5,
+      },
+    })
+    const { container } = await mount(<RecipesView locale="en" api={a} rows={[withProposal]} onChanged={() => { changed += 1 }} />)
+    const block = container.querySelector('[data-proposal="rpp-1"]')!
+    expect(block.textContent).toContain('restore')
+    expect(block.textContent).toContain('detector')
+    expect(block.textContent).toContain('rev 2: 1/4 accepted')
+    expect(block.textContent).toContain('restore rev 1 content')
+    const approve = [...block.querySelectorAll('button')].find(btn => btn.textContent === 'Approve')!
+    // First click arms only.
+    await act(async () => { Simulate.click(approve) })
+    expect(calls).toHaveLength(0)
+    const armed = [...block.querySelectorAll('button')].find(btn => btn.textContent === 'Confirm approve')!
+    await act(async () => { Simulate.click(armed); await Promise.resolve() })
+    expect(calls).toEqual([{ id: 'rpp-1', allow: true }])
+    expect(changed).toBe(1)
+  })
+
+  it('dismisses without a second click', async () => {
+    const calls: { id: string; allow: boolean }[] = []
+    const a = decideApi(async (id, allow) => { calls.push({ id, allow }); return 'ok' })
+    const withProposal = row({
+      proposal: {
+        id: 'rpp-2', kind: 'restore', origin: 'reflection', baseRevision: 2, targetRevision: 1,
+        reason: 'suggestion', base: { goal: 'g', requirementsFromGoal: false, requirements: [], constraints: [] }, createdAt: 5,
+      },
+    })
+    const { container } = await mount(<RecipesView locale="en" api={a} rows={[withProposal]} onChanged={() => {}} />)
+    const dismiss = [...container.querySelectorAll('button')].find(btn => btn.textContent === 'Dismiss')!
+    await act(async () => { Simulate.click(dismiss); await Promise.resolve() })
+    expect(calls).toEqual([{ id: 'rpp-2', allow: false }])
+  })
+
+  it('shows the field-level diff for a revise proposal', async () => {
+    const withProposal = row({
+      proposal: {
+        id: 'rpp-3', kind: 'revise', origin: 'reflection', baseRevision: 2,
+        reason: 'cadence changed',
+        patch: {
+          goal: 'monthly report',
+          requirements: [{ requirementRef: 'r2', text: 'covers last month', required: true }],
+          constraints: [{ constraintRef: 'c2', text: 'under two pages' }],
+        },
+        base: {
+          goal: 'weekly report', requirementsFromGoal: false,
+          requirements: [{ requirementRef: 'r1', text: 'covers last week', required: true }],
+          constraints: [{ constraintRef: 'c1', text: 'under one page' }],
+        },
+        createdAt: 5,
+      },
+    })
+    const { container } = await mount(<RecipesView locale="en" api={decideApi(async () => 'ok')} rows={[withProposal]} onChanged={() => {}} />)
+    const block = container.querySelector('[data-proposal="rpp-3"]')!
+    expect(block.textContent).toContain('revise')
+    expect(block.textContent).toContain('«weekly report» → «monthly report»')
+    expect(block.textContent).toContain('+ covers last month')
+    expect(block.textContent).toContain('− covers last week')
+    expect(block.textContent).toContain('+ under two pages')
+    expect(block.textContent).toContain('− under one page')
+  })
+
+  it('keeps untouched requirements and constraints out of a goal-only diff', async () => {
+    const withProposal = row({
+      proposal: {
+        id: 'rpp-5', kind: 'revise', origin: 'reflection', baseRevision: 2,
+        reason: 'new cadence',
+        patch: { goal: 'monthly report' },
+        base: {
+          goal: 'weekly report', requirementsFromGoal: false,
+          requirements: [{ requirementRef: 'r1', text: 'covers last week', required: true }],
+          constraints: [{ constraintRef: 'c1', text: 'under one page' }],
+        },
+        createdAt: 5,
+      },
+    })
+    const { container } = await mount(<RecipesView locale="en" api={decideApi(async () => 'ok')} rows={[withProposal]} onChanged={() => {}} />)
+    const block = container.querySelector('[data-proposal="rpp-5"]')!
+    expect(block.textContent).toContain('«weekly report» → «monthly report»')
+    // Approval keeps the explicit lists, so nothing renders as removed.
+    expect(block.textContent).not.toContain('−')
+    expect(block.textContent).not.toContain('covers last week')
+  })
+
+  it('shows a required/scenario flip as a changed requirement, not add+remove', async () => {
+    const withProposal = row({
+      proposal: {
+        id: 'rpp-6', kind: 'revise', origin: 'reflection', baseRevision: 2,
+        reason: 'soften',
+        patch: {
+          requirements: [
+            { requirementRef: 'r1', text: 'covers last week', required: false },
+            { requirementRef: 'r2', text: 'links to the tracker', required: true, scenarios: [{ scenarioRef: 's1', when: 'the tracker moves', then: 'relink' }] },
+          ],
+        },
+        base: {
+          goal: 'weekly report', requirementsFromGoal: false,
+          requirements: [
+            { requirementRef: 'r1', text: 'covers last week', required: true },
+            { requirementRef: 'r2', text: 'links to the tracker', required: true },
+          ],
+          constraints: [],
+        },
+        createdAt: 5,
+      },
+    })
+    const { container } = await mount(<RecipesView locale="en" api={decideApi(async () => 'ok')} rows={[withProposal]} onChanged={() => {}} />)
+    const block = container.querySelector('[data-proposal="rpp-6"]')!
+    expect(block.textContent).toContain('«covers last week» → «covers last week (optional)»')
+    expect(block.textContent).toContain('[the tracker moves]')
+    // Same refs with the same text are changes, not removals.
+    expect(block.textContent).not.toContain('−')
+    expect(block.textContent).not.toContain('+')
+  })
+
+  it('shows a decision error inline', async () => {
+    const a = decideApi(async () => { throw new Error('proposal rpp-4 is stale') })
+    const withProposal = row({
+      proposal: {
+        id: 'rpp-4', kind: 'restore', origin: 'detector', baseRevision: 2, targetRevision: 1,
+        reason: 'r', base: { goal: 'g', requirementsFromGoal: false, requirements: [], constraints: [] }, createdAt: 5,
+      },
+    })
+    const { container } = await mount(<RecipesView locale="en" api={a} rows={[withProposal]} onChanged={() => {}} />)
+    const block = container.querySelector('[data-proposal="rpp-4"]')!
+    const approve = [...block.querySelectorAll('button')].find(btn => btn.textContent === 'Approve')!
+    await act(async () => { Simulate.click(approve) })
+    const armed = [...block.querySelectorAll('button')].find(btn => btn.textContent === 'Confirm approve')!
+    await act(async () => { Simulate.click(armed); await Promise.resolve() })
+    expect(block.textContent).toContain('proposal rpp-4 is stale')
+  })
+})

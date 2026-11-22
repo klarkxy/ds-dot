@@ -102,4 +102,16 @@ describe('attentionItems', () => {
     )
     expect(items.map(item => item.id)).toEqual(['work:c-2:v-2:key-2', 'card:dot-card-1', 'work:c-1:v-2:key-2'])
   })
+
+  it('lists pending recipe proposals as recipe items', () => {
+    const items = attentionItems([], board({
+      recipeProposals: [
+        { id: 'rpp-b', recipeId: 'rcp-1', recipeName: 'Weekly', kind: 'revise', createdAt: 7 },
+        { id: 'rpp-a', recipeId: 'rcp-2', recipeName: 'Report', kind: 'restore', createdAt: 3 },
+      ],
+    }))
+    expect(items.map(item => item.id)).toEqual(['recipe:rpp-a', 'recipe:rpp-b'])
+    expect(items[0]).toMatchObject({ kind: 'recipe', title: 'Report — restore', since: 3 })
+  })
 })
+

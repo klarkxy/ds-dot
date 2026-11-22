@@ -30,6 +30,7 @@ import type { ChatImage } from './chat-images.ts'
 import { SettingsPanel, useSettingProposals, type SaveNotice, type SettingsApi } from './settings-panel.tsx'
 import type { RenderFactorySlot } from '@klarkxy/dsh-plugin-kit/model-picker'
 import { cardCopy, fillText, formatDuration, formatTokens, formatWhen, intlLocale, t, toolLabel, type CopyLocale, type TextKey } from './ui-copy.ts'
+import { mergedRecipeBody } from './recipes.ts'
 import { WorkBoardPanel, type WorkApi } from './work-board.tsx'
 import type { WorkAcceptPayload, PendingGlance, WorkBoardItem, WorkIntegratePayload, WorkReadRequest, WorkRejectPayload } from './work-board.ts'
 import { DotAvatar } from './whale.tsx'
@@ -52,6 +53,8 @@ export interface ChatApi extends SettingsApi, ContextApi, TrajectoryApi, Knowled
   recipes?(signal: AbortSignal): Promise<readonly RecipeBoardRow[]>
   /** Create + dispatch a recipe task from the Tasks panel. */
   recipeRun?(id: string): Promise<{ readonly ok: true; readonly changeId: string; readonly runId?: string } | { readonly ok: false; readonly reason: string }>
+  /** Approve or dismiss a pending recipe proposal. */
+  recipeProposalDecide?(id: string, allow: boolean): Promise<string>
   workAccept?(payload: WorkAcceptPayload): Promise<void>
   workReject?(payload: WorkRejectPayload): Promise<void>
   workAnswer?(payload: { readonly id: string; readonly allow: boolean; readonly note?: string }): Promise<void>
@@ -287,6 +290,56 @@ function WorkDrawer({ locale, api, tab, wide, settings, trajectoryRev, running, 
 }
 
 /** The Recipes filter: saved work orders with stats, bound reminders and a two-step Run now. */
+/** The display form of one requirement: text plus the flags a revise can flip. */
+function requirementSummary(row: import('./work.ts').Requirement): string {
+  return `${row.text}${row.required ? '' : ' (optional)'}${row.scenarios?.length ? ` [${row.scenarios.map(item => item.when).join('; ')}]` : ''}`
+}
+
+/** Old→new for one text field; added/removed/changed lines for the lists — always diffed against the body approve would save. */
+function ProposalDiff({ locale, proposal }: { locale: CopyLocale; proposal: NonNullable<RecipeBoardRow['proposal']> }) {
+  const base = proposal.base ?? { goal: '', requirementsFromGoal: false, requirements: [], constraints: [] }
+  const merged = mergedRecipeBody(base, proposal.patch ?? {})
+  const rows: { label: string; before?: string; after?: string; added?: readonly string[]; removed?: readonly string[]; changed?: readonly { before: string; after: string }[] }[] = []
+  if (merged.goal !== base.goal) rows.push({ label: t(locale, 'proposalGoal'), before: base.goal, after: merged.goal })
+  if ((merged.notes ?? '') !== (base.notes ?? '')) rows.push({ label: t(locale, 'proposalNotes'), before: base.notes ?? '', after: merged.notes ?? '' })
+  {
+    const want = merged.requirements
+    const have = base.requirements
+    const added = want.filter(row => !have.some(old => old.requirementRef === row.requirementRef)).map(requirementSummary)
+    const removed = have.filter(old => !want.some(row => row.requirementRef === old.requirementRef)).map(requirementSummary)
+    const changed = want.flatMap(row => {
+      const old = have.find(item => item.requirementRef === row.requirementRef)
+      return old && JSON.stringify(old) !== JSON.stringify(row) ? [{ before: requirementSummary(old), after: requirementSummary(row) }] : []
+    })
+    if (added.length > 0 || removed.length > 0 || changed.length > 0) rows.push({ label: t(locale, 'proposalRequirements'), added, removed, changed })
+  }
+  {
+    const want = merged.constraints ?? []
+    const have = base.constraints ?? []
+    const added = want.filter(row => !have.some(old => old.constraintRef === row.constraintRef)).map(row => row.text)
+    const removed = have.filter(old => !want.some(row => row.constraintRef === old.constraintRef)).map(row => row.text)
+    const changed = want.flatMap(row => {
+      const old = have.find(item => item.constraintRef === row.constraintRef)
+      return old && old.text !== row.text ? [{ before: old.text, after: row.text }] : []
+    })
+    if (added.length > 0 || removed.length > 0 || changed.length > 0) rows.push({ label: t(locale, 'proposalConstraints'), added, removed, changed })
+  }
+  if (rows.length === 0) return null
+  return (
+    <div className="dsh-dot-recipe-proposal-diff">
+      {rows.map((row, index) => (
+        <div key={`${row.label}-${index}`} className="dsh-dot-recipe-proposal-field">
+          <span className="dsh-ui-meta">{row.label}</span>
+          {row.before !== undefined ? <span className="dsh-ui-meta">«{row.before}» → «{row.after}»</span> : null}
+          {row.changed?.map(pair => <span key={`~${pair.before}`} className="dsh-ui-meta">«{pair.before}» → «{pair.after}»</span>)}
+          {row.added?.map(text => <span key={`+${text}`} className="dsh-ui-meta">+ {text}</span>)}
+          {row.removed?.map(text => <span key={`-${text}`} className="dsh-ui-meta">− {text}</span>)}
+        </div>
+      ))}
+    </div>
+  )
+}
+
 export function RecipesView({ locale, api, rows, error, onChanged }: {
   locale: CopyLocale; api: ChatApi; rows: readonly RecipeBoardRow[]; error?: string; onChanged: () => void
 }) {
@@ -294,8 +347,29 @@ export function RecipesView({ locale, api, rows, error, onChanged }: {
   const [busy, setBusy] = useState<string>()
   const [refusals, setRefusals] = useState<Readonly<Record<string, string>>>({})
   const [ran, setRan] = useState<Readonly<Record<string, string>>>({})
+  const [approveArm, setApproveArm] = useState<string>()
+  const [proposalBusy, setProposalBusy] = useState<string>()
+  const [proposalErrors, setProposalErrors] = useState<Readonly<Record<string, string>>>({})
   const armTimer = useRef<ReturnType<typeof setTimeout>>()
   useEffect(() => () => { if (armTimer.current !== undefined) clearTimeout(armTimer.current) }, [])
+  const decide = (proposalId: string, allow: boolean) => {
+    if (!api.recipeProposalDecide || proposalBusy) return
+    if (allow && approveArm !== proposalId) {
+      setApproveArm(proposalId)
+      if (armTimer.current !== undefined) clearTimeout(armTimer.current)
+      armTimer.current = setTimeout(() => setApproveArm(current => current === proposalId ? undefined : current), 5000)
+      return
+    }
+    setApproveArm(undefined)
+    setProposalBusy(proposalId)
+    api.recipeProposalDecide(proposalId, allow).then(() => {
+      setProposalErrors(prev => { const next = { ...prev }; delete next[proposalId]; return next })
+      onChanged()
+    }, (failure: unknown) => {
+      setProposalErrors(prev => ({ ...prev, [proposalId]: failure instanceof Error ? failure.message : String(failure) }))
+      onChanged()
+    }).finally(() => setProposalBusy(undefined))
+  }
   const run = (row: RecipeBoardRow) => {
     if (!api.recipeRun || busy) return
     if (arm !== row.id) {
@@ -360,6 +434,28 @@ export function RecipesView({ locale, api, rows, error, onChanged }: {
             {row.inFlight.map(item => (
               <span key={item.changeId} className="dsh-ui-meta">{t(locale, 'recipeInFlightLabel')} {item.changeId} {item.title} ({item.status})</span>
             ))}
+            {row.proposal ? (
+              <div className="dsh-dot-recipe-proposal" data-proposal={row.proposal.id}>
+                <div className="dsh-dot-recipe-proposal-head">
+                  <Tag tone="warning">{row.proposal.kind === 'restore' ? t(locale, 'proposalKindRestore') : t(locale, 'proposalKindRevise')}</Tag>
+                  <Tag tone="neutral">{row.proposal.origin === 'detector' ? t(locale, 'proposalOriginDetector') : t(locale, 'proposalOriginReflection')}</Tag>
+                  {row.proposal.kind === 'restore' && row.proposal.targetRevision !== undefined
+                    ? <span className="dsh-ui-meta">{fillText(t(locale, 'proposalRestoreLine'), { n: String(row.proposal.targetRevision) })}</span>
+                    : null}
+                </div>
+                <span className="dsh-ui-hint">{row.proposal.reason}</span>
+                {row.proposal.kind === 'revise' ? <ProposalDiff locale={locale} proposal={row.proposal} /> : null}
+                <div className="dsh-dot-recipe-proposal-actions">
+                  <Button variant="primary" size="sm" disabled={proposalBusy === row.proposal.id || !api.recipeProposalDecide} onClick={() => decide(row.proposal!.id, true)}>
+                    {approveArm === row.proposal.id ? t(locale, 'proposalApproveConfirm') : t(locale, 'proposalApprove')}
+                  </Button>
+                  <Button variant="ghost" size="sm" disabled={proposalBusy === row.proposal.id || !api.recipeProposalDecide} onClick={() => decide(row.proposal!.id, false)}>
+                    {t(locale, 'proposalDismiss')}
+                  </Button>
+                </div>
+                {proposalErrors[row.proposal.id] ? <p className="dsh-ui-hint dsh-dot-recipe-refusal" role="alert">{proposalErrors[row.proposal.id]}</p> : null}
+              </div>
+            ) : null}
             {ran[row.id] ? <span className="dsh-ui-hint">{fillText(t(locale, 'recipeRunDone'), { id: ran[row.id]! })}</span> : null}
             {refusals[row.id] ? <p className="dsh-ui-hint dsh-dot-recipe-refusal">{fillText(t(locale, 'recipeRunFailed'), { reason: refusals[row.id]! })}</p> : null}
           </div>
@@ -856,6 +952,7 @@ const NOTICE_TAG_TONE: Record<Exclude<NoticeEntry['kind'], 'reminder'>, TagTone>
   'idle-check': 'quiet',
   inbox: 'info',
   'recipe-run': 'success',
+  'recipe-proposal': 'info',
 }
 
 function noticeTagLabel(locale: CopyLocale, kind: Exclude<NoticeEntry['kind'], 'reminder'>): string {
@@ -868,6 +965,7 @@ function noticeTagLabel(locale: CopyLocale, kind: Exclude<NoticeEntry['kind'], '
     case 'idle-check': return t(locale, 'idleCheck')
     case 'inbox': return t(locale, 'inboxEvent')
     case 'recipe-run': return t(locale, 'recipeRunTag')
+    case 'recipe-proposal': return t(locale, 'recipeProposalTag')
   }
 }
 

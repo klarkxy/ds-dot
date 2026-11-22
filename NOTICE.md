@@ -9,6 +9,16 @@ Source revision: https://github.com/bowenliang123/dsh-context/tree/432c5cbb99117
 
 The components were adapted and scoped to Dorothy's panel.
 
+## LMArena leaderboard data
+
+The bundled `src/model-arena.json` contains normalized and aggregated data from **LMArena's `lmarena-ai/leaderboard-dataset`**, licensed **CC BY 4.0**.
+
+Upstream: https://huggingface.co/datasets/lmarena-ai/leaderboard-dataset
+Source revision: https://huggingface.co/datasets/lmarena-ai/leaderboard-dataset/tree/ad6131670bd01ed74a552172c1afee8c0db20047
+License: https://creativecommons.org/licenses/by/4.0/
+
+The source revision and per-file hashes are recorded in the generated document. Rankings are transformed into within-board percentiles and tag-weighted aggregate recommendations; no LMArena endorsement is implied.
+
 ## DeepSeek fish logo
 
 Dorothy's icon adapts the DeepSeek fish silhouette from **@deepseek-ai/dsh-client-ui-primitives**, under the MIT License, Copyright (c) 2026 DeepSeek, recolored pink and mirrored to face right.

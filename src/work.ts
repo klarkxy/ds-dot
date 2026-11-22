@@ -20,6 +20,8 @@ export type VerificationVerdict = 'accept' | 'rework' | 'unverified'
 
 const TERMINAL: ReadonlySet<RunPhase> = new Set(['completed', 'failed', 'stopped'])
 export const MAX_COMPLETED_CHANGES = 200
+/** How long a terminal run that still owes usage can defer its change's prune. */
+export const USAGE_PRUNE_GRACE_MS = 24 * 60 * 60_000
 
 /** Terminal run — usage and wall time can be recorded against it. */
 export function runIsTerminal(run: Pick<RunRecord, 'phase'>): boolean { return TERMINAL.has(run.phase) }
@@ -2008,6 +2010,7 @@ export class WorkBook {
     maxKeep = MAX_COMPLETED_CHANGES,
     removeDurable?: (table: 'changes' | 'inputs' | 'runs' | 'verifications', key: string) => Promise<void>,
     beforeRemove?: (change: ChangeRecord, failedRounds: number) => Promise<void>,
+    at = Date.now(),
   ): Promise<{ readonly prunedChanges: readonly string[]; readonly keptArtifacts: ReadonlySet<string> }> {
     return this.exclusive(async () => {
       if (this.recovery) return { prunedChanges: [], keptArtifacts: this.referencedArtifacts() }
@@ -2022,8 +2025,10 @@ export class WorkBook {
         const changeRuns = [...this.runs.values()].filter(run => run.changeId === change.id)
         // A run that still owes usage keeps its change for a later prune: usage
         // capture runs outside this exclusive lane and must commit first, or a
-        // change that closed between capture and selection loses its cost.
-        if (changeRuns.some(run => runIsTerminal(run) && run.sessionId !== undefined && run.usage === undefined)) continue
+        // change that closed between capture and selection loses its cost. The
+        // deferral is bounded — a run whose session can never be read again
+        // must not pin its change in history forever.
+        if (changeRuns.some(run => runIsTerminal(run) && run.sessionId !== undefined && run.usage === undefined && at - run.updatedAt < USAGE_PRUNE_GRACE_MS)) continue
         if (beforeRemove) {
           try { await beforeRemove(change, this.failedRounds(change.id)) } catch { /* outcome recording is best-effort */ }
         }

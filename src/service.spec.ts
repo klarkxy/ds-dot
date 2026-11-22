@@ -2840,6 +2840,59 @@ describe('run usage capture triggers', () => {
     await h.service.dispose()
   })
 
+  it('prunes a change whose owing run settled beyond the usage grace', async () => {
+    const h = setup()
+    const cwd = dir()
+    await h.service.ensureDot()
+    await h.service.manageRecipe({ action: 'save', name: 'stats', goal: 'run the pass', dir: cwd })
+    const owed = JSON.parse(await h.service.manageTask({ action: 'create', recipe: 'stats' })) as { id: string }
+    const spare = JSON.parse(await h.service.manageTask({ action: 'create', recipe: 'stats' })) as { id: string }
+    const started = await h.service.manageTask({ action: 'dispatch', task_id: owed.id })
+    const run = h.store.work.run(/started (run-\d+)/.exec(started)?.[1]!)!
+    // A session that can never be read: the run owes usage forever.
+    h.unreadable.add(run.sessionId!)
+    await h.service.manageTask({ action: 'cancel', task_id: owed.id })
+    await h.service.manageTask({ action: 'cancel', task_id: spare.id })
+    // 25 h later the grace is over: the prune proceeds and the outcome lands
+    // without cost fields.
+    h.advance(25 * 60 * 60_000)
+    const prune = h.service as unknown as { pruneWorkArtifactsIfNeeded(maxKeep?: number): Promise<void> }
+    await prune.pruneWorkArtifactsIfNeeded(1)
+    expect(h.store.work.change(owed.id)).toBeUndefined()
+    expect(h.store.work.change(spare.id)).toBeDefined()
+    expect(h.store.recipes[0]!.outcomes).toEqual([
+      expect.objectContaining({ changeId: owed.id, result: 'cancelled' }),
+    ])
+    expect(h.store.recipes[0]!.outcomes[0]!.tokens).toBeUndefined()
+    await h.service.dispose()
+  })
+
+  it('still defers pruning while an owing run settled inside the usage grace', async () => {
+    const h = setup()
+    const cwd = dir()
+    await h.service.ensureDot()
+    await h.service.manageRecipe({ action: 'save', name: 'stats', goal: 'run the pass', dir: cwd })
+    const owed = JSON.parse(await h.service.manageTask({ action: 'create', recipe: 'stats' })) as { id: string }
+    const spare = JSON.parse(await h.service.manageTask({ action: 'create', recipe: 'stats' })) as { id: string }
+    const started = await h.service.manageTask({ action: 'dispatch', task_id: owed.id })
+    const run = h.store.work.run(/started (run-\d+)/.exec(started)?.[1]!)!
+    h.unreadable.add(run.sessionId!)
+    await h.service.manageTask({ action: 'cancel', task_id: owed.id })
+    await h.service.manageTask({ action: 'cancel', task_id: spare.id })
+    // 1 min old: still inside the 24 h grace, so the change survives this pass.
+    h.advance(60_000)
+    const prune = h.service as unknown as { pruneWorkArtifactsIfNeeded(maxKeep?: number): Promise<void> }
+    await prune.pruneWorkArtifactsIfNeeded(1)
+    expect(h.store.work.change(owed.id)).toBeDefined()
+    expect(h.store.recipes[0]!.outcomes).toEqual([])
+    // Past the grace the very next pass lets it go.
+    h.advance(25 * 60 * 60_000)
+    await prune.pruneWorkArtifactsIfNeeded(1)
+    expect(h.store.work.change(owed.id)).toBeUndefined()
+    expect(h.store.recipes[0]!.outcomes).toEqual([expect.objectContaining({ changeId: owed.id })])
+    await h.service.dispose()
+  })
+
   it('signals the store change after a pass records usage', async () => {
     const h = setup()
     await h.service.ensureDot()

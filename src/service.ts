@@ -2407,7 +2407,7 @@ export class DotService {
           ...runCostTotals(this.store.work.listRuns().filter(run => run.changeId === change.id)),
           at: change.updatedAt,
         }))
-      })
+      }, this.now())
       if (prunedChanges.length > 0) pruneSnapshots(this.options.homeDir, keptArtifacts)
     } catch { /* best-effort background retention cleanup */ }
   }

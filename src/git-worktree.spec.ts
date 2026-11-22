@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
@@ -13,7 +13,8 @@ let gitAvailable = true
 try { execFileSync('git', ['--version'], { stdio: 'ignore' }) } catch { gitAvailable = false }
 
 function makeRepo(): { repo: string; home: string; cleanup: () => void } {
-  const repo = mkdtempSync(join(tmpdir(), 'dot-wt-repo-'))
+  // git reports the long physical path; resolve 8.3 short names (Windows CI) up front.
+  const repo = realpathSync.native(mkdtempSync(join(tmpdir(), 'dot-wt-repo-')))
   const home = mkdtempSync(join(tmpdir(), 'dot-wt-home-'))
   execFileSync('git', ['init', '-b', 'main'], { cwd: repo, stdio: 'ignore' })
   execFileSync('git', ['-C', repo, 'config', 'user.email', 'dot@spec.local'], { stdio: 'ignore' })

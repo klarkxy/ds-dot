@@ -1047,8 +1047,9 @@ describe('DotService reminders', () => {
     expect(h.relayed[0]!.text.startsWith(REMINDER_HEAD)).toBe(true)
     expect(h.relayed[0]!.text).toContain('Read the release task and report.')
     await vi.waitFor(() => expect(h.store.schedules.map(record => record.deliveredAt)).toEqual([1000 + 10 * 60_000]))
-    // The periodic reflection check keeps the clock armed even with no reminders.
-    expect(h.delays()).toEqual([30 * 60_000])
+    // The periodic reflection check keeps the clock armed even with no reminders;
+    // the usage capture debounce rides the same periodic wake.
+    expect(h.delays().sort((a, b) => a - b)).toEqual([2000, 30 * 60_000])
   })
 
   it('moves to a new segment first when one is due as the reminder fires', async () => {
@@ -1991,7 +1992,7 @@ describe('DotService work dispatch', () => {
 })
 
 function memoryDomain(seed: Record<string, Record<string, unknown>> = {}) {
-  const names = ['state', 'tasks', 'tickets', 'schedules', 'proposals', 'recipes', 'changes', 'inputs', 'runs', 'verifications']
+  const names = ['state', 'tasks', 'tickets', 'schedules', 'proposals', 'recipes', 'changes', 'inputs', 'runs', 'verifications', 'peers', 'inbox']
   const tables: Record<string, Map<string, unknown>> = {}
   for (const name of names) tables[name] = new Map(Object.entries(seed[name] ?? {}))
   const domain: DotDomainHandle = {
@@ -2644,6 +2645,136 @@ describe('task recipes', () => {
     await h.service.confirmFactoryReset(armed.token)
     expect(h.store.recipes).toEqual([])
     expect(h.service.previewFactoryReset().recipes).toBe(0)
+    await h.service.dispose()
+  })
+})
+
+describe('run usage capture triggers', () => {
+  const dir = () => mkdtempSync(join(tmpdir(), 'dsh-dot-usage-'))
+
+  async function settledRun(h: ReturnType<typeof setup>, events: import('./storage.ts').RawEvent[], title = 'one') {
+    await h.service.manageTask({ action: 'dispatch', dir: '/proj', title, message: 'go' })
+    const run = h.store.work.listRuns().at(-1)!
+    h.events.set(run.sessionId!, events)
+    await h.service.finishWorkRun(run.id, 'completed')
+    return run
+  }
+
+  it('a usage pass in flight cannot resurrect a run wiped by factory reset', async () => {
+    const h = setup()
+    const { domain, tables } = memoryDomain()
+    const store = new DotStore(domain)
+    await store.setSettings({ ...DEFAULT_SETTINGS, reflection: false, idleCheckMinutes: 0 })
+    const service = new DotService({ host: h.host, store, homeDir: join(tmpdir(), 'dsh-dot-spec'), approvalGraceMs: 0, timer: h.timer, now: () => 1000 })
+    await service.ensureDot()
+    await service.manageTask({ action: 'dispatch', dir: '/proj', title: 'one', message: 'go' })
+    const run = store.work.listRuns()[0]!
+    h.events.set(run.sessionId!, [{ type: 'assistant/message', time: 1, data: { usage: { inputTokens: 5, outputTokens: 1 } } }])
+    await service.finishWorkRun(run.id, 'completed')
+    // Park the capture pass inside readEvents; the reset must wait for it.
+    let release: () => void = () => {}
+    const gate = new Promise<void>(resolve => { release = resolve })
+    const original = h.host.readEvents.bind(h.host)
+    h.host.readEvents = async id => { await gate; return original(id) }
+    const pass = service.reconcile()
+    await new Promise(resolve => setTimeout(resolve, 20))
+    let resetDone = false
+    const reset = service.confirmFactoryReset(service.previewFactoryReset().token).then(result => { resetDone = true; return result })
+    await new Promise(resolve => setTimeout(resolve, 60))
+    // Blocked on the in-flight pass: the wipe cannot run while usage is landing.
+    expect(resetDone).toBe(false)
+    release()
+    await pass
+    const result = await reset
+    expect(result.archiveFailed).toEqual([])
+    expect(store.work.run(run.id)).toBeUndefined()
+    // Nothing was committed after the wipe: a reload finds no run row.
+    expect(tables.runs!.has(run.id)).toBe(false)
+    const reloaded = new DotStore(domain)
+    expect(reloaded.work.run(run.id)).toBeUndefined()
+    await service.dispose()
+    await h.service.dispose()
+  })
+
+  it('schedules a capture pass after work actions without waiting for the panel', async () => {
+    const h = setup()
+    await h.service.ensureDot()
+    const run = await settledRun(h, [
+      { type: 'assistant/message', time: 1000, data: { usage: { inputTokens: 10, outputTokens: 5 } } },
+      { type: 'assistant/message', time: 4000, data: { usage: { inputTokens: 1, outputTokens: 1 } } },
+    ])
+    // manageTask itself armed the debounce; no board() call was needed.
+    expect(h.delays()).toContain(2000)
+    h.fire()
+    await vi.waitFor(() => expect(h.store.work.run(run.id)?.usage).toEqual({ input: 11, cacheRead: 0, cacheWrite: 0, output: 6 }))
+    await h.service.dispose()
+  })
+
+  it('dot_read captures a settled run cost before formatting', async () => {
+    const h = setup()
+    await h.service.ensureDot()
+    const run = await settledRun(h, [
+      { type: 'assistant/message', time: 1000, data: { usage: { inputTokens: 10, outputTokens: 5 } } },
+      { type: 'assistant/message', time: 3000, data: { usage: { inputTokens: 2, outputTokens: 1 } } },
+    ])
+    expect(h.store.work.run(run.id)!.usage).toBeUndefined()
+    const text = await h.service.read(run.sessionId!)
+    expect(text).toContain(`run ${run.id} cost:`)
+    expect(text).toContain('tok')
+    expect(h.store.work.run(run.id)!.usage).toEqual({ input: 12, cacheRead: 0, cacheWrite: 0, output: 6 })
+    await h.service.dispose()
+  })
+
+  it('dot_recipe list runs a capture pass so costs land in stats', async () => {
+    const h = setup()
+    await h.service.ensureDot()
+    const run = await settledRun(h, [
+      { type: 'assistant/message', time: 1000, data: { usage: { inputTokens: 4, outputTokens: 2 } } },
+    ])
+    expect(h.store.work.run(run.id)!.usage).toBeUndefined()
+    await h.service.manageRecipe({ action: 'list' })
+    expect(h.store.work.run(run.id)!.usage).toEqual({ input: 4, cacheRead: 0, cacheWrite: 0, output: 2 })
+    await h.service.dispose()
+  })
+
+  it('pruning a tagged change captures its terminal runs cost into the outcome', async () => {
+    const h = setup()
+    const cwd = dir()
+    await h.service.ensureDot()
+    await h.service.manageRecipe({ action: 'save', name: 'stats', goal: 'run the pass', dir: cwd })
+    const first = JSON.parse(await h.service.manageTask({ action: 'create', recipe: 'stats' })) as { id: string }
+    const second = JSON.parse(await h.service.manageTask({ action: 'create', recipe: 'stats' })) as { id: string }
+    const started = await h.service.manageTask({ action: 'dispatch', task_id: first.id })
+    const runId = /started (run-\d+)/.exec(started)?.[1]!
+    const run = h.store.work.run(runId)!
+    h.events.set(run.sessionId!, [
+      { type: 'assistant/message', time: 1000, data: { usage: { inputTokens: 10, outputTokens: 5 } } },
+      { type: 'assistant/message', time: 3000, data: { usage: { inputTokens: 2, outputTokens: 1 } } },
+    ])
+    await h.service.manageTask({ action: 'cancel', task_id: first.id })
+    await h.service.manageTask({ action: 'cancel', task_id: second.id })
+    expect(h.store.work.run(runId)!.usage).toBeUndefined()
+    const prune = h.service as unknown as { pruneWorkArtifactsIfNeeded(maxKeep?: number): Promise<void> }
+    await prune.pruneWorkArtifactsIfNeeded(1)
+    const recipe = h.store.recipes[0]!
+    expect(recipe.outcomes[0]).toMatchObject({ changeId: first.id, result: 'cancelled', tokens: 18, wallMs: 2000 })
+    await h.service.dispose()
+  })
+
+  it('signals the store change after a pass records usage', async () => {
+    const h = setup()
+    await h.service.ensureDot()
+    await settledRun(h, [{ type: 'assistant/message', time: 1, data: { usage: { inputTokens: 3, outputTokens: 1 } } }])
+    let bumped = 0
+    const off = h.store.onChange(() => { bumped += 1 })
+    await h.service.reconcile()
+    off()
+    expect(bumped).toBeGreaterThan(0)
+    // A pass that records nothing stays quiet.
+    await h.service.reconcile()
+    const after = bumped
+    await h.service.reconcile()
+    expect(bumped).toBe(after)
     await h.service.dispose()
   })
 })

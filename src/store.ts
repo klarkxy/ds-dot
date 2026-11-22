@@ -611,6 +611,9 @@ export class DotStore {
     return () => { this.listeners.delete(listener) }
   }
 
+  /** A work-row mutation that bypassed a DotStore write still needs the board signal. */
+  workChanged(): void { this.changed() }
+
   /** Wait for queued writes; used on shutdown and in tests. */
   async flush(): Promise<void> { await this.tail.catch(() => undefined) }
 

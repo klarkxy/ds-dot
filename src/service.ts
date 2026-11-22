@@ -21,7 +21,7 @@ import {
   occupantOf, pathScope, plannedOccupant, plannedScope, requirementList, samePathList,
   stepList, verifyRefusal,
 } from './work-actions.ts'
-import { absoluteScopePath, changeIsTerminal, InputShapeError, inputContractError, occupantsConflict, runCostTotals, runIsTerminal, scopeWithinRoot, scopeWrites, type ChangeRecord, type Constraint, type Occupant, type Requirement, type RunRecord, type WorkRefusal } from './work.ts'
+import { absoluteScopePath, changeIsTerminal, MAX_COMPLETED_CHANGES, InputShapeError, inputContractError, occupantsConflict, runCostTotals, runIsTerminal, scopeWithinRoot, scopeWrites, type ChangeRecord, type Constraint, type Occupant, type Requirement, type RunRecord, type WorkRefusal } from './work.ts'
 import type { ShownView, ViewAnswer } from '@klarkxy/dsh-deep-view/contracts'
 import { DotCards, cardAnswerText, type DotCardRecord } from './card-state.ts'
 import { checkChatImages, type ChatImage } from './chat-images.ts'
@@ -205,7 +205,7 @@ export class DotService {
       now: this.now,
       deliver: text => this.remind(text),
       // The reflection check rides the reminder clock's periodic wake-up.
-      onPeriodic: () => { void this.reflection.tick().catch(() => undefined) },
+      onPeriodic: () => { this.scheduleRunUsage(); void this.reflection.tick().catch(() => undefined) },
       ...options.timer ? { timer: options.timer } : {},
       ...options.log ? { log: options.log } : {},
     })
@@ -864,6 +864,10 @@ export class DotService {
   }
 
   private async runFactoryReset(): Promise<FactoryResetResult> {
+    // No usage pass may start or commit while the book is being wiped; the flag
+    // is cleared on the way out whether the reset completes or throws.
+    this.usageStopped = true
+    try {
       const archiveIds = factoryResetArchiveIds(this.store)
       // The ownership list includes confirmed and uncertain host calls, but not
       // placeholder ids belonging to reservations that never reached the host.
@@ -906,6 +910,8 @@ export class DotService {
         throw new DotError('dot/reset-incomplete', `Factory reset is incomplete: sessions were stopped and archived, but cleanup failed (${messageOf(failure)}). Some files may already have been removed; Dorothy's records and settings are retained. Request a new preview to retry.`)
       }
       const activeLocale = this.currentLocale ?? this.store.uiLocale
+      if (this.usageHandle !== undefined) { this.timer.clear(this.usageHandle); this.usageHandle = undefined }
+      await this.usagePass
       try {
         await this.store.factoryReset(this.now())
       } catch (failure) {
@@ -935,6 +941,9 @@ export class DotService {
         data: { archived: archived.length, archiveFailed: archiveFailed.length },
       })
       return { archived, archiveFailed, sessionId, at: this.now() }
+    } finally {
+      this.usageStopped = false
+    }
   }
 
   /** Queue, agent idle, and owned jobs — the same facts finishSettled needs. Missing proof is UNKNOWN. */
@@ -1169,6 +1178,8 @@ export class DotService {
   private usagePass: Promise<void> | undefined
   private usageWanted = false
   private usageSeenRevision = -1
+  /** Set while a factory reset wipes the book: no pass may start or commit. */
+  private usageStopped = false
 
   /**
    * Debounced capture re-armed whenever the work revision moved since the last
@@ -1176,7 +1187,7 @@ export class DotService {
    * pass is scheduled by a capture itself.
    */
   private scheduleRunUsage(): void {
-    if (this.closing || this.usageSeenRevision === this.store.work.revision) return
+    if (this.closing || this.usageStopped || this.usageSeenRevision === this.store.work.revision) return
     this.usageSeenRevision = this.store.work.revision
     if (this.usageHandle !== undefined) this.timer.clear(this.usageHandle)
     this.usageHandle = this.timer.set(() => {
@@ -1187,6 +1198,7 @@ export class DotService {
 
   /** At most one pass at a time; another request during it queues one follow-up. */
   private captureRunUsage(): Promise<void> {
+    if (this.usageStopped || this.closing) return Promise.resolve()
     if (this.usagePass) {
       this.usageWanted = true
       return this.usagePass
@@ -1211,23 +1223,36 @@ export class DotService {
     const candidates = this.store.work.listRuns()
       .filter(run => runIsTerminal(run) && run.sessionId !== undefined && run.usage === undefined)
       .slice(0, 20)
+    let recorded = 0
     for (const run of candidates) {
-      if (this.closing) return
-      const sessionId = run.sessionId!
-      try {
-        const events = await this.host.readEvents(sessionId)
-        let firstAt: number | undefined
-        let lastAt: number | undefined
-        for (const event of events) {
-          if (typeof event.time !== 'number') continue
-          firstAt ??= event.time
-          lastAt = event.time
-        }
-        const wallMs = Math.max(0, firstAt !== undefined && lastAt !== undefined ? lastAt - firstAt : run.updatedAt - run.createdAt)
-        await this.store.work.recordRunUsage(run.id, usageFromEvents(events) ?? ZERO_USAGE, wallMs)
-      } catch (error) {
-        this.options.log?.(`dsh-dot: usage for run ${run.id} was not captured: ${messageOf(error)}`)
+      if (this.closing || this.usageStopped) return
+      if (await this.captureRunUsageFor(run.id)) recorded += 1
+    }
+    // Usage does not move the work revision, so the panel needs the store's
+    // change signal (the same one other writes use) to fetch the new numbers.
+    if (recorded > 0) this.store.workChanged()
+  }
+
+  /** Read one terminal run's session events and persist its cost. Returns true when usage is now recorded. */
+  private async captureRunUsageFor(runId: string): Promise<boolean> {
+    const run = this.store.work.run(runId)
+    const sessionId = run?.sessionId
+    if (!run || !runIsTerminal(run) || run.usage !== undefined || sessionId === undefined) return run?.usage !== undefined
+    try {
+      const events = await this.host.readEvents(sessionId)
+      let firstAt: number | undefined
+      let lastAt: number | undefined
+      for (const event of events) {
+        if (typeof event.time !== 'number') continue
+        firstAt ??= event.time
+        lastAt = event.time
       }
+      const wallMs = Math.max(0, firstAt !== undefined && lastAt !== undefined ? lastAt - firstAt : run.updatedAt - run.createdAt)
+      const recorded = await this.store.work.recordRunUsage(run.id, usageFromEvents(events) ?? ZERO_USAGE, wallMs)
+      return !('code' in recorded)
+    } catch (error) {
+      this.options.log?.(`dsh-dot: usage for run ${run.id} was not captured: ${messageOf(error)}`)
+      return false
     }
   }
 
@@ -1319,7 +1344,9 @@ export class DotService {
   manageTask(args: Record<string, unknown>): Promise<string> {
     const action = typeof args.action === 'string' ? args.action : ''
     const awaitsHost = ['finish', 'cancel', 'supplement', 'dispatch', 'check', 'closeout', 'reject'].includes(action)
-    return awaitsHost ? this.manageWorkAction(args) : this.serial(() => this.manageWorkAction(args))
+    const work = awaitsHost ? this.manageWorkAction(args) : this.serial(() => this.manageWorkAction(args))
+    // Settling runs earn their token/wall cost whether or not the panel is open.
+    return work.finally(() => this.scheduleRunUsage())
   }
 
   private async manageWorkAction(args: Record<string, unknown>): Promise<string> {
@@ -1463,8 +1490,13 @@ export class DotService {
     this.assertOpen()
     if (task) await this.store.markSeen(sessionId)
     const head = task ? `${task.status.toUpperCase()} "${task.title}" goal: ${task.goal}` : 'untracked session'
-    // A run that settled and had its usage captured reports its cost on its own line.
-    const run = this.store.work.sessionRun(sessionId)
+    // A run that settled earns its cost on its own line; capture it first when
+    // no pass has reached it yet.
+    let run = this.store.work.sessionRun(sessionId)
+    if (run && runIsTerminal(run) && run.usage === undefined) {
+      await this.captureRunUsageFor(run.id)
+      run = this.store.work.run(run.id)
+    }
     const cost = run?.usage
       ? `\nrun ${run.id} cost: ${formatTokens(totalUsage(run.usage))} tok${run.wallMs !== undefined ? ` · ${formatDuration(run.wallMs)}` : ''}`
       : ''
@@ -1527,7 +1559,9 @@ export class DotService {
 
   // ---- task recipes: saved, versioned work orders -----------------------
 
-  manageRecipe(args: Record<string, unknown>): Promise<string> {
+  async manageRecipe(args: Record<string, unknown>): Promise<string> {
+    const action = typeof args.action === 'string' ? args.action : ''
+    if (action === 'read' || action === 'list') await this.captureRunUsage()
     return this.serial(() => this.manageRecipeAction(args))
   }
 
@@ -2337,6 +2371,18 @@ export class DotService {
 
   private async pruneWorkArtifactsIfNeeded(maxKeep?: number): Promise<void> {
     try {
+      // The runs of a pruned change are deleted and their sessions' events are
+      // lost; capture their cost first. This cannot happen inside the prune
+      // callback: it holds the book's exclusive lane, which recordRunUsage
+      // also needs.
+      const runs = this.store.work.listRuns()
+      const terminal = this.store.work.listChanges()
+        .filter(change => changeIsTerminal(change, runs.filter(run => run.changeId === change.id)))
+        .sort((a, b) => a.updatedAt - b.updatedAt || Number(a.id.slice(2)) - Number(b.id.slice(2)))
+      const excess = Math.max(0, terminal.length - Math.max(1, maxKeep ?? MAX_COMPLETED_CHANGES))
+      for (const change of terminal.slice(0, excess)) {
+        for (const run of runs.filter(row => row.changeId === change.id)) await this.captureRunUsageFor(run.id)
+      }
       const { prunedChanges, keptArtifacts } = await this.store.pruneWorkHistory(maxKeep, async change => {
         // A tagged change records its terminal outcome on the recipe before its
         // rows are deleted; a removed recipe or an untagged change records none.

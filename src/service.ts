@@ -68,7 +68,7 @@ import { formatDuration, formatTokens } from './ui-copy.ts'
 import type { RawEvent } from './chat.ts'
 import { SelfSettings } from './self-settings.ts'
 import { approvalCardCopy, copyLocale, t, type CopyLocale } from './i18n/index.ts'
-import { HIGH_RISK_TOOLS, resolveGrants, type DotCapabilities } from './capabilities.ts'
+import { HIGH_RISK_TOOLS, HOST_SCHEDULE_MUTATORS, hostScheduleTargetsDot, resolveGrants, type DotCapabilities } from './capabilities.ts'
 import type { CapabilityCatalogView, CapabilityGrant, CapabilityGroupView } from './contracts.ts'
 import type { GateVerdict } from './tool-scope.ts'
 
@@ -454,6 +454,8 @@ export class DotService {
     if (!entry) return { kind: 'deny', reason: `The extra capability ${exec.name} was not applied to this segment.` }
     const live = caps.liveGrant(entry.chain)
     if (live !== 'ask' && live !== 'auto') return { kind: 'deny', reason: `The extra capability ${exec.name} is off.` }
+    const scheduled = this.hostScheduleGate(exec)
+    if (scheduled !== 'next') return scheduled
     if (live === 'auto') return 'next'
     const allowed = await this.askCapabilityApproval(exec, entry.chain)
     if (!allowed) return { kind: 'deny', reason: `The human declined ${exec.name}.` }
@@ -464,7 +466,23 @@ export class DotService {
     if (!reapplied) return { kind: 'deny', reason: `The extra capability ${exec.name} was not applied to this segment.` }
     const still = caps.liveGrant(reapplied.chain)
     if (still !== 'ask' && still !== 'auto') return { kind: 'deny', reason: `The extra capability ${exec.name} is off.` }
-    return 'next'
+    return this.hostScheduleGate(exec)
+  }
+
+  /**
+   * Host schedule_create/edit with target this_session (or a Dorothy segment
+   * id) cannot be delivered: the controller refuses subagent-origin sessions,
+   * and a later segment no longer uses that id. Reminders for Dorothy herself
+   * go through `dot_schedule`.
+   */
+  private hostScheduleGate(exec: { readonly name: string; readonly arguments?: unknown }): GateVerdict {
+    if (!HOST_SCHEDULE_MUTATORS.has(exec.name)) return 'next'
+    const ids = new Set<string>()
+    if (this.store.dotSessionId) ids.add(this.store.dotSessionId)
+    if (this.store.segment?.sessionId) ids.add(this.store.segment.sessionId)
+    for (const past of this.store.pastSegments) ids.add(past.sessionId)
+    if (!hostScheduleTargetsDot(exec.arguments, ids)) return 'next'
+    return { kind: 'deny', reason: `Host schedule tools cannot deliver to Dorothy's hidden session (this_session or a Dorothy segment id). Use ${TOOL.schedule} so the reminder follows the current conversation segment.` }
   }
 
   /**

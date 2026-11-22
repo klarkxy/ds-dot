@@ -364,9 +364,15 @@ function Capabilities({ locale, api, grants, onPick }: {
   const applied = view?.applied ?? {}
   const capNeedle = capFilter.trim().toLowerCase()
   const matchesTool = (tool: CapabilityToolView) => capNeedle === '' || tool.name.toLowerCase().includes(capNeedle) || (tool.description ?? '').toLowerCase().includes(capNeedle)
+  const displayedLabel = (group: CapabilityGroupView): string =>
+    group.kind === 'host' ? t(locale, 'sCapHostGroup')
+    : group.id === 'builtin' ? t(locale, 'sCapBuiltinGroup')
+    : group.id.startsWith('builtin:') ? t(locale, `sCapBuiltin_${group.id.slice('builtin:'.length)}` as TextKey)
+    : group.label
+  const groupSelfHits = (group: CapabilityGroupView): boolean =>
+    capNeedle !== '' && (displayedLabel(group).toLowerCase().includes(capNeedle) || group.id.toLowerCase().includes(capNeedle))
   const groupHits = (group: CapabilityGroupView): boolean =>
-    group.label.toLowerCase().includes(capNeedle) || group.id.toLowerCase().includes(capNeedle)
-      || group.tools.some(matchesTool) || (group.children ?? []).some(groupHits)
+    groupSelfHits(group) || group.tools.some(matchesTool) || (group.children ?? []).some(groupHits)
   const countTools = (group: CapabilityGroupView): number =>
     group.tools.length + (group.children ?? []).reduce((sum, child) => sum + countTools(child), 0)
   const kindLabel = (group: CapabilityGroupView): string =>
@@ -382,18 +388,16 @@ function Capabilities({ locale, api, grants, onPick }: {
     for (const selector of chain) { const grant = grants[selector]; if (grant !== undefined) return grant }
     return 'off'
   }
-  const groupRows = (group: CapabilityGroupView, parents: readonly string[]): ReactNode => {
+  const groupRows = (group: CapabilityGroupView, parents: readonly string[], showFull = false): ReactNode => {
     // The host and builtin groups are display-only: their tools grant one by one / via children.
     const chain = group.kind === 'host' || group.id === 'builtin' ? parents : [group.id, ...parents]
     const changed = group.tools.some(tool => (applied[tool.name] ?? 'off') !== effectiveFor([`tool:${tool.name}`, ...chain]))
     const granted = group.tools.some(tool => effectiveFor([`tool:${tool.name}`, ...chain]) !== 'off')
       || (group.children ?? []).some(child => child.tools.some(tool => effectiveFor([`tool:${tool.name}`, child.id, ...chain]) !== 'off'))
-    const label = group.kind === 'host' ? t(locale, 'sCapHostGroup')
-      : group.id === 'builtin' ? t(locale, 'sCapBuiltinGroup')
-      : group.id.startsWith('builtin:') ? t(locale, `sCapBuiltin_${group.id.slice('builtin:'.length)}` as TextKey)
-      : group.label
-    if (capNeedle !== '' && !groupHits(group)) return null
-    const tools = capNeedle === '' ? group.tools : group.tools.filter(matchesTool)
+    const label = displayedLabel(group)
+    const selfHit = showFull || groupSelfHits(group)
+    if (capNeedle !== '' && !selfHit && !groupHits(group)) return null
+    const tools = selfHit || capNeedle === '' ? group.tools : group.tools.filter(matchesTool)
     return (
       <details key={group.id} className="dsh-dot-cap-group" open={granted || capNeedle !== ''}>
         <summary className="dsh-dot-cap-head">
@@ -410,9 +414,11 @@ function Capabilities({ locale, api, grants, onPick }: {
         <div className="dsh-dot-cap-body">
           {tools.map(tool => {
             const toolChain = [`tool:${tool.name}`, ...chain]
-            // A single-tool group already carries the one grantable selector;
-            // show the second picker only when the tool has a grant of its own.
-            const soloNoOwnGrant = tools.length === 1 && (group.children ?? []).length === 0 && grants[`tool:${tool.name}`] === undefined
+            // Only a grantable group with exactly one tool has a picker to stand in for this row.
+            // Search that leaves a single visible tool must not hide the tool-level control.
+            const soloNoOwnGrant = group.kind !== 'host' && group.id !== 'builtin'
+              && group.tools.length === 1 && (group.children ?? []).length === 0
+              && grants[`tool:${tool.name}`] === undefined
             return (
               <div key={tool.name} className="dsh-dot-cap-row">
                 <span className="dsh-dot-cap-name dsh-dot-cap-tool">
@@ -426,7 +432,7 @@ function Capabilities({ locale, api, grants, onPick }: {
               </div>
             )
           })}
-          {(group.children ?? []).map(child => groupRows(child, chain))}
+          {(group.children ?? []).map(child => groupRows(child, chain, selfHit))}
         </div>
       </details>
     )
@@ -717,13 +723,14 @@ export function SettingsPanel({ locale, api, settings, section = 'all', proposal
   }, [api, keepaliveRefresh, hasSettings, modelKey, cacheTtlSig, proposalState.revision])
   useEffect(() => {
     if (!api.taskPermissionOptions) return
+    if (section !== 'all' && section !== 'dispatch') return
     const life = new AbortController()
     api.taskPermissionOptions(life.signal).then(
       value => { if (!life.signal.aborted && Array.isArray(value?.options)) setLivePermissions(value.options) },
       () => {},
     )
     return () => { life.abort() }
-  }, [api])
+  }, [api, section])
   const reportStatus = useCallback((next: SaveNotice | undefined) => {
     setStatus(next)
     onStatusChange?.(next)

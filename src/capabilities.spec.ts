@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { DEFAULT_SETTINGS, type CapabilityGroupView, type DotSettings } from './contracts.ts'
 import { parseSettings, patchSettings, CAPABILITY_GRANTS_MAX } from './settings.ts'
-import { buildCatalog, capabilitiesSignature, DotCapabilities, HIGH_RISK_TOOLS, installToolAttribution, mcpServerOf, resolveGrants, SCOPED_COPY, type CapabilityPluginManager, type CapabilityTools, type CapabilityToolDef } from './capabilities.ts'
+import { buildCatalog, capabilitiesSignature, DotCapabilities, HIGH_RISK_TOOLS, hostScheduleTargetsDot, installToolAttribution, mcpServerOf, resolveGrants, SCOPED_COPY, type CapabilityPluginManager, type CapabilityTools, type CapabilityToolDef } from './capabilities.ts'
 import { sharedAttribution } from './attribution.ts'
 import { reasonBeforeDelivery } from './segments.ts'
 import { gateToolExecution } from './tool-scope.ts'
@@ -179,6 +179,22 @@ describe('capability catalog', () => {
     const view = buildCatalog(catalogInput({ defs: fakeTools(['web_search', 'extra']).defs }))
     expect(view.groups.every(group => group.tools.every(tool => tool.name !== 'web_search'))).toBe(true)
     expect(view.locked).toContain('web_search')
+  })
+})
+
+describe('host schedule delivery target', () => {
+  it('treats this_session and Dorothy session ids as self-delivery', () => {
+    const ids = new Set(['dot-1', 'dot-old'])
+    expect(hostScheduleTargetsDot({ target: 'this_session' }, ids)).toBe(true)
+    expect(hostScheduleTargetsDot({ target: '  this_session  ' }, ids)).toBe(true)
+    expect(hostScheduleTargetsDot({ target: 'dot-1' }, ids)).toBe(true)
+    expect(hostScheduleTargetsDot({ target: 'dot-old' }, ids)).toBe(true)
+    expect(hostScheduleTargetsDot(JSON.stringify({ target: 'this_session' }), ids)).toBe(true)
+    expect(hostScheduleTargetsDot({ target: 'new_once' }, ids)).toBe(false)
+    expect(hostScheduleTargetsDot({ target: 'new' }, ids)).toBe(false)
+    expect(hostScheduleTargetsDot({ target: 'session-other' }, ids)).toBe(false)
+    expect(hostScheduleTargetsDot({ title: 't' }, ids)).toBe(false)
+    expect(hostScheduleTargetsDot(undefined, ids)).toBe(false)
   })
 })
 
@@ -589,6 +605,22 @@ describe('service-level capability gate', () => {
     await store.setSettings(settingsWith({ 'plugin:p': 'auto', 'tool:extra_tool': 'off' }))
     expect(await service.capabilityGate({ name: 'extra_tool' })).toMatchObject({ kind: 'deny' })
     expect(bundleCalls).toBe(before)
+  })
+
+  it('denies host schedule delivery to Dorothy herself and passes other targets', async () => {
+    const { store, service, apply } = serviceHarness({ 'tool:schedule_create': 'auto', 'tool:schedule_edit': 'auto' }, undefined, ['schedule_create', 'schedule_edit'])
+    await store.beginSegment({ sessionId: 'dot-1', startedAt: 1, persona: '' })
+    await apply()
+    await expect(service.capabilityGate({ name: 'schedule_create', arguments: { target: 'this_session', title: 't', prompt: 'p' } }))
+      .resolves.toMatchObject({ kind: 'deny', reason: expect.stringContaining('dot_schedule') })
+    await expect(service.capabilityGate({ name: 'schedule_create', arguments: { target: 'dot-1', title: 't', prompt: 'p' } }))
+      .resolves.toMatchObject({ kind: 'deny' })
+    await expect(service.capabilityGate({ name: 'schedule_create', arguments: JSON.stringify({ target: 'this_session' }) }))
+      .resolves.toMatchObject({ kind: 'deny' })
+    await expect(service.capabilityGate({ name: 'schedule_edit', arguments: { target: 'this_session' } }))
+      .resolves.toMatchObject({ kind: 'deny' })
+    await expect(service.capabilityGate({ name: 'schedule_create', arguments: { target: 'new_once', title: 't', prompt: 'p' } })).resolves.toBe('next')
+    await expect(service.capabilityGate({ name: 'schedule_create', arguments: { target: 'session-other' } })).resolves.toBe('next')
   })
 
   it('denies ungranted and unapplied extras, passes auto, and denies after a live revoke', async () => {

@@ -43,6 +43,34 @@ export const BUILTIN_GROUPS: readonly { readonly id: string; readonly label: str
   { id: 'plugin-manager', label: 'plugin-manager', tools: ['plugin_manager'] },
 ]
 
+/** Host schedule tools that can name a delivery session. */
+export const HOST_SCHEDULE_MUTATORS: ReadonlySet<string> = new Set(['schedule_create', 'schedule_edit'])
+
+function argsRecord(args: unknown): Record<string, unknown> | undefined {
+  if (args === undefined || args === null) return undefined
+  if (typeof args === 'string') {
+    try {
+      const parsed = JSON.parse(args) as unknown
+      return parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed as Record<string, unknown> : undefined
+    } catch { return undefined }
+  }
+  return typeof args === 'object' && !Array.isArray(args) ? args as Record<string, unknown> : undefined
+}
+
+/**
+ * Whether a host schedule_create/edit would deliver into Dorothy's hidden
+ * session. `this_session` resolves to the calling subagent session, which the
+ * host cannot deliver to; an explicit Dorothy session id has the same problem
+ * after a segment change. Use `dot_schedule` for reminders to Dorothy herself.
+ */
+export function hostScheduleTargetsDot(args: unknown, sessionIds: ReadonlySet<string>): boolean {
+  const target = argsRecord(args)?.target
+  if (typeof target !== 'string') return false
+  const key = target.trim()
+  if (key === 'this_session') return true
+  return sessionIds.has(key)
+}
+
 /**
  * Host tools whose rc5 self-escalation short-circuits under dot's
  * danger-full-access session: they run unsandboxed with no host approval, so
@@ -454,10 +482,9 @@ export class DotCapabilities {
 
   private bundlesCache?: { readonly at: number; readonly rows: readonly CapabilityBundle[] }
 
-  /** Mark the bundle rows stale and start a coalesced background refresh; cached rows keep serving meanwhile. */
+  /** Mark the bundle rows stale; the next catalog read starts the refresh. */
   invalidateBundles(): void {
     if (this.bundlesCache !== undefined) this.bundlesCache = { ...this.bundlesCache, at: 0 }
-    this.deferBundlesRefresh()
   }
 
   /** Kick the first bundle read early so the first catalog rarely awaits it. */
@@ -466,14 +493,18 @@ export class DotCapabilities {
   private bundlesRefresh?: Promise<void>
   private refreshBundles(): Promise<void> {
     if (this.bundlesRefresh !== undefined) return this.bundlesRefresh
-    const work = (async () => {
-      try {
-        const rows = await this.deps.pluginManager()?.listBundles() ?? []
+    let work: Promise<void>
+    try {
+      // Call listBundles now so the first catalog starts the scan in this turn.
+      // Catch a synchronous throw here: an async IIFE's finally would run
+      // before this.bundlesRefresh is assigned and stick a settled promise.
+      work = Promise.resolve(this.deps.pluginManager()?.listBundles() ?? []).then(rows => {
         this.bundlesCache = { at: Date.now(), rows }
-      } finally { this.bundlesRefresh = undefined }
-    })()
-    // A failed read reuses the last good answer; keep the stale stamp.
-    this.bundlesRefresh = work.catch(() => {})
+      })
+    } catch {
+      return Promise.resolve()
+    }
+    this.bundlesRefresh = work.catch(() => {}).finally(() => { this.bundlesRefresh = undefined })
     return this.bundlesRefresh
   }
 

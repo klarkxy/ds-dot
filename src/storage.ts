@@ -8,6 +8,7 @@ import { defineDomain, domainTable } from '@deepseek-ai/dsh-storage-domain'
 import { z } from 'zod'
 import type { ViewNode } from '@klarkxy/dsh-deep-view/contracts'
 import { SETTING_FIELDS, type CognitionVersion, type DotContextUsage, type DotUsageOffset, type InboxRecord, type RecipeProposal, type RecipeRecord, type TaskLink, type ReflectionRun, type ScheduleRecord, type SettingProposal, type TaskRecord } from './contracts.ts'
+import { migrateTaskPermissionBaseline, TASK_PERMISSIONS } from './settings.ts'
 import type { UpdateStatus } from './auto-update.ts'
 import type { PastSegment, Segment } from './segments.ts'
 import { changeSchema, constraintSchema, inputSchema, requirementSchema, runSchema, storedVerificationSchema } from './work.ts'
@@ -229,7 +230,15 @@ export interface DotState {
 export function parseSettingProposal(value: unknown): SettingProposal | undefined {
   const parsed = proposalSchema.safeParse(value)
   if (!parsed.success || !(SETTING_FIELDS as readonly string[]).includes(parsed.data.field)) return undefined
-  return parsed.data as SettingProposal
+  const proposal = parsed.data as SettingProposal
+  if (proposal.field !== 'taskPermission') return proposal
+  // A proposal whose target is the retired "follow host" value is stale; do
+  // not rewrite it into a different permission. A still-supported target keeps
+  // its after and migrates only the comparison baseline.
+  if (proposal.after === 'default') return undefined
+  if (typeof proposal.after === 'string' && !TASK_PERMISSIONS.has(proposal.after)) return undefined
+  const before = migrateTaskPermissionBaseline(proposal.before)
+  return before === proposal.before ? proposal : { ...proposal, before }
 }
 
 export const peerDeliverySchema = z.object({

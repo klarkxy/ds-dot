@@ -51,7 +51,12 @@ export class SettingsError extends Error {
 
 const isRecord = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === 'object' && !Array.isArray(value)
 
-const TASK_PERMISSIONS = new Set<string>(['workspace-write', 'danger-full-access', 'safe-auto', 'auto'])
+export const TASK_PERMISSIONS = new Set<string>(['workspace-write', 'danger-full-access', 'safe-auto', 'auto'])
+
+/** Stored `default` (follow host) from before that option was dropped. */
+export function migrateTaskPermissionBaseline(value: unknown): unknown {
+  return value === 'default' ? 'workspace-write' : value
+}
 
 /**
  * The stored settings; read field by field. A value that is not one of the

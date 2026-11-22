@@ -109,6 +109,32 @@ describe('capability bundle rows', () => {
     release!()
   })
 
+  it('does not scan plugin bundles on invalidateBundles itself', async () => {
+    let calls = 0
+    const caps = new DotCapabilities(deps(async () => { calls += 1; return [] }) as never)
+    await caps.catalog()
+    expect(calls).toBe(1)
+    caps.invalidateBundles()
+    await new Promise(resolve => setTimeout(resolve, 0))
+    expect(calls).toBe(1)
+    await caps.catalog()
+    await new Promise(resolve => setTimeout(resolve, 0))
+    expect(calls).toBe(2)
+  })
+
+  it('retries bundle refresh after a synchronous listBundles throw', async () => {
+    let calls = 0
+    const caps = new DotCapabilities(deps(() => {
+      calls += 1
+      if (calls === 1) throw new Error('sync fail')
+      return Promise.resolve([])
+    }) as never)
+    await caps.catalog()
+    expect(calls).toBe(1)
+    await caps.catalog()
+    expect(calls).toBe(2)
+  })
+
   it('exposes builtin groups and resolves builtin: grants to preset-scope tools', async () => {
     const view = buildCatalog({ defs: [], owners: new Map(), servers: [], bundles: [], grants: {}, locked: new Set(), conditional: () => false, builtinDescriptions: new Map([['skill', 'Run a skill']]) })
     const parent = view.groups.find(group => group.id === 'builtin')
@@ -220,6 +246,32 @@ describe('task permission options in the settings view', () => {
     expect(document.body.textContent).toContain('当前不可用')
     await act(async () => root.unmount())
   })
+
+  it('re-reads live options when switching to the dispatch page', async () => {
+    let options: TaskPermission[] = ['workspace-write', 'danger-full-access']
+    let reads = 0
+    const api = {
+      models: async () => ({ groups: [] }),
+      settings: async () => DEFAULT_SETTINGS,
+      settingProposals: async () => [],
+      decideSetting: async () => 'ok',
+      setSettings: async () => DEFAULT_SETTINGS,
+      taskPermissionOptions: async () => { reads += 1; return { options: [...options] } },
+    }
+    function Page({ section }: { section: 'general' | 'dispatch' }) {
+      return <SettingsPanel locale="zh" section={section} api={api as never} settings={DEFAULT_SETTINGS} onSaved={() => {}} />
+    }
+    const root = createRoot(document.getElementById('root')!)
+    await act(async () => root.render(<Page section="general" />))
+    await act(async () => { await Promise.resolve() })
+    expect(reads).toBe(0)
+    options = ['workspace-write', 'danger-full-access', 'safe-auto', 'auto']
+    await act(async () => root.render(<Page section="dispatch" />))
+    await act(async () => { await Promise.resolve() })
+    expect(reads).toBe(1)
+    expect(tabs()).toHaveLength(4)
+    await act(async () => root.unmount())
+  })
 })
 
 describe('task model picker', () => {
@@ -262,9 +314,47 @@ describe('capabilities page', () => {
     locked: ['dot_task'],
     groups: [
       { id: 'mcp:wiki', kind: 'mcp', label: 'wiki', tools: [{ name: 'mcp__wiki__find', description: 'find docs', conditional: false }] },
-      { id: 'plugin:p', kind: 'plugin', label: 'p', tools: [{ name: 'other_tool', conditional: false }] },
+      { id: 'plugin:p', kind: 'plugin', label: 'p', tools: [{ name: 'other_tool', conditional: false }, { name: 'other_list', conditional: false }] },
+      {
+        id: 'builtin', kind: 'builtin', label: 'builtin', tools: [],
+        children: [{
+          id: 'builtin:schedule', kind: 'builtin', label: 'schedule',
+          tools: [{ name: 'schedule_create', conditional: false }, { name: 'schedule_list', conditional: false }],
+        }],
+      },
+      { id: 'host', kind: 'host', label: 'Unattributed', tools: [{ name: 'loose_tool', conditional: false }] },
+      { id: 'plugin:solo', kind: 'plugin', label: 'solo', tools: [{ name: 'solo_tool', conditional: false }] },
     ],
     grants: {}, applied: {},
+  }
+
+  const groupIds = () => [...document.querySelectorAll('.dsh-dot-cap-head .dsh-dot-cap-name')].map(el => el.getAttribute('title'))
+  const toolRow = (name: string) => [...document.querySelectorAll('.dsh-dot-cap-row')].find(row => row.textContent?.includes(name))
+
+  async function mountCatalog() {
+    const api = {
+      models: async () => ({ groups: [] }),
+      settings: async () => DEFAULT_SETTINGS,
+      settingProposals: async () => [],
+      decideSetting: async () => 'ok',
+      setSettings: async () => DEFAULT_SETTINGS,
+      capabilities: async () => catalog,
+    }
+    const Harness = () => <SettingsPanel locale="zh" section="capabilities" api={api as never} settings={DEFAULT_SETTINGS} onSaved={() => {}} />
+    const root = createRoot(document.getElementById('root')!)
+    await act(async () => root.render(<Harness />))
+    await act(async () => { await Promise.resolve() })
+    return root
+  }
+
+  async function search(text: string) {
+    const input = document.querySelector<HTMLInputElement>('.dsh-dot-cap-search input')!
+    await act(async () => {
+      input.value = text
+      const propsKey = Object.keys(input).find(key => key.startsWith('__reactProps'))
+      const props = propsKey ? (input as unknown as Record<string, { onChange?: (event: { target: HTMLElement }) => void }>)[propsKey] : undefined
+      props?.onChange?.({ target: input })
+    })
   }
 
   it('shows a skeleton while loading and filters groups by search text', async () => {
@@ -285,12 +375,33 @@ describe('capabilities page', () => {
     await act(async () => { resolveView!(catalog); await Promise.resolve() })
     expect(document.querySelector('.dsh-dot-cap-intro')?.textContent).toContain('宿主提供的工具')
     expect(document.querySelectorAll('.dsh-dot-cap-group').length).toBeGreaterThanOrEqual(3)
-    // Search narrows to the matching group.
-    const input = document.querySelector<HTMLInputElement>('.dsh-dot-cap-search')!
-    await act(async () => { input.value = 'wiki'; input.dispatchEvent(new dom.window.Event('input', { bubbles: true })) })
-    const names = [...document.querySelectorAll('.dsh-dot-cap-head .dsh-dot-cap-name')].map(el => el.textContent ?? '')
-    expect(names.some(text => text.includes('wiki'))).toBe(true)
-    expect(names.some(text => text === 'p' || text.startsWith('pMCP'))).toBe(false)
+    await search('wiki')
+    expect(groupIds()).toContain('mcp:wiki')
+    expect(groupIds()).not.toContain('plugin:p')
+    await act(async () => root.unmount())
+  })
+
+  it('keeps a tool-level grant on a host singleton and on a search-narrowed plugin tool', async () => {
+    const root = await mountCatalog()
+    expect(toolRow('loose_tool')?.querySelector('.dsh-dot-cap-grant')).not.toBeNull()
+    expect(toolRow('solo_tool')?.querySelector('.dsh-dot-cap-grant')).toBeNull()
+    await search('other_list')
+    expect(toolRow('other_list')?.querySelector('.dsh-dot-cap-grant')).not.toBeNull()
+    expect(toolRow('other_tool')).toBeUndefined()
+    await act(async () => root.unmount())
+  })
+
+  it('shows the full subtree when the search hits a group id or localized name', async () => {
+    const root = await mountCatalog()
+    await search('builtin:schedule')
+    expect(groupIds()).toContain('builtin:schedule')
+    expect(toolRow('schedule_create')).not.toBeUndefined()
+    expect(toolRow('schedule_list')).not.toBeUndefined()
+    expect(groupIds()).not.toContain('plugin:p')
+    await search('定时任务')
+    expect(groupIds()).toContain('builtin:schedule')
+    expect(toolRow('schedule_create')).not.toBeUndefined()
+    expect(toolRow('schedule_list')).not.toBeUndefined()
     await act(async () => root.unmount())
   })
 })

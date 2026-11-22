@@ -461,7 +461,9 @@ function parsePatch(body: string): DiffLine[] {
 const DIFF_LINE_LIMIT = 2_000
 
 function DiffView({ locale, path, body, onQuote }: { readonly locale: CopyLocale; readonly path: string; readonly body: string; readonly onQuote?: (line: string) => void }) {
-  const rows = useMemo(() => parsePatch(body), [body])
+  // File header rows (Index:/===/---/+++) never render, so they must not count
+  // toward the truncation numbers either.
+  const rows = useMemo(() => parsePatch(body).filter(row => row.kind !== 'meta'), [body])
   // A huge delivery would otherwise mount tens of thousands of rows at once.
   const [all, setAll] = useState(false)
   const capped = !all && rows.length > DIFF_LINE_LIMIT

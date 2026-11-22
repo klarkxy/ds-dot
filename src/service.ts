@@ -18,7 +18,7 @@ import { attentionItems } from './board-groups.ts'
 import { renderBrief, renderSupplement, runTitle } from './brief.ts'
 import { bindRunSession, cancelWork, countRelayInserts, finishWork, launchReservedRun, observeRun, reconcileRun, supplementRun } from './execution.ts'
 import { detectWorkspaceRoot } from './git-root.ts'
-import { commitAll, createTaskWorktree, listTaskWorktrees, mergeInto, removeManagedWorktreeDir, removeTaskWorktree, runGit, taskWorktreeRoot, type GitRunner } from './git-worktree.ts'
+import { commitDelivery, createTaskWorktree, listTaskWorktrees, mergeInto, removeTaskWorktree, runGit, taskWorktreeRoot, type GitRunner } from './git-worktree.ts'
 import {
   WRITE_PATHS_EXAMPLE, artifactName, constraintList, jsonArray,
   occupantOf, pathScope, plannedOccupant, plannedScope, requirementList, samePathList,
@@ -841,8 +841,13 @@ export class DotService {
     this.assertOpen()
     const issued = issueFactoryResetToken(this.now())
     this.resetArmed = issued
+    // Only worktrees a change's isolation record points at are reset candidates;
+    // unknown dirs under <homeDir>/worktrees never count and are never touched.
+    const worktrees = this.store.work.listChanges()
+      .filter(change => change.isolation?.kind === 'worktree' && existsSync(change.isolation.worktree))
+      .length
     return {
-      ...factoryResetCounts(this.store, this.inbox.list().length, listTaskWorktrees(this.options.homeDir).length),
+      ...factoryResetCounts(this.store, this.inbox.list().length, worktrees),
       token: issued.token,
       expiresAt: issued.expiresAt,
       archiveSessionIds: factoryResetArchiveIds(this.store),
@@ -914,8 +919,15 @@ export class DotService {
         await this.options.peers?.clear()
         await this.inbox.clear()
         wipeArtifacts(this.options.homeDir)
-        for (const dir of listTaskWorktrees(this.options.homeDir)) {
-          await removeManagedWorktreeDir(dir, this.git())
+        // Reset removes only the worktrees change records point at, with the
+        // recorded repo and branch — never unknown dirs under home/worktrees.
+        for (const change of this.store.work.listChanges()) {
+          const isolation = change.isolation
+          if (isolation?.kind !== 'worktree') continue
+          await removeTaskWorktree({ repoRoot: isolation.repoRoot, worktree: isolation.worktree, branch: isolation.branch, baseSha: isolation.baseSha }, this.git()).catch(() => undefined)
+        }
+        for (const leftover of listTaskWorktrees(this.options.homeDir)) {
+          this.options.log?.(`dsh-dot: factory reset left unmanaged dir ${leftover} under worktrees`)
         }
       } catch (failure) {
         throw new DotError('dot/reset-incomplete', `Factory reset is incomplete: sessions were stopped and archived, but cleanup failed (${messageOf(failure)}). Some files may already have been removed; Dorothy's records and settings are retained. Request a new preview to retry.`)
@@ -2520,29 +2532,41 @@ export class DotService {
     const view = this.store.work.workView(changeId)
     if (!change.closeout || view?.status !== 'done') return { ok: false, code: 'invalid', message: `${changeId} is not accepted yet` }
     const git = this.git()
-    let commitSha: string | undefined
-    try {
-      commitSha = await commitAll(isolation.worktree, `${change.title}\n\nDorothy task ${changeId}`, git)
-    } catch (error) {
-      return { ok: false, code: 'failed', message: `commit in the task worktree failed: ${messageOf(error)}` }
-    }
-    const mark = (patch: Partial<Omit<TaskIsolation, 'kind' | 'repoRoot' | 'worktree' | 'branch' | 'baseSha'>>) =>
-      this.store.work.updateIsolation(changeId, { ...(commitSha !== undefined ? { commitSha } : {}), ...patch }, this.now())
+    const mark = (patch: Partial<Omit<TaskIsolation, 'kind' | 'repoRoot' | 'worktree' | 'branch' | 'baseSha'>> & { commitSha?: string }) =>
+      this.store.work.updateIsolation(changeId, patch, this.now())
     if (mode === 'discard') {
       await removeTaskWorktree({ repoRoot: isolation.repoRoot, worktree: isolation.worktree, branch: isolation.branch, force: true }, git)
       await mark({ state: 'discarded' })
       return this.integrated(change, `discarded ${isolation.branch}`)
     }
+    // keep/merge commit exactly the accepted delivery: each delivered path is
+    // re-verified against its snapshot hash, and nothing extra may be dirty.
+    const subject = this.store.work.verification(change.closeout.verificationId)?.subject
+    if (!subject) return { ok: false, code: 'invalid', message: `${changeId} has no delivery subject to integrate` }
+    let commitSha: string | undefined
+    try {
+      const committed = await commitDelivery({ worktree: isolation.worktree, files: subject.changes, message: `${change.title}\n\nDorothy task ${changeId}` }, git)
+      if (!committed.ok) return { ok: false, code: 'failed', message: committed.message }
+      commitSha = committed.commitSha
+    } catch (error) {
+      return { ok: false, code: 'failed', message: `commit in the task worktree failed: ${messageOf(error)}` }
+    }
+    const withSha = (patch: Parameters<typeof mark>[0]) => mark({ ...(commitSha !== undefined ? { commitSha } : {}), ...patch })
     if (mode === 'keep') {
       await removeTaskWorktree({ repoRoot: isolation.repoRoot, worktree: isolation.worktree }, git)
-      await mark({ state: 'committed' })
+      await withSha({ state: 'committed' })
       return this.integrated(change, `kept branch ${isolation.branch}; the worktree directory was removed`)
     }
-    const merged = await mergeInto({ repoRoot: isolation.repoRoot, branch: isolation.branch, deliveredPaths: view.verification?.changes?.map(row => row.path) ?? [] }, git)
+    const delivered = subject.changes.map(row => row.path)
+    const merged = await mergeInto({
+      repoRoot: isolation.repoRoot, branch: isolation.branch,
+      deliveredPaths: delivered,
+      addedPaths: subject.changes.filter(row => row.kind === 'added').map(row => row.path),
+    }, git)
     if (!merged.ok) {
       return { ok: false, code: merged.conflicts ? 'conflict' : 'invalid', message: merged.message ?? 'merge failed', ...(merged.conflicts ? { conflicts: merged.conflicts } : {}) }
     }
-    await mark({ state: 'merged', ...(merged.mergedInto ? { mergedInto: merged.mergedInto } : {}) })
+    await withSha({ state: 'merged', ...(merged.mergedInto ? { mergedInto: merged.mergedInto } : {}) })
     // The branch is merged now, so -d succeeds and the worktree goes with it.
     await removeTaskWorktree({ repoRoot: isolation.repoRoot, worktree: isolation.worktree, branch: isolation.branch }, git)
     return this.integrated(change, `merged ${isolation.branch} into ${merged.mergedInto}`)

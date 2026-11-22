@@ -284,6 +284,7 @@ const recipeBodyFields = {
   model: z.string().optional(),
   access: z.enum(['read', 'write']).optional(),
   humanReview: z.boolean().optional(),
+  isolation: z.literal('worktree').optional(),
 }
 
 const recipeSchema = z.object({

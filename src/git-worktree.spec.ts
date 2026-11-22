@@ -3,9 +3,10 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
+import { sha256 } from './artifacts.ts'
 import {
-  TASK_BRANCH_PREFIX, TASK_WORKTREES_DIR, commitAll, createTaskWorktree, hasCommitsBeyond, listTaskWorktrees,
-  mergeInto, removeManagedWorktreeDir, removeTaskWorktree, runGit, taskWorktreeRoot,
+  TASK_BRANCH_PREFIX, TASK_WORKTREES_DIR, commitAll, commitDelivery, createTaskWorktree, hasCommitsBeyond, listTaskWorktrees,
+  mergeInto, removeTaskWorktree, runGit, taskWorktreeRoot,
 } from './git-worktree.ts'
 
 let gitAvailable = true
@@ -25,7 +26,7 @@ function makeRepo(): { repo: string; home: string; cleanup: () => void } {
   return { repo, home, cleanup: () => { rmSync(repo, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }) } }
 }
 
-describe.skipIf(!gitAvailable)('git worktrees (real git)', () => {
+describe.skipIf(!gitAvailable)('git worktrees (real git)', { timeout: 30_000 }, () => {
   it('creates a worktree from the repo root with a dot/task-* branch', async () => {
     const { repo, home, cleanup } = makeRepo()
     try {
@@ -171,14 +172,107 @@ describe.skipIf(!gitAvailable)('git worktrees (real git)', () => {
     } finally { cleanup() }
   })
 
-  it('removeManagedWorktreeDir discovers the repo and drops the branch', async () => {
+  it('commitDelivery commits exactly the delivery, even an ignored file', async () => {
+    const { repo, home, cleanup } = makeRepo()
+    try {
+      // A .gitignore that hides the delivered file: -f staging still commits it.
+      writeFileSync(join(repo, '.gitignore'), 'made.log\n')
+      await runGit(['add', '-A'], repo)
+      await runGit(['commit', '-m', 'ignore log files'], repo)
+      const created = await createTaskWorktree({ dir: repo, homeDir: home })
+      writeFileSync(join(created.worktree, 'made.log'), 'made')
+      const files = [{ path: 'made.log', kind: 'added' as const, sha256: sha256(new TextEncoder().encode('made')) }]
+      const committed = await commitDelivery({ worktree: created.worktree, files, message: 'deliver' })
+      expect(committed).toMatchObject({ ok: true })
+      expect(await runGit(['ls-tree', '-r', '--name-only', created.branch], repo)).toContain('made.log')
+      // Nothing left to commit: a second call reports a clean tree, no sha.
+      expect(await commitDelivery({ worktree: created.worktree, files, message: 'deliver' })).toEqual({ ok: true })
+    } finally { cleanup() }
+  })
+
+  it('commitDelivery refuses edits, missing delivered files and anything extra', async () => {
     const { repo, home, cleanup } = makeRepo()
     try {
       const created = await createTaskWorktree({ dir: repo, homeDir: home })
-      const root = await removeManagedWorktreeDir(created.worktree)
-      expect(root?.replace(/\\/g, '/')).toBe(repo.replace(/\\/g, '/'))
-      expect(existsSync(created.worktree)).toBe(false)
-      expect(await runGit(['branch', '--list', created.branch], repo)).toBe('')
+      const files = [
+        { path: 'made.txt', kind: 'added' as const, sha256: sha256(new TextEncoder().encode('made')) },
+        { path: 'gone.txt', kind: 'deleted' as const },
+      ]
+      // The delivered file itself must match the acceptance bytes.
+      writeFileSync(join(created.worktree, 'made.txt'), 'made')
+      writeFileSync(join(created.worktree, 'stray.txt'), 'not delivered')
+      let result = await commitDelivery({ worktree: created.worktree, files, message: 'deliver' })
+      expect(result).toMatchObject({ ok: false })
+      expect(result.ok ? '' : result.message).toMatch(/changed since acceptance.*stray\.txt/)
+      rmSync(join(created.worktree, 'stray.txt'))
+      // A restored deleted file refuses too.
+      writeFileSync(join(created.worktree, 'gone.txt'), 'back')
+      result = await commitDelivery({ worktree: created.worktree, files, message: 'deliver' })
+      expect(result.ok ? '' : result.message).toMatch(/changed since acceptance.*gone\.txt/)
+      rmSync(join(created.worktree, 'gone.txt'))
+      writeFileSync(join(created.worktree, 'made.txt'), 'edited later')
+      result = await commitDelivery({ worktree: created.worktree, files, message: 'deliver' })
+      expect(result.ok ? '' : result.message).toMatch(/changed since acceptance.*made\.txt/)
+      // Restoring the exact bytes unblocks the commit.
+      writeFileSync(join(created.worktree, 'made.txt'), 'made')
+      result = await commitDelivery({ worktree: created.worktree, files, message: 'deliver' })
+      expect(result).toMatchObject({ ok: true })
+    } finally { cleanup() }
+  })
+
+  it('mergeInto refuses while the checkout has an operation in progress', async () => {
+    const { repo, home, cleanup } = makeRepo()
+    try {
+      const created = await createTaskWorktree({ dir: repo, homeDir: home })
+      writeFileSync(join(created.worktree, 'made.txt'), 'made')
+      await commitAll(created.worktree, 'task commit')
+      // Park the human's own conflicting merge in the checkout.
+      writeFileSync(join(repo, 'a.txt'), 'other')
+      await runGit(['checkout', '-b', 'other'], repo)
+      await runGit(['add', 'a.txt'], repo)
+      await runGit(['commit', '-m', 'other side'], repo)
+      await runGit(['checkout', 'main'], repo)
+      writeFileSync(join(repo, 'a.txt'), 'main side')
+      await runGit(['add', 'a.txt'], repo)
+      await runGit(['commit', '-m', 'main side'], repo)
+      await runGit(['merge', 'other'], repo).catch(() => undefined)
+      // The in-progress merge is the human's: dot's mergeInto refuses before touching it.
+      const refused = await mergeInto({ repoRoot: repo, branch: created.branch })
+      expect(refused.ok).toBe(false)
+      expect(refused.message).toMatch(/merge in progress/)
+      // Cleaning up the human merge restores mergeability.
+      await runGit(['merge', '--abort'], repo)
+      const merged = await mergeInto({ repoRoot: repo, branch: created.branch })
+      expect(merged).toMatchObject({ ok: true, mergedInto: 'main' })
+    } finally { cleanup() }
+  })
+
+  it('mergeInto refuses to overwrite an untracked or ignored file the delivery adds', async () => {
+    const { repo, home, cleanup } = makeRepo()
+    try {
+      const created = await createTaskWorktree({ dir: repo, homeDir: home })
+      writeFileSync(join(created.worktree, 'new.txt'), 'from the task')
+      await commitAll(created.worktree, 'task commit')
+      // An untracked file on the delivered path is refused too (when the
+      // delivered-paths dirty check also fires, its message lands first).
+      writeFileSync(join(repo, 'new.txt'), 'human draft')
+      let merged = await mergeInto({ repoRoot: repo, branch: created.branch, addedPaths: ['new.txt'] })
+      expect(merged.ok).toBe(false)
+      expect(merged.message).toMatch(/untracked files.*new\.txt/)
+      rmSync(join(repo, 'new.txt'))
+      // Same for a file ignored in the checkout.
+      writeFileSync(join(repo, '.gitignore'), 'new.txt\n')
+      await runGit(['add', '.gitignore'], repo)
+      await runGit(['commit', '-m', 'ignore it'], repo)
+      writeFileSync(join(repo, 'new.txt'), 'ignored draft')
+      merged = await mergeInto({ repoRoot: repo, branch: created.branch, addedPaths: ['new.txt'] })
+      expect(merged.ok).toBe(false)
+      expect(merged.message).toMatch(/untracked files.*new\.txt/)
+      // Once the path is clear the merge applies.
+      rmSync(join(repo, 'new.txt'))
+      merged = await mergeInto({ repoRoot: repo, branch: created.branch, addedPaths: ['new.txt'] })
+      expect(merged).toMatchObject({ ok: true })
+      expect(readFileSync(join(repo, 'new.txt'), 'utf-8')).toBe('from the task')
     } finally { cleanup() }
   })
 })

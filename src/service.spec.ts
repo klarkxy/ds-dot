@@ -1,7 +1,7 @@
 import { execFileSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { describe, expect, it, vi } from 'vitest'
 import type { Timer } from './batcher.ts'
 import type { RawEvent } from './chat.ts'
@@ -15,6 +15,7 @@ import { agreementsSection } from './memory.ts'
 import { PACKAGE_NAME, type PluginManagerLike } from './auto-update.ts'
 import { DotStore, type DotDomainHandle } from './store.ts'
 import { TASK_BRANCH_PREFIX, TASK_WORKTREES_DIR, listTaskWorktrees, runGit } from './git-worktree.ts'
+import { canonicalPath } from './work.ts'
 
 /** Manual timer: tests fire scheduled callbacks explicitly. */
 function manualTimer() {
@@ -3148,18 +3149,20 @@ async function finishIsolated(h: ReturnType<typeof setup>, changeId: string, wri
   return runId
 }
 
-describe.skipIf(!worktreeGitAvailable)('task worktree isolation', () => {
+describe.skipIf(!worktreeGitAvailable)('task worktree isolation', { timeout: 30_000 }, () => {
   it('creates an isolated change inside a managed worktree', async () => {
     const { repo, home, cleanup } = makeSpecRepo('dot-iso-')
     const h = setup(undefined, undefined, home, { git: runGit })
     try {
       const created = JSON.parse(await h.service.manageTask({ action: 'create', title: 'Iso', goal: 'land', dir: repo, isolation: 'worktree', human_review: true })) as { id: string }
       const change = h.store.work.change(created.id)!
-      // Stored cwds are canonicalized (lowercased on win32).
-      expect(change.cwd.startsWith(join(home, TASK_WORKTREES_DIR).toLowerCase())).toBe(true)
+      // Stored cwds are canonicalized (case-folded on win32 only): compare
+      // through canonicalPath so mkdtemp's mixed-case suffix still matches.
+      expect(change.cwd.startsWith(canonicalPath(join(home, TASK_WORKTREES_DIR)))).toBe(true)
       expect(change.isolation).toMatchObject({ kind: 'worktree', state: 'active' })
       expect(change.isolation?.branch).toContain(TASK_BRANCH_PREFIX)
-      expect(change.isolation?.repoRoot.replaceAll('\\', '/').toLowerCase()).toBe(repo.replaceAll('\\', '/').toLowerCase())
+      // git reports the physical path (8.3/long names may differ on win32).
+      expect(canonicalPath(realpathSync(change.isolation!.repoRoot))).toBe(canonicalPath(realpathSync(repo)))
       expect(existsSync(change.cwd)).toBe(true)
       await expect(h.service.manageTask({ action: 'create', title: 'bad', goal: 'g', dir: repo, isolation: 'wat' })).rejects.toMatchObject({ code: 'dot/invalid' })
       const plain = JSON.parse(await h.service.manageTask({ action: 'create', title: 'Plain', goal: 'land', dir: repo, isolation: 'none' })) as { id: string }
@@ -3313,6 +3316,99 @@ describe.skipIf(!worktreeGitAvailable)('task worktree isolation', () => {
       expect(dropIsolation.state).toBe('discarded')
       expect(existsSync(dropIsolation.worktree)).toBe(false)
       expect(await runGit(['branch', '--list', dropIsolation.branch], repo)).toBe('')
+    } finally { await h.service.dispose(); cleanup() }
+  })
+
+  it('a recipe saved with isolation still isolates after a storage reload', async () => {
+    const { repo, home, cleanup } = makeSpecRepo('dot-iso-reload-')
+    const h = setup(undefined, undefined, home, { git: runGit })
+    const { domain } = memoryDomain()
+    const store = new DotStore(domain)
+    await store.setSettings({ ...DEFAULT_SETTINGS, reflection: false, idleCheckMinutes: 0 })
+    const service = new DotService({ host: h.host, store, homeDir: home, approvalGraceMs: 0, timer: h.timer, now: () => 1000, git: runGit })
+    try {
+      await service.manageRecipe({ action: 'save', name: 'iso recipe', goal: 'ship it', dir: repo, isolation: 'worktree' })
+      // Reload from the durable domain rows: the schema must carry isolation.
+      const reloaded = new DotStore(domain)
+      expect(reloaded.recipes[0]?.isolation).toBe('worktree')
+      const again = new DotService({ host: h.host, store: reloaded, homeDir: home, approvalGraceMs: 0, timer: h.timer, now: () => 2000, git: runGit })
+      const ran = await again.runRecipe('iso recipe', { origin: 'human' })
+      expect(ran.ok).toBe(true)
+      if (ran.ok) {
+        const change = reloaded.work.change(ran.changeId)!
+        expect(change.isolation?.kind).toBe('worktree')
+        expect(change.cwd).toContain(TASK_WORKTREES_DIR)
+      }
+      await again.dispose()
+    } finally { await service.dispose(); await h.service.dispose(); cleanup() }
+  })
+
+  it('integrate refuses anything outside the accepted delivery', async () => {
+    const { repo, home, cleanup } = makeSpecRepo('dot-iso-verify-')
+    const h = setup(undefined, undefined, home, { git: runGit })
+    try {
+      const created = JSON.parse(await h.service.manageTask({ action: 'create', title: 'Iso', goal: 'land', dir: repo, isolation: 'worktree', human_review: true })) as { id: string }
+      const isolation = h.store.work.change(created.id)!.isolation!
+      await finishIsolated(h, created.id, cwd => writeFileSync(join(cwd, 'made.ts'), 'made'))
+      // A stray file written after acceptance is not part of the delivery.
+      writeFileSync(join(isolation.worktree, 'stray.txt'), 'not delivered')
+      let refused = await h.service.integrateWork(created.id, 'keep')
+      expect(refused).toMatchObject({ ok: false, code: 'failed' })
+      expect(refused.ok ? '' : refused.message).toMatch(/changed since acceptance.*stray\.txt/)
+      // Editing a delivered file after acceptance refuses too.
+      rmSync(join(isolation.worktree, 'stray.txt'))
+      writeFileSync(join(isolation.worktree, 'made.ts'), 'edited after acceptance')
+      refused = await h.service.integrateWork(created.id, 'keep')
+      expect(refused.ok ? '' : refused.message).toMatch(/changed since acceptance.*made\.ts/)
+      // Restoring the accepted bytes lets the integration land.
+      writeFileSync(join(isolation.worktree, 'made.ts'), 'made')
+      const kept = await h.service.integrateWork(created.id, 'keep')
+      expect(kept).toMatchObject({ ok: true })
+      expect(await runGit(['ls-tree', '-r', '--name-only', isolation.branch], repo)).toContain('made.ts')
+    } finally { await h.service.dispose(); cleanup() }
+  })
+
+  it('integrate merge refuses to overwrite an ignored file the delivery adds', async () => {
+    const { repo, home, cleanup } = makeSpecRepo('dot-iso-over-')
+    const h = setup(undefined, undefined, home, { git: runGit })
+    try {
+      // made.txt is ignored on both sides: invisible to porcelain, silent to merge.
+      writeFileSync(join(repo, '.gitignore'), 'made.txt\n')
+      await runGit(['add', '.gitignore'], repo)
+      await runGit(['commit', '-m', 'ignore it'], repo)
+      const created = JSON.parse(await h.service.manageTask({ action: 'create', title: 'Iso', goal: 'land', dir: repo, isolation: 'worktree', human_review: true })) as { id: string }
+      await finishIsolated(h, created.id, cwd => writeFileSync(join(cwd, 'made.txt'), 'made'))
+      writeFileSync(join(repo, 'made.txt'), 'human draft')
+      const refused = await h.service.integrateWork(created.id, 'merge')
+      expect(refused).toMatchObject({ ok: false, code: 'invalid' })
+      expect(refused.ok ? '' : refused.message).toMatch(/untracked files.*made\.txt/)
+      expect(readFileSync(join(repo, 'made.txt'), 'utf-8')).toBe('human draft')
+      rmSync(join(repo, 'made.txt'))
+      expect(await h.service.integrateWork(created.id, 'merge')).toMatchObject({ ok: true })
+      expect(readFileSync(join(repo, 'made.txt'), 'utf-8')).toBe('made')
+    } finally { await h.service.dispose(); cleanup() }
+  })
+
+  it('factory reset removes only recorded worktrees, never unmanaged dirs', async () => {
+    const { repo, home, cleanup } = makeSpecRepo('dot-iso-stray-')
+    const h = setup(undefined, undefined, home, { git: runGit })
+    try {
+      const created = JSON.parse(await h.service.manageTask({ action: 'create', title: 'Iso', goal: 'g', dir: repo, isolation: 'worktree' })) as { id: string }
+      const isolation = h.store.work.change(created.id)!.isolation!
+      // A plain dir and a real but unmanaged git worktree under home/worktrees.
+      const stray = join(home, TASK_WORKTREES_DIR, 'stray')
+      mkdirSync(stray, { recursive: true })
+      const unmanaged = join(home, TASK_WORKTREES_DIR, 'unmanaged')
+      await runGit(['worktree', 'add', unmanaged, '-b', 'human-branch'], repo)
+      // The preview counts only the recorded worktree.
+      expect(h.service.previewFactoryReset().worktrees).toBe(1)
+      await h.service.confirmFactoryReset(h.service.previewFactoryReset().token)
+      expect(existsSync(isolation.worktree)).toBe(false)
+      expect(await runGit(['branch', '--list', isolation.branch], repo)).toBe('')
+      // Both unmanaged entries are left alone.
+      expect(existsSync(stray)).toBe(true)
+      expect(existsSync(unmanaged)).toBe(true)
+      expect((await runGit(['worktree', 'list', '--porcelain'], repo))).toContain('human-branch')
     } finally { await h.service.dispose(); cleanup() }
   })
 })

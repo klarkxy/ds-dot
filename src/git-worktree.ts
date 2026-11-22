@@ -5,9 +5,9 @@
  * delivery from the panel; nothing here touches a checkout dot did not create.
  */
 import { execFile } from 'node:child_process'
-import { mkdirSync, readdirSync, rmSync } from 'node:fs'
-import { randomBytes } from 'node:crypto'
-import path, { dirname, isAbsolute, join, relative, resolve } from 'node:path'
+import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync } from 'node:fs'
+import { createHash, randomBytes } from 'node:crypto'
+import path, { isAbsolute, join, relative, resolve } from 'node:path'
 import { HarnessError } from '@deepseek-ai/dsh-llm'
 import { canonicalPath } from './work.ts'
 
@@ -50,7 +50,9 @@ const slug = (): string => randomBytes(3).toString('hex')
  * caller can fall back to a plain change instead of leaving half a worktree.
  */
 export async function createTaskWorktree(input: { readonly dir: string; readonly homeDir: string }, git: GitRunner = runGit): Promise<TaskWorktree> {
-  const dir = resolve(input.dir)
+  // git reports the physical path (8.3 names expanded, symlinks resolved), so
+  // both sides of the inside check go through realpath before comparing.
+  const dir = realpathSync(resolve(input.dir))
   const repoRoot = await git(['rev-parse', '--show-toplevel'], dir).catch(failure => {
     throw new GitWorktreeError(`worktree isolation needs a git checkout: ${failure instanceof Error ? failure.message : String(failure)}`)
   })
@@ -70,10 +72,10 @@ export async function createTaskWorktree(input: { readonly dir: string; readonly
       if (attempt < 4 && /already exists/i.test(failure instanceof Error ? failure.message : '')) continue
       throw failure
     }
-    // git reports forward slashes (and on Windows may differ in drive-letter
-    // case), so compute the in-repo subdir with path.relative on resolved
-    // paths instead of slicing the repoRoot prefix off the raw string.
-    const inside = relative(resolve(repoRoot), dir)
+    // git reports forward slashes, expanded 8.3 names and resolved symlinks,
+    // so compute the in-repo subdir with path.relative on real paths instead
+    // of slicing the repoRoot prefix off the raw string.
+    const inside = relative(realpathSync(repoRoot), dir)
     if (inside === '..' || inside.startsWith(`..${path.sep}`) || isAbsolute(inside)) {
       throw new GitWorktreeError(`${input.dir} resolves outside ${repoRoot}`)
     }
@@ -91,6 +93,70 @@ export async function commitAll(worktree: string, message: string, git: GitRunne
   return git(['rev-parse', 'HEAD'], worktree)
 }
 
+/** One file the accepted delivery recorded: present content (added/modified) or an expected absence (deleted). */
+export interface DeliveredFile {
+  readonly path: string
+  readonly kind: 'added' | 'modified' | 'deleted'
+  readonly sha256?: string
+}
+
+const sha256File = (file: string): string => createHash('sha256').update(readFileSync(file)).digest('hex')
+
+/** Paths a `git status --porcelain -z` stream reports, including both sides of a rename. */
+const porcelainPaths = (status: string): string[] => {
+  const fields = status.split('\0').filter(field => field !== '')
+  const paths: string[] = []
+  for (let index = 0; index < fields.length; index += 1) {
+    const field = fields[index]
+    const name = field.slice(3)
+    if (name) paths.push(name)
+    if (field[0] === 'R' || field[0] === 'C' || field[1] === 'R' || field[1] === 'C') {
+      index += 1
+      const original = fields[index]
+      if (original) paths.push(original)
+    }
+  }
+  return paths
+}
+
+/**
+ * Commit exactly the accepted delivery in the worktree — nothing a stray write
+ * added afterwards. Delivered files must still match the acceptance snapshot
+ * byte for byte, delivered deletions must still be absent, and git must report
+ * no other modified or untracked path. Anything else refuses with
+ * `worktree changed since acceptance`, leaving the tree untouched for retry.
+ */
+export async function commitDelivery(input: { readonly worktree: string; readonly files: readonly DeliveredFile[]; readonly message: string }, git: GitRunner = runGit): Promise<{ readonly ok: true; readonly commitSha?: string } | { readonly ok: false; readonly message: string }> {
+  const worktree = input.worktree
+  const touched = new Set(input.files.map(file => file.path))
+  for (const file of input.files) {
+    const target = join(worktree, file.path)
+    if (file.kind === 'deleted') {
+      if (existsSync(target)) return { ok: false, message: `worktree changed since acceptance: ${file.path} was restored` }
+      continue
+    }
+    if (!existsSync(target)) return { ok: false, message: `worktree changed since acceptance: ${file.path} is missing` }
+    if (file.sha256 !== undefined && sha256File(target) !== file.sha256) {
+      return { ok: false, message: `worktree changed since acceptance: ${file.path} was edited` }
+    }
+  }
+  const status = await git(['status', '--porcelain', '-z'], worktree, { raw: true })
+  const extra = porcelainPaths(status).filter(name => !touched.has(name))
+  if (extra.length > 0) {
+    return { ok: false, message: `worktree changed since acceptance: unexpected changes outside the delivery (${extra.join(', ')})` }
+  }
+  const present = input.files.filter(file => file.kind !== 'deleted').map(file => file.path)
+  const deleted = input.files.filter(file => file.kind === 'deleted').map(file => file.path)
+  // -f so an ignored-but-delivered file is staged; --cached --ignore-unmatch
+  // stages each delivered removal without touching other index entries.
+  if (present.length > 0) await git(['add', '-f', '--', ...present], worktree)
+  if (deleted.length > 0) await git(['rm', '-q', '--cached', '--ignore-unmatch', '--', ...deleted], worktree)
+  const clean = await git(['diff', '--cached', '--quiet'], worktree).then(() => true, () => false)
+  if (clean) return { ok: true }
+  await git(['commit', '-m', input.message], worktree)
+  return { ok: true, commitSha: await git(['rev-parse', 'HEAD'], worktree) }
+}
+
 /** True when `ref` (a branch) contains commits the base does not. */
 export async function hasCommitsBeyond(repoRoot: string, baseSha: string, ref: string, git: GitRunner = runGit): Promise<boolean> {
   const ahead = await git(['rev-list', '--count', `${baseSha}..${ref}`], repoRoot).catch(() => '0')
@@ -106,39 +172,70 @@ export interface MergeResult {
   readonly message?: string
 }
 
+/** The ref a `git rev-parse --verify` names, or '' when it does not exist. */
+const refAt = async (repoRoot: string, ref: string, git: GitRunner): Promise<string> =>
+  git(['rev-parse', '--verify', ref], repoRoot).catch(() => '')
+
+/** An in-progress merge/cherry-pick/revert/rebase makes this checkout unsafe to touch. */
+const operationInProgress = async (repoRoot: string, git: GitRunner): Promise<string | undefined> => {
+  const [merge, pick, revert, rebaseMerge, rebaseApply] = await Promise.all([
+    refAt(repoRoot, 'MERGE_HEAD', git),
+    refAt(repoRoot, 'CHERRY_PICK_HEAD', git),
+    refAt(repoRoot, 'REVERT_HEAD', git),
+    git(['rev-parse', '--git-path', 'rebase-merge'], repoRoot).catch(() => ''),
+    git(['rev-parse', '--git-path', 'rebase-apply'], repoRoot).catch(() => ''),
+  ])
+  if (merge) return 'a merge'
+  if (pick) return 'a cherry-pick'
+  if (revert) return 'a revert'
+  if ((rebaseMerge && existsSync(resolve(repoRoot, rebaseMerge))) || (rebaseApply && existsSync(resolve(repoRoot, rebaseApply)))) return 'a rebase'
+  return undefined
+}
+
 /**
  * Merge the task branch into `repoRoot`'s current branch with --no-ff.
- * Refuses on a detached HEAD or uncommitted changes in any of `deliveredPaths`
- * (the human may have edits the delivery would overwrite). A conflict aborts
- * the merge and reports the conflicting paths.
+ * Refuses on a detached HEAD, an in-progress merge/cherry-pick/rebase,
+ * uncommitted changes in any of `deliveredPaths`, or an untracked file in the
+ * checkout sitting on a path the delivery adds (the merge would silently
+ * overwrite it). A conflict aborts only the merge this call started — the
+ * human's own MERGE_HEAD is never touched.
  */
-export async function mergeInto(input: { readonly repoRoot: string; readonly branch: string; readonly deliveredPaths?: readonly string[] }, git: GitRunner = runGit): Promise<MergeResult> {
+export async function mergeInto(input: { readonly repoRoot: string; readonly branch: string; readonly deliveredPaths?: readonly string[]; readonly addedPaths?: readonly string[] }, git: GitRunner = runGit): Promise<MergeResult> {
   const current = await git(['branch', '--show-current'], input.repoRoot)
   if (!current) return { ok: false, message: `${input.repoRoot} is on a detached HEAD; check out a branch first` }
+  const busy = await operationInProgress(input.repoRoot, git)
+  if (busy) return { ok: false, message: `${input.repoRoot} has ${busy} in progress; finish or abort it first` }
   const status = await git(['status', '--porcelain', '-z'], input.repoRoot, { raw: true })
   // -z keeps paths verbatim (spaces stay unquoted); a rename/copy entry is
   // `XY <new>` followed by a bare `<old>` field, which also counts as dirty.
-  const fields = status.split('\0').filter(field => field !== '')
-  const dirty: string[] = []
-  for (let index = 0; index < fields.length; index += 1) {
-    const field = fields[index]
-    const name = field.slice(3)
-    if (name) dirty.push(name)
-    if (field[0] === 'R' || field[0] === 'C' || field[1] === 'R' || field[1] === 'C') {
-      index += 1
-      const original = fields[index]
-      if (original) dirty.push(original)
-    }
-  }
+  const dirty = porcelainPaths(status)
   const blocking = (input.deliveredPaths ?? []).filter(path => dirty.some(row => row === path || row.startsWith(`${path}/`)))
   if (blocking.length > 0) {
     return { ok: false, message: `uncommitted changes in the checkout overlap the delivery: ${blocking.join(', ')}` }
+  }
+  // An added delivery path landing on an existing ignored file is an overwrite
+  // git performs quietly (untracked files are already dirty-blocked above); a
+  // tracked file merges or conflicts and is handled below.
+  const addedPaths = input.addedPaths ?? []
+  const present = addedPaths.filter(path => existsSync(join(input.repoRoot, path)))
+  if (present.length > 0) {
+    const listed = await git(['ls-files', '-z', '--', ...present], input.repoRoot, { raw: true })
+    const tracked = new Set(listed.split('\0').filter(name => name !== ''))
+    const overwritten = present.filter(path => !tracked.has(path))
+    if (overwritten.length > 0) {
+      return { ok: false, message: `the checkout already has untracked files the delivery would overwrite: ${overwritten.join(', ')}` }
+    }
   }
   try {
     await git(['merge', '--no-ff', '--no-edit', input.branch], input.repoRoot)
   } catch (failure) {
     const conflicts = await git(['diff', '--name-only', '--diff-filter=U'], input.repoRoot).catch(() => '')
-    await git(['merge', '--abort'], input.repoRoot).catch(() => undefined)
+    // Abort only when the failed merge is this one — MERGE_HEAD pinned to the
+    // task branch tip. Another operation's state is left exactly as found.
+    const head = await refAt(input.repoRoot, 'MERGE_HEAD', git)
+    if (head !== '' && head === await refAt(input.repoRoot, input.branch, git)) {
+      await git(['merge', '--abort'], input.repoRoot).catch(() => undefined)
+    }
     return {
       ok: false,
       ...(conflicts ? { conflicts: conflicts.split('\n').filter(Boolean) } : {}),
@@ -166,35 +263,6 @@ export async function removeTaskWorktree(input: { readonly repoRoot: string; rea
     return
   }
   await git(['branch', '-d', input.branch], input.repoRoot).catch(() => undefined)
-}
-
-/**
- * Remove one dot-managed worktree directory during factory reset, discovering
- * its repo and branch from git itself. The `dot/task-*` branch is deleted only
- * with `branch -d`, which git refuses for unmerged work, so committed output
- * survives a reset; a worktree dot never created (its branch lacks the prefix)
- * keeps both. Returns the discovered repo root, or undefined when nothing was
- * removed.
- */
-export async function removeManagedWorktreeDir(worktree: string, git: GitRunner = runGit): Promise<string | undefined> {
-  let repoRoot: string | undefined
-  let branch = ''
-  try {
-    const commonDir = await git(['rev-parse', '--git-common-dir'], worktree)
-    if (commonDir) repoRoot = dirname(commonDir)
-    branch = await git(['branch', '--show-current'], worktree).catch(() => '')
-  } catch { repoRoot = undefined }
-  if (repoRoot === undefined) {
-    // Not a readable worktree (half-created row): remove the dir, nothing else.
-    rmSync(worktree, { recursive: true, force: true })
-    return undefined
-  }
-  await git(['worktree', 'remove', '--force', worktree], repoRoot).catch(() => {
-    rmSync(worktree, { recursive: true, force: true })
-    git(['worktree', 'prune'], repoRoot).catch(() => undefined)
-  })
-  if (branch.startsWith(TASK_BRANCH_PREFIX)) await git(['branch', '-d', branch], repoRoot).catch(() => undefined)
-  return repoRoot
 }
 
 /** The `<homeDir>/worktrees` row this cwd belongs to, or undefined. */

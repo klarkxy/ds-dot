@@ -52,7 +52,7 @@ const slug = (): string => randomBytes(3).toString('hex')
 export async function createTaskWorktree(input: { readonly dir: string; readonly homeDir: string }, git: GitRunner = runGit): Promise<TaskWorktree> {
   // git reports the physical path (8.3 names expanded, symlinks resolved), so
   // both sides of the inside check go through realpath before comparing.
-  const dir = realpathSync(resolve(input.dir))
+  const dir = realpathSync.native(resolve(input.dir))
   const repoRoot = await git(['rev-parse', '--show-toplevel'], dir).catch(failure => {
     throw new GitWorktreeError(`worktree isolation needs a git checkout: ${failure instanceof Error ? failure.message : String(failure)}`)
   })
@@ -75,7 +75,7 @@ export async function createTaskWorktree(input: { readonly dir: string; readonly
     // git reports forward slashes, expanded 8.3 names and resolved symlinks,
     // so compute the in-repo subdir with path.relative on real paths instead
     // of slicing the repoRoot prefix off the raw string.
-    const inside = relative(realpathSync(repoRoot), dir)
+    const inside = relative(realpathSync.native(repoRoot), dir)
     if (inside === '..' || inside.startsWith(`..${path.sep}`) || isAbsolute(inside)) {
       throw new GitWorktreeError(`${input.dir} resolves outside ${repoRoot}`)
     }

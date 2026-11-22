@@ -3162,7 +3162,7 @@ describe.skipIf(!worktreeGitAvailable)('task worktree isolation', { timeout: 30_
       expect(change.isolation).toMatchObject({ kind: 'worktree', state: 'active' })
       expect(change.isolation?.branch).toContain(TASK_BRANCH_PREFIX)
       // git reports the physical path (8.3/long names may differ on win32).
-      expect(canonicalPath(realpathSync(change.isolation!.repoRoot))).toBe(canonicalPath(realpathSync(repo)))
+      expect(canonicalPath(realpathSync.native(change.isolation!.repoRoot))).toBe(canonicalPath(realpathSync.native(repo)))
       expect(existsSync(change.cwd)).toBe(true)
       await expect(h.service.manageTask({ action: 'create', title: 'bad', goal: 'g', dir: repo, isolation: 'wat' })).rejects.toMatchObject({ code: 'dot/invalid' })
       const plain = JSON.parse(await h.service.manageTask({ action: 'create', title: 'Plain', goal: 'land', dir: repo, isolation: 'none' })) as { id: string }

@@ -34,7 +34,7 @@ import { ZERO_USAGE, addUsage, combineUsage, netSegmentUsage, totalUsage, usageF
 import { PRESET_ID, TOOL, type AttentionView, type BoardView, type DotContextSections, type DotContextUsage, type DotContextView, type FactoryResetPreview, type FactoryResetResult, type InboxEventInput, type InboxRecord, type InboxSubmitResult, type KeepaliveInfo, type KnowledgeView, type ModelChoice, type PendingKind, type PendingQuestionItem, type RecipeBody, type RecipeRecord, type ReflectionRun, type RolloverReason, type RuleConfig, type TrajectoryView } from './contracts.ts'
 import { SUMMARY_INSTRUCTION, SUMMARY_MAX_TOKENS, buildHandoff, type Handoff } from './handoff.ts'
 import { READ_ROWS_DEFAULT, READ_ROWS_MAX, SEARCH_LIMIT_DEFAULT, SEARCH_LIMIT_MAX, SEARCH_SESSIONS_MAX, formatRead, formatSearch, historyRows, queryTerms, searchRows, windowRows, type SessionHits } from './history.ts'
-import { InboxLedger, inboxNotice, memoryInboxTable } from './inbox.ts'
+import { InboxLedger, fenceUntrusted, inboxNotice, memoryInboxTable } from './inbox.ts'
 import { type DotHost, type WorkspaceRow } from './host.ts'
 import { clip, ledgerSummary } from './ledger.ts'
 import { applyLinkEvent, linkMatchesSubject, makeTaskLink, parseLinkRef, scanReportLinks, taskLinkId } from './links.ts'
@@ -3085,7 +3085,12 @@ export class DotService {
       userRequest: material?.userRequest ?? null,
       deliverableLanguage: material?.deliverableLanguage ?? null,
       ...(change.recipe ? { recipe: { id: change.recipe.id, name: this.taggedRecipe(change)?.name ?? null, revision: change.recipe.revision } } : {}),
-      links: this.store.linksFor(changeId),
+      // lastEvent carries GitHub-authored title/summary (comment bodies etc.):
+      // fence them as untrusted in tool output; the board keeps plain text.
+      links: this.store.linksFor(changeId).map(link => link.lastEvent === undefined ? link : {
+        ...link,
+        lastEvent: { ...link.lastEvent, title: fenceUntrusted(link.lastEvent.title), summary: fenceUntrusted(link.lastEvent.summary) },
+      }),
       maxConcurrentRuns: change.maxConcurrentRuns,
       failedRounds: this.store.work.failedRounds(changeId),
       history: this.store.work.inputsFor(changeId).map(row => ({ id: row.id, revision: row.revision, goal: row.goal })),

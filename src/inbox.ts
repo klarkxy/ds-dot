@@ -59,6 +59,17 @@ export function inboxNotice(record: InboxRecord): { readonly text: string; reado
   return { text: `${lead}\n  <${token}>${safe}</${token}>`, display: `${lead}\n  ${payload}` }
 }
 
+/**
+ * Fence one untrusted string for model-facing output — flattened to a single
+ * line and wrapped in a random token so payload text cannot forge structure.
+ * The board keeps the plain value; only tool-facing text goes through this.
+ */
+export function fenceUntrusted(value: string): string {
+  const token = `${INBOX_FENCE_PREFIX}${randomUUID()}`
+  const safe = flattenInboxText(value).split(token).join(`${token} `)
+  return `<${token}>${safe}</${token}>`
+}
+
 export type InboxSubmit = { readonly result: InboxSubmitResult; readonly record?: InboxRecord }
 
 export class InboxLedger {

@@ -407,7 +407,7 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
   const str = (payload: unknown, key: string): string => { const value = field(payload, key); return typeof value === 'string' ? value : '' }
   // The kit's 64 KiB default answers 413 before `say` runs. A PNG of about
   // 51 KB does not fit after base64; the cap below fits the advertised images.
-  const PASSIVE_ENDPOINTS = new Set(['wait', 'board', 'attention', 'work.list', 'work.read', 'card.pending', 'card.detail'])
+  const PASSIVE_ENDPOINTS = new Set(['wait', 'board', 'attention', 'work.list', 'work.read', 'card.pending', 'card.detail', 'recipes'])
   ctx.effect(() => registerHostRpc(ctx as unknown as HostRpcContext, RPC_CHANNEL, async (endpoint, payload, signal) => {
     try {
       const reqLocale = field(payload, 'uiLocale')
@@ -487,6 +487,12 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
         case 'context.clear': {
           await ensureDot()
           return { ok: true, value: await service.clearUsage() }
+        }
+        case 'recipes': return { ok: true, value: service.recipeBoard() }
+        case 'recipe.run': {
+          const id = str(payload, 'id')
+          const result = await service.runRecipe(id ?? '', { origin: 'human' })
+          return { ok: true, value: result }
         }
         case 'schedule.remove': {
           const id = field(payload, 'id')

@@ -86,6 +86,7 @@ const scheduleSchema = z.object({
   nextAt: z.number(),
   lastFiredAt: z.number().optional(),
   deliveredAt: z.number().optional(),
+  recipe: z.string().min(1).optional(),
 })
 
 const usageSchema = z.object({

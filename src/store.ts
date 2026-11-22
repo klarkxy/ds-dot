@@ -648,7 +648,10 @@ export class DotStore {
       ...(started.length > 0 ? { startedTasks: started } : {}),
       ...(work.length > 0 ? { work } : {}),
       pending,
-      schedules: this.schedules,
+      schedules: this.schedules.map(row => {
+        const recipe = row.recipe ? this.recipe(row.recipe) : undefined
+        return recipe ? { ...row, recipeName: recipe.name } : row
+      }),
     }
   }
 

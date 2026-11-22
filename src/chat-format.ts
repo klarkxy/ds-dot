@@ -31,7 +31,7 @@ export interface QuestionRow {
 
 export type NoticeEntry =
   | {
-      readonly kind: 'approval' | 'question' | 'turn-end' | 'error' | 'task-human' | 'idle-check' | 'inbox'
+      readonly kind: 'approval' | 'question' | 'turn-end' | 'error' | 'task-human' | 'idle-check' | 'inbox' | 'recipe-run'
       readonly sessionId: string
       readonly requestId?: string
       readonly subject?: string
@@ -55,6 +55,8 @@ export type NoticeEntry =
       readonly next?: string
       readonly once?: boolean
       readonly late?: boolean
+      /** A recipe-bound reminder whose direct dispatch was refused. */
+      readonly refused?: string
     }
 
 export interface ParsedNotice {
@@ -67,7 +69,7 @@ const NOTICE_HEAD = /^\[dot notice\]/i
 const REMINDER_PREFIX = /^\[dot reminder\]/i
 const MODEL_FOOTER = /^Do what each one asks now\./
 const SESSION_BULLET = /^- (approval|question|turn-end|error|task-human|idle-check|inbox)\s*·\s*([^:]+):\s*(.*)$/
-const REMINDER_BULLET = /^- (\S+)\s+"([^"]+)"\s*\(([^)]*)\):\s*(.*)$/
+const REMINDER_BULLET = /^- (\S+)\s+"([^"]+)"\s*\(([^)]*)\)(?:\s+recipe\s+\S+\s+"[^"]*")?(?:\s+\[dispatch refused:\s*([^\]]*)\])?(?::\s*(.*))?$/
 const REQUEST_HEAD = /^(\S+)\s*·\s*(?:approval|question) from (?:task "(.+?)"|untracked session(?: in (.+?))?)\s*·\s*"(.*)"$/
 const CHANGE_REQUEST_HEAD = /^(\S+) for task (\S+) "(.*?)": (?:approval|question)\s*·\s*"(.*)"$/
 const TURN_END_HEAD = /^"(.+?)" finished a turn:\s*(.*)$/
@@ -328,13 +330,14 @@ export function parseNotice(text: string): ParsedNotice {
     if (item.section === 'reminder') {
       const m = REMINDER_BULLET.exec(item.head)
       if (m) {
-        const promptLines = [m[4]!, ...item.sublines].join('\n').trim()
+        const promptLines = [m[5] ?? '', ...item.sublines].join('\n').trim()
         entries.push({
           kind: 'reminder',
           id: m[1]!,
           title: m[2]!,
           prompt: promptLines,
           ...parseReminderFacts(m[3]!),
+          ...m[4] !== undefined ? { refused: m[4].trim() } : {},
         })
         continue
       }

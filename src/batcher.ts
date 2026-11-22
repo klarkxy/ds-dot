@@ -2,7 +2,7 @@
 import type { NoticeEntry, ParsedNotice } from './chat-format.ts'
 export interface Notice {
   readonly sessionId: string
-  readonly kind: 'turn-end' | 'error' | 'approval' | 'question' | 'task-human' | 'idle-check' | 'inbox'
+  readonly kind: 'turn-end' | 'error' | 'approval' | 'question' | 'task-human' | 'idle-check' | 'inbox' | 'recipe-run'
   readonly text: string
   readonly display?: NoticeEntry
   readonly at: number

@@ -146,6 +146,19 @@ describe('DotStore', () => {
     expect(new DotStore(domain).schedules.map(record => record.id)).toEqual(['sch-b'])
   })
 
+  it('round-trips a recipe-bound reminder and resolves its name on the board', async () => {
+    const { domain } = fakeDomain()
+    const store = new DotStore(domain)
+    await store.putSchedule({ id: 'sch-r', title: 'bound', prompt: '', timing: { kind: 'every', minutes: 60, anchor: 1 }, createdAt: 3, nextAt: 600, recipe: 'rcp-1' })
+    await store.putSchedule({ id: 'sch-p', title: 'plain', prompt: 'p', timing: { kind: 'every', minutes: 30, anchor: 1 }, createdAt: 2, nextAt: 300 })
+    const reloaded = new DotStore(domain)
+    expect(reloaded.schedule('sch-r')?.recipe).toBe('rcp-1')
+    expect(reloaded.schedule('sch-p')?.recipe).toBeUndefined()
+    await reloaded.putRecipe({ id: 'rcp-1', name: 'Weekly', revision: 1, history: [], outcomes: [], goal: 'g', requirements: [{ requirementRef: 'g', text: 'g', required: true }], createdAt: 1, updatedAt: 1 })
+    expect(reloaded.board([]).schedules.find(row => row.id === 'sch-r')?.recipeName).toBe('Weekly')
+    expect(reloaded.board([]).schedules.find(row => row.id === 'sch-p')?.recipeName).toBeUndefined()
+  })
+
   it('keeps a capabilities-changed rollover reason on current and past segments across a reload', async () => {
     const { domain } = fakeDomain()
     const store = new DotStore(domain)

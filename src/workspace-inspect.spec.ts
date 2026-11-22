@@ -1,8 +1,9 @@
+import { spawnSync } from 'node:child_process'
 import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
-import { formatWorkspaceFiles, listWorkspaceFiles, pathInsideRoot } from './workspace-inspect.ts'
+import { formatWorkspaceFiles, listWorkspaceFiles, pathInsideRoot, readWorkspaceText, WORKSPACE_READ_MAX_LINES } from './workspace-inspect.ts'
 
 describe('workspace inspect listing', () => {
   it('lists files inside the root and refuses a path that escapes it', async () => {
@@ -44,5 +45,86 @@ describe('workspace inspect listing', () => {
     const rows = await listWorkspaceFiles(root)
     expect(rows.map(row => row.path)).toEqual(['inside.txt'])
     expect(rows.map(row => row.path).join('\n')).not.toContain('outside-marker')
+  })
+})
+
+describe('workspace read', () => {
+  it('reads a file inside the workspace with line windows and truncation', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'dsh-dot-read-'))
+    writeFileSync(join(root, 'doc.txt'), Array.from({ length: 10 }, (_, i) => `line ${i + 1}`).join('\n'))
+    const full = await readWorkspaceText([root], root, 'doc.txt')
+    expect(full.totalLines).toBe(10)
+    expect(full.start).toBe(1)
+    expect(full.end).toBe(10)
+    expect(full.truncated).toBe(false)
+    expect(full.lines).toHaveLength(10)
+
+    const window = await readWorkspaceText([root], root, 'doc.txt', { startLine: 4, maxLines: 3 })
+    expect(window.lines).toEqual(['line 4', 'line 5', 'line 6'])
+    expect(window.start).toBe(4)
+    expect(window.end).toBe(6)
+    expect(window.truncated).toBe(true)
+
+    const clamped = await readWorkspaceText([root], root, 'doc.txt', { maxLines: WORKSPACE_READ_MAX_LINES + 500 })
+    expect(clamped.truncated).toBe(false)
+    const many = mkdtempSync(join(tmpdir(), 'dsh-dot-read-many-'))
+    writeFileSync(join(many, 'big.txt'), Array.from({ length: WORKSPACE_READ_MAX_LINES + 5 }, () => 'x').join('\n'))
+    const capped = await readWorkspaceText([many], many, 'big.txt', { maxLines: WORKSPACE_READ_MAX_LINES + 500 })
+    expect(capped.lines).toHaveLength(WORKSPACE_READ_MAX_LINES)
+    expect(capped.truncated).toBe(true)
+  })
+
+  it('reads an absolute path inside any authorized root and refuses one outside all of them', async () => {
+    const workspace = mkdtempSync(join(tmpdir(), 'dsh-dot-read-ws-'))
+    const change = mkdtempSync(join(tmpdir(), 'dsh-dot-read-chg-'))
+    const outside = mkdtempSync(join(tmpdir(), 'dsh-dot-read-out-'))
+    writeFileSync(join(change, 'a.ts'), 'change file')
+    writeFileSync(join(outside, 'secret.txt'), 'nope')
+    const inChange = await readWorkspaceText([workspace, change], workspace, join(change, 'a.ts'))
+    expect(inChange.lines).toEqual(['change file'])
+    await expect(readWorkspaceText([workspace, change], workspace, join(outside, 'secret.txt'))).rejects.toThrow(/outside/)
+    await expect(readWorkspaceText([workspace], workspace, join(outside, '..', '..'))).rejects.toThrow(/outside/)
+    await expect(readWorkspaceText([workspace], undefined, 'relative.txt')).rejects.toThrow(/workspace/)
+  })
+
+  it('refuses a symlink escaping the workspace', async () => {
+    const parent = mkdtempSync(join(tmpdir(), 'dsh-dot-read-link-'))
+    const root = join(parent, 'workspace')
+    const external = join(parent, 'external')
+    mkdirSync(root)
+    mkdirSync(external)
+    writeFileSync(join(external, 'out.txt'), 'outside')
+    symlinkSync(external, join(root, 'link'), 'junction')
+    await expect(readWorkspaceText([root], root, join('link', 'out.txt'))).rejects.toThrow(/outside/)
+    await expect(readWorkspaceText([root], root, 'link')).rejects.toThrow(/outside/)
+  })
+
+  it('refuses directories, binaries, oversized files, and credential-like paths', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'dsh-dot-read-refuse-'))
+    mkdirSync(join(root, 'sub'))
+    writeFileSync(join(root, 'bin.dat'), Buffer.from([0x89, 0x00, 0x50]))
+    writeFileSync(join(root, 'huge.txt'), Buffer.alloc(2 * 1024 * 1024 + 1, 0x61))
+    writeFileSync(join(root, '.env'), 'TOKEN=x')
+    writeFileSync(join(root, '.env.example'), 'TOKEN=')
+    await expect(readWorkspaceText([root], root, 'sub')).rejects.toThrow(/directory/)
+    await expect(readWorkspaceText([root], root, 'bin.dat')).rejects.toThrow(/binary/)
+    await expect(readWorkspaceText([root], root, 'huge.txt')).rejects.toThrow(/2 MiB/)
+    await expect(readWorkspaceText([root], root, '.env')).rejects.toThrow(/credential/)
+    const template = await readWorkspaceText([root], root, '.env.example')
+    expect(template.lines).toEqual(['TOKEN='])
+    await expect(readWorkspaceText([root], root, '.env.local')).rejects.toThrow(/cannot read|credential/)
+  })
+
+  it.skipIf(process.platform === 'win32')('refuses a named pipe instead of hanging on it', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'dsh-dot-read-fifo-'))
+    const fifo = join(root, 'pipe')
+    spawnSync('mkfifo', [fifo])
+    await expect(readWorkspaceText([root], root, 'pipe')).rejects.toThrow(/not a regular file/)
+  })
+
+  it('rejects a bad start_line', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'dsh-dot-read-lines-'))
+    writeFileSync(join(root, 'a.txt'), 'one')
+    await expect(readWorkspaceText([root], root, 'a.txt', { startLine: 0 })).rejects.toThrow(/start_line/)
   })
 })

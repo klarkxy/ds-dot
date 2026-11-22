@@ -10,7 +10,7 @@ export type EventTier = 'wake' | 'hold' | 'ledger'
 export type TierEventKind = Notice['kind'] | 'status'
 
 export function eventTier(kind: TierEventKind, origin?: TaskOrigin): EventTier {
-  if (kind === 'status' || kind === 'archived') return 'ledger'
+  if (kind === 'status') return 'ledger'
   if (kind === 'turn-end' && origin === 'watched') return 'hold'
   return 'wake'
 }

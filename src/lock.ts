@@ -1,5 +1,4 @@
 import path from 'node:path'
-import type { Ticket } from './contracts.ts'
 
 /** Compare directory boundaries using the platform's path semantics. */
 export function directoriesConflict(a: string, b: string, platform: NodeJS.Platform = process.platform): boolean {
@@ -17,8 +16,4 @@ export function directoriesConflict(a: string, b: string, platform: NodeJS.Platf
     return relative === '' || (relative !== '..' && !relative.startsWith(`..${api.sep}`) && !api.isAbsolute(relative))
   }
   return contains(first, second) || contains(second, first)
-}
-
-export function lockHolders(tickets: Iterable<Ticket>, dir: string, exceptId?: string, platform: NodeJS.Platform = process.platform): Ticket[] {
-  return [...tickets].filter(ticket => ticket.id !== exceptId && ticket.access === 'write' && (ticket.status === 'active' || ticket.status === 'review') && directoriesConflict(ticket.dir, dir, platform))
 }

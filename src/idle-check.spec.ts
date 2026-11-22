@@ -1,29 +1,40 @@
 import { describe, expect, it } from 'vitest'
-import type { Ticket, TaskRecord, PendingView } from './contracts.ts'
-import { idleCandidates, IdleChecker } from './idle-check.ts'
+import type { TaskRecord, PendingView } from './contracts.ts'
+import { idleCandidates, IdleChecker, type WorkIdleItem } from './idle-check.ts'
 import type { Timer } from './batcher.ts'
 
-const ticket = (id: string, status: Ticket['status'], access: Ticket['access'] = 'read'): Ticket => ({ id, title: id, goal: 'g', dir: `/work/${id}`, access, status, priority: 2, sessions: [{ sessionId: id, role: 'work', at: 1 }], rounds: [], history: [], createdAt: 1, updatedAt: 1 })
+const change = (id: string, patch: Partial<WorkIdleItem> = {}): WorkIdleItem => ({
+  id, title: id, cwd: `/work/${id}`, priority: 2, control: 'open', status: 'waiting', sessionIds: [], ...patch,
+})
 const task = (id: string, status: TaskRecord['status']): TaskRecord => ({ sessionId: id, origin: 'started', title: id, goal: 'g', cwd: '/', status, createdAt: 1, updatedAt: 1, unseenTurns: 0 })
 
 describe('idle checks', () => {
-  it('selects todo, idle active and idle review but excludes running, waiting and human review', () => {
-    const tickets = [ticket('todo', 'todo'), ticket('active', 'active'), ticket('review', 'review'), ticket('run', 'active'), ticket('wait', 'review'), { ...ticket('human', 'review'), humanReview: true }]
-    const tasks = tickets.map(row => task(row.id, row.id === 'run' ? 'running' : 'idle'))
+  it('selects waiting, rework and verified changes but excludes running, waiting-human, oversight and closed', () => {
+    const changes = [
+      change('todo'),
+      change('active', { status: 'rework' }),
+      change('review', { readyToAccept: true }),
+      change('run', { sessionIds: ['run'] }),
+      change('wait', { sessionIds: ['wait'] }),
+      change('human', { awaitingHumanOversight: true }),
+      change('done', { status: 'done' }),
+      change('closed', { control: 'cancelled' }),
+    ]
+    const tasks = [task('run', 'running'), task('wait', 'idle')]
     const pending: PendingView[] = [{ id: 'ap-1', kind: 'approval', sessionId: 'wait', createdAt: 1, subject: 's' }]
-    expect(idleCandidates(tickets, tasks, pending).map(row => row.ticket.id)).toEqual(['todo', 'active', 'review'])
+    expect(idleCandidates(tasks, pending, changes).map(row => row.id)).toEqual(['todo', 'active', 'review'])
   })
-  it('excludes locked todo write tasks and allows read tasks', () => {
-    const holder = { ...ticket('holder', 'active', 'write'), dir: '/work' }
-    const write = { ...ticket('write', 'todo', 'write'), dir: '/work/sub' }
-    const read = { ...ticket('read', 'todo', 'read'), dir: '/work/sub' }
-    expect(idleCandidates([holder, write, read], [task('holder', 'running')], []).map(row => row.ticket.id)).toEqual(['read'])
+  it('excludes a change whose session has a pending request or a running session', () => {
+    const changes = [change('busy', { sessionIds: ['busy'] }), change('held', { sessionIds: ['held'] }), change('free')]
+    const tasks = [task('busy', 'running'), task('held', 'idle')]
+    const pending: PendingView[] = [{ id: 'ap-1', kind: 'approval', sessionId: 'held', createdAt: 1, subject: 's' }]
+    expect(idleCandidates(tasks, pending, changes).map(row => row.id)).toEqual(['free'])
   })
   it('deduplicates unchanged fingerprints and disables timer at zero', () => {
     let callback: (() => void) | undefined
     const timer: Timer = { now: () => 0, set: fn => { callback = fn; return 1 }, clear: () => { callback = undefined } }
     let calls = 0
-    const c = new IdleChecker(() => idleCandidates([ticket('a', 'todo')], [], []), () => { calls++ }, timer)
+    const c = new IdleChecker(() => idleCandidates([], [], [change('a')]), () => { calls++ }, timer)
     c.arm(0); expect(callback).toBeUndefined()
     c.arm(1); callback!(); c.run(); expect(calls).toBe(1)
   })

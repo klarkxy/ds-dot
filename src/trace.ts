@@ -2,15 +2,14 @@ import type { PluginLogContext, PluginLogger } from '@klarkxy/dsh-plugin-kit/log
 
 /** The decisions worth grepping. Names match the kit's event pattern. */
 export const DOT_TRACE = {
-  ticketCreated: 'ticket.created',
-  ticketMoved: 'ticket.moved',
-  ticketNoted: 'ticket.noted',
-  ticketUpdateRejected: 'ticket.update-rejected',
   sessionDispatched: 'session.dispatched',
   sessionSent: 'session.sent',
   sessionSendRefused: 'session.send-refused',
   idleFired: 'idle.fired',
   idleSuppressed: 'idle.suppressed',
+  keepalivePing: 'keepalive.ping',
+  keepaliveFailed: 'keepalive.failed',
+  keepaliveRollover: 'keepalive.rollover',
   lockHeld: 'lock.held',
   lockReleased: 'lock.released',
   lockConflict: 'lock.conflict',
@@ -26,6 +25,9 @@ export const DOT_TRACE = {
   peerUnknown: 'peer.unknown',
   peerRefused: 'peer.refused',
   factoryReset: 'factory.reset',
+  updateChecked: 'update.checked',
+  updateApplied: 'update.applied',
+  updateFailed: 'update.failed',
 } as const
 
 export type DotTraceEventName = (typeof DOT_TRACE)[keyof typeof DOT_TRACE]
@@ -41,7 +43,7 @@ export interface DotTraceInput {
   readonly event: string
   readonly message: string
   readonly level?: 'info' | 'debug' | 'warn'
-  readonly ticketId?: string
+  readonly changeId?: string
   readonly sessionId?: string
   readonly data?: PluginLogContext
 }
@@ -53,7 +55,7 @@ function clip(text: string): string {
 
 function contextOf(input: DotTraceInput): PluginLogContext {
   const context: PluginLogContext = {}
-  if (input.ticketId?.trim()) context.ticketId = clip(input.ticketId)
+  if (input.changeId?.trim()) context.changeId = clip(input.changeId)
   if (input.sessionId?.trim()) context.sessionId = clip(input.sessionId)
   for (const [key, value] of Object.entries(input.data ?? {}).slice(0, 12)) {
     if (!KEY_RE.test(key) || DROPPED_KEY.test(key) || value === undefined) continue
@@ -77,41 +79,23 @@ export function emitDotTrace(logger: Sink, input: DotTraceInput): boolean {
   }
 }
 
-export function traceTicketMoved(logger: Sink, input: { ticketId: string; from: string; to: string; by: string }): boolean {
-  return emitDotTrace(logger, {
-    event: DOT_TRACE.ticketMoved,
-    message: `Task ${input.ticketId} moved from ${input.from} to ${input.to}.`,
-    ticketId: input.ticketId,
-    data: { from: input.from, to: input.to, by: input.by },
-  })
-}
-
-export function traceTicketUpdateRejected(logger: Sink, input: { ticketId: string; status: string; to: string }): boolean {
-  return emitDotTrace(logger, {
-    event: DOT_TRACE.ticketUpdateRejected,
-    message: `Update refused; ${input.ticketId} is still ${input.status}.`,
-    ticketId: input.ticketId,
-    data: { status: input.status, to: input.to },
-  })
-}
-
-export function traceSessionSent(logger: Sink, input: { sessionId: string; ticketId?: string; queued: boolean }): boolean {
+export function traceSessionSent(logger: Sink, input: { sessionId: string; changeId?: string; queued: boolean }): boolean {
   return emitDotTrace(logger, {
     event: DOT_TRACE.sessionSent,
     message: input.queued ? `Queued a follow-up for ${input.sessionId}.` : `Delivered a follow-up to ${input.sessionId}.`,
     sessionId: input.sessionId,
-    ...(input.ticketId ? { ticketId: input.ticketId } : {}),
+    ...(input.changeId ? { changeId: input.changeId } : {}),
     data: { queued: input.queued },
   })
 }
 
-export function traceSessionSendRefused(logger: Sink, input: { sessionId: string; ticketId?: string; code: string }): boolean {
+export function traceSessionSendRefused(logger: Sink, input: { sessionId: string; changeId?: string; code: string }): boolean {
   return emitDotTrace(logger, {
     event: DOT_TRACE.sessionSendRefused,
     level: 'warn',
     message: `Follow-up to ${input.sessionId} was not delivered.`,
     sessionId: input.sessionId,
-    ...(input.ticketId ? { ticketId: input.ticketId } : {}),
+    ...(input.changeId ? { changeId: input.changeId } : {}),
     data: { code: input.code },
   })
 }

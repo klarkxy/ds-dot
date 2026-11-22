@@ -2,12 +2,12 @@
 import type { NoticeEntry, ParsedNotice } from './chat-format.ts'
 export interface Notice {
   readonly sessionId: string
-  readonly kind: 'turn-end' | 'error' | 'approval' | 'question' | 'archived' | 'lock-free' | 'task-human' | 'idle-check'
+  readonly kind: 'turn-end' | 'error' | 'approval' | 'question' | 'task-human' | 'idle-check' | 'inbox' | 'recipe-run' | 'recipe-proposal'
   readonly text: string
   readonly display?: NoticeEntry
   readonly at: number
   readonly requestId?: string
-  readonly ticketId?: string
+  readonly changeId?: string
   /** Set on a persisted work-decision wake so delivery can be marked once. */
   readonly wakeKey?: string
 }
@@ -28,6 +28,8 @@ export class NoticeBatcher {
   constructor(private readonly flush: (items: readonly Notice[]) => Promise<void>, private readonly options: { isIdle: () => boolean; timer?: Timer; holdLimit?: number; onEnqueue?: () => void; onEmpty?: () => void }) {}
   private get timer(): Timer { return this.options.timer ?? realTimer }
   get size(): number { return this.items.length }
+  /** Entries that will schedule a delivery on their own. */
+  get waking(): number { return this.items.filter(entry => entry.wake).length }
   push(notice: Notice, _urgent = false, delayMs = 0): void {
     if (this.disposed) return
     this.options.onEnqueue?.()
@@ -37,9 +39,12 @@ export class NoticeBatcher {
   }
   hold(notice: Notice): void {
     if (this.disposed) return
-    this.options.onEnqueue?.()
+    // A held item only rides the next delivery: it neither schedules one nor
+    // cancels an armed idle check. The overflow escalation does deliver, so it
+    // takes the enqueue hook then.
     this.items.push({ notice, wake: false, dueAt: 0 })
     if (this.items.filter(entry => !entry.wake).length >= (this.options.holdLimit ?? HOLD_LIMIT)) {
+      this.options.onEnqueue?.()
       for (const entry of this.items) entry.wake = true
       this.schedule(1500)
     }
@@ -48,6 +53,9 @@ export class NoticeBatcher {
     this.items = this.items.filter(entry => !predicate(entry.notice))
     if (!this.items.length) { this.retryAt = 0; this.options.onEmpty?.() }
     this.armGrace()
+  }
+  some(predicate: (notice: Notice) => boolean): boolean {
+    return this.items.some(entry => predicate(entry.notice))
   }
   /** Called on idle; the entry timer also batches arrivals for 1.5 seconds. */
   wake(): void { if (this.items.length) this.schedule(0) }
@@ -111,11 +119,11 @@ export class NoticeBatcher {
 /** The text prompt and structured display share the same folded set. */
 function foldedNotices(items: readonly Notice[]): readonly Notice[] {
   const latest = new Map<string, Notice>()
-  for (const item of items) if (item.kind === 'turn-end' && item.ticketId) {
-    const key = `${item.ticketId}\0${item.sessionId}`
+  for (const item of items) if (item.kind === 'turn-end' && item.changeId) {
+    const key = `${item.changeId}\0${item.sessionId}`
     if ((latest.get(key)?.at ?? Number.NEGATIVE_INFINITY) <= item.at) latest.set(key, item)
   }
-  return items.filter(item => item.kind !== 'turn-end' || !item.ticketId || latest.get(`${item.ticketId}\0${item.sessionId}`) === item)
+  return items.filter(item => item.kind !== 'turn-end' || !item.changeId || latest.get(`${item.changeId}\0${item.sessionId}`) === item)
 }
 
 export function formatNoticeDisplay(items: readonly Notice[]): ParsedNotice {
@@ -130,8 +138,10 @@ export function formatNotices(items: readonly Notice[], ready: readonly string[]
   const groups: Array<[string, (notice: Notice) => boolean]> = [
     ['Requests waiting for you:', item => item.kind === 'approval' || item.kind === 'question'],
     ['Errors:', item => item.kind === 'error'],
-    ['Tasks:', item => !['approval', 'question', 'error'].includes(item.kind) && (!!item.ticketId || item.kind === 'lock-free' || item.kind === 'task-human' || item.kind === 'idle-check')],
-    ['Watched sessions:', item => !item.ticketId && (item.kind === 'turn-end' || item.kind === 'archived')],
+    ['External events:', item => item.kind === 'inbox'],
+    ['Tasks:', item => !['approval', 'question', 'error'].includes(item.kind) && (!!item.changeId || item.kind === 'task-human' || item.kind === 'idle-check')],
+    ['Recipes:', item => item.kind === 'recipe-proposal'],
+    ['Watched sessions:', item => !item.changeId && item.kind === 'turn-end'],
   ]
   const lines = ['[dot notice] Updates:']
   for (const [heading, matches] of groups) {

@@ -3,6 +3,7 @@
  * The buttons carry the versions the backend already requires. They do not
  * decide acceptance, release a review, or invent a user answer.
  */
+import type { DotContextUsage } from './contracts.ts'
 import type { TextKey } from './ui-copy.ts'
 export type WorkStatus = 'cancelled' | 'rework' | 'unverified' | 'done' | 'review' | 'settling' | 'running' | 'waiting'
 
@@ -36,7 +37,14 @@ export interface WorkRunView {
   readonly kind: string
   readonly phase: string
   readonly cwd: string
+  readonly sessionId?: string
   readonly writeScope?: WorkScopeView
+  /** Folded session usage once the run is terminal; the panel shows its total. */
+  readonly usage?: DotContextUsage
+  /** Wall time of a terminal run's session. */
+  readonly wallMs?: number
+  /** createdAt, present only while the run is live so the panel can tick elapsed. */
+  readonly startedAt?: number
   readonly deliveries?: readonly WorkDeliveryView[]
 }
 
@@ -82,6 +90,16 @@ export interface WorkHumanAction {
   readonly expectedSubjectKey: string
 }
 
+/** A link chip the card shows: the bound GitHub target, its state, and the newest event. */
+export interface WorkLinkView {
+  readonly repo: string
+  readonly number?: number
+  readonly branch?: string
+  readonly url?: string
+  readonly state: 'open' | 'closed' | 'merged'
+  readonly lastEvent?: import('./contracts.ts').LinkEvent
+}
+
 export interface WorkBoardItem {
   readonly id: string
   readonly title: string
@@ -91,12 +109,29 @@ export interface WorkBoardItem {
   readonly control: string
   readonly status: WorkStatus
   readonly summary?: string
+  /** Cost summed over the change's finished runs, when any recorded it. */
+  readonly tokens?: number
+  readonly wallMs?: number
   readonly runs: readonly WorkRunView[]
   readonly blockers: readonly string[]
   readonly verification?: WorkVerificationView
   readonly closeout?: WorkCloseoutView
   readonly oversight?: WorkOversightView
   readonly humanAction?: WorkHumanAction
+  readonly links?: readonly WorkLinkView[]
+  /** A change whose runs wrote into a dot-managed git worktree. */
+  readonly isolation?: WorkIsolationView
+}
+
+export interface WorkIsolationView {
+  readonly kind: 'worktree'
+  readonly repoRoot: string
+  readonly worktree: string
+  readonly branch: string
+  readonly baseSha: string
+  readonly state: 'active' | 'committed' | 'merged' | 'discarded'
+  readonly commitSha?: string
+  readonly mergedInto?: string
 }
 
 export interface WorkReadRequest {
@@ -107,6 +142,8 @@ export interface WorkReadRequest {
   readonly inputRef: string
   readonly inputRevision: number
   readonly forceFull?: boolean
+  /** 'diff' asks for a unified diff against the writer baseline (change kind only). */
+  readonly view?: 'diff'
 }
 
 export interface PendingGlance {
@@ -127,6 +164,7 @@ export interface WorkRejectPayload {
   readonly id: string
   readonly reviewRunId: string
   readonly expectedInputRevision: number
+  readonly note?: string
 }
 
 export interface WorkLookRequest {
@@ -135,6 +173,18 @@ export interface WorkLookRequest {
   readonly inputRevision: number
   readonly verificationId: string
   readonly subjectKey: string
+}
+
+export interface WorkIntegratePayload {
+  readonly id: string
+  readonly mode: 'merge' | 'keep' | 'discard'
+}
+
+/** The three human-only integrations an accepted isolated change offers. */
+export function integrateActions(item: WorkBoardItem): readonly ('merge' | 'keep' | 'discard')[] {
+  if (item.isolation?.kind !== 'worktree' || item.isolation.state !== 'active') return []
+  if (item.status !== 'done' || !item.closeout) return []
+  return ['merge', 'keep', 'discard']
 }
 
 const TERMINAL = new Set(['completed', 'failed', 'stopped'])
@@ -168,6 +218,12 @@ export function rejectPayload(item: WorkBoardItem): WorkRejectPayload | undefine
 /** Resume only a closeout that is stored while a run is still held. */
 export function resumePayload(item: WorkBoardItem): { readonly id: string } | undefined {
   if (!item.closeout || item.blockers.length === 0) return undefined
+  return { id: item.id }
+}
+
+/** Force-release wedged runs on an already-cancelled change that still holds blockers. */
+export function forceReleasePayload(item: WorkBoardItem): { readonly id: string } | undefined {
+  if (item.status !== 'cancelled' || item.blockers.length === 0) return undefined
   return { id: item.id }
 }
 
@@ -224,10 +280,11 @@ const RUN_PHASE = { reserved: 'workPhaseReserved', active: 'workPhaseActive', se
 const VERDICT = { accept: 'workVerdictAccept', rework: 'workVerdictRework', unverified: 'workVerdictUnverified' } as const
 const CHECK = { pass: 'workCheckPass', fail: 'workCheckFail', unverified: 'workCheckUnverified', 'not-applicable': 'workCheckNa' } as const
 const DELIVERY = { intent: 'workDeliveryIntent', accepted: 'workDeliveryAccepted', rejected: 'workDeliveryRejected', unknown: 'workDeliveryUnknown' } as const
+const DISPATCH = { intent: 'workDispatchPending', rejected: 'workDispatchRejected', unknown: 'workDispatchUnknown' } as const
 const CHANGE = { added: 'workChangeAdded', modified: 'workChangeModified', deleted: 'workChangeDeleted' } as const
 
-export function workFactKey(group: 'kind' | 'phase' | 'verdict' | 'check' | 'delivery' | 'change', value: string): TextKey | undefined {
-  const tables = { kind: RUN_KIND, phase: RUN_PHASE, verdict: VERDICT, check: CHECK, delivery: DELIVERY, change: CHANGE } as const
+export function workFactKey(group: 'kind' | 'phase' | 'verdict' | 'check' | 'delivery' | 'dispatch' | 'change', value: string): TextKey | undefined {
+  const tables = { kind: RUN_KIND, phase: RUN_PHASE, verdict: VERDICT, check: CHECK, delivery: DELIVERY, dispatch: DISPATCH, change: CHANGE } as const
   const table: Record<string, TextKey> = tables[group]
   return table[value]
 }

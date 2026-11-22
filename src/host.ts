@@ -35,6 +35,7 @@ import { REFLECTION_PRESET_ID, REFLECTION_ALLOW } from './reflection.ts'
 import { foldTrajectory } from './trajectory.ts'
 import { restrictInheritedTools } from './tool-scope.ts'
 import { DOT_INHERITED_ALLOW, dotDevIndexReady } from './tools.ts'
+import type { DotCapabilities } from './capabilities.ts'
 
 declare module '@deepseek-ai/dsh-llm' {
   interface MessageSourceMap {
@@ -120,6 +121,8 @@ export interface DotHost {
   handoffView?(fromSessionId: string, toSessionId: string): boolean
   /** Let go of a segment dot has left; its log stays readable. */
   releaseDot(sessionId: string): Promise<void>
+  /** Reapply the extra-capability grants on a live dot agent, for an untouched segment taking a settings change in place. */
+  reapplyCapabilities?(sessionId: string): Promise<void>
   /** The whole log of one of dot's segments, live or stored, oldest first. */
   readEvents(sessionId: string): Promise<RawEvent[]>
   /**
@@ -128,6 +131,17 @@ export interface DotHost {
    * instruction. Rejects when no answer came back.
    */
   summarize(sessionId: string, instruction: string, maxTokens: number, onUsage?: (usage: DotContextUsage) => void): Promise<string>
+  /**
+   * One cache-keepalive ping: the same replayed prefix as {@link summarize}
+   * plus a one-character user text capped at one token, outside the session
+   * log. A truncated or empty answer is a success; only request failures
+   * reject.
+   */
+  ping(sessionId: string, onUsage?: (usage: DotContextUsage) => void): Promise<void>
+  /** The provider and model dot's next request would run on; undefined when none is known. */
+  dotModel(): { provider: string; model: string } | undefined
+  /** The provider and model the session's own request header carries — what a replayed prefix would run on. */
+  sessionModel(sessionId: string): { provider: string; model: string } | undefined
   /** The model dot's next segment would run on, as `provider/model@effort`; undefined when none is known. */
   modelKey(): string | undefined
   /** The human's message to dot, optionally carrying notices into the same turn; steers a running turn, starts one when idle. */
@@ -253,7 +267,7 @@ async function settleOwnedJobs(get: Get, sessionId: string, factsOf: () => Promi
 }
 
 /** @param modelOf - dot's chosen model, read on every model call; undefined follows the host default. */
-export function bindHost(get: Get, log?: (message: string) => void, modelOf?: () => ModelChoice | undefined, seal?: (agent: Agent) => void): DotHost {
+export function bindHost(get: Get, log?: (message: string) => void, modelOf?: () => ModelChoice | undefined, seal?: (agent: Agent) => void, capabilities?: DotCapabilities): DotHost {
   const need = <T,>(name: string): T => {
     const value = get(name) as T | undefined
     if (!value) throw new HostUnavailable(name)
@@ -294,7 +308,7 @@ export function bindHost(get: Get, log?: (message: string) => void, modelOf?: ()
     const id = (await presets.resolve(preset)).id
     return {
       id,
-      setup: async (agentCtx: unknown) => {
+      setup: async (agentCtx: unknown, agent: Agent) => {
         installModelSelection(agentCtx as never)
         await presets.mount(agentCtx, id)
         if (allow === DOT_INHERITED_ALLOW) await dotDevIndexReady()
@@ -304,7 +318,12 @@ export function bindHost(get: Get, log?: (message: string) => void, modelOf?: ()
         // the request), leaving the model with no tool list at all. The allow
         // list must wait for the late dev-index row: restrict keeps a
         // snapshot, so a name registered after the call would stay hidden.
-        restrictInheritedTools(agentCtx, allow)
+        // The agent scope's key is the Agent itself — the host builds the
+        // scope as `createScope(loopCtx, agent)` — so the supported setup
+        // parameter names it, and nothing here has to read a scope tag through
+        // a possibly duplicated dsh-scope copy.
+        if (allow === DOT_INHERITED_ALLOW && capabilities) await capabilities.applyToAgent(agentCtx, agent)
+        else restrictInheritedTools(agentCtx, allow, agent)
       },
     }
   }
@@ -327,6 +346,46 @@ export function bindHost(get: Get, log?: (message: string) => void, modelOf?: ()
     if (!provider || !model) return undefined
     const effort = chosen ? chosen.reasoningEffort : typeof fallback?.reasoningEffort === 'string' ? fallback.reasoningEffort : undefined
     return { provider, model, ...effort ? { reasoningEffort: effort } : {} }
+  }
+  /**
+   * Replay the session's own prompt, history and tools with one extra user
+   * text, outside its log — the request shape dsh-compaction-basic's
+   * summarizer uses, so the provider cache is reused.
+   */
+  const streamOnPrefix = async (sessionId: string, text: string, maxTokens: number, onUsage?: (usage: DotContextUsage) => void): Promise<string> => {
+    const session = registryAgent(sessionId)?.session
+    const llm = get('llm') as Llm | undefined
+    if (!session) throw new Error('the session is not live')
+    if (typeof llm?.stream !== 'function') throw new HostUnavailable('llm')
+    const header = session.requestHeader()
+    const config = header?.config
+    if (!config?.provider || !config.model) throw new Error('the session has not made a model request yet')
+    const assembler = new BlockAssembler()
+    const stream = llm.stream({
+      provider: config.provider,
+      model: config.model,
+      messages: [...session.deriveMessages(), { role: 'user', content: [{ type: 'text', text }] }],
+      toolHistory: session.toolHistory(),
+      ...header?.tools ? { tools: [...header.tools] } : {},
+      maxTokens,
+      sessionId: session.id,
+      purpose: 'compaction',
+      signal: AbortSignal.timeout(SUMMARY_TIMEOUT_MS),
+    })
+    for await (const chunk of stream) assembler.push(chunk as Parameters<BlockAssembler['push']>[0])
+    const finish = assembler.finish as { kind: string; failure?: { message?: string } }
+    if (finish.kind === 'error' || finish.kind === 'aborted') throw new Error(finish.failure?.message ?? `the request ended with ${finish.kind}`)
+    const usage = assembler.usage as { inputTokens?: unknown; cacheReadTokens?: unknown; cacheWriteTokens?: unknown; outputTokens?: unknown } | undefined
+    const num = (value: unknown) => typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : 0
+    if (usage && (typeof usage.inputTokens === 'number' || typeof usage.outputTokens === 'number')) {
+      onUsage?.({
+        input: num(usage.inputTokens),
+        cacheRead: num(usage.cacheReadTokens),
+        cacheWrite: num(usage.cacheWriteTokens),
+        output: num(usage.outputTokens),
+      })
+    }
+    return assembler.blocks().map(block => { const row = block as { type?: string; text?: unknown }; return row.type === 'text' && typeof row.text === 'string' ? row.text : '' }).join('')
   }
 
   return {
@@ -690,11 +749,16 @@ export function bindHost(get: Get, log?: (message: string) => void, modelOf?: ()
       }
     },
     async releaseDot(sessionId) {
+      capabilities?.releaseAgent(sessionId)
       scans.delete(sessionId)
       const handle = handles.get(sessionId)
       if (!handle) return
       handles.delete(sessionId)
       await handle.dispose()
+    },
+    async reapplyCapabilities(sessionId) {
+      const agent = registryAgent(sessionId)
+      if (agent) await capabilities?.applyToAgent(agent.ctx, agent)
     },
     async readEvents(sessionId) {
       const session = registryAgent(sessionId)?.session
@@ -710,41 +774,17 @@ export function bindHost(get: Get, log?: (message: string) => void, modelOf?: ()
       return stored.events.filter((event): event is RawEvent => typeof event.type === 'string')
     },
     async summarize(sessionId, instruction, maxTokens, onUsage) {
-      const session = registryAgent(sessionId)?.session
-      const llm = get('llm') as Llm | undefined
-      if (!session) throw new Error('the session is not live')
-      if (typeof llm?.stream !== 'function') throw new HostUnavailable('llm')
-      const header = session.requestHeader()
-      const config = header?.config
-      if (!config?.provider || !config.model) throw new Error('the session has not made a model request yet')
-      const assembler = new BlockAssembler()
-      const stream = llm.stream({
-        provider: config.provider,
-        model: config.model,
-        messages: [...session.deriveMessages(), { role: 'user', content: [{ type: 'text', text: instruction }] }],
-        toolHistory: session.toolHistory(),
-        ...header?.tools ? { tools: [...header.tools] } : {},
-        maxTokens,
-        sessionId: session.id,
-        purpose: 'compaction',
-        signal: AbortSignal.timeout(SUMMARY_TIMEOUT_MS),
-      })
-      for await (const chunk of stream) assembler.push(chunk as Parameters<BlockAssembler['push']>[0])
-      const finish = assembler.finish as { kind: string; failure?: { message?: string } }
-      if (finish.kind === 'error' || finish.kind === 'aborted') throw new Error(finish.failure?.message ?? `the request ended with ${finish.kind}`)
-      const usage = assembler.usage as { inputTokens?: unknown; cacheReadTokens?: unknown; cacheWriteTokens?: unknown; outputTokens?: unknown } | undefined
-      const num = (value: unknown) => typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : 0
-      if (usage && (typeof usage.inputTokens === 'number' || typeof usage.outputTokens === 'number')) {
-        onUsage?.({
-          input: num(usage.inputTokens),
-          cacheRead: num(usage.cacheReadTokens),
-          cacheWrite: num(usage.cacheWriteTokens),
-          output: num(usage.outputTokens),
-        })
-      }
-      const text = assembler.blocks().map(block => { const row = block as { type?: string; text?: unknown }; return row.type === 'text' && typeof row.text === 'string' ? row.text : '' }).join('').trim()
+      const text = (await streamOnPrefix(sessionId, instruction, maxTokens, onUsage)).trim()
       if (!text) throw new Error('the model returned no text')
       return text
+    },
+    async ping(sessionId, onUsage) {
+      await streamOnPrefix(sessionId, '.', 1, onUsage)
+    },
+    dotModel: () => wantedModel(),
+    sessionModel(sessionId) {
+      const config = registryAgent(sessionId)?.session.requestHeader()?.config
+      return config?.provider && config.model ? { provider: config.provider, model: config.model } : undefined
     },
     modelKey() {
       const wanted = wantedModel()
@@ -851,6 +891,7 @@ export function bindHost(get: Get, log?: (message: string) => void, modelOf?: ()
       return status !== undefined && status !== 'idle'
     },
     async dispose() {
+      capabilities?.releaseAll()
       const owned = [...handles.values()]
       handles.clear()
       await Promise.allSettled(owned.map(handle => handle.dispose()))

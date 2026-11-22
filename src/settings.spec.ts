@@ -12,6 +12,13 @@ describe('parseSettings', () => {
     expect(() => patchSettings(DEFAULT_SETTINGS, { idleCheckMinutes: -1 })).toThrow()
     expect(() => patchSettings(DEFAULT_SETTINGS, { idleCheckMinutes: 1.5 })).toThrow()
   })
+  it('defaults auto update on and round-trips a boolean', () => {
+    expect(parseSettings({}).autoUpdate).toBe(true)
+    expect(parseSettings({ autoUpdate: false }).autoUpdate).toBe(false)
+    expect(parseSettings({ autoUpdate: 'no' }).autoUpdate).toBe(true)
+    expect(patchSettings(DEFAULT_SETTINGS, { autoUpdate: false }).autoUpdate).toBe(false)
+    expect(() => patchSettings(DEFAULT_SETTINGS, { autoUpdate: 'no' })).toThrow()
+  })
   it('fills defaults and keeps each valid field on its own', () => {
     expect(parseSettings(undefined)).toEqual(DEFAULT_SETTINGS)
     const parsed = parseSettings({ approvals: 'deny', questions: 'nonsense', taskPermission: 'inherit', approvalAllowlist: ['read'], notifyQuietSeconds: 30, awayMinutes: 20, model: { provider: 'p', model: 'm' } })
@@ -35,23 +42,8 @@ describe('parseSettings', () => {
     expect(parseSettings({ taskPermission: 'inherit' }).taskPermission).toBe('workspace-write')
   })
 
-  it('reads the plural legacy permission name once, without guessing a shape', () => {
-    expect(parseSettings({ taskPermissions: 'danger-full-access' }).taskPermission).toBe('danger-full-access')
-    expect(parseSettings({ taskPermissions: 'workspace-write' }).taskPermission).toBe('workspace-write')
-    expect(parseSettings({ taskPermissions: { mode: 'danger-full-access' } }).taskPermission).toBe('workspace-write')
-    // The singular field wins over the legacy one.
-    expect(parseSettings({ taskPermission: 'default', taskPermissions: 'danger-full-access' }).taskPermission).toBe('default')
-  })
 
-  it('falls back to the human for the removed blanket allow mode', () => {
-    expect(parseSettings({ approvals: 'allow' }).approvals).toBe('human')
-    expect(parseSettings({ approvals: 'dot' }).approvals).toBe('dot')
-  })
 
-  it('reads the deprecated policy text but never lets it be edited', () => {
-    expect(parseSettings({ policy: 'ask before push' }).policy).toBe('ask before push')
-    expect(() => patchSettings(DEFAULT_SETTINGS, { policy: 'new rules' })).toThrow(/unknown setting/)
-  })
 })
 
 describe('patchSettings', () => {
@@ -75,14 +67,18 @@ describe('patchSettings', () => {
     expect(parseSettings({ persona: 'x'.repeat(PERSONA_MAX_CHARS + 1) }).persona).toBeUndefined()
   })
 
-  it('uses a four-part Chinese default persona that is warm, encouraging and honest', () => {
+  it('uses a three-section Chinese default persona that is warm, encouraging and honest', () => {
     expect(DEFAULT_PERSONA).toContain('你叫桃乐丝')
     expect(DEFAULT_PERSONA).toContain('英文名 Dorothy')
     expect(DEFAULT_PERSONA).toContain('简称 dot')
     expect(DEFAULT_PERSONA).toContain('鼓励')
     expect(DEFAULT_PERSONA).not.toContain('不是《妮姬》')
     expect(DEFAULT_PERSONA).not.toContain('社区里的 doro')
-    for (const heading of ['【你是谁】', '【性格和在意的东西】', '【怎么说话】', '【和用户的关系】']) expect(DEFAULT_PERSONA).toContain(heading)
+    for (const heading of ['【性格和在意的东西】', '【怎么说话】', '【和用户的关系】']) expect(DEFAULT_PERSONA).toContain(heading)
+    // sectionLead already introduces the persona, so the body starts without a heading.
+    expect(DEFAULT_PERSONA.startsWith('【')).toBe(false)
+    expect(DEFAULT_PERSONA).toContain('聊正事时先给结论。')
+    expect(DEFAULT_PERSONA).not.toContain('确实需要用户拍板时')
     expect(DEFAULT_PERSONA.length).toBeLessThanOrEqual(1200)
     expect(DEFAULT_PERSONA).not.toMatch(/姐姐|妹妹|鲸鱼娘|大肥鱼|粉色虎鲸|粉毛小狗|大小姐|sister|At work|Off duty|the human/i)
   })
@@ -117,10 +113,29 @@ describe('patchSettings', () => {
     expect(parseSettings(next).reflection).toBe(false)
   })
 
+  it('stores per-model cache TTL overrides and refuses bad values', () => {
+    const next = patchSettings(DEFAULT_SETTINGS, { cacheTtl: { 'p/base': 12, 'x/deepseek-v4': 0 } })
+    expect(next.cacheTtl).toEqual({ 'p/base': 12, 'x/deepseek-v4': 0 })
+    expect(parseSettings(next).cacheTtl).toEqual(next.cacheTtl)
+    expect(() => patchSettings(DEFAULT_SETTINGS, { cacheTtl: { 'p/base': -1 } })).toThrow(/cacheTtl/)
+    expect(() => patchSettings(DEFAULT_SETTINGS, { cacheTtl: { 'p/base': 1441 } })).toThrow(/cacheTtl/)
+    expect(() => patchSettings(DEFAULT_SETTINGS, { cacheTtl: { 'p/base': 1.5 } })).toThrow(/cacheTtl/)
+    expect(() => patchSettings(DEFAULT_SETTINGS, { cacheTtl: { '': 5 } })).toThrow(/cacheTtl/)
+    expect(() => patchSettings(DEFAULT_SETTINGS, { cacheTtl: null })).toThrow(/cacheTtl/)
+    const tooMany = Object.fromEntries(Array.from({ length: 201 }, (_, index) => [`p/m${index}`, 5]))
+    expect(() => patchSettings(DEFAULT_SETTINGS, { cacheTtl: tooMany })).toThrow(/cacheTtl/)
+  })
+
+  it('ignores a malformed stored cache TTL map field by field', () => {
+    expect(parseSettings({ cacheTtl: { 'p/base': 'soon' } }).cacheTtl).toBeUndefined()
+    expect(parseSettings({ cacheTtl: 'yes' }).cacheTtl).toBeUndefined()
+    expect(parseSettings({ cacheTtl: { 'p/base': 30 } }).cacheTtl).toEqual({ 'p/base': 30 })
+  })
+
   it('keeps every setting unlocked by default and saves individual locks', () => {
     expect(parseSettings(undefined).locks).toBeUndefined()
-    const next = patchSettings(DEFAULT_SETTINGS, { locks: { model: true, memory: false } })
-    expect(next.locks).toEqual({ model: true, memory: false })
+    const next = patchSettings(DEFAULT_SETTINGS, { locks: { model: true, agreements: false } })
+    expect(next.locks).toEqual({ model: true, agreements: false })
     expect(parseSettings(next).locks).toEqual(next.locks)
     expect(parseSettings({ locks: { model: true, taskPermission: true } }).locks).toEqual({ model: true, taskPermission: true })
     expect(() => patchSettings(DEFAULT_SETTINGS, { locks: { locks: true } })).toThrow()

@@ -6,33 +6,40 @@
  * the host feed and redraws on every change.
  */
 import {
-  Button, DisclosureRow, IconCheckOutlineRegular, IconCloseOutlineRegular,
-  MarkdownText, StateDot, Tag, TextShimmer, UserMessageBubble, type MarkdownLabels, type StateDotState, type TagTone,
+  Button, DisclosureRow, IconCheckOutlineRegular, IconChecklistOutlineRegular, IconChevronDownOutlineRegular,
+  IconCloseOutlineRegular, IconCordisPluginOutlineRegular, IconEditOutlineRegular, IconGaugeOutlineRegular,
+  IconInspectOutlineRegular, IconShieldOutlineRegular, IconSlidersTwoOutlineRegular, IconUserOutlineRegular,
+  IconWarningOutlineRegular, MarkdownText, Modal, modalSelector, StateDot, Tag, TextShimmer, Tooltip, UserMessageBubble,
+  type MarkdownLabels, type StateDotState, type TagTone,
 } from '@deepseek-ai/dsh-client-ui-primitives'
-import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ChangeEvent, type ClipboardEvent, type ComponentType, type KeyboardEvent, type ReactNode } from 'react'
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type ComponentType, type ReactNode } from 'react'
 import { Board, boardCounts, type BoardFilter } from './board.tsx'
-import { headerBoardCounts, sessionLookup } from './board-groups.ts'
+import { groupBoard, headerBoardCounts, sessionLookup } from './board-groups.ts'
 import { filterVisibleChat } from './chat-filter.ts'
 import { formatToolDetail, parseNotice, permissionLabel, resolveSessionBadge, summarizeNotice, summarizeToolCall, summarizeToolGroup, type NoticeEntry, type ParsedNotice, type SessionBadge, type TaskLookup } from './chat-format.ts'
+import { BellGlyph, Composer, GearGlyph, JumpGlyph, NarrowGlyph, ToolGlyph, WidenGlyph } from './composer.tsx'
+import {
+  useBoard, useChatFeed, useContextUse, useDrawerGuard, useLocalEchoes, useRecipes, useReminderRemoval, useScrollPin, useSettings,
+  type DrawerAction, type DrawerTab, type SettingsSection,
+} from './chat-hooks.ts'
 import { ContextPanel, type ContextApi } from './context-panel.tsx'
 import { PersonaPanel, type KnowledgeApi } from './persona-panel.tsx'
 import { TrajectoryPanel, type TrajectoryApi } from './trajectory-panel.tsx'
-import type { BoardView, ChatItem, ChatSnapshot, DotSettings, RolloverReason } from './contracts.ts'
-import { CHAT_IMAGE_LIMIT, ChatImageRejected, imageName, inspectImageBytes, type ChatImage, type ChatImageError } from './chat-images.ts'
-import { SettingsPanel, settingsCss, type SaveNotice, type SettingsApi } from './settings-panel.tsx'
+import type { BoardView, ChatItem, ChatSnapshot, DotSettings, RecipeBoardRow, RolloverReason } from './contracts.ts'
+import type { ChatImage } from './chat-images.ts'
+import { SettingsPanel, useSettingProposals, type SaveNotice, type SettingsApi } from './settings-panel.tsx'
 import type { RenderFactorySlot } from '@klarkxy/dsh-plugin-kit/model-picker'
-import { cardCopy, intlLocale, t, toolLabel, type CopyLocale, type TextKey } from './ui-copy.ts'
+import { cardCopy, fillText, formatDuration, formatTokens, formatWhen, intlLocale, t, toolLabel, type CopyLocale, type TextKey } from './ui-copy.ts'
+import { mergedRecipeBody } from './recipes.ts'
 import { WorkBoardPanel, type WorkApi } from './work-board.tsx'
-import type { WorkAcceptPayload, PendingGlance, WorkBoardItem, WorkReadRequest, WorkRejectPayload } from './work-board.ts'
+import type { WorkAcceptPayload, PendingGlance, WorkBoardItem, WorkIntegratePayload, WorkReadRequest, WorkRejectPayload } from './work-board.ts'
 import { DotAvatar } from './whale.tsx'
 
-export const CHAT_ROOT = 'dsh-dot-chat'
+export { chatCss } from './chat-panel-css.ts'
+export type { DrawerTab } from './chat-hooks.ts'
 
-const BOARD_POLL_MS = 5_000
-const RETRY_MS = 2_000
-/** A sent message waits this long to show up in the log before its local echo is dropped. */
-const ECHO_MS = 60_000
-const STICK_PX = 96
+
+export const CHAT_ROOT = 'dsh-dot-chat'
 
 export interface ChatApi extends SettingsApi, ContextApi, TrajectoryApi, KnowledgeApi {
   chat(itemsRev: number, signal: AbortSignal): Promise<ChatSnapshot | undefined>
@@ -42,90 +49,24 @@ export interface ChatApi extends SettingsApi, ContextApi, TrajectoryApi, Knowled
   board(signal: AbortSignal): Promise<BoardView>
   /** Remove one of Dorothy's reminders from the board. */
   removeSchedule(id: string): Promise<boolean>
+  /** Recipes with per-revision stats, in-flight changes and bound reminders. */
+  recipes?(signal: AbortSignal): Promise<readonly RecipeBoardRow[]>
+  /** Create + dispatch a recipe task from the Tasks panel. */
+  recipeRun?(id: string): Promise<{ readonly ok: true; readonly changeId: string; readonly runId?: string } | { readonly ok: false; readonly reason: string }>
+  /** Approve or dismiss a pending recipe proposal. */
+  recipeProposalDecide?(id: string, allow: boolean): Promise<string>
   workAccept?(payload: WorkAcceptPayload): Promise<void>
   workReject?(payload: WorkRejectPayload): Promise<void>
-  workAnswer?(payload: { readonly id: string; readonly allow: boolean }): Promise<void>
+  workAnswer?(payload: { readonly id: string; readonly allow: boolean; readonly note?: string }): Promise<void>
   workResume?(payload: { readonly id: string }): Promise<void>
+  workForceRelease?(payload: { readonly id: string }): Promise<void>
+  workIntegrate?(payload: WorkIntegratePayload): Promise<void>
   workRead?(request: WorkReadRequest): Promise<{ readonly source: string; readonly body: string; readonly truncated?: boolean; readonly totalBytes?: number }>
   settings(signal: AbortSignal): Promise<DotSettings>
 }
 
 /** deep-view's client card, read from its service when that plugin is installed. */
 export type CardComponent = ComponentType<{ sessionId: string; callId: string; presentation?: unknown; title?: unknown; view?: unknown; failed?: boolean; answer?: { id: string; action: string; values: Record<string, unknown> } }>
-
-interface ChatState {
-  readonly snapshot?: ChatSnapshot
-  readonly items: readonly ChatItem[]
-  readonly answers: NonNullable<ChatSnapshot['answers']>
-}
-
-/** Keep the item list across snapshots that leave it out. */
-function merge(state: ChatState, next: ChatSnapshot | undefined): ChatState {
-  if (!next) return state
-  return next.items ? { snapshot: next, items: next.items, answers: next.answers ?? {} } : { ...state, snapshot: next }
-}
-
-function useChatFeed(api: ChatApi): { state: ChatState; error?: string; retry: () => void } {
-  const [state, setState] = useState<ChatState>({ items: [], answers: {} })
-  const [error, setError] = useState<string>()
-  const [attempt, setAttempt] = useState(0)
-  useEffect(() => {
-    const lifetime = new AbortController()
-    let current: ChatState = { items: [], answers: {} }
-    const apply = (next: ChatSnapshot | undefined) => { current = merge(current, next); setState(current); setError(undefined) }
-    void (async () => {
-      while (!lifetime.signal.aborted) {
-        try {
-          const known = current.snapshot
-          apply(known ? await api.wait(known.rev, known.itemsRev, lifetime.signal) : await api.chat(0, lifetime.signal))
-        } catch (failure) {
-          if (lifetime.signal.aborted) return
-          setError(failure instanceof Error ? failure.message : String(failure))
-          await new Promise(resolve => setTimeout(resolve, RETRY_MS))
-        }
-      }
-    })()
-    return () => lifetime.abort()
-  }, [api, attempt])
-  return { state, ...error === undefined ? {} : { error }, retry: useCallback(() => setAttempt(value => value + 1), []) }
-}
-
-function useBoard(api: ChatApi): [BoardView | undefined, string | undefined, () => void] {
-  const [view, setView] = useState<BoardView>()
-  const [error, setError] = useState<string>()
-  const [round, setRound] = useState(0)
-  useEffect(() => {
-    const lifetime = new AbortController()
-    let timer: ReturnType<typeof setTimeout> | undefined
-    // An unchanged poll keeps the old object, so the chat and the board do not redraw every few seconds.
-    let last = ''
-    const run = () => {
-      api.board(lifetime.signal).then(next => {
-        if (lifetime.signal.aborted) return
-        const text = JSON.stringify(next)
-        if (text !== last) { last = text; setView(next) }
-        setError(undefined)
-      }, failure => {
-        if (!lifetime.signal.aborted) setError(failure instanceof Error ? failure.message : String(failure))
-      }).finally(() => {
-        if (!lifetime.signal.aborted) timer = setTimeout(run, BOARD_POLL_MS)
-      })
-    }
-    run()
-    return () => { lifetime.abort(); if (timer !== undefined) clearTimeout(timer) }
-  }, [api, round])
-  return [view, error, useCallback(() => setRound(value => value + 1), [])]
-}
-
-function useSettings(api: ChatApi): [DotSettings | undefined, (next: DotSettings) => void] {
-  const [settings, setSettings] = useState<DotSettings>()
-  useEffect(() => {
-    const lifetime = new AbortController()
-    api.settings(lifetime.signal).then(setSettings, () => {})
-    return () => lifetime.abort()
-  }, [api])
-  return [settings, setSettings]
-}
 
 const NO_PENDING: readonly PendingGlance[] = []
 const NO_WORK: readonly WorkBoardItem[] = []
@@ -150,9 +91,6 @@ export function rowsOf(items: readonly ChatItem[]): Row[] {
   return rows
 }
 
-export type DrawerTab = 'tasks' | 'settings' | 'persona' | 'context' | 'trajectory'
-const CONFIG_TABS: ReadonlySet<DrawerTab> = new Set(['settings', 'persona', 'context', 'trajectory'])
-
 interface DrawerProps {
   readonly locale: CopyLocale
   readonly api: ChatApi
@@ -165,66 +103,134 @@ interface DrawerProps {
   readonly proposalCount: number
   readonly tasks: ReactNode
   readonly renderFactorySlot?: RenderFactorySlot
-  readonly onTab: (tab: DrawerTab) => void
+  readonly personaDirty: boolean
+  readonly pendingAction?: DrawerAction
+  readonly discardSignal: number
+  readonly onRequest: (action: DrawerAction) => void
+  readonly onCancelPending: () => void
+  readonly onDiscardPending: () => void
+  readonly onDirtyChange: (dirty: boolean) => void
   readonly onWide: () => void
   readonly onSaved: (next: DotSettings) => void
   readonly onProposalCount: (count: number) => void
-  readonly onClose: () => void
+}
+
+const SETTINGS_SECTIONS: ReadonlySet<DrawerTab> = new Set<SettingsSection>([
+  'proposals', 'general', 'takeover', 'dispatch', 'capabilities',
+])
+
+function isSettingsSection(tab: DrawerTab): tab is SettingsSection {
+  return SETTINGS_SECTIONS.has(tab)
+}
+
+interface DrawerNavItem {
+  readonly value: DrawerTab
+  readonly label: string
+  readonly title: string
+  readonly icon: ReactNode
+  readonly badge?: number
+  readonly dirty?: boolean
 }
 
 /**
  * One drawer docked beside the chat for the board and every settings page.
  * It has no backdrop, so the conversation and the composer stay usable while it is open.
  */
-function WorkDrawer({ locale, api, tab, wide, settings, trajectoryRev, running, waiting, proposalCount, tasks, renderFactorySlot, onTab, onWide, onSaved, onProposalCount, onClose }: DrawerProps) {
+function WorkDrawer({ locale, api, tab, wide, settings, trajectoryRev, running, waiting, proposalCount, tasks, renderFactorySlot, personaDirty, pendingAction, discardSignal, onRequest, onCancelPending, onDiscardPending, onDirtyChange, onWide, onSaved, onProposalCount }: DrawerProps) {
   const [saveNotice, setSaveNotice] = useState<SaveNotice>()
+  useEffect(() => { setSaveNotice(undefined) }, [tab])
+  const requestClose = useCallback(() => { onRequest({ kind: 'close' }) }, [onRequest])
+  const requestTab = useCallback((next: DrawerTab) => { onRequest({ kind: 'tab', tab: next }) }, [onRequest])
   useEffect(() => {
-    const close = (event: globalThis.KeyboardEvent) => { if (event.key === 'Escape' && !event.defaultPrevented) onClose() }
+    const close = (event: globalThis.KeyboardEvent) => {
+      if (event.key === 'Escape' && !event.defaultPrevented && !document.querySelector(modalSelector)) requestClose()
+    }
     document.addEventListener('keydown', close)
     return () => document.removeEventListener('keydown', close)
-  }, [onClose])
-  useEffect(() => { setSaveNotice(undefined) }, [tab])
+  }, [requestClose])
   useEffect(() => {
     if (saveNotice?.kind !== 'saved') return
     const timer = setTimeout(() => setSaveNotice(undefined), 2200)
     return () => clearTimeout(timer)
   }, [saveNotice])
   const isTasks = tab === 'tasks'
-  const items: readonly { value: DrawerTab; label: string; title: string; badge: number }[] = isTasks ? [
-    { value: 'tasks', label: t(locale, 'tasks'), title: t(locale, 'tasks'), badge: waiting },
-  ] : [
-    { value: 'settings', label: t(locale, 'settings'), title: t(locale, 'settings'), badge: proposalCount },
-    { value: 'persona', label: t(locale, 'tabPersona'), title: t(locale, 'personaTitle'), badge: 0 },
-    { value: 'context', label: t(locale, 'tabContext'), title: t(locale, 'ctxTitle'), badge: 0 },
-    { value: 'trajectory', label: t(locale, 'viewTrajectory'), title: t(locale, 'trTitle'), badge: 0 },
+  const reloadSettings = useCallback(() => {
+    api.settings(new AbortController().signal).then(onSaved, () => {})
+  }, [api, onSaved])
+  const proposalState = useSettingProposals(api, !isTasks, reloadSettings, onProposalCount)
+  useEffect(() => {
+    if (tab === 'proposals' && proposalState.loaded && proposalState.rows.length === 0 && !proposalState.error) {
+      requestTab('general')
+    }
+  }, [tab, proposalState.loaded, proposalState.rows.length, proposalState.error, requestTab])
+
+  const bodyRef = useRef<HTMLDivElement>(null)
+  const scrollerRef = useRef<HTMLDivElement>(null)
+  const [navCompact, setNavCompact] = useState(false)
+  useEffect(() => {
+    const el = bodyRef.current
+    if (isTasks || !el || typeof ResizeObserver === 'undefined') { setNavCompact(false); return }
+    const sync = (width: number) => {
+      if (width > 0) setNavCompact(width < 440)
+    }
+    sync(el.getBoundingClientRect().width)
+    const observer = new ResizeObserver(entries => {
+      const width = entries[0]?.contentRect.width ?? el.getBoundingClientRect().width
+      sync(width)
+    })
+    observer.observe(el)
+    return () => observer.disconnect()
+  }, [isTasks])
+  useEffect(() => {
+    if (scrollerRef.current) scrollerRef.current.scrollTop = 0
+  }, [tab])
+
+  const proposalItems: readonly DrawerNavItem[] = !isTasks && (proposalCount > 0 || tab === 'proposals') ? [
+    { value: 'proposals', label: t(locale, 'tabProposals'), title: t(locale, 'sProposals'), icon: <IconEditOutlineRegular size={15} />, badge: proposalCount },
+  ] : []
+  const configItems: readonly DrawerNavItem[] = isTasks ? [] : [
+    { value: 'general', label: t(locale, 'tabGeneral'), title: t(locale, 'tabGeneral'), icon: <IconSlidersTwoOutlineRegular size={15} /> },
+    { value: 'takeover', label: t(locale, 'tabTakeover'), title: t(locale, 'sRequests'), icon: <IconShieldOutlineRegular size={15} /> },
+    { value: 'dispatch', label: t(locale, 'tabDispatch'), title: t(locale, 'sTasks'), icon: <IconChecklistOutlineRegular size={15} /> },
+    { value: 'capabilities', label: t(locale, 'tabCapabilities'), title: t(locale, 'sCapabilities'), icon: <IconCordisPluginOutlineRegular size={15} /> },
+    { value: 'persona', label: t(locale, 'tabPersona'), title: t(locale, 'personaTitle'), icon: <IconUserOutlineRegular size={15} />, dirty: personaDirty },
   ]
-  const activeItem = items.find(item => item.value === tab) ?? items[0]!
+  const inspectItems: readonly DrawerNavItem[] = isTasks ? [] : [
+    { value: 'context', label: t(locale, 'tabContext'), title: t(locale, 'ctxTitle'), icon: <IconGaugeOutlineRegular size={15} /> },
+    { value: 'trajectory', label: t(locale, 'viewTrajectory'), title: t(locale, 'trTitle'), icon: <IconInspectOutlineRegular size={15} /> },
+  ]
+  const allItems: readonly DrawerNavItem[] = isTasks
+    ? [{ value: 'tasks', label: t(locale, 'tasks'), title: t(locale, 'tasks'), icon: null, badge: waiting }]
+    : [...proposalItems, ...configItems, ...inspectItems]
+  const activeItem = allItems.find(item => item.value === tab) ?? allItems[0]!
+
+  const renderNavButton = (item: DrawerNavItem) => (
+    <Tooltip key={item.value} label={item.label} side="right" portal disabled={!navCompact}>
+      <button
+        type="button"
+        className="dsh-dot-nav-item"
+        data-nav={item.value}
+        aria-pressed={tab === item.value}
+        aria-controls={`dsh-dot-drawer-panel-${item.value}`}
+        onClick={() => requestTab(item.value)}
+      >
+        <span className="dsh-dot-nav-icon" aria-hidden="true">{item.icon}</span>
+        <span className="dsh-dot-nav-label">{item.label}</span>
+        {item.badge && item.badge > 0 ? <span className="dsh-dot-nav-badge">{item.badge}</span> : null}
+        {item.dirty ? <span className="dsh-dot-dirty-dot" aria-hidden="true" /> : null}
+      </button>
+    </Tooltip>
+  )
+
   return (
-    <div className="dsh-dot-drawer-layer">
-    <button type="button" tabIndex={-1} className="dsh-dot-drawer-backdrop" aria-label={t(locale, 'closeDrawer')} onClick={onClose} />
+    <div className="dsh-dot-drawer-layer" data-kind={isTasks ? 'tasks' : 'settings'}>
+    <button type="button" tabIndex={-1} className="dsh-dot-drawer-backdrop" aria-label={t(locale, 'closeDrawer')} onClick={requestClose} />
     <aside className="dsh-dot-drawer" data-kind={isTasks ? 'tasks' : 'settings'} data-wide={wide ? '' : undefined} role="dialog" aria-label={isTasks ? t(locale, 'tasks') : t(locale, 'settings')}>
       <header className="dsh-dot-drawer-head">
-        {isTasks ? (
-          <h2 className="dsh-dot-drawer-title">
-            {t(locale, 'tasks')}
-            {waiting > 0 ? <span className="dsh-dot-nav-badge">{waiting}</span> : null}
-          </h2>
-        ) : (
-        <nav className="dsh-dot-drawer-tabs" aria-label={t(locale, 'drawerTabs')}>
-          {items.map(item => (
-            <button
-              key={item.value}
-              type="button"
-              aria-pressed={tab === item.value}
-              aria-controls={`dsh-dot-drawer-panel-${item.value}`}
-              onClick={() => onTab(item.value)}
-            >
-              <span className="dsh-dot-nav-label">{item.label}</span>
-              {item.badge > 0 ? <span className="dsh-dot-nav-badge">{item.badge}</span> : null}
-            </button>
-          ))}
-        </nav>
-        )}
+        <h2 className="dsh-dot-drawer-title">
+          {activeItem.title}
+          {isTasks && waiting > 0 ? <span className="dsh-dot-nav-badge">{waiting}</span> : null}
+        </h2>
         <span className="dsh-dot-spacer" />
         {saveNotice?.kind === 'saved' ? (
           <span className="dsh-dot-settings-status" role="status">
@@ -238,19 +244,44 @@ function WorkDrawer({ locale, api, tab, wide, settings, trajectoryRev, running, 
           </span>
         ) : null}
         <Button variant="ghost" size="sm" className="dsh-dot-drawer-widen" icon={wide ? <NarrowGlyph /> : <WidenGlyph />} aria-label={t(locale, wide ? 'narrowDrawer' : 'widenDrawer')} title={t(locale, wide ? 'narrowDrawer' : 'widenDrawer')} aria-pressed={wide} onClick={onWide} />
-        <Button variant="ghost" size="sm" icon={<IconCloseOutlineRegular size={15} />} aria-label={t(locale, 'closeDrawer')} title={t(locale, 'closeDrawer')} onClick={onClose} />
+        <Button variant="ghost" size="sm" icon={<IconCloseOutlineRegular size={15} />} aria-label={t(locale, 'closeDrawer')} title={t(locale, 'closeDrawer')} onClick={requestClose} />
       </header>
-      <div className="dsh-dot-settings-scroll">
-        <div className="dsh-dot-settings" data-tab={tab} id={`dsh-dot-drawer-panel-${tab}`} role="region" aria-label={activeItem.title}>
-          {tab === 'tasks'
-            ? tasks
-            : tab === 'settings'
-              ? <SettingsPanel locale={locale} api={api} {...settings ? { settings } : {}} onSaved={onSaved} onStatusChange={setSaveNotice} onProposalCount={onProposalCount} {...renderFactorySlot ? { renderFactorySlot } : {}} />
-              : tab === 'persona'
-                ? <PersonaPanel locale={locale} api={api} {...settings ? { settings } : {}} onSaved={onSaved} onStatusChange={setSaveNotice} />
-                : tab === 'context'
-                  ? <ContextPanel locale={locale} api={api} running={running} />
-                  : <TrajectoryPanel locale={locale} api={api} {...trajectoryRev === undefined ? {} : { rev: trajectoryRev }} running={running} />}
+      {pendingAction ? (
+        <div className="dsh-dot-unsaved-bar" role="alert">
+          <span>{t(locale, 'unsavedChanges')}</span>
+          <span className="dsh-dot-spacer" />
+          <Button variant="ghost" size="sm" onClick={onCancelPending}>{t(locale, 'unsavedKeepEditing')}</Button>
+          <Button variant="primary" size="sm" onClick={onDiscardPending}>{t(locale, 'unsavedDiscard')}</Button>
+        </div>
+      ) : null}
+      <div className="dsh-dot-drawer-body" ref={bodyRef}>
+        {!isTasks ? (
+          <nav className="dsh-dot-drawer-nav" aria-label={t(locale, 'drawerTabs')}>
+            {proposalItems.length > 0 ? (
+              <>
+                {proposalItems.map(renderNavButton)}
+                <div className="dsh-dot-nav-sep" role="separator" />
+              </>
+            ) : null}
+            <div className="dsh-dot-nav-group-label">{t(locale, 'sNavGroupConfig')}</div>
+            {configItems.map(renderNavButton)}
+            <div className="dsh-dot-nav-sep" role="separator" />
+            <div className="dsh-dot-nav-group-label">{t(locale, 'sNavGroupInspect')}</div>
+            {inspectItems.map(renderNavButton)}
+          </nav>
+        ) : null}
+        <div className="dsh-dot-settings-scroll" ref={scrollerRef}>
+          <div className="dsh-dot-settings" data-tab={tab} id={`dsh-dot-drawer-panel-${tab}`} role="region" aria-label={activeItem.title}>
+            {tab === 'tasks'
+              ? tasks
+              : isSettingsSection(tab)
+                ? <SettingsPanel locale={locale} api={api} section={tab} proposals={proposalState} {...settings ? { settings } : {}} onSaved={onSaved} onStatusChange={setSaveNotice} onProposalCount={onProposalCount} {...renderFactorySlot ? { renderFactorySlot } : {}} />
+                : tab === 'persona'
+                  ? <PersonaPanel locale={locale} api={api} {...settings ? { settings } : {}} discardSignal={discardSignal} onDirtyChange={onDirtyChange} onSaved={onSaved} onStatusChange={setSaveNotice} />
+                  : tab === 'context'
+                    ? <ContextPanel locale={locale} api={api} running={running} />
+                    : <TrajectoryPanel locale={locale} api={api} {...trajectoryRev === undefined ? {} : { rev: trajectoryRev }} running={running} />}
+          </div>
         </div>
       </div>
     </aside>
@@ -258,45 +289,223 @@ function WorkDrawer({ locale, api, tab, wide, settings, trajectoryRev, running, 
   )
 }
 
-/** The board tab: a filter row, the work changes waiting on the human, then the ticket board. */
-function TasksTab({ locale, view, workApi, boardError, onOpen, onRetry, onRemoveSchedule }: {
-  locale: CopyLocale; view?: BoardView; workApi?: WorkApi; boardError?: string
+/** The Recipes filter: saved work orders with stats, bound reminders and a two-step Run now. */
+/** The display form of one requirement: text plus the flags a revise can flip. */
+function requirementSummary(row: import('./work.ts').Requirement): string {
+  return `${row.text}${row.required ? '' : ' (optional)'}${row.scenarios?.length ? ` [${row.scenarios.map(item => item.when).join('; ')}]` : ''}`
+}
+
+/** Old→new for one text field; added/removed/changed lines for the lists — always diffed against the body approve would save. */
+function ProposalDiff({ locale, proposal }: { locale: CopyLocale; proposal: NonNullable<RecipeBoardRow['proposal']> }) {
+  const base = proposal.base ?? { goal: '', requirementsFromGoal: false, requirements: [], constraints: [] }
+  const merged = mergedRecipeBody(base, proposal.patch ?? {})
+  const rows: { label: string; before?: string; after?: string; added?: readonly string[]; removed?: readonly string[]; changed?: readonly { before: string; after: string }[] }[] = []
+  if (merged.goal !== base.goal) rows.push({ label: t(locale, 'proposalGoal'), before: base.goal, after: merged.goal })
+  if ((merged.notes ?? '') !== (base.notes ?? '')) rows.push({ label: t(locale, 'proposalNotes'), before: base.notes ?? '', after: merged.notes ?? '' })
+  {
+    const want = merged.requirements
+    const have = base.requirements
+    const added = want.filter(row => !have.some(old => old.requirementRef === row.requirementRef)).map(requirementSummary)
+    const removed = have.filter(old => !want.some(row => row.requirementRef === old.requirementRef)).map(requirementSummary)
+    const changed = want.flatMap(row => {
+      const old = have.find(item => item.requirementRef === row.requirementRef)
+      return old && JSON.stringify(old) !== JSON.stringify(row) ? [{ before: requirementSummary(old), after: requirementSummary(row) }] : []
+    })
+    if (added.length > 0 || removed.length > 0 || changed.length > 0) rows.push({ label: t(locale, 'proposalRequirements'), added, removed, changed })
+  }
+  {
+    const want = merged.constraints ?? []
+    const have = base.constraints ?? []
+    const added = want.filter(row => !have.some(old => old.constraintRef === row.constraintRef)).map(row => row.text)
+    const removed = have.filter(old => !want.some(row => row.constraintRef === old.constraintRef)).map(row => row.text)
+    const changed = want.flatMap(row => {
+      const old = have.find(item => item.constraintRef === row.constraintRef)
+      return old && old.text !== row.text ? [{ before: old.text, after: row.text }] : []
+    })
+    if (added.length > 0 || removed.length > 0 || changed.length > 0) rows.push({ label: t(locale, 'proposalConstraints'), added, removed, changed })
+  }
+  if (rows.length === 0) return null
+  return (
+    <div className="dsh-dot-recipe-proposal-diff">
+      {rows.map((row, index) => (
+        <div key={`${row.label}-${index}`} className="dsh-dot-recipe-proposal-field">
+          <span className="dsh-ui-meta">{row.label}</span>
+          {row.before !== undefined ? <span className="dsh-ui-meta">«{row.before}» → «{row.after}»</span> : null}
+          {row.changed?.map(pair => <span key={`~${pair.before}`} className="dsh-ui-meta">«{pair.before}» → «{pair.after}»</span>)}
+          {row.added?.map(text => <span key={`+${text}`} className="dsh-ui-meta">+ {text}</span>)}
+          {row.removed?.map(text => <span key={`-${text}`} className="dsh-ui-meta">− {text}</span>)}
+        </div>
+      ))}
+    </div>
+  )
+}
+
+export function RecipesView({ locale, api, rows, error, onChanged }: {
+  locale: CopyLocale; api: ChatApi; rows: readonly RecipeBoardRow[]; error?: string; onChanged: () => void
+}) {
+  const [arm, setArm] = useState<string>()
+  const [busy, setBusy] = useState<string>()
+  const [refusals, setRefusals] = useState<Readonly<Record<string, string>>>({})
+  const [ran, setRan] = useState<Readonly<Record<string, string>>>({})
+  const [approveArm, setApproveArm] = useState<string>()
+  const [proposalBusy, setProposalBusy] = useState<string>()
+  const [proposalErrors, setProposalErrors] = useState<Readonly<Record<string, string>>>({})
+  const armTimer = useRef<ReturnType<typeof setTimeout>>()
+  useEffect(() => () => { if (armTimer.current !== undefined) clearTimeout(armTimer.current) }, [])
+  const decide = (proposalId: string, allow: boolean) => {
+    if (!api.recipeProposalDecide || proposalBusy) return
+    if (allow && approveArm !== proposalId) {
+      setApproveArm(proposalId)
+      if (armTimer.current !== undefined) clearTimeout(armTimer.current)
+      armTimer.current = setTimeout(() => setApproveArm(current => current === proposalId ? undefined : current), 5000)
+      return
+    }
+    setApproveArm(undefined)
+    setProposalBusy(proposalId)
+    api.recipeProposalDecide(proposalId, allow).then(() => {
+      setProposalErrors(prev => { const next = { ...prev }; delete next[proposalId]; return next })
+      onChanged()
+    }, (failure: unknown) => {
+      setProposalErrors(prev => ({ ...prev, [proposalId]: failure instanceof Error ? failure.message : String(failure) }))
+      onChanged()
+    }).finally(() => setProposalBusy(undefined))
+  }
+  const run = (row: RecipeBoardRow) => {
+    if (!api.recipeRun || busy) return
+    if (arm !== row.id) {
+      setArm(row.id)
+      if (armTimer.current !== undefined) clearTimeout(armTimer.current)
+      armTimer.current = setTimeout(() => setArm(current => current === row.id ? undefined : current), 5000)
+      return
+    }
+    setArm(undefined)
+    setBusy(row.id)
+    api.recipeRun(row.id).then(result => {
+      if (result.ok) {
+        setRefusals(prev => { const next = { ...prev }; delete next[row.id]; return next })
+        setRan(prev => ({ ...prev, [row.id]: result.changeId }))
+        onChanged()
+      } else {
+        setRan(prev => { const next = { ...prev }; delete next[row.id]; return next })
+        setRefusals(prev => ({ ...prev, [row.id]: result.reason }))
+      }
+    }, failure => {
+      setRefusals(prev => ({ ...prev, [row.id]: failure instanceof Error ? failure.message : String(failure) }))
+    }).finally(() => setBusy(undefined))
+  }
+  if (rows.length === 0) {
+    if (error === undefined) return <p className="dsh-ui-hint">{t(locale, 'recipeEmpty')}</p>
+    return <div className="dsh-ui-row" role="alert"><span className="dsh-ui-error">{t(locale, 'loadFailed')}: {error}</span><Button variant="ghost" onClick={onChanged}>{t(locale, 'retry')}</Button></div>
+  }
+  return (
+    <div className="dsh-dot-recipes">
+      {error !== undefined ? <p className="dsh-ui-hint" role="status">{t(locale, 'recipesRefreshFailed')}: {error}</p> : null}
+      {rows.map(row => {
+        const inFlight = row.inFlight.length > 0
+        const armed = arm === row.id
+        return (
+          <div key={row.id} className="dsh-dot-recipe" data-recipe={row.id}>
+            <div className="dsh-dot-recipe-head">
+              <span className="dsh-ui-compact dsh-ui-truncate">{row.name}</span>
+              <Tag tone="neutral">{fillText(t(locale, 'recipeRev'), { n: String(row.revision) })}</Tag>
+              <span className="dsh-ui-spacer" />
+              <Button variant="primary" size="sm" disabled={inFlight || busy === row.id || !api.recipeRun} title={inFlight ? t(locale, 'recipeInFlightTip') : undefined} onClick={() => run(row)}>
+                {armed ? t(locale, 'recipeRunConfirm') : t(locale, 'recipeRunNow')}
+              </Button>
+            </div>
+            {row.stats.length > 0 ? (
+              <div className="dsh-dot-recipe-stats">
+                {row.stats.map(stat => (
+                  <span key={stat.revision} className="dsh-ui-meta">
+                    {fillText(t(locale, 'recipeRev'), { n: String(stat.revision) })}: {stat.accepted} {t(locale, 'recipeAccepted')} · {stat.cancelled} {t(locale, 'recipeCancelled')} · {stat.failedRounds} {t(locale, 'recipeFailedRounds')} · {stat.inFlight} {t(locale, 'recipeInFlight')}{(stat.avgTokens !== undefined || stat.avgWallMs !== undefined) ? ` · ${t(locale, 'recipeAvg')}: ${[stat.avgTokens !== undefined ? `${formatTokens(stat.avgTokens)} ${t(locale, 'workTokens')}` : '', stat.avgWallMs !== undefined ? formatDuration(stat.avgWallMs) : ''].filter(Boolean).join(' · ')}` : ''}
+                  </span>
+                ))}
+              </div>
+            ) : <span className="dsh-ui-meta">{t(locale, 'recipeNoRuns')}</span>}
+            {row.reminders.length > 0 ? (
+              <div className="dsh-dot-recipe-reminders">
+                {row.reminders.map(reminder => (
+                  <span key={reminder.id} className="dsh-ui-hint dsh-ui-truncate">
+                    {reminder.title} · {t(locale, 'reminderNext').replace('{when}', formatWhen(reminder.nextAt))}
+                  </span>
+                ))}
+              </div>
+            ) : null}
+            {row.inFlight.map(item => (
+              <span key={item.changeId} className="dsh-ui-meta">{t(locale, 'recipeInFlightLabel')} {item.changeId} {item.title} ({item.status})</span>
+            ))}
+            {row.proposal ? (
+              <div className="dsh-dot-recipe-proposal" data-proposal={row.proposal.id}>
+                <div className="dsh-dot-recipe-proposal-head">
+                  <Tag tone="warning">{row.proposal.kind === 'restore' ? t(locale, 'proposalKindRestore') : t(locale, 'proposalKindRevise')}</Tag>
+                  <Tag tone="neutral">{row.proposal.origin === 'detector' ? t(locale, 'proposalOriginDetector') : t(locale, 'proposalOriginReflection')}</Tag>
+                  {row.proposal.kind === 'restore' && row.proposal.targetRevision !== undefined
+                    ? <span className="dsh-ui-meta">{fillText(t(locale, 'proposalRestoreLine'), { n: String(row.proposal.targetRevision) })}</span>
+                    : null}
+                </div>
+                <span className="dsh-ui-hint">{row.proposal.reason}</span>
+                {row.proposal.kind === 'revise' ? <ProposalDiff locale={locale} proposal={row.proposal} /> : null}
+                <div className="dsh-dot-recipe-proposal-actions">
+                  <Button variant="primary" size="sm" disabled={proposalBusy === row.proposal.id || !api.recipeProposalDecide} onClick={() => decide(row.proposal!.id, true)}>
+                    {approveArm === row.proposal.id ? t(locale, 'proposalApproveConfirm') : t(locale, 'proposalApprove')}
+                  </Button>
+                  <Button variant="ghost" size="sm" disabled={proposalBusy === row.proposal.id || !api.recipeProposalDecide} onClick={() => decide(row.proposal!.id, false)}>
+                    {t(locale, 'proposalDismiss')}
+                  </Button>
+                </div>
+                {proposalErrors[row.proposal.id] ? <p className="dsh-ui-hint dsh-dot-recipe-refusal" role="alert">{proposalErrors[row.proposal.id]}</p> : null}
+              </div>
+            ) : null}
+            {ran[row.id] ? <span className="dsh-ui-hint">{fillText(t(locale, 'recipeRunDone'), { id: ran[row.id]! })}</span> : null}
+            {refusals[row.id] ? <p className="dsh-ui-hint dsh-dot-recipe-refusal">{fillText(t(locale, 'recipeRunFailed'), { reason: refusals[row.id]! })}</p> : null}
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
+/** The board tab: a filter row, the work changes waiting on the human, then the board. */
+function TasksTab({ locale, view, api, workApi, boardError, pendingRemoveTitle, onUndoRemove, onOpen, onRetry, onRemoveSchedule }: {
+  locale: CopyLocale; view?: BoardView; api: ChatApi; workApi?: WorkApi; boardError?: string
+  pendingRemoveTitle?: string; onUndoRemove?: () => void
   onOpen: (sessionId: string) => void; onRetry: () => void; onRemoveSchedule: (id: string) => void
 }) {
-  const [filter, setFilter] = useState<BoardFilter>('all')
+  const [filter, setFilter] = useState<BoardFilter | 'recipes'>('all')
   const counts = boardCounts(view)
-  const filters: readonly { value: BoardFilter; label: string }[] = [
-    { value: 'all', label: t(locale, 'filterAll') },
+  const totalCount = useMemo(() => {
+    if (!view) return 0
+    const groups = groupBoard(view)
+    const openWork = (view.work ?? []).filter(w => w.status !== 'done' && w.status !== 'cancelled').length
+    return openWork + groups.requests.length + groups.watched.length + view.schedules.length
+  }, [view])
+  const [recipes, recipesError, refreshRecipes] = useRecipes(api)
+  const filters: readonly { value: BoardFilter | 'recipes'; label: string }[] = [
+    { value: 'all', label: totalCount > 0 ? `${t(locale, 'filterAll')} (${totalCount})` : t(locale, 'filterAll') },
     { value: 'waiting', label: `${t(locale, 'filterWaiting')} (${counts.waiting})` },
     { value: 'active', label: `${t(locale, 'filterActive')} (${counts.active})` },
     { value: 'watch', label: `${t(locale, 'filterWatch')} (${counts.watch})` },
+    { value: 'recipes', label: `${t(locale, 'filterRecipes')} (${recipes.length})` },
   ]
   return (
     <div className="dsh-dot-tasks">
       <div className="dsh-dot-filters" role="group" aria-label={t(locale, 'tasks')}>
         {filters.map(item => <button key={item.value} type="button" aria-pressed={filter === item.value} onClick={() => setFilter(item.value)}>{item.label}</button>)}
       </div>
-      {workApi && filter !== 'watch' ? <WorkBoardPanel locale={locale} api={workApi} filter={filter} items={view?.work ?? NO_WORK} pending={view?.pending ?? NO_PENDING} onChanged={onRetry} /> : null}
-      <Board locale={locale} view={view} filter={filter} suppressEmpty={(view?.work?.length ?? 0) > 0} {...boardError === undefined ? {} : { error: boardError }} onOpen={onOpen} onRetry={onRetry} onRemoveSchedule={onRemoveSchedule} />
+      {pendingRemoveTitle && onUndoRemove ? (
+        <div className="dsh-dot-undo-bar" role="status">
+          <span className="dsh-dot-undo-text">{fillText(t(locale, 'reminderRemoved'), { title: pendingRemoveTitle })}</span>
+          <Button variant="ghost" size="sm" onClick={onUndoRemove}>{t(locale, 'undoAction')}</Button>
+        </div>
+      ) : null}
+      {filter === 'recipes' ? <RecipesView locale={locale} api={api} rows={recipes} {...recipesError === undefined ? {} : { error: recipesError }} onChanged={() => { refreshRecipes(); onRetry() }} /> : null}
+      {workApi && filter !== 'watch' && filter !== 'recipes' ? <WorkBoardPanel locale={locale} api={workApi} filter={filter} items={view?.work ?? NO_WORK} pending={view?.pending ?? NO_PENDING} onChanged={onRetry} onOpenSession={onOpen} /> : null}
+      {filter !== 'recipes' ? <Board locale={locale} view={view} filter={filter} suppressEmpty={(view?.work?.length ?? 0) > 0 || (Boolean(workApi) && filter === 'all')} {...boardError === undefined ? {} : { error: boardError }} onOpen={onOpen} onRetry={onRetry} onRemoveSchedule={onRemoveSchedule} /> : null}
     </div>
   )
 }
 
 /** Live context occupancy for the header pill; read again whenever the log changes or a turn ends. */
-function useContextUse(api: ChatApi, rev: number | undefined, running: boolean): { used: number; window: number } | undefined {
-  const [use, setUse] = useState<{ used: number; window: number }>()
-  useEffect(() => {
-    if (rev === undefined || running) return
-    const life = new AbortController()
-    api.context(life.signal).then(view => {
-      if (life.signal.aborted) return
-      setUse(view.usedTokens !== undefined && view.contextWindow ? { used: view.usedTokens, window: view.contextWindow } : undefined)
-    }, () => {})
-    return () => life.abort()
-  }, [api, rev, running])
-  return use
-}
-
 function compactTokens(value: number): string {
   return value >= 1000 ? `${(value / 1000).toFixed(value >= 100_000 ? 0 : 1)}K` : String(value)
 }
@@ -308,24 +517,29 @@ export interface ChatPanelProps {
   readonly renderFactorySlot?: RenderFactorySlot
 }
 
+function imageCacheKey(text: string, images: readonly { readonly mediaType: string; readonly name?: string }[]): string {
+  return `${text.trim()}\0${images.map(img => `${img.mediaType}:${img.name ?? ''}`).join('|')}`
+}
+
 export function ChatPanel({ locale, api, Card, onOpenSession, renderFactorySlot }: ChatPanelProps) {
   const { state, error, retry } = useChatFeed(api)
-  const [board, boardError, refreshBoard] = useBoard(api)
-  const removeSchedule = useCallback((id: string) => { void api.removeSchedule(id).then(refreshBoard, refreshBoard) }, [api, refreshBoard])
+  const [rawBoard, boardError, refreshBoard] = useBoard(api, state.snapshot?.boardRev)
+  const { board, pendingRemoval, removeSchedule, undoRemoveSchedule } = useReminderRemoval(api, refreshBoard, rawBoard)
   const workApi = useMemo<WorkApi | undefined>(() => {
     if (!api.workAccept || !api.workReject || !api.workAnswer || !api.workResume) return undefined
     return {
       workAccept: api.workAccept, workReject: api.workReject, workAnswer: api.workAnswer, workResume: api.workResume,
+      ...(api.workForceRelease ? { workForceRelease: api.workForceRelease } : {}),
+      ...(api.workIntegrate ? { workIntegrate: api.workIntegrate } : {}),
       ...(api.workRead ? { workRead: api.workRead } : {}),
     }
   }, [api])
   const snapshot = state.snapshot
   const running = snapshot?.running === true
   const streaming = snapshot?.streaming ?? ''
-  const [echoes, setEchoes] = useState<{ text: string; at: number; images: readonly ChatImage[] }[]>([])
+  const [sentPreviews, setSentPreviews] = useState<Readonly<Record<string, readonly string[]>>>({})
+  const [previewImage, setPreviewImage] = useState<{ src: string; name: string }>()
   const [sendError, setSendError] = useState<string>()
-  const [drawerTab, setDrawerTab] = useState<DrawerTab | null>(null)
-  const [drawerWide, setDrawerWide] = useState(false)
   const [settings, setSettings] = useSettings(api)
   const [proposalCount, setProposalCount] = useState(0)
   useEffect(() => {
@@ -333,63 +547,41 @@ export function ChatPanel({ locale, api, Card, onOpenSession, renderFactorySlot 
     api.settingProposals(life.signal).then(rows => { if (!life.signal.aborted) setProposalCount(rows.length) }, () => {})
     return () => life.abort()
   }, [api])
-  const closeDrawer = useCallback(() => setDrawerTab(null), [])
-  const configOpen = drawerTab !== null && CONFIG_TABS.has(drawerTab)
+  const { drawerTab, drawerWide, personaDirty, discardSignal, pendingDrawerAction, configOpen, requestDrawer, discardDrawerAction, cancelDrawerAction, setPersonaDirty, toggleDrawerWide } = useDrawerGuard()
   const labels = useMemo<MarkdownLabels>(() => {
     const c = cardCopy(locale)
     return { code: { copyLabel: c.copy, copiedLabel: c.copied }, footnotes: c.footnotes }
   }, [locale])
 
-  // A local echo leaves once the log holds a matching message sent after it.
-  // Filtered during render as well, so the frame that brings the logged copy
-  // never shows both.
-  const delivered = useCallback((echo: { text: string; at: number; images: readonly ChatImage[] }) => state.items.some(item => item.kind === 'user' && item.text.trim() === echo.text && (item.images?.length ?? 0) === echo.images.length && item.at >= echo.at - 5_000), [state.items])
-  const pendingEchoes = useMemo(() => echoes.filter(echo => !delivered(echo)), [echoes, delivered])
-  useEffect(() => {
-    if (echoes.length === 0) return
-    const now = Date.now()
-    const left = echoes.filter(echo => now - echo.at < ECHO_MS && !delivered(echo))
-    if (left.length !== echoes.length) setEchoes(left)
-  }, [echoes, delivered])
+  const { pendingEchoes, pushEcho, removeEcho } = useLocalEchoes(state.items)
 
   const send = useCallback(async (text: string, images: readonly ChatImage[]) => {
     setSendError(undefined)
-    const echo = { text, at: Date.now(), images }
-    setEchoes(list => [...list, echo])
-    try { await api.say(text, images) } catch (failure) {
-      setEchoes(list => list.filter(item => item !== echo))
+    const echo = pushEcho(text, images)
+    try {
+      await api.say(text, images)
+    } catch (failure) {
+      removeEcho(echo)
       const message = failure instanceof Error ? failure.message : String(failure)
       setSendError(/\bHTTP 413\b/.test(message) ? t(locale, 'sendTooLarge') : message)
       throw failure
     }
-  }, [api])
+    // Keep the local bytes only for a message the host accepted: a rejected send must not
+    // leave a thumbnail keyed by text and file name for the next message that happens to match.
+    if (images.length > 0) {
+      const key = imageCacheKey(text, images)
+      const urls = images.map(img => `data:${img.mediaType};base64,${img.data}`)
+      setSentPreviews(prev => ({ ...prev, [key]: urls }))
+    }
+  }, [api, locale, pushEcho, removeEcho])
 
   const hasStreaming = Boolean(streaming.trim())
   const preparingCard = snapshot?.preparingCard === true
-  const filtered = useMemo(() => filterVisibleChat(state.items, { streaming: hasStreaming, running }), [state.items, hasStreaming, running])
+  const filtered = useMemo(() => filterVisibleChat(state.items, { streaming: hasStreaming, running, preparingCard }), [state.items, hasStreaming, running, preparingCard])
   const rows = useMemo(() => rowsOf(filtered.items), [filtered.items])
-  const scroller = useRef<HTMLDivElement>(null)
-  const stuck = useRef(true)
-  const lastTop = useRef(0)
-  // Direction-aware: any real upward scroll releases the bottom pin, even within STICK_PX of the
-  // bottom, so streaming updates cannot yank the viewport back. Scrolling back down to within
-  // STICK_PX re-pins. A scrollTop drop that lands at the bottom is a browser clamp after the
-  // content shrank, not a user gesture, so it keeps the pin.
-  const onScroll = useCallback(() => {
-    const el = scroller.current
-    if (!el) return
-    const gap = el.scrollHeight - el.scrollTop - el.clientHeight
-    const up = el.scrollTop < lastTop.current - 3 && gap > 3
-    stuck.current = up ? false : gap < STICK_PX
-    lastTop.current = el.scrollTop
-  }, [])
-  useLayoutEffect(() => {
-    const el = scroller.current
-    if (el && stuck.current) {
-      el.scrollTop = el.scrollHeight
-      lastTop.current = el.scrollTop
-    }
-  }, [rows, streaming, pendingEchoes, running])
+  const composerInsert = useRef<((text: string) => void) | undefined>(undefined)
+  const activitySig = `${rows.length}:${snapshot?.itemsRev ?? 0}:${streaming.length}`
+  const { scroller, pinned, unreadBelow, onScroll, scrollToBottom } = useScrollPin(activitySig, [rows, streaming, pendingEchoes, running])
 
   const counts = useMemo(() => headerBoardCounts(board), [board])
   const live = counts.liveCount
@@ -399,9 +591,13 @@ export function ChatPanel({ locale, api, Card, onOpenSession, renderFactorySlot 
   // The log is the heaviest part of the panel (markdown, cards). Keeping its elements stable lets
   // opening a drawer, typing or a board poll skip redrawing every message.
   const sessionId = snapshot?.sessionId ?? ''
-  const logRows = useMemo(() => rows.map(row => <Fragment key={row.kind === 'tools' ? 'tools:' + row.key : row.item.key}>{renderRow(row, { locale, labels, Card, sessionId, answers: state.answers, hiddenRequestIds: filtered.hiddenRequestIds, tasks: tasksBySession, onOpenSession })}</Fragment>), [rows, locale, labels, Card, sessionId, state.answers, filtered.hiddenRequestIds, tasksBySession, onOpenSession])
-  const lastTool = rows.at(-1)?.kind === 'tools'
-  const showThinking = running && !preparingCard && !lastTool && !filtered.silentTail
+  const openPreview = useCallback((src: string, name: string) => setPreviewImage({ src, name }), [])
+  const logRows = useMemo(() => rows.map(row => <Fragment key={row.kind === 'tools' ? 'tools:' + row.key : row.item.key}>{renderRow(row, { locale, labels, Card, sessionId, answers: state.answers, hiddenRequestIds: filtered.hiddenRequestIds, tasks: tasksBySession, sentPreviews, onPreviewImage: openPreview, onOpenSession })}</Fragment>), [rows, locale, labels, Card, sessionId, state.answers, filtered.hiddenRequestIds, tasksBySession, sentPreviews, openPreview, onOpenSession])
+  const lastRow = rows.at(-1)
+  const lastTool = lastRow?.kind === 'tools'
+  const lastInReply = lastRow !== undefined && (lastRow.kind === 'tools' || lastRow.item.kind === 'bot' || lastRow.item.kind === 'view' || lastRow.item.kind === 'error')
+  const showStreaming = running && !preparingCard && hasStreaming
+  const showThinking = running && !preparingCard && !hasStreaming && !lastTool && !filtered.silentTail
   const segmentCount = useMemo(() => 1 + state.items.filter(item => item.kind === 'segment').length, [state.items])
   const contextUse = useContextUse(api, snapshot?.itemsRev, running)
   const contextPct = contextUse ? Math.min(100, (contextUse.used / contextUse.window) * 100) : undefined
@@ -417,49 +613,75 @@ export function ChatPanel({ locale, api, Card, onOpenSession, renderFactorySlot 
         </div>
         <span className="dsh-dot-spacer" />
         {contextUse && contextPct !== undefined ? (
-          <Button variant="ghost" size="sm" className="dsh-dot-ctx-pill" aria-pressed={drawerTab === 'context'} title={t(locale, 'ctxPill').replace('{pct}', `${contextPct.toFixed(1)}%`)} onClick={() => setDrawerTab(current => current === 'context' ? null : 'context')}>
+          <Button variant="ghost" size="sm" className="dsh-dot-ctx-pill" aria-pressed={drawerTab === 'context'} title={t(locale, 'ctxPill').replace('{pct}', `${contextPct.toFixed(1)}%`)} onClick={() => requestDrawer(drawerTab === 'context' ? { kind: 'close' } : { kind: 'tab', tab: 'context' })}>
             <span className="dsh-dot-ctx-track" aria-hidden="true"><span style={{ width: `${contextPct}%` }} /></span>
             <span className="dsh-dot-ctx-num">{compactTokens(contextUse.used)}</span>
           </Button>
         ) : null}
-        <Button variant="ghost" size="sm" aria-expanded={drawerTab === 'tasks'} aria-pressed={drawerTab === 'tasks'} onClick={() => setDrawerTab(current => current === 'tasks' ? null : 'tasks')}>
-          {t(locale, 'tasks')} {live}{waiting > 0 ? <span className="dsh-dot-badge">{waiting}</span> : null}
+        <Button variant="ghost" size="sm" aria-expanded={drawerTab === 'tasks'} aria-pressed={drawerTab === 'tasks'} onClick={() => requestDrawer(drawerTab === 'tasks' ? { kind: 'close' } : { kind: 'tab', tab: 'tasks' })}>
+          {t(locale, 'tasks')}{live > 0 ? ` ${live}` : ''}{waiting > 0 ? <span className="dsh-dot-badge">{waiting}</span> : null}
         </Button>
-        <Button variant="ghost" size="sm" className="dsh-dot-gear" aria-label={t(locale, 'settings')} aria-pressed={configOpen} title={t(locale, 'settings')} onClick={() => setDrawerTab(configOpen ? null : 'settings')}>
+        <Button variant="ghost" size="sm" className="dsh-dot-gear" aria-label={t(locale, 'settings')} aria-pressed={configOpen} title={t(locale, 'settings')} onClick={() => requestDrawer(configOpen ? { kind: 'close' } : { kind: 'tab', tab: 'general' })}>
           <GearGlyph />
           {proposalCount > 0 ? <span className="dsh-dot-gear-dot" aria-hidden="true" /> : null}
         </Button>
       </header>
       <div className="dsh-dot-stage">
       <section className="dsh-dot-chatcol">
+      <div className="dsh-dot-scroll-wrap">
       <div className="dsh-dot-scroll" ref={scroller} onScroll={onScroll}>
-        <div className="dsh-dot-log">
+        <div className="dsh-dot-log" role="log" aria-live="polite" aria-relevant="additions">
           {snapshot === undefined && error === undefined ? <div className="dsh-dot-center"><DotAvatar size={56} /><span className="dsh-dot-muted">{t(locale, 'loading')}</span></div> : null}
-          {snapshot !== undefined && rows.length === 0 && pendingEchoes.length === 0 && (!running || filtered.silentTail) ? (
+          {snapshot !== undefined && rows.length === 0 && pendingEchoes.length === 0 && !showStreaming && (!running || filtered.silentTail) ? (
             <div className="dsh-dot-center">
               <DotAvatar size={72} />
               <span className="dsh-dot-greeting">{t(locale, 'greeting')}</span>
               <span className="dsh-dot-muted">{t(locale, 'greetingHint')}</span>
               <div className="dsh-dot-starters">
                 {(['starter1', 'starter2', 'starter3'] as const).map(key => (
-                  <button key={key} type="button" className="dsh-dot-starter" disabled={running} onClick={() => { void send(t(locale, key), []).catch(() => {}) }}>{t(locale, key)}</button>
+                  <button key={key} type="button" className="dsh-dot-starter" disabled={running} onClick={() => composerInsert.current?.(t(locale, key))}>{t(locale, key)}</button>
                 ))}
               </div>
             </div>
           ) : null}
           {logRows}
-          {pendingEchoes.map(echo => <div key={'echo:' + echo.at} className="dsh-dot-user dsh-dot-echo"><UserMessageBubble>{echo.text}</UserMessageBubble>{echo.images.length > 0 ? <ImageNotes locale={locale} images={echo.images.map(image => ({ mediaType: image.mediaType, ...(image.name ? { name: image.name } : {}) }))} /> : null}</div>)}
-          {preparingCard ? <BotLine lead={!lastTool}><span role="status"><TextShimmer active>{t(locale, 'cardPreparing')}</TextShimmer></span></BotLine> : null}
-          {showThinking ? <BotLine lead={!lastTool}><TextShimmer active>{t(locale, 'thinking')}</TextShimmer></BotLine> : null}
+          {pendingEchoes.map(echo => <div key={'echo:' + echo.at} className="dsh-dot-user dsh-dot-echo">{echo.text ? <UserMessageBubble>{echo.text}</UserMessageBubble> : null}{echo.images.length > 0 ? <ImageNotes locale={locale} images={echo.images.map(image => ({ mediaType: image.mediaType, previewUrl: `data:${image.mediaType};base64,${image.data}`, ...(image.name ? { name: image.name } : {}) }))} onPreview={openPreview} /> : null}</div>)}
+          {showStreaming ? <BotLine lead={!lastInReply}><MarkdownText text={streaming} labels={labels} variant="body" streaming /></BotLine> : null}
+          {preparingCard ? <BotLine lead={!lastInReply}><span role="status"><TextShimmer active>{t(locale, 'cardPreparing')}</TextShimmer></span></BotLine> : null}
+          {showThinking ? <BotLine lead={!lastInReply}><TextShimmer active>{t(locale, 'thinking')}</TextShimmer></BotLine> : null}
         </div>
       </div>
+      {!pinned ? (
+        <button type="button" className="dsh-dot-scroll-fab" data-unread={unreadBelow ? '' : undefined} onClick={scrollToBottom}>
+          <IconChevronDownOutlineRegular size={13} />
+          <span>{t(locale, unreadBelow ? 'scrollNew' : 'scrollBottom')}</span>
+        </button>
+      ) : null}
+      </div>
       {error !== undefined ? (
-        <div className="dsh-dot-banner" role="alert">
-          <span>{t(locale, 'loadFailed')}: {error}</span>
-          <Button variant="ghost" size="sm" onClick={retry}>{t(locale, 'retry')}</Button>
+        <div className="dsh-dot-banner-wrap">
+          <div className="dsh-dot-banner" role="alert">
+            <IconWarningOutlineRegular size={14} className="dsh-dot-banner-icon" />
+            <span className="dsh-dot-banner-text">{t(locale, 'loadFailed')}: {error}</span>
+            <Button variant="ghost" size="sm" onClick={retry}>{t(locale, 'retry')}</Button>
+          </div>
         </div>
       ) : null}
-      <Composer locale={locale} running={running} disabled={snapshot === undefined} onSend={send} onStop={() => { void api.stop() }} {...sendError === undefined ? {} : { error: sendError }} />
+      <Composer
+        locale={locale}
+        sessionId={sessionId}
+        running={running}
+        disabled={snapshot === undefined}
+        items={state.items}
+        onNewSegment={() => api.newSegment()}
+        onOpenTasks={() => requestDrawer({ kind: 'tab', tab: 'tasks' })}
+        onOpenSettings={() => requestDrawer({ kind: 'tab', tab: 'general' })}
+        onSend={send}
+        onStop={() => { void api.stop() }}
+        onDismissError={() => setSendError(undefined)}
+        insertRef={composerInsert}
+        {...sendError === undefined ? {} : { error: sendError }}
+      />
       </section>
       {drawerTab !== null ? (
         <WorkDrawer
@@ -472,23 +694,40 @@ export function ChatPanel({ locale, api, Card, onOpenSession, renderFactorySlot 
           running={running}
           waiting={waiting}
           proposalCount={proposalCount}
-          tasks={<TasksTab locale={locale} {...board ? { view: board } : {}} {...workApi ? { workApi } : {}} {...boardError === undefined ? {} : { boardError }} onOpen={onOpenSession} onRetry={refreshBoard} onRemoveSchedule={removeSchedule} />}
+          tasks={<TasksTab locale={locale} api={api} {...board ? { view: board } : {}} {...workApi ? { workApi } : {}} {...boardError === undefined ? {} : { boardError }} {...pendingRemoval ? { pendingRemoveTitle: pendingRemoval.title, onUndoRemove: undoRemoveSchedule } : {}} onOpen={onOpenSession} onRetry={refreshBoard} onRemoveSchedule={removeSchedule} />}
           {...renderFactorySlot ? { renderFactorySlot } : {}}
-          onTab={setDrawerTab}
-          onWide={() => setDrawerWide(value => !value)}
+          personaDirty={personaDirty}
+          {...pendingDrawerAction ? { pendingAction: pendingDrawerAction } : {}}
+          discardSignal={discardSignal}
+          onRequest={requestDrawer}
+          onCancelPending={cancelDrawerAction}
+          onDiscardPending={discardDrawerAction}
+          onDirtyChange={setPersonaDirty}
+          onWide={toggleDrawerWide}
           onSaved={setSettings}
           onProposalCount={setProposalCount}
-          onClose={closeDrawer}
         />
       ) : null}
       </div>
+      <Modal
+        open={previewImage !== undefined}
+        onClose={() => setPreviewImage(undefined)}
+        title={previewImage?.name ?? t(locale, 'imagePreview')}
+        closeLabel={t(locale, 'closeDrawer')}
+      >
+        {previewImage ? (
+          <div className="dsh-dot-lightbox">
+            <img src={previewImage.src} alt={previewImage.name} className="dsh-dot-lightbox-img" />
+          </div>
+        ) : null}
+      </Modal>
     </div>
   )
 }
 
 const SEGMENT_REASON: Record<RolloverReason, TextKey> = {
   'context-full': 'segmentWhy_contextFull', 'idle-expired': 'segmentWhy_idle', 'model-switch': 'segmentWhy_model',
-  'prompt-changed': 'segmentWhy_prompt', lost: 'segmentWhy_lost', manual: 'segmentWhy_manual', 'dot-requested': 'segmentWhy_dot',
+  'prompt-changed': 'segmentWhy_prompt', 'capabilities-changed': 'segmentWhy_capabilities', lost: 'segmentWhy_lost', manual: 'segmentWhy_manual', 'dot-requested': 'segmentWhy_dot',
 }
 
 /** Where the conversation moved to a new session segment; opening it says why and when. */
@@ -530,6 +769,8 @@ interface RenderContext {
   readonly answers: NonNullable<ChatSnapshot['answers']>
   readonly hiddenRequestIds: ReadonlySet<string>
   readonly tasks: TaskLookup
+  readonly sentPreviews: Readonly<Record<string, readonly string[]>>
+  readonly onPreviewImage: (src: string, name: string) => void
   readonly onOpenSession: (sessionId: string) => void
 }
 
@@ -537,13 +778,21 @@ function renderRow(row: Row, context: RenderContext): ReactNode {
   if (row.kind === 'tools') return <BotLine lead={row.lead}><ToolActivity locale={context.locale} items={row.items} tasks={context.tasks} onOpenSession={context.onOpenSession} /></BotLine>
   const item = row.item
   switch (item.kind) {
-    case 'user':
+    case 'user': {
+      const previews = item.images && item.images.length > 0 ? context.sentPreviews[imageCacheKey(item.text, item.images)] : undefined
       return (
         <div className="dsh-dot-user">
           {item.text ? <UserMessageBubble>{item.text}</UserMessageBubble> : null}
-          {item.images && item.images.length > 0 ? <ImageNotes locale={context.locale} images={item.images} /> : null}
+          {item.images && item.images.length > 0 ? (
+            <ImageNotes
+              locale={context.locale}
+              images={item.images.map((img, idx) => ({ ...img, ...(previews?.[idx] ? { previewUrl: previews[idx] } : {}) }))}
+              onPreview={context.onPreviewImage}
+            />
+          ) : null}
         </div>
       )
+    }
     case 'answer':
       return <div className="dsh-dot-user dsh-dot-answer"><UserMessageBubble>{item.text}</UserMessageBubble></div>
     case 'notice':
@@ -699,10 +948,11 @@ const NOTICE_TAG_TONE: Record<Exclude<NoticeEntry['kind'], 'reminder'>, TagTone>
   question: 'info',
   'turn-end': 'success',
   error: 'danger',
-  archived: 'quiet',
-  'lock-free': 'success',
   'task-human': 'info',
   'idle-check': 'quiet',
+  inbox: 'info',
+  'recipe-run': 'success',
+  'recipe-proposal': 'info',
 }
 
 function noticeTagLabel(locale: CopyLocale, kind: Exclude<NoticeEntry['kind'], 'reminder'>): string {
@@ -711,10 +961,11 @@ function noticeTagLabel(locale: CopyLocale, kind: Exclude<NoticeEntry['kind'], '
     case 'question': return t(locale, 'question')
     case 'turn-end': return t(locale, 'turnEnd')
     case 'error': return t(locale, 'error')
-    case 'archived': return t(locale, 'archived')
-    case 'lock-free': return t(locale, 'lockFree')
     case 'task-human': return t(locale, 'taskHuman')
     case 'idle-check': return t(locale, 'idleCheck')
+    case 'inbox': return t(locale, 'inboxEvent')
+    case 'recipe-run': return t(locale, 'recipeRunTag')
+    case 'recipe-proposal': return t(locale, 'recipeProposalTag')
   }
 }
 
@@ -738,6 +989,7 @@ function NoticeCard({ entry, locale, tasks, onOpenSession }: { entry: NoticeEntr
           ) : null}
         </div>
         {entry.prompt ? <div className="dsh-dot-card-body">{entry.prompt}</div> : null}
+        {entry.refused ? <div className="dsh-dot-card-body">{fillText(t(locale, 'recipeRunFailed'), { reason: entry.refused })}</div> : null}
       </div>
     )
   }
@@ -837,449 +1089,31 @@ function Notice({ locale, text, structured, hiddenRequestIds, tasks, onOpenSessi
   )
 }
 
-function imageErrorText(locale: CopyLocale, code: ChatImageError): string {
-  switch (code) {
-    case 'unsupported': return t(locale, 'imageUnsupported')
-    case 'too-large': return t(locale, 'imageTooLarge')
-    case 'too-many': return t(locale, 'imageTooMany')
-    case 'mismatch': return t(locale, 'imageMismatch')
-    default: return t(locale, 'imageInvalid')
-  }
-}
-
-function bytesToBase64(bytes: Uint8Array): string {
-  let binary = ''
-  const step = 0x8000
-  for (let index = 0; index < bytes.length; index += step) {
-    binary += String.fromCharCode(...bytes.subarray(index, index + step))
-  }
-  return btoa(binary)
-}
-
-async function readImageFile(file: File): Promise<ChatImage> {
-  const bytes = new Uint8Array(await file.arrayBuffer())
-  const inspected = inspectImageBytes(bytes, file.type)
-  if (!inspected.ok) throw new ChatImageRejected(inspected.error)
-  const name = imageName(file.name)
-  return { mediaType: inspected.mediaType, data: bytesToBase64(bytes), ...(name ? { name } : {}) }
-}
-
-function ImageNotes({ locale, images }: { locale: CopyLocale; images: readonly { readonly mediaType: string; readonly name?: string }[] }) {
+function ImageNotes({ locale, images, onPreview }: {
+  locale: CopyLocale
+  images: readonly { readonly mediaType: string; readonly name?: string; readonly previewUrl?: string }[]
+  onPreview?: (src: string, name: string) => void
+}) {
   return (
     <div className="dsh-dot-images">
-      {images.map((image, index) => <span key={`${image.name ?? image.mediaType}:${index}`} className="dsh-dot-image-chip">{t(locale, 'imageAttached')}{image.name ? ` · ${image.name}` : ''}</span>)}
+      {images.map((image, index) => {
+        const label = image.name ? `${t(locale, 'imageAttached')} · ${image.name}` : t(locale, 'imageAttached')
+        if (image.previewUrl && onPreview) {
+          return (
+            <button
+              key={`${image.name ?? image.mediaType}:${index}`}
+              type="button"
+              className="dsh-dot-image-thumb"
+              title={t(locale, 'imagePreview')}
+              onClick={() => onPreview(image.previewUrl!, image.name ?? t(locale, 'imageAttached'))}
+            >
+              <img src={image.previewUrl} alt={label} className="dsh-dot-image-thumb-img" />
+              <span className="dsh-dot-image-thumb-name">{label}</span>
+            </button>
+          )
+        }
+        return <span key={`${image.name ?? image.mediaType}:${index}`} className="dsh-dot-image-chip">{label}</span>
+      })}
     </div>
   )
 }
-
-function Composer({ locale, running, disabled, error, onSend, onStop }: { locale: CopyLocale; running: boolean; disabled: boolean; error?: string; onSend: (text: string, images: readonly ChatImage[]) => Promise<void>; onStop: () => void }) {
-  const [text, setText] = useState('')
-  const [images, setImages] = useState<ChatImage[]>([])
-  const [busy, setBusy] = useState(false)
-  const [localError, setLocalError] = useState<string>()
-  const area = useRef<HTMLTextAreaElement>(null)
-  const picker = useRef<HTMLInputElement>(null)
-  useLayoutEffect(() => {
-    const el = area.current
-    if (!el) return
-    el.style.height = 'auto'
-    el.style.height = Math.min(el.scrollHeight, 200) + 'px'
-  }, [text])
-  const addFiles = useCallback(async (files: readonly File[]) => {
-    setLocalError(undefined)
-    const next = [...images]
-    for (const file of files) {
-      if (next.length >= CHAT_IMAGE_LIMIT) { setLocalError(imageErrorText(locale, 'too-many')); break }
-      try { next.push(await readImageFile(file)) } catch (failure) {
-        setLocalError(failure instanceof ChatImageRejected ? imageErrorText(locale, failure.code) : imageErrorText(locale, 'invalid'))
-        break
-      }
-    }
-    setImages(next)
-  }, [images, locale])
-  const submit = useCallback(() => {
-    const body = text.trim()
-    if ((!body && images.length === 0) || busy || disabled) return
-    setBusy(true)
-    const sending = images
-    onSend(body, sending).then(() => { setText(''); setImages([]) }, () => {}).finally(() => { setBusy(false); area.current?.focus() })
-  }, [text, images, busy, disabled, onSend])
-  const onKeyDown = useCallback((event: KeyboardEvent<HTMLTextAreaElement>) => {
-    if (event.key !== 'Enter' || event.shiftKey || event.nativeEvent.isComposing || event.keyCode === 229) return
-    event.preventDefault()
-    submit()
-  }, [submit])
-  const onPaste = useCallback((event: ClipboardEvent<HTMLTextAreaElement>) => {
-    const files = [...event.clipboardData.files]
-    if (files.length === 0) return
-    event.preventDefault()
-    void addFiles(files)
-  }, [addFiles])
-  const onPick = useCallback((event: ChangeEvent<HTMLInputElement>) => {
-    const files = [...event.target.files ?? []]
-    event.target.value = ''
-    if (files.length > 0) void addFiles(files)
-  }, [addFiles])
-  const shownError = localError ?? error
-  return (
-    <div className="dsh-dot-composer">
-      {shownError !== undefined ? <div className="dsh-dot-error">{localError !== undefined ? shownError : `${t(locale, 'sendFailed')}${shownError}`}</div> : null}
-      {images.length > 0 ? (
-        <div className="dsh-dot-images">
-          {images.map((image, index) => (
-            <span key={`${image.name ?? image.mediaType}:${index}`} className="dsh-dot-image-chip">
-              {image.name ?? t(locale, 'imageAttached')}
-              <button type="button" aria-label={t(locale, 'removeImage')} onClick={() => setImages(list => list.filter((_, item) => item !== index))}>×</button>
-            </span>
-          ))}
-        </div>
-      ) : null}
-      <div className="dsh-dot-inputrow">
-        <input ref={picker} className="dsh-dot-file" type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple onChange={onPick} />
-        <Button variant="outline" size="sm" disabled={disabled || busy} aria-label={t(locale, 'attachImage')} onClick={() => picker.current?.click()}>{t(locale, 'attachImage')}</Button>
-        <textarea
-          ref={area}
-          className="dsh-dot-input"
-          rows={1}
-          value={text}
-          placeholder={running ? t(locale, 'placeholderRunning') : t(locale, 'placeholder')}
-          onChange={event => setText(event.target.value)}
-          onKeyDown={onKeyDown}
-          onPaste={onPaste}
-          disabled={disabled}
-        />
-        {running ? <Button variant="outline" size="sm" onClick={onStop}>{t(locale, 'stop')}</Button> : null}
-        <Button variant="primary" size="sm" disabled={disabled || busy || (!text.trim() && images.length === 0)} onClick={submit}>{busy ? t(locale, 'sending') : t(locale, 'send')}</Button>
-      </div>
-    </div>
-  )
-}
-
-function ToolGlyph() {
-  return (
-    <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-      <path d="M9.8 2.6a3.2 3.2 0 0 0 3.6 4.2L8.2 12a1.7 1.7 0 0 1-2.4-2.4l5.2-5.2" />
-      <path d="M3 13l1.6-1.6" />
-    </svg>
-  )
-}
-
-function WidenGlyph() {
-  return (
-    <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-      <path d="M9.5 2.5h4v4M13.5 2.5 9 7M6.5 13.5h-4v-4M2.5 13.5 7 9" />
-    </svg>
-  )
-}
-
-function NarrowGlyph() {
-  return (
-    <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-      <path d="M13.5 6.5h-4v-4M9.5 6.5 14 2M2.5 9.5h4v4M6.5 9.5 2 14" />
-    </svg>
-  )
-}
-
-function GearGlyph() {
-  return (
-    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-      <path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.38a2 2 0 0 0-.73-2.73l-.15-.09a2 2 0 0 1-1-1.74v-.51a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z" />
-      <circle cx="12" cy="12" r="3" />
-    </svg>
-  )
-}
-
-function BellGlyph() {
-  return (
-    <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-      <path d="M4 10.5V7a4 4 0 0 1 8 0v3.5l1 1.5H3z" />
-      <path d="M6.6 13.6a1.5 1.5 0 0 0 2.8 0" />
-    </svg>
-  )
-}
-
-function JumpGlyph() {
-  return (
-    <svg width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-      <path d="M6 4h6v6" />
-      <path d="M12 4L4.5 11.5" />
-    </svg>
-  )
-}
-
-// Selectors spell the root out (.dsh-dot-chat = CHAT_ROOT) so the repository scope check can read them.
-export const chatCss = settingsCss + `
-.dsh-dot-chat {
-  display: flex; flex-direction: column; height: 100%; min-height: 0;
-  background: var(--dsw-alias-bg-base); color: var(--dsw-alias-label-primary);
-  padding-top: var(--dsh-frame-top-clearance);
-}
-.dsh-dot-chat .dsh-dot-head {
-  display: flex; align-items: center; gap: 10px; padding: 10px 16px;
-  border-bottom: 0.5px solid var(--dsw-alias-border-l1);
-}
-.dsh-dot-chat .dsh-dot-head > button,
-.dsh-dot-chat .dsh-dot-drawer-head > button,
-.dsh-dot-chat .dsh-dot-inputrow > button,
-.dsh-dot-chat .dsh-dot-banner > button,
-.dsh-dot-chat .dsh-ui-actions > button { flex-shrink: 0; white-space: nowrap; }
-.dsh-dot-chat .dsh-ui-actions { flex-wrap: wrap; }
-.dsh-dot-chat .dsh-dot-head-text { display: flex; align-items: center; gap: 8px; min-width: 0; }
-.dsh-dot-chat .dsh-dot-name { font-size: 14px; line-height: 20px; font-weight: 600; }
-.dsh-dot-chat .dsh-dot-status { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; line-height: 16px; color: var(--dsw-alias-label-tertiary); white-space: nowrap; }
-.dsh-dot-chat .dsh-dot-status[data-running] { color: var(--dsw-alias-state-business-primary); }
-.dsh-dot-chat .dsh-dot-status-dot { width: 6px; height: 6px; border-radius: 3px; background: var(--dsw-alias-state-success-primary); }
-.dsh-dot-chat .dsh-dot-status[data-running] .dsh-dot-status-dot { background: var(--dsw-alias-state-business-primary); animation: dsh-dot-pulse 1.4s ease-in-out infinite; }
-@keyframes dsh-dot-pulse { 50% { opacity: 0.35; } }
-@media (prefers-reduced-motion: reduce) { .dsh-dot-chat .dsh-dot-status[data-running] .dsh-dot-status-dot { animation: none; } }
-.dsh-dot-chat .dsh-dot-head { min-height: 48px; box-sizing: border-box; padding: 6px 12px 6px 16px; gap: 8px; }
-.dsh-dot-chat .dsh-dot-segment-count {
-  padding: 1px 6px; border-radius: var(--dsw-radius-sm); background: var(--dsw-alias-bg-layer-1);
-  font: 11px/16px var(--ds-font-family-code); color: var(--dsw-alias-label-tertiary); white-space: nowrap;
-}
-@container (max-width: 420px) { .dsh-dot-chat .dsh-dot-segment-count { display: none; } }
-.dsh-dot-chat .dsh-dot-starters { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; max-width: 480px; margin-top: 12px; }
-.dsh-dot-chat .dsh-dot-starter {
-  padding: 6px 12px; border: 0; border-radius: var(--dsw-radius-sm); cursor: pointer;
-  background: var(--dsw-alias-bg-layer-1); box-shadow: var(--dsw-elevation-stroke);
-  color: var(--dsw-alias-label-secondary); font: inherit; font-size: 12px; line-height: 18px;
-}
-.dsh-dot-chat .dsh-dot-starter:hover:not(:disabled) { color: var(--dsw-alias-label-primary); background: var(--dsw-alias-interactive-bg-hover); }
-.dsh-dot-chat .dsh-dot-starter:disabled { opacity: 0.5; cursor: default; }
-.dsh-dot-chat .dsh-dot-segment-wrap { display: flex; flex-direction: column; gap: 6px; }
-.dsh-dot-chat .dsh-dot-segment button {
-  display: inline-flex; align-items: center; gap: 4px; padding: 0 2px; border: 0; background: none; cursor: pointer;
-  color: inherit; font: inherit;
-}
-.dsh-dot-chat .dsh-dot-segment button:hover { color: var(--dsw-alias-label-secondary); }
-.dsh-dot-chat .dsh-dot-segment-note {
-  display: flex; gap: 8px; align-items: baseline; align-self: center; max-width: 100%;
-  padding: 6px 12px; border-radius: var(--dsw-radius-sm); background: var(--dsw-alias-bg-layer-1);
-  font-size: 12px; line-height: 18px; color: var(--dsw-alias-label-secondary);
-}
-.dsh-dot-chat .dsh-dot-segment-time { font-family: var(--ds-font-family-code); color: var(--dsw-alias-label-tertiary); flex-shrink: 0; }
-.dsh-dot-chat .dsh-dot-spacer { flex: 1; }
-.dsh-dot-chat .dsh-dot-badge {
-  display: inline-flex; align-items: center; justify-content: center; min-width: 16px; height: 16px;
-  margin-left: 6px; padding: 0 4px; border-radius: 8px; font-size: 11px;
-  background: var(--dsw-alias-state-warn-primary); color: var(--dsw-alias-label-primary-foreground);
-}
-.dsh-dot-chat .dsh-dot-head .dsh-dot-gear { position: relative; }
-.dsh-dot-chat .dsh-dot-gear-dot {
-  position: absolute; top: 5px; right: 5px; width: 6px; height: 6px; border-radius: 3px;
-  background: var(--dsw-alias-state-warn-primary);
-}
-.dsh-dot-chat .dsh-dot-ctx-pill { gap: 8px; font-variant-numeric: tabular-nums; }
-.dsh-dot-chat .dsh-dot-ctx-track {
-  display: inline-block; width: 40px; height: 6px; border-radius: 3px; overflow: hidden;
-  background: var(--dsw-alias-bg-layer-2);
-}
-.dsh-dot-chat .dsh-dot-ctx-track > span { display: block; height: 100%; border-radius: 3px; background: var(--dsw-alias-label-secondary); }
-.dsh-dot-chat .dsh-dot-ctx-num { font: 12px/16px var(--ds-font-family-code); color: var(--dsw-alias-label-secondary); }
-.dsh-dot-chat .dsh-dot-stage { position: relative; flex: 1; min-height: 0; display: flex; flex-direction: row; container-type: inline-size; }
-.dsh-dot-chat .dsh-dot-chatcol { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; }
-.dsh-dot-chat .dsh-dot-scroll { flex: 1; min-height: 0; overflow-y: auto; }
-.dsh-dot-chat .dsh-dot-drawer-layer { position: absolute; inset: 0; z-index: 10; display: flex; justify-content: flex-end; overflow: hidden; }
-.dsh-dot-chat .dsh-dot-drawer-backdrop {
-  position: absolute; inset: 0; padding: 0; border: 0; border-radius: 0; cursor: default;
-  background: var(--dsw-alias-bg-mask-1); animation: dsh-dot-fade var(--ds-transition-duration, 0.2s) ease-out;
-}
-.dsh-dot-chat .dsh-dot-drawer {
-  position: relative; width: min(460px, 100%); height: 100%; min-height: 0; display: flex; flex-direction: column;
-  border-left: 0.5px solid var(--dsw-alias-border-l1); background: var(--dsw-alias-bg-layer-1);
-  box-shadow: var(--dsw-elevation-prominent);
-  transition: width var(--ds-transition-duration, 0.2s) var(--ds-ease-in-out, ease-out);
-  animation: dsh-dot-drawer-in var(--ds-transition-duration, 0.2s) var(--ds-ease-in-out, ease-out);
-}
-.dsh-dot-chat .dsh-dot-drawer[data-wide] { width: min(640px, 100%); }
-.dsh-dot-chat .dsh-dot-drawer-title {
-  display: inline-flex; align-items: center; gap: 8px; margin: 0; padding: 0 6px;
-  font-size: 14px; line-height: 20px; font-weight: 600; color: var(--dsw-alias-label-primary);
-}
-@keyframes dsh-dot-drawer-in { from { transform: translateX(24px); opacity: 0; } to { transform: none; opacity: 1; } }
-@keyframes dsh-dot-fade { from { opacity: 0; } to { opacity: 1; } }.dsh-dot-chat .dsh-dot-drawer-head {
-  display: flex; align-items: center; gap: 4px; min-height: 46px; padding: 6px 8px 6px 10px; box-sizing: border-box;
-  border-bottom: 0.5px solid var(--dsw-alias-border-l2);
-}
-.dsh-dot-chat .dsh-dot-drawer-head > button { flex-shrink: 0; }
-.dsh-dot-chat .dsh-dot-drawer-tabs { display: flex; align-items: center; gap: 2px; min-width: 0; overflow-x: auto; scrollbar-width: none; }
-.dsh-dot-chat .dsh-dot-drawer-tabs button,
-.dsh-dot-chat .dsh-dot-filters button {
-  display: inline-flex; align-items: center; gap: 6px; flex-shrink: 0; padding: 5px 10px;
-  border: 0; border-radius: var(--dsw-radius-sm); background: transparent; white-space: nowrap;
-  color: var(--dsw-alias-label-secondary); font: inherit; font-size: 13px; line-height: 20px; cursor: pointer;
-}
-.dsh-dot-chat .dsh-dot-drawer-tabs button:hover,
-.dsh-dot-chat .dsh-dot-filters button:hover { background: var(--dsw-alias-interactive-bg-hover); color: var(--dsw-alias-label-primary); }
-.dsh-dot-chat .dsh-dot-drawer-tabs button[aria-pressed='true'],
-.dsh-dot-chat .dsh-dot-filters button[aria-pressed='true'] { background: var(--dsw-alias-interactive-bg-active); color: var(--dsw-alias-label-primary); font-weight: 500; }
-.dsh-dot-chat .dsh-dot-drawer-tabs button:focus-visible,
-.dsh-dot-chat .dsh-dot-filters button:focus-visible { outline: 2px solid var(--dsw-alias-brand-primary); outline-offset: -2px; }
-.dsh-dot-chat .dsh-dot-nav-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.dsh-dot-chat .dsh-dot-nav-badge {
-  display: inline-flex; align-items: center; justify-content: center;
-  min-width: 16px; height: 16px; padding: 0 4px; border-radius: 8px; font-size: 11px; line-height: 16px; font-weight: 500;
-  background: var(--dsw-alias-state-warn-primary); color: var(--dsw-alias-label-primary-foreground);
-}
-.dsh-dot-chat .dsh-dot-settings-status {
-  display: inline-flex; align-items: center; gap: 4px; flex-shrink: 1; min-width: 0; margin-right: 2px; font-size: 12px; line-height: 18px;
-  color: var(--dsw-alias-state-success-primary); max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-}
-.dsh-dot-chat .dsh-dot-settings-status--error { color: var(--dsw-alias-label-error); }
-.dsh-dot-chat .dsh-dot-settings-scroll { flex: 1; min-width: 0; min-height: 0; overflow-y: auto; overscroll-behavior: contain; container-type: inline-size; }
-.dsh-dot-chat .dsh-dot-settings { display: flex; flex-direction: column; padding: 16px 18px 28px; }
-.dsh-dot-chat .dsh-dot-settings[data-tab='tasks'] { padding: 12px 12px 24px; }
-.dsh-dot-chat .dsh-dot-settings[data-tab='trajectory'] { padding: 0; }
-.dsh-dot-chat .dsh-dot-settings[data-tab='trajectory'] .dsh-dot-tr { flex: none; }
-.dsh-dot-chat .dsh-dot-settings[data-tab='trajectory'] .dsh-dot-tr-list { overflow: visible; }
-.dsh-dot-chat .dsh-dot-trajectory-wrap { flex: 1; min-height: 0; display: flex; flex-direction: column; }
-.dsh-dot-chat .dsh-dot-tasks { display: flex; flex-direction: column; gap: 12px; }
-.dsh-dot-chat .dsh-dot-tasks .dsh-dot-board { padding: 0; height: auto; overflow: visible; }
-.dsh-dot-chat .dsh-dot-filters { display: flex; gap: 2px; overflow-x: auto; scrollbar-width: none; }
-.dsh-dot-chat .dsh-dot-filters button { padding: 3px 9px; font-size: 12px; line-height: 18px; }
-@container (max-width: 560px) { .dsh-dot-chat .dsh-dot-drawer-widen { display: none; } }
-@media (prefers-reduced-motion: reduce) { .dsh-dot-chat .dsh-dot-drawer, .dsh-dot-chat .dsh-dot-drawer-backdrop { transition: none; animation: none; } }
-.dsh-dot-chat .dsh-dot-settings-pane { gap: 0; }
-.dsh-dot-chat .dsh-dot-settings-pane > .dsh-ui-notice,
-.dsh-dot-chat .dsh-dot-settings-pane > .dsh-ui-error { margin-bottom: 16px; }
-.dsh-dot-chat .dsh-dot-pane-section { padding: 18px 0; border-bottom: 0.5px solid var(--dsw-alias-border-l2); }
-.dsh-dot-chat .dsh-dot-pane > .dsh-dot-pane-section:first-child { padding-top: 0; }
-.dsh-dot-chat .dsh-dot-pane > .dsh-dot-pane-section:last-child { padding-bottom: 0; border-bottom: 0; }
-.dsh-dot-chat .dsh-dot-pane-section .dsh-ui-form > .dsh-ui-field:first-child { padding-top: 4px; }
-.dsh-dot-chat .dsh-dot-pane-section .dsh-ui-form > .dsh-ui-field:last-child { padding-bottom: 0; }
-.dsh-dot-chat .dsh-dot-pane-section-title {
-  margin: 0 0 8px; font-size: 12px; line-height: 18px; font-weight: 600;
-  color: var(--dsw-alias-label-secondary);
-}
-.dsh-dot-chat .dsh-dot-settings-note { margin: 0; padding-top: 16px; }
-.dsh-dot-chat .dsh-dot-pane { display: flex; flex-direction: column; gap: 12px; }
-.dsh-dot-chat .dsh-dot-log {
-  display: flex; flex-direction: column; gap: 12px;
-  max-width: 760px; margin: 0 auto; padding: 20px 16px 12px;
-}
-.dsh-dot-chat .dsh-dot-center {
-  display: flex; flex-direction: column; align-items: center; gap: 10px; text-align: center;
-  padding: 48px 24px;
-}
-.dsh-dot-chat .dsh-dot-greeting { font-size: 16px; line-height: 24px; font-weight: 600; }
-.dsh-dot-chat .dsh-dot-muted { font-size: 13px; line-height: 20px; color: var(--dsw-alias-label-secondary); max-width: 420px; }
-.dsh-dot-chat .dsh-dot-user { display: flex; justify-content: flex-end; padding-left: 48px; }
-.dsh-dot-chat .dsh-dot-user > * { max-width: 100%; white-space: pre-wrap; overflow-wrap: anywhere; }
-.dsh-dot-chat .dsh-dot-echo { opacity: 0.55; }
-.dsh-dot-chat .dsh-dot-bot { display: flex; gap: 10px; align-items: flex-start; }
-.dsh-dot-chat .dsh-dot-gutter { flex: 0 0 28px; width: 28px; min-height: 1px; }
-.dsh-dot-chat .dsh-dot-body { flex: 1; min-width: 0; padding-top: 3px; }
-.dsh-dot-chat .dsh-dot-view-number { margin-bottom: 4px; }
-.dsh-dot-chat .dsh-dot-view[data-expired] { opacity: 0.7; }
-.dsh-dot-chat .dsh-dot-activity { color: var(--dsw-alias-label-tertiary); }
-.dsh-dot-chat .dsh-dot-row-content { flex: 1 1 auto; min-width: 0; }
-.dsh-dot-chat .dsh-dot-row-layout { min-width: 0; }
-.dsh-dot-chat .dsh-dot-row-sep {
-  flex: none; width: 2px; height: 2px; margin: 0 8px;
-  border-radius: 1px; background: var(--dsw-alias-label-caption);
-}
-.dsh-dot-chat .dsh-dot-row-summary {
-  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  font-size: 12px; line-height: 18px; color: var(--dsw-alias-label-caption);
-}
-.dsh-dot-chat .dsh-dot-row-summary[data-tone="error"] { color: var(--dsw-alias-label-error); }
-.dsh-dot-chat .dsh-dot-tool-group {
-  display: flex; flex-direction: column; gap: 2px;
-  margin: 4px 0 2px 7px; padding-left: 14px;
-  border-left: 1px solid var(--dsw-alias-border-l2);
-}
-.dsh-dot-chat .dsh-dot-tool-body {
-  display: flex; align-items: center; gap: 8px;
-  margin: 3px 0 4px 22px; padding: 7px 11px; max-height: 200px; overflow-y: auto;
-  border-radius: var(--dsw-radius-sm); background: var(--dsw-alias-bg-layer-1);
-  font-size: 12px; line-height: 18px; color: var(--dsw-alias-label-secondary);
-}
-.dsh-dot-chat .dsh-dot-tool-body[data-multiline] { flex-direction: column; align-items: stretch; gap: 6px; }
-.dsh-dot-chat .dsh-dot-tool-body[data-tone="muted"] { color: var(--dsw-alias-label-tertiary); }
-.dsh-dot-chat .dsh-dot-tool-body[data-tone="error"] { color: var(--dsw-alias-label-error); }
-.dsh-dot-chat .dsh-dot-tool-text { flex: 1 1 auto; min-width: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
-.dsh-dot-chat .dsh-dot-tool-foot { display: flex; justify-content: flex-end; }
-.dsh-dot-chat .dsh-dot-notice { padding-left: 38px; color: var(--dsw-alias-label-tertiary); }
-.dsh-dot-chat .dsh-dot-notice-list {
-  display: flex; flex-direction: column; gap: 10px;
-  margin: 4px 0 2px 7px; padding: 2px 0 2px 14px;
-  border-left: 1px solid var(--dsw-alias-border-l2);
-}
-.dsh-dot-chat .dsh-dot-notice-entry { display: flex; flex-direction: column; gap: 5px; color: var(--dsw-alias-label-primary); }
-.dsh-dot-chat .dsh-dot-notice-entry + .dsh-dot-notice-entry { padding-top: 10px; border-top: 0.5px solid var(--dsw-alias-border-l1); }
-.dsh-dot-chat .dsh-dot-card-head { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; min-width: 0; }
-.dsh-dot-chat .dsh-dot-card-subject { font-size: 13px; line-height: 20px; font-weight: 500; color: var(--dsw-alias-label-primary); min-width: 0; overflow-wrap: anywhere; }
-.dsh-dot-chat .dsh-dot-code-pill {
-  padding: 1px 6px; border-radius: 6px; background: var(--dsw-alias-bg-module-platform);
-  color: var(--dsw-alias-label-primary); font: 12px/18px var(--ds-font-family-code);
-}
-.dsh-dot-chat .dsh-dot-req-id { font: 11px/17px var(--ds-font-family-code); color: var(--dsw-alias-label-tertiary); }
-.dsh-dot-chat .dsh-dot-card-meta { font-size: 12px; line-height: 18px; color: var(--dsw-alias-label-tertiary); }
-.dsh-dot-chat .dsh-dot-card-body { font-size: 13px; line-height: 20px; color: var(--dsw-alias-label-primary); white-space: pre-wrap; overflow-wrap: anywhere; }
-.dsh-dot-chat .dsh-dot-card-error { color: var(--dsw-alias-label-error); }
-.dsh-dot-chat .dsh-dot-card-desc { font-size: 12px; line-height: 18px; color: var(--dsw-alias-label-secondary); overflow-wrap: anywhere; }
-.dsh-dot-chat .dsh-dot-cmd {
-  margin: 0; padding: 7px 10px; max-height: 160px; overflow-y: auto;
-  border: 0; border-radius: var(--dsw-radius-sm); background: var(--dsw-alias-bg-layer-1);
-  color: var(--dsw-alias-label-secondary);
-  font: 12px/18px var(--ds-font-family-code); white-space: pre-wrap; overflow-wrap: anywhere;
-}
-.dsh-dot-chat .dsh-dot-questions { display: flex; flex-direction: column; gap: 6px; }
-.dsh-dot-chat .dsh-dot-question-item { display: flex; flex-direction: column; gap: 4px; }
-.dsh-dot-chat .dsh-dot-question-multi { font-size: 12px; color: var(--dsw-alias-label-tertiary); }
-.dsh-dot-chat .dsh-dot-question-opts { display: flex; flex-wrap: wrap; gap: 4px; }
-.dsh-dot-chat .dsh-dot-kv-list { display: flex; flex-direction: column; gap: 2px; font-size: 12px; line-height: 18px; }
-.dsh-dot-chat .dsh-dot-kv-row { display: flex; gap: 6px; min-width: 0; }
-.dsh-dot-chat .dsh-dot-kv-key { flex-shrink: 0; font-family: var(--ds-font-family-code); color: var(--dsw-alias-label-tertiary); }
-.dsh-dot-chat .dsh-dot-kv-val { min-width: 0; color: var(--dsw-alias-label-secondary); overflow-wrap: anywhere; }
-.dsh-dot-chat .dsh-dot-session-btn {
-  display: inline-flex; align-items: center; gap: 3px; max-width: 220px; min-width: 0;
-  padding: 1px 6px; border: 0; border-radius: var(--dsw-radius-sm);
-  background: transparent; color: var(--dsw-alias-label-tertiary);
-  font: inherit; font-size: 12px; line-height: 18px; cursor: pointer;
-}
-.dsh-dot-chat .dsh-dot-session-btn:hover { background: var(--dsw-alias-interactive-bg-hover); color: var(--dsw-alias-label-primary); }
-.dsh-dot-chat .dsh-dot-session-btn:focus-visible { outline: 1px solid var(--dsw-focus-ring-color); outline-offset: 1px; }
-.dsh-dot-chat .dsh-dot-session-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.dsh-dot-chat .dsh-dot-turn-error {
-  display: flex; align-items: flex-start; gap: 8px; padding: 8px 12px;
-  border-radius: var(--dsw-radius-sm); background: var(--dsw-alias-bg-layer-1);
-  box-shadow: var(--dsw-elevation-stroke); font-size: 13px; line-height: 20px; color: var(--dsw-alias-label-error);
-}
-.dsh-dot-chat .dsh-dot-turn-error > [data-state] { margin-top: 6px; flex-shrink: 0; }
-.dsh-dot-chat .dsh-dot-segment {
-  display: flex; align-items: center; gap: 10px; padding: 4px 0;
-  font-size: 12px; line-height: 16px; color: var(--dsw-alias-label-tertiary);
-}
-.dsh-dot-chat .dsh-dot-segment::before, .dsh-dot-chat .dsh-dot-segment::after { content: ''; flex: 1; height: 0.5px; background: var(--dsw-alias-border-l2); }
-.dsh-dot-chat .dsh-dot-error { font-size: 13px; line-height: 20px; color: var(--dsw-alias-label-error); }
-.dsh-dot-chat .dsh-dot-banner {
-  display: flex; align-items: center; gap: 8px; justify-content: center; padding: 6px 16px;
-  font-size: 12px; color: var(--dsw-alias-label-error); background: var(--dsw-alias-bg-layer-1);
-}
-.dsh-dot-chat .dsh-dot-composer {
-  display: flex; flex-direction: column; gap: 6px;
-  width: 100%; max-width: 760px; margin: 0 auto; padding: 8px 16px 16px; box-sizing: border-box;
-}
-.dsh-dot-chat .dsh-dot-inputrow {
-  display: flex; align-items: flex-end; gap: 8px; padding: 8px 8px 8px 14px;
-  border-radius: var(--dsw-radius-md); background: var(--dsw-alias-bg-layer-1);
-  box-shadow: var(--dsw-elevation-stroke);
-}
-.dsh-dot-chat .dsh-dot-input {
-  flex: 1; min-width: 0; resize: none; border: 0; outline: none; background: transparent;
-  color: var(--dsw-alias-label-primary); font: inherit; font-size: 14px; line-height: 22px;
-  padding: 3px 0; max-height: 200px;
-}
-.dsh-dot-chat .dsh-dot-file { display: none; }
-.dsh-dot-chat .dsh-dot-images { display: flex; flex-wrap: wrap; gap: 6px; }
-.dsh-dot-chat .dsh-dot-image-chip {
-  display: inline-flex; align-items: center; gap: 6px; max-width: 100%;
-  padding: 2px 8px; border-radius: var(--dsw-radius-sm); background: var(--dsw-alias-bg-layer-2);
-  font-size: 12px; line-height: 18px; color: var(--dsw-alias-label-secondary);
-}
-.dsh-dot-chat .dsh-dot-image-chip button {
-  border: 0; background: transparent; color: inherit; cursor: pointer; padding: 0; font: inherit;
-}
-.dsh-dot-chat .dsh-dot-input::placeholder { color: var(--dsw-alias-label-dimmed); }
-`

@@ -14,9 +14,11 @@ import type { FactoryResetPreview } from './contracts.ts'
 function source(partial: Partial<FactoryResetSource> = {}): FactoryResetSource {
   return {
     list: () => [{ origin: 'started' }, { origin: 'watched' }],
-    listTickets: () => [{}],
     work: { listChanges: () => [{}, {}], listRuns: () => [{}] },
     schedules: [{}],
+    recipes: [{}],
+    links: [{}],
+    recipeProposals: [],
     settingProposals: [],
     cards: [{}, {}],
     pastSegments: [{ sessionId: 'past-1' }],
@@ -33,7 +35,7 @@ describe('factory reset preview', () => {
   it('counts Dorothy\'s own records and never treats a watched session as owned', () => {
     const counts = factoryResetCounts(source())
     expect(counts).toEqual({
-      tasks: 2, tickets: 1, changes: 2, runs: 1, schedules: 1, proposals: 0, cards: 2,
+      tasks: 2, changes: 2, runs: 1, schedules: 1, recipes: 1, links: 1, recipeProposals: 0, proposals: 0, cards: 2, inbox: 0, worktrees: 0,
       ownedSessions: 2, pastSegments: 1, reflections: 1, hasAgreements: true, hasCognition: true,
     })
     expect(factoryResetArchiveIds(source()).sort()).toEqual(['dot-now', 'owned-1', 'owned-2', 'past-1', 'ref-1'])
@@ -58,7 +60,7 @@ describe('factory reset preview', () => {
       archiveSessionIds: factoryResetArchiveIds(source()),
     }
     const text = formatFactoryResetPreview(preview)
-    expect(text).toContain('2 task(s)')
+    expect(text).toContain('2 tracked session(s)')
     expect(text).toContain('agreements will be cleared')
     expect(text).toContain('5 session(s) will be archived')
   })

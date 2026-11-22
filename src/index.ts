@@ -25,7 +25,10 @@ import type { RawEvent } from './chat.ts'
 import { COMPACTION_POLICY, PLUGIN_NAME, PRESET_ID, RPC_CHANNEL, SERVICE_NAME, type PendingQuestionItem, type TaskRecord } from './contracts.ts'
 import { CHAT_SAY_BODY_BYTES, checkChatImages } from './chat-images.ts'
 import { ChatFeed } from './feed.ts'
+import { DotCapabilities, type CapabilityPluginManager, type CapabilityTools } from './capabilities.ts'
 import { bindHost } from './host.ts'
+import { InboxLedger } from './inbox.ts'
+import { installInboxIngress } from './inbox-github.ts'
 import { clip } from './ledger.ts'
 import { detachNative } from './native.ts'
 import { PeerLedger } from './peer.ts'
@@ -35,9 +38,10 @@ import { REFLECTION_INSTRUCTIONS, REFLECTION_PRESET_ID } from './reflection.ts'
 import { APPROVAL_GRACE_MS, DotError, DotService, messageOf } from './service.ts'
 import { configI18n } from './i18n/index.ts'
 import { patchSettings } from './settings.ts'
-import { dotDomain, parsePeerDelivery, parseTask, restoreTaskTimestamps } from './storage.ts'
+import { dotDomain, parseInboxRecord, parsePeerDelivery, parseTask } from './storage.ts'
 import { DotStore, type DotDomainHandle } from './store.ts'
-import { reviewPayload } from './task-rpc.ts'
+import { DOT_INHERITED_ALLOW } from './tools.ts'
+import { copyLocale, fillText, t } from './ui-copy.ts'
 
 export const name = PLUGIN_NAME
 export const inject = ['storageDomain', 'sessions', 'sessionController', 'workspaceRegistry', 'sessionQuery', 'agentPresets', 'agents', 'agentDefaultModel', 'webServer', 'connection'] as const
@@ -75,6 +79,15 @@ interface SessionLike {
 }
 interface AgentLike { readonly id?: string; readonly session?: SessionLike }
 
+/** Tell Dorothy, in the chat, why a review was rejected. The decision is already committed, so the
+ *  note is best effort: it must never fail the RPC or hold its acknowledgment while the chat queues. */
+function notifyRejected(service: DotService, title: string, note: string): void {
+  try {
+    const msg = fillText(t(copyLocale(service.locale), 'workRejectPrefix'), { title, note })
+    void service.say(msg.slice(0, 4_000)).catch(() => undefined)
+  } catch { /* a missing note is not a failed decision */ }
+}
+
 /** Ledger events come from top-level sessions only; subagents report to their parent session. */
 function sessionIdOf(agent: AgentLike | undefined): string | undefined {
   const session = agent?.session
@@ -94,19 +107,27 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
     dotDomain,
     { logger, domainName: 'dsh_dot' },
   )
-  const query = ctx.get('sessionQuery' as never) as unknown as { readSession(sessionId: string): Promise<{ events: readonly { time?: unknown }[] }> }
-  await restoreTaskTimestamps(domain, async sessionId => (await query.readSession(sessionId)).events.map(event => event.time).filter((time): time is number => typeof time === 'number'), log)
   const store = new DotStore(domain, [...domain.table('tasks').entries()].map(([, value]) => parseTask(value)).filter((task): task is TaskRecord => task !== undefined))
   let sealOwned: ((agent: unknown) => void) | undefined
-  const host = bindHost(name => ctx.get(name as never), log, () => store.settings.model, agent => { sealOwned?.(agent) })
+  const capabilities = new DotCapabilities({
+    tools: () => ctx.get('tools' as never) as CapabilityTools | undefined,
+    mcpManager: () => ctx.get('mcpManager' as never) as { list(): readonly { readonly name: string }[] } | undefined,
+    pluginManager: () => ctx.get('pluginManager' as never) as CapabilityPluginManager | undefined,
+    settings: () => store.settings,
+    locked: DOT_INHERITED_ALLOW,
+  })
+  const host = bindHost(name => ctx.get(name as never), log, () => store.settings.model, agent => { sealOwned?.(agent) }, capabilities)
   const service = new DotService({
     host,
     store,
+    capabilities,
     peers: new PeerLedger(domain.table('peers'), parsePeerDelivery),
+    inbox: new InboxLedger(domain.table('inbox'), parseInboxRecord),
     homeDir: config.homeDir?.trim() || join(process.env.DSH_HOME?.trim() || join(homedir(), '.dsh'), 'dot'),
     log,
     trace: logger,
     approvalGraceMs: Number.isFinite(config.approvalGraceMs) ? Math.max(0, Math.min(60_000, config.approvalGraceMs!)) : APPROVAL_GRACE_MS,
+    pluginManager: () => ctx.get('pluginManager' as never),
   })
   sealOwned = agent => service.sealAgent(agent)
   void service.sealExisting()
@@ -124,17 +145,30 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
   }), 'dot.locale-settings')
   const feed = new ChatFeed(host, store)
   // The chat follows dot into every new segment and keeps the earlier ones above it.
-  const follow = () => { if (store.dotSessionId) feed.attach(store.dotSessionId, store.pastSegments); feed.cardsChanged() }
+  const follow = () => {
+    if (store.dotSessionId) feed.attach(store.dotSessionId, store.pastSegments)
+    feed.boardChanged()
+    feed.cardsChanged()
+  }
   follow()
   const unfollow = store.onChange(follow)
+  const unpending = service.pending.onChange(() => feed.boardChanged())
   const ensureDot = async () => {
     const sessionId = await service.ensureDot()
     follow()
     return sessionId
   }
   ctx.provide(SERVICE_NAME, service)
+  // Wrap tools.register so every extra tool records the loader entry that
+  // registered it; the catalog uses that for plugin attribution.
+  ctx.effect(() => capabilities.installAttribution(), 'dot.capabilities-attribution')
+  // A tool set change can mean a bundle came or went; refetch row mapping on the next catalog read.
+  ctx.effect(() => (ctx as unknown as { on(name: string, listener: () => void): () => void }).on('tools/change', () => capabilities.invalidateBundles()), 'dot.capabilities-bundles')
+  // Optional webhook ingress: only while the host provides webhookRuntime.
+  installInboxIngress(ctx, service, log)
   ctx.effect(() => () => {
     unfollow()
+    unpending()
     const done = (async () => {
       service.releaseChildSeals()
       await service.dispose().catch(err => { logger.fault('service.dispose-failed', 'DotService disposal failed.', err) })
@@ -158,7 +192,7 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
     void ctx.agentPresets.register({
       id: PRESET_ID,
       name: 'Dorothy',
-      description: 'Dorothy (dot): talks to you, starts and checks other sessions; no file or shell tools.',
+      description: 'Dorothy (dot): coordinates workspaces and task sessions, settles routine requests, and reports back; carries no file or shell tools.',
       order: 90,
       plugins: [
         { id: 'persona', name: '@deepseek-ai/dsh-persona', config: { prefix: DOT_INSTRUCTIONS } },
@@ -195,7 +229,7 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
     void ctx.agentPresets.register({
       id: REFLECTION_PRESET_ID,
       name: 'Dot reflection',
-      description: 'Internal background reflection pass for Dorothy; not used for tasks.',
+      description: 'Internal background reflection pass that updates Dorothy’s cognition; never used for tasks.',
       order: 91,
       plugins: [
         { id: 'persona', name: '@deepseek-ai/dsh-persona', config: { prefix: REFLECTION_INSTRUCTIONS } },
@@ -373,13 +407,17 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
   const str = (payload: unknown, key: string): string => { const value = field(payload, key); return typeof value === 'string' ? value : '' }
   // The kit's 64 KiB default answers 413 before `say` runs. A PNG of about
   // 51 KB does not fit after base64; the cap below fits the advertised images.
+  const PASSIVE_ENDPOINTS = new Set(['wait', 'board', 'attention', 'work.list', 'work.read', 'card.pending', 'card.detail', 'recipes'])
   ctx.effect(() => registerHostRpc(ctx as unknown as HostRpcContext, RPC_CHANNEL, async (endpoint, payload, signal) => {
     try {
       const reqLocale = field(payload, 'uiLocale')
-      if (typeof reqLocale === 'string' && reqLocale.trim()) await service.syncLocale(reqLocale)
+      if (typeof reqLocale === 'string' && reqLocale.trim() && (!PASSIVE_ENDPOINTS.has(endpoint) || store.uiLocale === undefined)) {
+        await service.syncLocale(reqLocale)
+      }
       switch (endpoint) {
         case 'locale.sync': return { ok: true, value: await service.syncLocale(str(payload, 'locale') || str(payload, 'uiLocale')) }
         case 'board': return { ok: true, value: service.board() }
+        case 'attention': return { ok: true, value: service.attention() }
         case 'ensure': return { ok: true, value: { sessionId: await ensureDot() } }
         case 'chat': {
           await ensureDot()
@@ -418,11 +456,17 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
         case 'stop': { await service.stop(); return { ok: true, value: true } }
         case 'settings': return { ok: true, value: store.settings }
         case 'settings.proposals': return { ok: true, value: store.settingProposals }
+        case 'capabilities.catalog': return { ok: true, value: await service.capabilitiesView() }
         case 'settings.decide': {
           const id = field(payload, 'id')
           return { ok: true, value: await service.selfSettings.decide(typeof id === 'string' ? id : '', field(payload, 'allow') === true) }
         }
         case 'segment.new': return { ok: true, value: await service.newSegment() }
+        case 'update.status': return { ok: true, value: service.updateStatus() ?? null }
+        case 'update.check': return { ok: true, value: await service.checkUpdates() }
+        case 'keepalive': {
+          return { ok: true, value: service.keepaliveInfo() }
+        }
         case 'trajectory': {
           const id = await ensureDot()
           return { ok: true, value: host.dotTrajectory(id) }
@@ -440,39 +484,32 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
           await ensureDot()
           return { ok: true, value: await service.contextView() }
         }
-        case 'context.clearUsage': {
+        case 'context.clear': {
           await ensureDot()
           return { ok: true, value: await service.clearUsage() }
         }
+        case 'recipes': return { ok: true, value: service.recipeBoard() }
+        case 'recipe.run': {
+          const id = str(payload, 'id')
+          const result = await service.runRecipe(id ?? '', { origin: 'human' })
+          return { ok: true, value: result }
+        }
+        case 'recipe.proposal.decide': return { ok: true, value: await service.decideRecipeProposal(payload !== null && typeof payload === 'object' ? payload as Record<string, unknown> : {}) }
         case 'schedule.remove': {
           const id = field(payload, 'id')
           return { ok: true, value: typeof id === 'string' ? await service.removeSchedule(id) : false }
         }
-        case 'task.confirm': { await service.confirmTask(str(payload, 'id')); return { ok: true, value: true } }
-        case 'task.delete': return { ok: true, value: await service.deleteDraft(str(payload, 'id')) }
-        case 'task.cancel': { await service.cancelTask(str(payload, 'id')); return { ok: true, value: true } }
-        case 'task.review': {
-          const parsed = reviewPayload(payload)
-          if (typeof parsed === 'string') return { ok: false, error: { code: 'dot/invalid', message: parsed } }
-          await service.reviewTask(str(payload, 'id'), parsed.pass, parsed.note)
-          return { ok: true, value: true }
-        }
-        case 'task.priority': {
-          const priority = field(payload, 'priority')
-          if (priority !== 1 && priority !== 2 && priority !== 3) return { ok: false, error: { code: 'dot/invalid', message: 'invalid priority' } }
-          await service.setTaskPriority(str(payload, 'id'), priority)
-          return { ok: true, value: true }
-        }
         case 'work.list': {
-          const rows = service.store.work.listChanges().map(change => service.workBoard(change.id)).filter(row => row !== undefined)
-          return { ok: true, value: rows }
+          return { ok: true, value: service.workList() }
         }
         case 'work.read': {
           const kind = field(payload, 'kind')
           if (kind !== 'evidence' && kind !== 'change') return { ok: false, error: { code: 'dot/invalid', message: 'kind must be evidence or change' } }
+          const view = field(payload, 'view')
+          if (view !== undefined && view !== 'diff') return { ok: false, error: { code: 'dot/invalid', message: 'view must be diff' } }
           const read = service.readWorkSource(str(payload, 'id'), kind, str(payload, 'ref'), {
             verificationId: str(payload, 'verificationId'), inputRef: str(payload, 'inputRef'), inputRevision: num(payload, 'inputRevision'),
-          }, { forceFull: field(payload, 'forceFull') === true })
+          }, { forceFull: field(payload, 'forceFull') === true, ...(view === 'diff' ? { view: 'diff' as const } : {}) })
           if (!read.ok) return { ok: false, error: { code: `dot/${read.code}`, message: read.message } }
           return { ok: true, value: { source: read.source, body: read.body, truncated: read.truncated, totalBytes: read.totalBytes } }
         }
@@ -484,13 +521,31 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
           return { ok: true, value: true }
         }
         case 'work.reject': {
-          const result = await service.rejectWork(str(payload, 'id'), str(payload, 'reviewRunId'), num(payload, 'expectedInputRevision'))
+          const id = str(payload, 'id')
+          const result = await service.rejectWork(id, str(payload, 'reviewRunId'), num(payload, 'expectedInputRevision'))
           if (result && 'ok' in result && result.ok === false) return { ok: false, error: { code: result.code, message: result.message } }
+          const note = str(payload, 'note').trim()
+          if (note) {
+            const title = service.workBoard(id)?.title ?? id
+            notifyRejected(service, title, note)
+          }
           return { ok: true, value: true }
         }
         case 'work.answer': {
           try {
-            await service.answerWorkReview(str(payload, 'id'), field(payload, 'allow') === true)
+            const reqId = str(payload, 'id')
+            const allow = field(payload, 'allow') === true
+            const pendingRow = !allow ? service.pending.list().find(row => row.id === reqId) : undefined
+            await service.answerWorkReview(reqId, allow)
+            const note = !allow ? str(payload, 'note').trim() : ''
+            if (note) {
+              let title = reqId
+              try {
+                const parsed = pendingRow?.detail ? JSON.parse(pendingRow.detail) as { changeId?: unknown } : undefined
+                if (typeof parsed?.changeId === 'string') title = service.workBoard(parsed.changeId)?.title ?? parsed.changeId
+              } catch { /* fallback to request id */ }
+              notifyRejected(service, title, note)
+            }
             return { ok: true, value: true }
           } catch (error) {
             return { ok: false, error: { code: error instanceof DotError ? error.code : 'dot/failed', message: messageOf(error) } }
@@ -500,6 +555,18 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
           const result = await service.resumeWorkCloseout(str(payload, 'id'))
           if (result && 'ok' in result && result.ok === false) return { ok: false, error: { code: result.code, message: result.message } }
           return { ok: true, value: true }
+        }
+        case 'work.release': {
+          const result = await service.forceReleaseWork(str(payload, 'id'))
+          if (result && 'ok' in result && result.ok === false) return { ok: false, error: { code: result.code, message: result.message } }
+          return { ok: true, value: true }
+        }
+        case 'work.integrate': {
+          const mode = field(payload, 'mode')
+          if (mode !== 'merge' && mode !== 'keep' && mode !== 'discard') return { ok: false, error: { code: 'dot/invalid', message: 'mode must be merge, keep or discard' } }
+          const result = await service.integrateWork(str(payload, 'id'), mode)
+          if (!result.ok) return { ok: false, error: { code: `dot/${result.code}`, message: result.message } }
+          return { ok: true, value: result.text }
         }
         case 'knowledge': return { ok: true, value: await service.knowledgeView() }
         // Panel edits of the agreements/cognition do not switch segments at once: the change is

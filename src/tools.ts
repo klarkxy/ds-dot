@@ -12,6 +12,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { checkShownView } from '@klarkxy/dsh-deep-view/core'
 import type { ShownView } from '@klarkxy/dsh-deep-view/contracts'
+import { SHOW_VIEW_DEFERRED_META, SHOW_VIEW_MIXED_SUMMARY, showViewSharesStep, type StepTranscript } from './card-step.ts'
 import { cardPresentation, type DotCardMeta } from './cards.ts'
 import { SERVICE_NAME, TOOL } from './contracts.ts'
 import { personaSection } from './persona.ts'
@@ -78,14 +79,6 @@ const str = (args: unknown, key: string): string | undefined => {
   return typeof value === 'string' ? value : undefined
 }
 
-/** paths is a JSON string in the schema. A model that passes the array itself is still that same list. */
-const pathsText = (args: unknown): string | undefined => {
-  const value = (args as Record<string, unknown> | null)?.paths
-  if (typeof value === 'string') return value
-  if (Array.isArray(value)) return JSON.stringify(value)
-  return undefined
-}
-
 const num = (args: unknown, key: string): number | undefined => {
   const value = (args as Record<string, unknown> | null)?.[key]
   return typeof value === 'number' ? value : undefined
@@ -94,14 +87,16 @@ const num = (args: unknown, key: string): number | undefined => {
 const bool = (args: unknown, key: string): boolean =>
   (args as Record<string, unknown> | null)?.[key] === true
 
-export const TASK_ACTIONS = ['create', 'revise', 'dispatch', 'read', 'list', 'supplement', 'finish', 'step', 'closeout', 'pause', 'resume', 'cancel', 'decide', 'reject'] as const
+export const TASK_ACTIONS = ['create', 'revise', 'dispatch', 'check', 'read', 'list', 'supplement', 'finish', 'step', 'closeout', 'pause', 'resume', 'cancel', 'decide', 'reject', 'link', 'unlink'] as const
 
 export function apply(ctx: Context): void {
   installDotWeb(ctx)
-  gateToolExecution(ctx, DOT_INHERITED_ALLOW)
-  devIndexLoad = installDotDevIndex(ctx)
   const host = ctx as ToolHost
   const dot = () => host[SERVICE_NAME]
+  // Names outside the locked set go to the capability layer: granted extras pass
+  // while still granted and applied to the live segment; everything else denies.
+  gateToolExecution(ctx, DOT_INHERITED_ALLOW, exec => dot().capabilityGate(exec))
+  devIndexLoad = installDotDevIndex(ctx)
   // Both sections read what the segment froze when it started, so every request of a segment
   // shares one prompt prefix; a settings edit reaches dot with her next segment. A session
   // that is not the recorded segment (one being set up) reads the live settings.
@@ -129,22 +124,22 @@ export function apply(ctx: Context): void {
   // ── show_view (dot scope, single-step) ────────────────────────────────────
   // Same name as dsh-deep-view's global tool. A preset row registers into the
   // agent scope, and a scoped registration shadows the global one, so only dot
-  // gets this variant: a valid card concludes the turn in the same request.
-  // Ordinary sessions keep deep-view's two-step show_view untouched.
+  // gets this variant: a valid card that is the step's only call concludes
+  // the turn. A card sent beside another tool is refused before it is shown,
+  // and the turn stays open so those calls can finish. Ordinary sessions keep
+  // deep-view's two-step show_view untouched.
   tool({
     name: 'show_view',
     description: [
-      'Show the human one card and end this turn. This is how every reply to the human goes out: put your reply text inside the card (a text node is enough), then call show_view once as the very last step.',
-      'Calling it ends the turn at once — finish every other tool call first and have its result in hand. If it reports an invalid view, fix the view and call show_view again in the same turn.',
-      'Write the view as JSON text in view. Every ViewNode must carry a "type" field; nodes nest under stack|row (children, optional let).',
-      'Display nodes: text, metric{label,value}, table{columns,rows}, chart{kind,categories,series}, progress{percent|value+max}, callout{text}, sources{items}, steps{items}. Rich nodes: math (plots), flow (node graphs), explore (scatter), map (locations). Inputs: slider, number, choice, toggle.',
-      'To ask the human to choose, confirm or fill something in, use an options, confirm or form node and set await_reply true; a display-only card must not set it. For a human approval pass approval_id with the exact request id: the host renders a bound approval confirmation and applies its answer directly. A background wake-up with nothing for the human must not call this tool: end silently with no message.',
+      'Show the human a card. Use it only when structure or interaction helps: a table, metrics, a chart, progress, steps, or sources; a choice, confirmation, or form you need answered (set await_reply=true); or relaying a pending approval (pass its request id as approval_id so the host renders bound controls). Ordinary replies are plain text, not cards.',
+      'Call show_view alone in its own step after all other tool results are in; a valid card ends the turn. If it shares a step with another tool call, the card is deferred and the turn stays open: wait for those results, then call show_view by itself. If validation fails, fix the JSON and call show_view again.',
+      'view is JSON text for one root ViewNode, and every node needs a "type" field. Layout: stack, row (children, optional let). Display: text, metric{label,value}, table{columns,rows}, chart{kind,categories,series}, progress{percent|value+max}, callout{text}, sources{items}, steps{items}; rich: math, flow, explore, map. Reactive inputs: slider, number, choice, toggle. Answer controls: options, confirm, form.',
     ].join(' '),
     parameters: {
-      title: { type: 'string', description: 'Short heading above the card.' },
-      view: { type: 'string', required: true, description: 'One ViewNode as JSON text. Every node needs a "type"; nodes nest under stack|row children.' },
-      await_reply: { type: 'boolean', description: 'true only for a card with answer controls (options/confirm/form); omit or false for a display card.' },
-      approval_id: { type: 'string', description: 'For a human approval decision only: the exact pending approval id. The host renders the request and confirmation itself.' },
+      title: { type: 'string', description: 'Concise heading shown above the card.' },
+      view: { type: 'string', required: true, description: 'JSON string of one root ViewNode. Every node requires a "type" field; nest multiple nodes under stack or row children.' },
+      await_reply: { type: 'boolean', description: 'Set true only when the card contains interactive answer controls (options/confirm/form); omit or set false for display cards.' },
+      approval_id: { type: 'string', description: 'Exact pending approval id when relaying an approval to the human; the host binds and renders the confirmation controls.' },
     },
     output: {
       schema: {
@@ -162,12 +157,21 @@ export function apply(ctx: Context): void {
         const status = (value as { status?: unknown } | null)?.status
         return [{ type: 'text' as const, text: status === 'shown' || status === 'pending' ? 'shown' : String((value as { summary?: unknown } | null)?.summary ?? 'invalid view') }]
       },
-      presentationMeta: (_args: unknown, value: unknown) => cardPresentation(value) ?? null,
+      // A deferred mix is a successful result with no card. Its meta is the only
+      // durable marker; an invalid view still contributes none.
+      presentationMeta: (_args: unknown, value: unknown) =>
+        (value as { status?: unknown } | null)?.status === 'deferred' ? SHOW_VIEW_DEFERRED_META : cardPresentation(value) ?? null,
     },
     isConcurrencySafe: () => false,
-    execute: async (args: unknown, exec: { callId?: string; concludeTurn(): void }) => {
+    execute: async (args: unknown, exec: { callId?: string; concludeTurn(): void; agent?: { session?: StepTranscript } }) => {
       const input = (args !== null && typeof args === 'object' ? args : {}) as Record<string, unknown>
       const invalid = (summary: string) => ({ status: 'invalid' as const, summary })
+      // Refuse before presentCard. Later exclusive calls are not logged yet,
+      // so the assistant message committed for this step is the whole batch.
+      const session = exec.agent?.session
+      if (session !== undefined && typeof session.deriveMessages === 'function' && showViewSharesStep(session.deriveMessages(), exec.callId)) {
+        return { status: 'deferred' as const, summary: SHOW_VIEW_MIXED_SUMMARY }
+      }
       let view = input.view
       if (typeof view === 'string') {
         try { view = JSON.parse(view) } catch { return invalid('view: expected JSON text describing one ViewNode') }
@@ -196,9 +200,9 @@ export function apply(ctx: Context): void {
   // ── dot_overview ──────────────────────────────────────────────────────────
   tool(defineToolInput({
     name: TOOL.overview,
-    description: 'Ledger of the tasks you track (status, unread turns, waiting requests) plus every top-level session on this host, newest first. Clears the unread counters.',
+    description: 'Inspect the live ledger of tracked changes, tasks, watched sessions, and waiting requests alongside top-level host sessions (newest first). Clears unread turn counters.',
     parameters: {
-      limit: { type: 'integer', description: 'Sessions to list, default 30.' },
+      limit: { type: 'integer', description: 'Maximum top-level host sessions to list (default 30).' },
     },
     execute: async (args, exec) => dot().overview(exec.signal ?? new AbortController().signal, typeof (args as { limit?: unknown }).limit === 'number' ? (args as { limit: number }).limit : 30),
     title: 'Overview',
@@ -207,10 +211,10 @@ export function apply(ctx: Context): void {
   // ── dot_read ──────────────────────────────────────────────────────────────
   tool(defineToolInput({
     name: TOOL.read,
-    description: 'Read the latest assistant reply of one session, with its tracked goal and status. Use it to check results against the goal.',
+    description: "Read one session's tracked status, goal, and latest assistant reply so you can verify its report against the work order.",
     parameters: {
-      session_id: { type: 'string', required: true, description: 'Session to read.' },
-      max_chars: { type: 'integer', description: 'Tail characters of the reply, default 4000.' },
+      session_id: { type: 'string', required: true, description: 'Target session id.' },
+      max_chars: { type: 'integer', description: 'Maximum trailing characters of the latest reply to return (default 4000).' },
     },
     execute: async (args) => dot().read(str(args, 'session_id') ?? '', typeof (args as { max_chars?: unknown }).max_chars === 'number' ? (args as { max_chars: number }).max_chars : 4000),
     title: 'Read session',
@@ -219,18 +223,24 @@ export function apply(ctx: Context): void {
   // ── dot_workspace (merged from dot_list_workspaces + dot_create_workspace) ─
   tool(defineToolInput({
     name: TOOL.workspace,
-    description: 'Manage workspaces. action=list: list workspaces (id, title, directory, session count), your own workspace is marked. action=inspect: details of one workspace (id, or your own when omitted). action=files: list files and folders inside that workspace (read-only; optional relative path). action=create: create or reuse a workspace for an absolute directory; the directory is created when missing. File writes stay on task sessions.',
+    description: 'Inspect or create DSH workspaces (file edits always run on task sessions, never here). action=list: list all workspaces (id, title, directory, session count), marking your own workspace. action=inspect: read metadata of one workspace (defaults to your own). action=files: list files and folders inside a workspace (read-only; optional relative path). action=read: read a text file inside the workspace (relative path under the workspace, or an absolute path inside a registered workspace/change directory; optional start_line and max_lines, default 400, max 2000). action=create: register or reuse a workspace at an absolute directory, creating the directory if absent.',
     parameters: {
-      action: { type: 'string', enum: ['list', 'inspect', 'files', 'create'], required: true, description: 'list, inspect, files, or create.' },
-      path: { type: 'string', description: 'create: absolute directory. files: optional relative path inside the workspace.' },
-      title: { type: 'string', description: 'create only: display title for a new workspace.' },
-      workspace_id: { type: 'string', description: 'inspect or files: workspace id from action=list. Omit to use your own workspace.' },
+      action: { type: 'string', enum: ['list', 'inspect', 'files', 'create', 'read'], required: true, description: 'Operation: list, inspect, files, read, or create.' },
+      path: { type: 'string', description: 'create: absolute directory path. files: optional relative subpath inside the workspace. read: file path, relative inside the workspace or absolute inside an allowed root.' },
+      title: { type: 'string', description: 'create: optional display title for a newly registered workspace.' },
+      workspace_id: { type: 'string', description: 'inspect/files/read: workspace id from action=list; omit to target your own workspace.' },
+      start_line: { type: 'integer', description: 'read: first line to show, 1-based (default 1).' },
+      max_lines: { type: 'integer', description: 'read: maximum lines to show (default 400, max 2000).' },
     },
     execute: async (args) => {
       const action = str(args, 'action')
       if (action === 'create') return dot().createWorkspace(str(args, 'path') ?? '', str(args, 'title'))
       if (action === 'inspect') return dot().inspectWorkspace(str(args, 'workspace_id'))
       if (action === 'files') return dot().listWorkspaceFiles(str(args, 'workspace_id'), str(args, 'path'))
+      if (action === 'read') {
+        const numeric = args as { start_line?: unknown; max_lines?: unknown }
+        return dot().readWorkspaceFile(str(args, 'workspace_id'), str(args, 'path'), typeof numeric.start_line === 'number' ? numeric.start_line : undefined, typeof numeric.max_lines === 'number' ? numeric.max_lines : undefined)
+      }
       return dot().listWorkspaces()
     },
     title: 'Workspace',
@@ -239,93 +249,52 @@ export function apply(ctx: Context): void {
   // ── dot_task ──────────────────────────────────────────────────────────────
   tool(defineToolInput({
     name: TOOL.task,
-    description: 'Manage a change from goal to verified delivery. create/revise define its input; dispatch reserves scope, captures a baseline and starts a run. finish settles a writer after its result arrives. closeout captures the delivery, records checks and accepts it, or asks for the requested human review. An independent review run is optional: dispatch with role=review, then closeout or reject. read/list show state; supplement delivers context once to an active run; step records progress; pause/resume/cancel control work; decide requests a human decision for a recorded verification. Service refusals retain their scope and version guarantees.',
+    description: `Drive a contract-backed change from goal definition to verified closeout. create/revise define or update the input contract; dispatch reserves scope, captures the baseline, and launches a run (omit task_id to open a quick run on a new change in dir/workspace_id, or pass run_id to launch a saved reservation); finish settles a writer run once its report arrives; closeout snapshots the delivery, evaluates checks, and accepts it (or opens human oversight when human_review is set). check reports conflicting run reservations and active user sessions for dir/workspace_id (+ optional paths) without starting anything; with task_id it inherits the same pinned recipe access as dispatch. When overriding access or paths, pass the same values to check that you will pass to dispatch so the preflight evaluates the planned write scope rather than the recipe/default scope. Optional independent review: dispatch with role=review, then closeout or reject. read/list inspect state; supplement delivers context once to an active run without changing requirements; step records progress notes; pause/resume/cancel control execution; decide requests a human decision on a recorded verification. link attaches the PR/issue/branch a task works on and unlink removes it, so follow-up inbox events arrive with the task's context. create accepts recipe=<id or name> to fill the order from a saved recipe (see ${TOOL.recipe}). Recipe-created dispatches start from the saved work order even without message; other dispatches without message still only reserve. Service refusals preserve scope and version invariants.`,
     parameters: {
-      action: { type: 'string', enum: [...TASK_ACTIONS], required: true },
-      task_id: { type: 'string', description: 'Change id. Required except create, list, and dispatch of a new change.' },
-      title: { type: 'string', description: 'create/revise/dispatch: short task title.' },
-      goal: { type: 'string', description: 'create/revise/dispatch: one sentence stating what the delivery must achieve, in English.' },
-      dir: { type: 'string', description: 'create/dispatch: absolute project directory.' },
-      workspace_id: { type: 'string', description: 'create/dispatch: project workspace.' },
-      requirements: { type: 'string', description: 'create/revise: JSON array of {requirementRef,text,required,scenarios?}. text is in English and states what SHALL hold; quote exact strings verbatim. scenarios: [{scenarioRef,given?,when,then}], concrete checks such as R1.a; every required requirement needs at least one. Scenario ids are unique across the input.' },
-      steps: { type: 'string', description: 'create/revise: JSON array of {stepRef,text,covers?,after?}; planning notes, not delivery proof. covers: requirement or scenario ids this step serves. after: step ids it waits for; no cycles.' },
-      constraints: { type: 'string', description: 'create/revise: JSON array of {constraintRef,text}, in English: how the work must be done (order, paths not to touch). Part of the input, so changing them makes a new input.' },
-      user_request: { type: 'string', description: 'create/revise: the human\'s own words for this goal, unedited and untranslated. Runs read it as the source of truth when the English spec is ambiguous.' },
-      deliverable_language: { type: 'string', description: 'create/revise: the language the deliverable itself must use, for example "Simplified Chinese" for Chinese docs or UI copy. Omit to follow the request and existing files. Reports stay in English.' },
-      behavior_notes: { type: 'string', description: 'Legacy free-text constraints. Use constraints instead; passing both, or revising it once constraints exist, is refused.' },
-      acceptance: { type: 'string', description: 'create/revise: acceptance criteria when requirements are omitted.' },
-      deliverable: { type: 'string', description: 'create/revise: expected output.' },
-      priority: { type: 'integer', description: 'create/revise: priority, 1 to 3.' },
-      human_review: { type: 'boolean', description: 'create/revise: the human requested a decision before acceptance.' },
-      max_concurrent: { type: 'integer', description: 'create/revise: maximum open runs, 1 to 8.' },
-      role: { type: 'string', enum: ['work', 'rework', 'review'], description: 'dispatch: run kind; independent review is optional and holds the workspace.' },
-      access: { type: 'string', enum: ['read', 'write'], description: 'dispatch: write for file changes; read cannot write.' },
-      paths: { type: 'string', description: 'dispatch: JSON array of {path,type}, type file or directory. Omit for the whole change directory.' },
-      message: { type: 'string', description: 'dispatch: notes, in English, appended to the brief the service renders from the work order (goal, original request, scope, requirements, constraints, steps, report format). Write only context the input does not hold; never restate requirements or scope. supplement: context delivered once to the named active run; it changes no requirement.' },
-      model: { type: 'string', description: 'dispatch: allowed provider/model from dot_list_models; omit for default.' },
-      preset: { type: 'string', description: 'dispatch: agent preset; omit for default.' },
-      run_id: { type: 'string', description: 'finish/step/supplement: run id. dispatch: continue a reserved run.' },
-      verdict: { type: 'string', enum: ['pass', 'fail'], description: 'finish: writer result; review runs close through closeout/reject.' },
-      step_refs: { type: 'string', description: 'dispatch: JSON array of planning step ids this run covers; omit for current steps.' },
-      step_ref: { type: 'string', description: 'step: planning step whose progress is recorded.' },
-      input_ref: { type: 'string', description: 'read: historical input; omit for current input and history.' },
-      checks: { type: 'string', description: 'closeout: JSON array of {requirementRef,applicability,verdict,note,evidenceRefs}. Each check carries its own note and evidence refs. A requirement passes only when every one of its scenarios is backed by evidence; name the scenario ids in the note.' },
-      expected_input_ref: { type: 'string', description: 'closeout/supplement: inputRef copied from read.' },
-      expected_input_revision: { type: 'integer', description: 'closeout/supplement/step/decide/reject: revision copied from read.' },
-      review_run_id: { type: 'string', description: 'closeout: optional independent review run; reject: required review run to release.' },
+      action: { type: 'string', enum: [...TASK_ACTIONS], required: true, description: 'Lifecycle action to perform.' },
+      task_id: { type: 'string', description: 'Change id (required except on create, list, or initial dispatch of a new change).' },
+      ref: { type: 'string', description: 'link/unlink: the GitHub target the task works on — a pull/issue URL, owner/repo#N, or owner/repo@branch — so follow-up events reach you with task context.' },
+      title: { type: 'string', description: 'create/revise/dispatch: concise human-facing change title.' },
+      goal: { type: 'string', description: 'create/revise/dispatch: one English sentence stating what the finished delivery must achieve.' },
+      dir: { type: 'string', description: 'create/dispatch/check: absolute project directory.' },
+      workspace_id: { type: 'string', description: 'create/dispatch/check: target project workspace id.' },
+      requirements: { type: 'string', description: 'create/revise: JSON array of {requirementRef,text,required,scenarios?}. Write text in English stating what SHALL hold (quote exact strings verbatim). Each required item needs at least one scenario {scenarioRef,given?,when,then} with a globally unique scenarioRef (e.g. R1.a).' },
+      steps: { type: 'string', description: 'create/revise: JSON array of {stepRef,text,covers?,after?} for planning notes (never treated as delivery proof). covers lists requirement/scenario ids served; after lists prerequisite step ids (acyclic).' },
+      constraints: { type: 'string', description: 'create/revise: JSON array of {constraintRef,text} in English specifying execution boundaries (order, untouched paths, forbidden tools). Modifying constraints creates a new input revision.' },
+      user_request: { type: 'string', description: "create/revise: the human's exact unedited, untranslated request text, passed verbatim to runs as the source of truth." },
+      recipe: { type: 'string', description: "create: recipe id or name; fills title, goal, requirements, constraints, dir, deliverable_language, human_review and isolation from the recipe — pass a field only to override it for this task." },
+      deliverable_language: { type: 'string', description: 'create/revise: target language for deliverable files/copy/commits (e.g. "Simplified Chinese"); omit to follow user_request and existing project files. Run reports stay in English.' },
+      priority: { type: 'integer', description: 'create/revise: priority from 1 (normal) to 3 (urgent).' },
+      human_review: { type: 'boolean', description: 'create/revise: set true when the human asked to decide before acceptance. The first closeout records the verification and opens that decision; a later closeout accepts it.' },
+      isolation: { type: 'string', enum: ['none', 'worktree'], description: 'create: run the task in an isolated git worktree on a dot/task-* branch so the human checkout stays untouched; the human integrates it from the panel after acceptance. Use when the human asked for an isolated branch/worktree or the checkout is dirty.' },
+      max_concurrent: { type: 'integer', description: 'create/revise: maximum concurrent open runs (1 to 8).' },
+      role: { type: 'string', enum: ['work', 'rework', 'review'], description: 'dispatch/check: run role. review is optional and reserves the whole workspace exclusively but launches read-only; verification needing writes (e.g. builds) belongs in a writer run.' },
+      access: { type: 'string', enum: ['read', 'write'], description: 'dispatch/check: set "write" when the run will create, edit, or delete files; "read" is strictly read-only.' },
+      paths: { type: 'string', description: 'dispatch/check: JSON array of {path,type} ("file" or "directory") bounding write access, e.g. [{"path":"src/app.ts","type":"file"}]. Omit with access="write" only to reserve the entire change directory.' },
+      message: { type: 'string', description: 'dispatch: English supplementary notes appended after the rendered work-order brief (include only context not already in the input; never restate requirements or scope). supplement: English context delivered once to an active run without altering requirements.' },
+      model: { type: 'string', description: 'dispatch: allowed provider/model key from dot_list_models; omit for default.' },
+      preset: { type: 'string', description: 'dispatch: task preset id ("ptc" for scripted batch work, "cordis" for DSH plugin work); omit for default.' },
+      run_id: { type: 'string', description: 'finish/step/supplement: target run id. dispatch: continue a previously reserved run.' },
+      verdict: { type: 'string', enum: ['pass', 'fail'], description: 'finish: writer outcome after checking its Report (review runs close via closeout or reject).' },
+      step_refs: { type: 'string', description: 'dispatch: JSON array of stepRef ids assigned to this run; omit to include all current steps.' },
+      step_ref: { type: 'string', description: 'step: stepRef whose progress is being marked.' },
+      input_ref: { type: 'string', description: 'read: specific historical inputRef to inspect; omit for current input and full history.' },
+      checks: { type: 'string', description: 'closeout: JSON array of {requirementRef,applicability,verdict,note,evidenceRefs}. Every pass needs resolvable evidence: run:<runId> for a run\'s captured Report, run:<runId>#<scenarioRef> for one of its Report bullets, or file:<path> for a delivered file.' },
+      expected_input_ref: { type: 'string', description: 'closeout/supplement: exact inputRef copied from action=read.' },
+      expected_input_revision: { type: 'integer', description: 'closeout/supplement/step/decide/reject: exact revision number copied from action=read.' },
+      review_run_id: { type: 'string', description: 'closeout: optional open review run of this change; closeout holds it and refuses one that is already completed, failed, or stopped. reject: required open review run id to release for rework.' },
       expected_subject_key: { type: 'string', description: 'decide: subjectKey of the recorded verification.' },
-      verification_id: { type: 'string', description: 'decide: recorded verification to show the human.' },
-      reason: { type: 'string', description: 'pause/resume/cancel: reason for the control action.' },
+      verification_id: { type: 'string', description: 'decide: verification id to submit for human review.' },
+      reason: { type: 'string', description: 'pause/resume/cancel: brief reason for the lifecycle action.' },
     },
     execute: async (args) => dot().manageTask(args as Record<string, unknown>),
     title: 'Manage task',
   }))
 
-  // ── dot_start_task ────────────────────────────────────────────────────────
-  tool(defineToolInput({
-    name: TOOL.startTask,
-    description: 'Open a Run for a Change. Without task_id, create the Change in an absolute cwd first. The service renders the run\'s first prompt from the work order; the instruction is added to it as your notes. A run that writes files must set access to "write" and paths to a JSON array of {path, type} covering exactly those files or directories. Copy this: access "write", paths [{"path":"site/note.txt","type":"file"}]. type is only "file" or "directory". access "read" cannot write; do not use it for a writing step, and do not wait for a write tool to fail before switching. Omitting paths with access "write" reserves the whole change directory. role=review reserves the whole workspace. To continue a reserved run, pass run_id, or the same {path, type} list; a relative path and its absolute path under the change directory are the same entry. An unknown run_id, or one that is not reserved for the requested role, is refused and does not create a Change. Several reserved write runs are not chosen by taking the first. The write gate uses the selected run\'s saved scope, so omitting access or passing read does not lower it, and access "write" does not start a read-only run. check_only lists conflicting reservations and the user\'s own sessions; it does not start anything. A model must be one the human allows. A named preset must exist. Write runs use the configured permission.',
-    parameters: {
-      task_id: { type: 'string', description: 'Existing task id.' },
-      run_id: { type: 'string', description: 'Continue this reserved run. With paths, its full scope must match.' },
-      role: { type: 'string', enum: ['work', 'rework', 'review'] },
-      access: { type: 'string', enum: ['read', 'write'], description: 'write when the run will change files. read cannot write. Example for a writing run: access "write" with paths [{"path":"site/note.txt","type":"file"}].' },
-      acceptance: { type: 'string' }, deliverable: { type: 'string' }, priority: { type: 'integer' }, check_only: { type: 'boolean' }, capture_baseline: { type: 'boolean', description: 'true captures and publishes the pre-write baseline before the first prompt. If that fails, only a reservation this call just created and never started is released. A reservation already selected stays for retry. The change is not cancelled.' },
-      title: { type: 'string', description: 'Short task name for the board.' },
-      instruction: { type: 'string', description: 'Notes from you, in English, appended to the first prompt the service renders from the work order (goal, original request, scope, requirements, constraints, steps, report format). Write only context the input does not hold. Omit for check_only.' },
-      workspace_id: { type: 'string', description: 'Workspace to run in (preferred when the task belongs to a project).' },
-      cwd: { type: 'string', description: 'Absolute directory when no workspace fits.' },
-      goal: { type: 'string', description: 'What done means, kept in the ledger; defaults to the instruction.' },
-      model: { type: 'string', description: `Model to run on, as provider/model from ${TOOL.listModels}. Leave it out for the default.` },
-      preset: { type: 'string', description: 'Agent preset: the tools and instructions the session works with. Leave it out for the default, which fits most work. "ptc" for mechanical work that is mostly running steps by script: bulk edits, batch processing, repetitive checks. "cordis" for work on DSH itself: writing or changing DSH plugins, presets and settings.' },
-      paths: { type: 'string', description: 'JSON array of {path, type} for a write run. type is "file" or "directory". Example: [{"path":"site/note.txt","type":"file"}]. A continuation must match the reserved run\'s full list; a relative path is resolved against the change directory. Review reserves the whole workspace. Omit with access "write" only to reserve the whole change directory.' },
-    },
-    execute: async (args, exec) => dot().startTask({
-      title: str(args, 'title') ?? 'task',
-      instruction: str(args, 'instruction') ?? '',
-      ...(str(args, 'task_id') ? { taskId: str(args, 'task_id')! } : {}),
-      ...(str(args, 'role') ? { role: str(args, 'role') as 'work' | 'rework' | 'review' } : {}),
-      ...(str(args, 'access') ? { access: str(args, 'access') as 'read' | 'write' } : {}),
-      ...(str(args, 'acceptance') !== undefined ? { acceptance: str(args, 'acceptance')! } : {}),
-      ...(str(args, 'deliverable') !== undefined ? { deliverable: str(args, 'deliverable')! } : {}),
-      ...(num(args, 'priority') !== undefined ? { priority: num(args, 'priority') as 1 | 2 | 3 } : {}),
-      checkOnly: bool(args, 'check_only'),
-      captureBaseline: bool(args, 'capture_baseline'),
-      ...str(args, 'workspace_id') ? { workspaceId: str(args, 'workspace_id')! } : {},
-      ...str(args, 'cwd') ? { cwd: str(args, 'cwd')! } : {},
-      ...str(args, 'goal') ? { goal: str(args, 'goal')! } : {},
-      ...str(args, 'model') ? { model: str(args, 'model')! } : {},
-      ...str(args, 'preset') ? { preset: str(args, 'preset')! } : {},
-      ...pathsText(args) ? { paths: pathsText(args)! } : {},
-      ...str(args, 'run_id') ? { runId: str(args, 'run_id')! } : {},
-    }, exec.signal ?? new AbortController().signal),
-    title: 'Start task',
-  }))
-
   // ── dot_list_models ───────────────────────────────────────────────────────
   tool(defineToolInput({
     name: TOOL.listModels,
-    description: `The models a task may run on, as provider/model keys, and the default a task gets without one. The human decides in your settings which models are allowed; ${TOOL.startTask} refuses the others.`,
+    description: `List the provider/model keys permitted for dispatched tasks under the human's current settings, plus the default model used when none is specified.`,
     parameters: {},
     execute: async () => dot().listModels(),
     title: 'List models',
@@ -334,10 +303,10 @@ export function apply(ctx: Context): void {
   // ── dot_send ──────────────────────────────────────────────────────────────
   tool(defineToolInput({
     name: TOOL.sendToSession,
-    description: 'Send a message to a watched or ordinary session as yourself (agent-attributed). Wakes an idle session; a running one gets it at its next turn. A run\'s own session refuses this. Context for an active run goes through dot_task action=supplement, which records a delivery for that run and input version.',
+    description: 'Deliver an agent-attributed message to a watched or ordinary user session (wakes an idle session, or queues for the next turn of a running one). A managed run session refuses this tool — to send pure context to an active run, use dot_task action=supplement so the delivery is version-checked and recorded.',
     parameters: {
-      session_id: { type: 'string', required: true, description: 'Target session.' },
-      message: { type: 'string', required: true, description: 'Text to deliver.' },
+      session_id: { type: 'string', required: true, description: 'Target watched or ordinary session id.' },
+      message: { type: 'string', required: true, description: 'Message text to deliver.' },
     },
     execute: async (args) => dot().send(str(args, 'session_id') ?? '', str(args, 'message') ?? ''),
     title: 'Message session',
@@ -346,8 +315,8 @@ export function apply(ctx: Context): void {
   // ── dot_interrupt ─────────────────────────────────────────────────────────
   tool(defineToolInput({
     name: TOOL.interruptSession,
-    description: 'Stop the current turn of a session. Its queued messages stay.',
-    parameters: { session_id: { type: 'string', required: true, description: 'Session to stop.' } },
+    description: 'Interrupt the active turn of a session while leaving its queued messages intact.',
+    parameters: { session_id: { type: 'string', required: true, description: 'Session id to interrupt.' } },
     execute: async (args) => dot().interrupt(str(args, 'session_id') ?? ''),
     title: 'Stop session',
   }))
@@ -355,8 +324,8 @@ export function apply(ctx: Context): void {
   // ── dot_archive ───────────────────────────────────────────────────────────
   tool(defineToolInput({
     name: TOOL.archiveSession,
-    description: 'Archive a session you started yourself (marked "started" in the ledger), stopping its running work. Waiting requests from it are declined. Sessions you did not start are refused.',
-    parameters: { session_id: { type: 'string', required: true, description: 'A session you started.' } },
+    description: 'Archive a session that you opened (marked "started" in the ledger) once its runs are terminal, declining any pending requests on it. Sessions opened by the human are refused.',
+    parameters: { session_id: { type: 'string', required: true, description: 'Session id started by you.' } },
     execute: async (args) => dot().archive(str(args, 'session_id') ?? ''),
     title: 'Archive session',
   }))
@@ -364,11 +333,11 @@ export function apply(ctx: Context): void {
   // ── dot_watch ─────────────────────────────────────────────────────────────
   tool(defineToolInput({
     name: TOOL.watchSession,
-    description: 'Track a session you did not start: it joins the ledger and board, and its finished turns, errors and requests reach you.',
+    description: 'Subscribe to an existing session you did not start so it appears on the board and its completed turns, errors, approvals, and questions route to you.',
     parameters: {
-      session_id: { type: 'string', required: true, description: 'Session to watch.' },
-      goal: { type: 'string', required: true, description: 'What the human expects from it.' },
-      title: { type: 'string', description: 'Board name.' },
+      session_id: { type: 'string', required: true, description: 'Session id to watch.' },
+      goal: { type: 'string', required: true, description: 'What the human expects from this session.' },
+      title: { type: 'string', description: 'Optional display title on the board.' },
     },
     execute: async (args) => dot().watch(str(args, 'session_id') ?? '', str(args, 'goal') ?? '', str(args, 'title')),
     title: 'Watch session',
@@ -379,12 +348,12 @@ export function apply(ctx: Context): void {
   // Callers pass either allow or answers, never both.
   tool(defineToolInput({
     name: TOOL.answerPending,
-    description: 'Read full recorded approval details with action=read, or settle a waiting approval or question from another session by its id. Approval: set allow to true or false. Question: give answers as a string containing a JSON array, one item per question id, with selected option labels and/or custom text. Follow the settings snapshot, agreements and approval principles in your system prompt. Already settled means no answer was applied: do not retry it, and stay silent unless another update needs the human.',
+    description: 'Inspect untruncated approval parameters with action=read, or settle a pending approval or question from another session by request id. For an approval, pass allow=true or false; for a question, pass answers as a JSON array string covering every question id exactly once. Honor [settings snapshot], [agreements], and the approval principles in your system prompt (requests marked human-required cannot be answered here). If a request is already settled elsewhere, do not retry it and stay silent unless another update requires the human.',
     parameters: {
-      id: { type: 'string', required: true, description: 'Request id from the notice.' },
-      action: { type: 'string', enum: ['read'], description: 'Read full recorded approval details without answering.' },
-      allow: { type: 'boolean', description: 'Approval decision (omit for a question).' },
-      answers: { type: 'string', description: 'Question answers as JSON text (omit for an approval), e.g. [{"id":"q1","selected":["Option"],"custom":"details"}]. Include every question id exactly once; selected may be empty.' },
+      id: { type: 'string', required: true, description: 'Pending request id from the notice.' },
+      action: { type: 'string', enum: ['read'], description: 'Pass "read" to inspect full recorded approval arguments without settling the request.' },
+      allow: { type: 'boolean', description: 'Approval verdict: true to allow once, false to deny (omit when answering a question).' },
+      answers: { type: 'string', description: 'JSON array string for a question request (omit for approvals), e.g. [{"id":"q1","selected":["Option"],"custom":"details"}]. Every question id must appear once; selected may be [].' },
     },
     execute: async (args) => {
       const id = str(args, 'id') ?? ''
@@ -415,16 +384,17 @@ export function apply(ctx: Context): void {
   // ── dot_schedule (merged from dot_schedule_add + dot_schedule_list + dot_schedule_remove) ──
   tool(defineToolInput({
     name: TOOL.schedule,
-    description: `Manage your reminders. action=add: set a reminder — when it is due you are woken by a [dot reminder] message carrying its prompt, in whatever session your conversation has moved to by then. Give exactly one timing: after_minutes, at, every_minutes, or daily_time (optionally with weekdays). after_minutes and at fire once: a late wake, a lost ack, or a restart does not fire that same reminder again, so do not add a second copy of it. Times are the host's local time. Every firing costs you a turn, so repeat no more often than the work needs. action=list: list your reminders (id, title, timing, next due or delivered once, prompt). action=remove: remove one reminder by its id (sch-...); remove a repeating reminder once its purpose is served.`,
+    description: 'Manage persistent reminders that wake your active conversation segment with a [dot reminder] message when due. action=add refuses a duplicate of a still-set reminder (same title, or same timing and prompt); remove the existing one first to change it. action=add requires exactly one timing field: after_minutes, at, every_minutes, or daily_time (optionally paired with weekdays). One-off reminders (after_minutes, at) fire at most once even across late wakes or restarts. All timestamps use host local time; each firing consumes a model turn, so choose sensible intervals and action=remove recurring reminders once their goal is done. With recipe set, the reminder instead creates and dispatches that recipe task directly when due — no model turn is consumed for the dispatch; you are told afterwards by a notice and still verify and close out the task; if the direct dispatch is refused you get the ordinary reminder with the refusal reason. prompt becomes optional when recipe is set (an extra note for the run).',
     parameters: {
-      action: { type: 'string', enum: ['add', 'list', 'remove'], required: true, description: 'add, list, or remove.' },
-      title: { type: 'string', description: 'add: short name shown in the board.' },
-      prompt: { type: 'string', description: 'add: what to do when the reminder fires. Write it for a later you who no longer has this conversation in view: what to check, where, and what to tell the human.' },
-      after_minutes: { type: 'integer', description: 'add: once, this many minutes from now.' },
-      at: { type: 'string', description: 'add: once, at this local date and time: YYYY-MM-DD HH:mm.' },
-      every_minutes: { type: 'integer', description: 'add: repeating, this many minutes apart; the first time is one interval from now.' },
-      daily_time: { type: 'string', description: 'add: repeating, every day at this local time: HH:mm.' },
-      weekdays: { type: 'string', description: 'add: with daily_time only — comma-separated weekday numbers 1 (Monday) to 7 (Sunday), e.g. "1,2,3,4,5".' },
+      action: { type: 'string', enum: ['add', 'list', 'remove'], required: true, description: 'Operation: add, list, or remove.' },
+      title: { type: 'string', description: 'add: concise reminder label shown on the board.' },
+      prompt: { type: 'string', description: 'add: self-contained instructions for your future self (which may be in a new segment) — what to inspect, where, and when to notify the human.' },
+      after_minutes: { type: 'integer', description: 'add: fire once after N minutes from now.' },
+      at: { type: 'string', description: 'add: fire once at host local time YYYY-MM-DD HH:mm (or ISO timestamp with offset).' },
+      every_minutes: { type: 'integer', description: 'add: repeat every N minutes, starting one interval from now.' },
+      daily_time: { type: 'string', description: 'add: repeat at host local time HH:mm.' },
+      weekdays: { type: 'string', description: 'add (with daily_time only): comma-separated ISO weekdays 1 (Mon) through 7 (Sun), e.g. "1,2,3,4,5".' },
+      recipe: { type: 'string', description: 'add: bind a saved recipe (id or exact name); the reminder dispatches it directly when due. prompt becomes an optional note for the run.' },
       id: { type: 'string', description: 'remove: reminder id (sch-...).' },
     },
     execute: async (args) => {
@@ -441,6 +411,7 @@ export function apply(ctx: Context): void {
       return dot().scheduleAdd({
         title: str(args, 'title') ?? '',
         prompt: str(args, 'prompt') ?? '',
+        ...str(args, 'recipe') ? { recipe: str(args, 'recipe')! } : {},
         ...afterMinutes === undefined ? {} : { afterMinutes },
         ...str(args, 'at') ? { at: str(args, 'at')! } : {},
         ...everyMinutes === undefined ? {} : { everyMinutes },
@@ -454,13 +425,13 @@ export function apply(ctx: Context): void {
   // ── dot_search_history ────────────────────────────────────────────────────
   tool(defineToolInput({
     name: TOOL.searchHistory,
-    description: `Find what was said earlier: in your own conversation with the human, including the sessions before a handoff, and in the sessions of the tasks on your ledger. Every word of the query has to occur in one message (any order, any letter case); it is a literal search, so use words that were actually said. Hits come with session_id and seq for ${TOOL.readHistory}.`,
+    description: `Search literal terms across your conversation with the human (including earlier segments before rollovers) and tracked task sessions. Every word in query must appear within the same message (case-insensitive, any order). Returns session_id and seq anchors for ${TOOL.readHistory}.`,
     parameters: {
-      query: { type: 'string', required: true, description: 'Words to find; fewer words find more.' },
-      scope: { type: 'string', enum: ['all', 'own', 'tasks'], description: 'own: your conversation with the human; tasks: the task sessions; all (default): both.' },
-      session_id: { type: 'string', description: 'Search this one session only.' },
-      tools: { type: 'boolean', description: 'Also search tool calls and their results; default false, the conversation only.' },
-      limit: { type: 'integer', description: 'Matches to list, default 12, at most 40.' },
+      query: { type: 'string', required: true, description: 'Exact words to match; fewer words broaden recall.' },
+      scope: { type: 'string', enum: ['all', 'own', 'tasks'], description: 'own: your conversation segments; tasks: tracked task sessions; all (default): both.' },
+      session_id: { type: 'string', description: 'Restrict search to one specific session id.' },
+      tools: { type: 'boolean', description: 'Also search tool call arguments and results; default false (messages only).' },
+      limit: { type: 'integer', description: 'Maximum matches to return (default 12, max 40).' },
     },
     execute: async (args) => {
       const limit = num(args, 'limit')
@@ -478,13 +449,13 @@ export function apply(ctx: Context): void {
   // ── dot_read_history ──────────────────────────────────────────────────────
   tool(defineToolInput({
     name: TOOL.readHistory,
-    description: `Read a stretch of one session word for word: the messages around seq, or its last messages when seq is left out. Use it after ${TOOL.searchHistory}, or to read back the session before a handoff.`,
+    description: `Read verbatim messages from one session: centered around seq (from ${TOOL.searchHistory}), or the trailing messages when seq is omitted.`,
     parameters: {
-      session_id: { type: 'string', required: true, description: 'Session to read.' },
-      seq: { type: 'integer', description: 'Position to read around, from a search hit or an earlier read.' },
-      before: { type: 'integer', description: 'Messages before it, default 4, at most 30.' },
-      after: { type: 'integer', description: 'Messages after it, default 4, at most 30.' },
-      tools: { type: 'boolean', description: 'Include tool calls and their results; default false.' },
+      session_id: { type: 'string', required: true, description: 'Session id to read.' },
+      seq: { type: 'integer', description: 'Anchor sequence number from a search hit or prior read.' },
+      before: { type: 'integer', description: 'Messages before seq (default 4, max 30).' },
+      after: { type: 'integer', description: 'Messages after seq (default 4, max 30).' },
+      tools: { type: 'boolean', description: 'Include tool calls and results; default false.' },
     },
     execute: async (args) => {
       const seq = num(args, 'seq')
@@ -504,10 +475,10 @@ export function apply(ctx: Context): void {
   // ── dot_agreement ─────────────────────────────────────────────────────────
   tool(defineToolInput({
     name: TOOL.agreement,
-    description: `The human's own standing requirements, kept in their words. action=add: call only when the human explicitly asks you to remember something or states a rule; write one short line verbatim, do not reword it. action=remove: drop the one requirement the human says to drop, giving enough of its words to single it out. The [agreements] block of the running session keeps its old text until your next session.`,
+    description: "Manage the human's standing rules in [agreements], preserved in their own words. action=add: call only when the human explicitly states a standing rule or asks you to remember one; record a single concise line verbatim without paraphrasing. action=remove: remove an entry the human asked to drop by quoting enough of it to match uniquely. Updates take effect in the prompt prefix on the next segment.",
     parameters: {
-      action: { type: 'string', enum: ['add', 'remove'], required: true, description: 'add or remove.' },
-      text: { type: 'string', required: true, description: 'add: the requirement, in the human\'s own words (one short line, at most 400 characters). remove: the requirement, or enough of its words to single it out.' },
+      action: { type: 'string', enum: ['add', 'remove'], required: true, description: 'Operation: add or remove.' },
+      text: { type: 'string', required: true, description: "add: single-line rule in the human's exact words (max 400 characters). remove: exact rule text or a unique substring." },
     },
     execute: async (args) => str(args, 'action') === 'remove' ? dot().agreementRemove(str(args, 'text') ?? '') : dot().agreementAdd(str(args, 'text') ?? ''),
     title: 'Agreement',
@@ -516,9 +487,9 @@ export function apply(ctx: Context): void {
   // ── dot_cognition ─────────────────────────────────────────────────────────
   tool(defineToolInput({
     name: TOOL.cognition,
-    description: 'Rewrite your own cognition: your understanding of the human and of how best to work with them — what you have noticed, felt and come to expect. Pass the complete new text every time (this replaces the whole block, it does not append); pass an empty string to clear it. Keep it short. It never overrides the [agreements]. The running session keeps its old text until your next session.',
+    description: 'Rewrite your [cognition] block: your concise, durable understanding of the human (workflow preferences, habits) and of yourself (formed preferences, shared jokes, accomplishments together). Always pass the complete replacement text (empty string clears it); never include transient task status, and remember [agreements] always take precedence. Updates take effect in the prompt prefix on the next segment.',
     parameters: {
-      text: { type: 'string', required: true, description: 'The complete new cognition text (at most 4000 characters); empty clears it.' },
+      text: { type: 'string', required: true, description: 'Complete replacement [cognition] text (max 4000 characters; empty clears it).' },
     },
     execute: async (args) => dot().cognitionRewrite(str(args, 'text') ?? ''),
     title: 'Cognition',
@@ -527,9 +498,9 @@ export function apply(ctx: Context): void {
   // ── dot_new_segment ───────────────────────────────────────────────────────
   tool(defineToolInput({
     name: TOOL.newSegment,
-    description: 'Start a fresh context segment after this turn ends, carrying the ordinary handoff, task ledger, reminders and searchable history. Use it when a change of topic or accumulated context would help. Do not use it to avoid unfinished work. Optional focus tells your next segment what to concentrate on.',
+    description: 'Schedule a clean segment rollover at the end of this turn while preserving handoff context, task ledger, reminders, and searchable history. Use on genuine topic shifts or heavy context accumulation — never to dodge unfinished work.',
     parameters: {
-      focus: { type: 'string', description: 'What to focus on after the segment change.' },
+      focus: { type: 'string', description: 'Optional note telling your next segment what to focus on first.' },
     },
     execute: async (args) => dot().requestSegment(str(args, 'focus')),
     title: 'New segment',
@@ -541,12 +512,12 @@ export function apply(ctx: Context): void {
   const self = () => dot().selfSettings
   tool(defineToolInput({
     name: TOOL.settings,
-    description: `Manage your own settings. action=read: read the full current settings, which fields the human has locked, and any change proposals waiting for approval. The core switches (scope, approvals, questions, taskPermission, reflection) are always visible in your [settings snapshot] block, so call read only when you need detail beyond those. action=propose: propose changing one unlocked setting — nothing changes until the human approves it in Settings. Fields: model, approvals, questions, scope, taskModels, taskPermission, reflection, idleCheckMinutes (0 disables; 0–1440), persona, address, memory (the agreements text). value is a string containing JSON in the same shape as read: encode text as a JSON string, booleans as true/false, objects as JSON, and null to restore a clearable default. For example value=\"\\\"human\\\"\" proposes approvals=human. Locks and homeDir cannot be changed. Routine agreements use ${TOOL.agreement} and cognition uses ${TOOL.cognition}; do not propose these for an ordinary edit.`,
+    description: `Read full settings or submit a setting-change proposal for human approval. Live core switches (scope, approvals, questions, taskPermission, reflection, idleCheckMinutes) are already shown in [settings snapshot]; call action=read only when you need full values, lock states, or pending proposals. action=propose queues one unlocked setting change for approval in Settings (nothing changes until approved). Supported fields: model, approvals, questions, scope, taskModels, taskPermission, reflection, idleCheckMinutes (0–1440; 0 disables), persona, address, agreements (agreements bulk text). Pass value as a JSON-encoded string matching action=read (e.g. "\\"human\\"", "true", "{\\"provider\\":\\"p\\",\\"model\\":\\"m\\"}", or "null" to reset a clearable default). Locks and homeDir are human-only; use ${TOOL.agreement} and ${TOOL.cognition} for normal knowledge updates.`,
     parameters: {
-      action: { type: 'string', enum: ['read', 'propose'], required: true, description: 'read or propose.' },
-      field: { type: 'string', description: 'propose: one setting field.' },
-      value: { type: 'string', description: 'propose: JSON-encoded value, e.g. "human", true, {"provider":"p","model":"m"}, or null. The outer tool argument is always a string.' },
-      reason: { type: 'string', description: 'propose: why this change helps; shown to the human.' },
+      action: { type: 'string', enum: ['read', 'propose'], required: true, description: 'Operation: read or propose.' },
+      field: { type: 'string', description: 'propose: target setting field name.' },
+      value: { type: 'string', description: 'propose: JSON-encoded target value wrapped as a string, e.g. "\\"human\\"", "true", "{\\"provider\\":\\"p\\",\\"model\\":\\"m\\"}", or "null".' },
+      reason: { type: 'string', description: 'propose: concise human-facing explanation of why this change helps.' },
     },
     execute: async (args) => {
       const action = str(args, 'action')
@@ -561,6 +532,61 @@ export function apply(ctx: Context): void {
     },
     title: 'Settings',
   }), /* read is not exclusively read-only since propose mutates */ false)
+
+  // ── dot_recipe ────────────────────────────────────────────────────────────
+  tool(defineToolInput({
+    name: TOOL.recipe,
+    description: `Manage saved, versioned work-order recipes you reuse through ${TOOL.task} action=create recipe=<id or name>. action=save records a new recipe under a unique name — pass from_task to copy goal, requirements, constraints, deliverable language, dir, preset and access from a change you were happy with, or pass the fields directly. action=revise replaces any subset of fields (or renames) and always requires a reason naming what changed; it refuses a no-op. action=restore brings an earlier revision back as a new revision (reason required). action=list shows every recipe with its current-revision outcome stats; action=read shows the full body, revision history, per-revision accepted/cancelled stats and recent outcomes; action=remove deletes the recipe while tagged changes keep their tag but no longer inherit its dispatch defaults; finish or cancel those tasks first if their remaining runs still need those defaults.`,
+    parameters: {
+      action: { type: 'string', enum: ['list', 'read', 'save', 'revise', 'restore', 'remove'], required: true, description: 'Operation: list, read, save, revise, restore, or remove.' },
+      recipe: { type: 'string', description: 'read/revise/restore/remove: recipe id or exact name (case-insensitive).' },
+      name: { type: 'string', description: 'save: unique recipe name. revise: new name (rename).' },
+      from_task: { type: 'string', description: 'save: change id to copy goal, requirements, constraints, deliverable_language, dir, preset and access from; explicit fields override the copied ones.' },
+      goal: { type: 'string', description: 'save/revise: one English sentence stating what a delivery must achieve. Required on save without from_task.' },
+      requirements: { type: 'string', description: 'save/revise: JSON array of {requirementRef,text,required,scenarios?}, same contract as dot_task. Omit to copy or default to the goal.' },
+      constraints: { type: 'string', description: 'save/revise: JSON array of {constraintRef,text}; empty array clears.' },
+      notes: { type: 'string', description: 'save/revise: English guidance added to every run brief; empty string clears.' },
+      deliverable_language: { type: 'string', description: 'save/revise: target language for deliverables; empty string clears.' },
+      dir: { type: 'string', description: 'save/revise: absolute default project directory; empty string clears. Required on save without from_task.' },
+      preset: { type: 'string', description: 'save/revise: default task preset id for dispatches; empty string clears.' },
+      model: { type: 'string', description: 'save/revise: default provider/model key for dispatches; empty string clears.' },
+      access: { type: 'string', enum: ['read', 'write'], description: 'save/revise: default run access for work and rework dispatches (review stays read-only).' },
+      human_review: { type: 'boolean', description: 'save/revise: created tasks open human oversight before acceptance.' },
+      isolation: { type: 'string', enum: ['none', 'worktree'], description: 'save/revise: created tasks run in an isolated git worktree on a dot/task-* branch.' },
+      revision: { type: 'integer', description: 'restore: earlier revision number from action=read history.' },
+      reason: { type: 'string', description: 'revise/restore: required — why this revision exists (name the failure it fixes).' },
+    },
+    execute: async (args) => dot().manageRecipe(args as Record<string, unknown>),
+    title: 'Task recipes',
+  }))
+
+  // ── dot_capabilities ────────────────────────────────────────────────────
+  // Extra tools from other plugins and MCP servers are off by default; the
+  // human grants them in Settings > Capabilities, or approves a proposal here.
+  tool(defineToolInput({
+    name: TOOL.capabilities,
+    description: 'List optional extra capabilities (tools from other plugins and MCP servers) or propose changes. Extras are off by default. action=list shows a tree of selectors (tool:<name>, mcp:<server>, plugin:<bundle>[#<entry>], prefix:<segment>) with each tool\'s grant, whether it is applied to this segment, conditional, high-risk, and unavailable state. action=propose queues {selector, grant, reason} for human approval in Settings; grant is off | ask (each call pauses for human approval) | auto (calls run freely). Nothing changes until the human approves, and grants apply only from the next segment. action=propose_install {spec, version, reason} asks the human to install a plugin package; to find one use the official plugin_market/plugin_manager tools if the human granted them, else dsh_plugins (version is optional for official catalog bundles, exact otherwise). To build a new plugin or wire up an MCP server, dispatch a dot_task with preset "cordis" — a wrapper plugin can register an MCP server through mcpManager.',
+    parameters: {
+      action: { type: 'string', enum: ['list', 'propose', 'propose_install'], required: true, description: 'Operation: list the catalog, propose a grant change, or propose installing a plugin.' },
+      selector: { type: 'string', description: 'propose: selector id from list output, e.g. tool:<name>, mcp:<server>, plugin:<bundle>, plugin:<bundle>#<entry>.' },
+      grant: { type: 'string', enum: ['off', 'ask', 'auto'], description: 'propose: the grant the selector should get.' },
+      spec: { type: 'string', description: 'propose_install: npm package name of the plugin to install, e.g. dsh-something or @scope/pkg.' },
+      version: { type: 'string', description: 'propose_install: exact published version, e.g. 1.2.3. Optional only when the bundle is an official on-demand catalog row — its version is already pinned.' },
+      reason: { type: 'string', description: 'propose/propose_install: concise human-facing explanation of why this helps.' },
+    },
+    execute: async (args) => {
+      const action = str(args, 'action')
+      if (action === 'propose') {
+        return dot().proposeCapability({ selector: str(args, 'selector') ?? '', grant: (str(args, 'grant') ?? 'off') as 'off' | 'ask' | 'auto', reason: str(args, 'reason') ?? '' })
+      }
+      if (action === 'propose_install') {
+        const version = str(args, 'version')
+        return dot().proposeInstall({ spec: str(args, 'spec') ?? '', ...(version !== undefined ? { version } : {}), reason: str(args, 'reason') ?? '' })
+      }
+      return dot().listCapabilities()
+    },
+    title: 'Capabilities',
+  }), false)
 }
 
 /** Shared defaults: text output, serial execution, a generic call card. */

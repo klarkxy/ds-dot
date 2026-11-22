@@ -1,4 +1,6 @@
 - insert:
+    - id: dot-attribution
+      name: 'ds-dot/attribution'
     - id: deep-view
       name: '@klarkxy/dsh-deep-view'
       disabled: false

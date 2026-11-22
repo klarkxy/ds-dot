@@ -49,6 +49,25 @@ describe('cardText', () => {
     expect(cardText(formula)).toContain('metric: Total=20')
   })
 
+  it('keeps every step label, detail and status in history', () => {
+    expect(cardText(card({ type: 'steps', items: [
+      { label: 'Build', detail: 'Compile sources', status: 'done' },
+      { label: 'Test', detail: 'Run suite', status: 'active' },
+    ] })))
+      .toBe('Report — steps: Build (Compile sources) [done]; Test (Run suite) [active]')
+  })
+
+  it('summarizes the new interactive node types with Deep View core', () => {
+    expect(cardText(card({ type: 'math', id: 'plot', mathPoints: [{ id: 'p', label: 'P', x: 1, y: 2 }], domain: [-5, 5], range: [-5, 5] })))
+      .toBe('Report — math: plot=P=(1, 2)')
+    expect(cardText(card({ type: 'flow', id: 'graph', nodes: [{ id: 'a', label: 'Node A', x: 0, y: 0 }], edges: [] })))
+      .toBe('Report — flow: graph=No selection')
+    expect(cardText(card({ type: 'explore', id: 'points', data: [{ x: 1, y: 2 }], xKey: 'x', yKey: 'y' })))
+      .toBe('Report — explore: points=0 selected')
+    expect(cardText(card({ type: 'map', id: 'places', locations: [{ id: 'here', label: 'Here', coordinates: [0, 0] }] })))
+      .toBe('Report — map: places=No selection')
+  })
+
   it('keeps option descriptions, form placeholders and source URLs', () => {
     expect(cardText(card({ type: 'options', id: 'o', options: [{ label: 'A', description: 'fast' }, { label: 'B' }] })))
       .toBe('Report — options: A (fast)/B')

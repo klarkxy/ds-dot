@@ -129,7 +129,7 @@ function groupBlocks(items: readonly ChatItem[]): ExchangeBlock[] {
 
 export function filterVisibleChat(
   items: readonly ChatItem[],
-  options?: { readonly streaming?: boolean; readonly running?: boolean },
+  options?: { readonly streaming?: boolean; readonly running?: boolean; readonly preparingCard?: boolean },
 ): FilteredChat {
   const blocks = groupBlocks(items)
   const out: ChatItem[] = []
@@ -181,8 +181,11 @@ export function filterVisibleChat(
 
     // Pure background request wake-up (only approval/question notices, no user message).
     if (!hasHumanInput && notices.length > 0) {
-      // A pure query leaves nothing the human must see. Any ending text is hidden; the journal is untouched.
-      if (isRoutineOnly && !hasVisibleView && !hasInvalidView && !hasTurnError && !hasToolError && !hasSideEffectTool && !hasRequestDecision && !streamingHere) {
+      // A pure query leaves nothing the human must see. The turn stays hidden only
+      // while it produced no reply text either; a non-empty reply is visible now
+      // that ordinary replies are plain text, mirroring hasVisibleView for cards.
+      if (isRoutineOnly && !hasVisibleView && !hasInvalidView && !hasTurnError && !hasToolError && !hasSideEffectTool && !hasRequestDecision && !streamingHere
+        && !bots.some(bot => bText(bot).trim())) {
         if (isLast) silentTail = true
         return
       }
@@ -244,7 +247,8 @@ export function filterVisibleChat(
       out.push(input)
     }
     for (const reply of block.replies) {
-      if (reply.kind === 'bot' && (hasVisibleView || isLast && options?.running === true)) continue
+      // Text and a card in the same reply both show: ordinary replies are plain text,
+      // and a card no longer swallows the message written beside it.
       if (reply.kind === 'view' && (reply.failed || !reply.presentation) && !(isRoutineOnly && hasInvalidView)) continue
       if (reply.kind === 'tool' && droppedTools.has(reply)) continue
       out.push(reply)

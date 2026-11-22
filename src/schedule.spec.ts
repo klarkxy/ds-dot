@@ -90,3 +90,35 @@ describe('reminder text', () => {
     expect(describeTiming({ kind: 'daily', time: '09:00' })).toBe('daily at 09:00')
   })
 })
+
+describe('recipe-bound schedules', () => {
+  it('makes prompt optional when a recipe is bound and carries the recipe id', () => {
+    const parsed = parseSchedule({ title: 'weekly report', prompt: '', recipe: 'rcp-1', everyMinutes: 60 }, NOW)
+    expect(parsed.recipe).toBe('rcp-1')
+    expect(parsed.prompt).toBe('')
+    expect(() => parseSchedule({ title: 't', prompt: '', everyMinutes: 60 }, NOW)).toThrow(/prompt/)
+  })
+
+  it('shows the recipe tag in formatReminders, scheduleLines and a refusal line', () => {
+    const record: ScheduleRecord = { id: 'sch-9', title: 'Report', prompt: 'note', timing: { kind: 'every' as const, minutes: 60, anchor: NOW - MINUTE }, createdAt: NOW - MINUTE, nextAt: NOW, recipe: 'rcp-1' }
+    const text = formatReminders([record], NOW, { refusals: new Map([['sch-9', 'previous run still in flight']]), recipeName: () => 'Weekly' })
+    expect(text).toContain('recipe rcp-1 "Weekly"')
+    expect(text).toContain(' [dispatch refused: previous run still in flight]')
+    const list = scheduleLines([record], () => 'Weekly')
+    expect(list).toContain('recipe rcp-1 "Weekly"')
+  })
+
+  it('flattens a multi-line refusal into the bullet marker and caps its length', () => {
+    const bound: ScheduleRecord = { id: 'sch-9', title: 'Report', prompt: '', timing: { kind: 'every' as const, minutes: 60, anchor: NOW - MINUTE }, createdAt: NOW - MINUTE, nextAt: NOW, recipe: 'rcp-1' }
+    const plain: ScheduleRecord = { id: 'sch-8', title: 'Standup', prompt: 'post it', timing: { kind: 'every' as const, minutes: 60, anchor: NOW - MINUTE }, createdAt: NOW - MINUTE, nextAt: NOW }
+    const reason = 'write scope conflicts\nwith an active user session in that directory\n  and the lock stays held'
+    const text = formatReminders([bound, plain], NOW, { refusals: new Map([['sch-9', reason]]), recipeName: () => 'Weekly' })
+    // The marker stays on the bullet's one line so the chat parser keeps the entry.
+    expect(text).toContain(' [dispatch refused: write scope conflicts with an active user session in that directory and the lock stays held]')
+    expect(text).not.toContain('conflicts\nwith')
+    const long = 'x'.repeat(500)
+    const capped = formatReminders([bound], NOW, { refusals: new Map([['sch-9', long]]) })
+    expect(capped).toContain(`[dispatch refused: ${'x'.repeat(299)}…]`)
+    expect(capped).not.toContain('x'.repeat(301))
+  })
+})

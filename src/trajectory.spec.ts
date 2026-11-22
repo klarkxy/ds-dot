@@ -47,7 +47,7 @@ describe('trajectory fold', () => {
       ev(6, 'user/message', user('task finished', 'agent-message')),
       ev(7, 'step/start', { step: 1 }),
       ev(8, 'compaction/summary', { summary: [{ type: 'text', text: 'so far' }], shadowedTokenCount: 9000 }),
-      ev(9, 'tool/call', { callId: 'c2', name: 'dot_start_task', arguments: long }),
+      ev(9, 'tool/call', { callId: 'c2', name: 'dot_task', arguments: long }),
     ])
     expect(turns[0]).toMatchObject({ end: 'error', error: '400 bad' })
     expect(turns[0]!.steps[0]!.failed).toBe('400 bad')

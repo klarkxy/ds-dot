@@ -13,6 +13,7 @@ import {
   type Constraint,
   type Occupant,
   type Requirement,
+  type RootHint,
   type RunRecord,
   type Scenario,
   type StepSpec,
@@ -136,10 +137,9 @@ export function plannedScope(role: 'work' | 'rework' | 'review', access: string 
   return { kind: 'paths', paths: listed ?? (access === 'write' ? [{ path: cwd, type: 'directory' as const }] : []) }
 }
 
-export function plannedOccupant(cwd: string, scope: WriteScope): Occupant {
+export function plannedOccupant(cwd: string, scope: WriteScope, hint?: RootHint): Occupant {
   const canonical = canonicalPath(cwd)
-  const hint = detectWorkspaceRoot(cwd)
-  const identity = workspaceIdentity(canonical, hint)
+  const identity = workspaceIdentity(canonical, hint ?? detectWorkspaceRoot(cwd))
   return {
     id: 'next',
     cwd: canonical,

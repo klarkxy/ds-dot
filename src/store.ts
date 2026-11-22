@@ -3,20 +3,18 @@
  * the durable copy follows the in-memory order; reads never wait on disk.
  */
 import { APPROVAL_DETAIL_LIMIT } from './approval-risk.ts'
-import { COGNITION_HISTORY_MAX, type BoardView, type CognitionVersion, type DotContextUsage, type DotSettings, type DotUsageOffset, type PendingView, type ReflectionRun, type ScheduleRecord, type SettingProposal, type TaskRecord, type Ticket } from './contracts.ts'
+import { COGNITION_HISTORY_MAX, type BoardView, type CognitionVersion, type DotContextUsage, type DotSettings, type DotUsageOffset, type PendingView, type RecipeProposal, type RecipeRecord, type ReflectionRun, type ScheduleRecord, type SettingProposal, type TaskLink, type TaskRecord } from './contracts.ts'
 import { ZERO_USAGE, addUsage } from './context.ts'
 import { applyEvent, createTask, ledgerSummary, markSeen, sortTasks, withPending, type LedgerEvent, type NewTask } from './ledger.ts'
 import { MAX_PAST_SEGMENTS, type PastSegment, type Segment } from './segments.ts'
 import { parseSettings } from './settings.ts'
 import { isCopyLocale, type CopyLocale } from './i18n/index.ts'
-import { STATE_KEY, parseScheduleRecord, parseSettingProposal, parseState, parseTask, parseTicket, type DotState } from './storage.ts'
-import { clip } from './ledger.ts'
-import { deriveTicketViews } from './ticket-view.ts'
+import { STATE_KEY, parseRecipeProposal, parseRecipeRecord, parseScheduleRecord, parseSettingProposal, parseState, parseTask, parseTaskLink, type DotState } from './storage.ts'
 import { ownedSessionIds, sessionIsOwned } from './peer.ts'
-import { WorkBook, isUnknownState, type WorkPersist } from './work.ts'
+import { WorkBook, isUnknownState, type ChangeRecord, type WorkPersist } from './work.ts'
 import { projectWorkIdle, projectWorkLedger } from './work-actions.ts'
 
-type TableName = 'state' | 'tasks' | 'tickets' | 'schedules' | 'proposals' | 'changes' | 'inputs' | 'runs' | 'verifications' | 'peers'
+type TableName = 'state' | 'tasks' | 'schedules' | 'proposals' | 'changes' | 'inputs' | 'runs' | 'verifications' | 'peers' | 'inbox' | 'recipes' | 'links' | 'recipe_proposals'
 
 export interface DotTable {
   entries(): IterableIterator<[unknown, unknown]>
@@ -37,13 +35,18 @@ export const MAX_TASKS = 300
 /** Reflection runs remembered for the trajectory list. */
 export const MAX_REFLECTION_RUNS = 30
 
+/** Interactive cards retained in the state row; older settled/expired cards are evicted. */
+export const MAX_STORED_CARDS = 100
+
 export class DotStore {
   private state: DotState
   private current: DotSettings
   private localePref: CopyLocale | undefined
   private readonly tasks = new Map<string, TaskRecord>()
-  private readonly tickets = new Map<string, Ticket>()
   private readonly reminders = new Map<string, ScheduleRecord>()
+  private readonly recipeRows = new Map<string, RecipeRecord>()
+  private readonly linkRows = new Map<string, TaskLink>()
+  private readonly recipeProposalRows = new Map<string, RecipeProposal>()
   private readonly proposals = new Map<string, SettingProposal>()
   private tail: Promise<unknown> = Promise.resolve()
   private cognitionRevision = 0
@@ -62,11 +65,6 @@ export class DotStore {
         const task = parseTask(value)
         if (task && task.sessionId === key) this.tasks.set(task.sessionId, task)
       }
-      for (const [key, value] of domain.table('tickets').entries()) {
-        const ticket = parseTicket(value)
-        if (ticket && ticket.id === key) this.tickets.set(ticket.id, ticket)
-      }
-      this.pruneTickets()
       for (const [key, value] of domain.table('schedules').entries()) {
         const record = parseScheduleRecord(value)
         if (record && record.id === key) this.reminders.set(record.id, record)
@@ -74,6 +72,18 @@ export class DotStore {
       for (const [key, value] of domain.table('proposals').entries()) {
         const proposal = parseSettingProposal(value)
         if (proposal && proposal.id === key) this.proposals.set(proposal.id, proposal)
+      }
+      for (const [key, value] of domain.table('recipes').entries()) {
+        const recipe = parseRecipeRecord(value)
+        if (recipe && recipe.id === key) this.recipeRows.set(recipe.id, recipe)
+      }
+      for (const [key, value] of domain.table('links').entries()) {
+        const link = parseTaskLink(value)
+        if (link && link.id === key) this.linkRows.set(link.id, link)
+      }
+      for (const [key, value] of domain.table('recipe_proposals').entries()) {
+        const proposal = parseRecipeProposal(value)
+        if (proposal && proposal.id === key) this.recipeProposalRows.set(proposal.id, proposal)
       }
     }
     this.work = WorkBook.restore({
@@ -123,38 +133,6 @@ export class DotStore {
     }
   }
 
-  /** Import v3 started sessions. Retry is safe after any individual write fails. */
-  async migrateTickets(): Promise<void> {
-    if (this.state.ticketsMigrated !== undefined) return
-    for (const task of this.tasks.values()) {
-      if (task.origin !== 'started' || task.ticketId) continue
-      // A previous attempt may have persisted the ticket but not the session row.
-      let ticket = [...this.tickets.values()].find(row => row.sessions.some(session => session.sessionId === task.sessionId))
-      if (!ticket) {
-        const sequence = Math.max(this.state.ticketSequence ?? 0, ...[...this.tickets.keys()].map(id => Number(/^t-(\d+)$/.exec(id)?.[1] ?? 0))) + 1
-        const status = task.status === 'archived' ? 'done' as const : 'active' as const
-        ticket = { id: `t-${sequence}`, title: clip(task.title, 80), goal: clip(task.goal, 600), dir: task.cwd, ...(task.workspaceId ? { workspaceId: task.workspaceId } : {}), access: 'write', priority: 2, status, sessions: [{ sessionId: task.sessionId, role: 'work', at: task.createdAt }], rounds: [], history: [{ at: task.createdAt, to: status, by: 'dot', reason: 'migrated from the session ledger' }], createdAt: task.createdAt, updatedAt: task.updatedAt }
-        // Publish only after the durable ticket exists; retry finds it by session.
-        await this.write('tickets', ticket.id, ticket)
-        this.tickets.set(ticket.id, ticket)
-        this.state = { ...this.state, ticketSequence: sequence }
-      }
-      const updated = { ...task, ticketId: ticket.id, role: 'work' as const }
-      await this.write('tasks', task.sessionId, updated)
-      this.tasks.set(task.sessionId, updated)
-    }
-    const domain = this.domain
-    const op = this.tail.then(async () => {
-      const next = { ...this.state, ticketsMigrated: '1' }
-      if (domain) await this.durable(() => domain.table('state').put(STATE_KEY, next))
-      this.state = { ...this.state, ticketsMigrated: '1' }
-      this.pruneTickets()
-      this.changed()
-    })
-    this.tail = op.catch(() => undefined)
-    await op
-  }
-
   get cards(): readonly import('./card-state.ts').DotCardRecord[] { return this.state.cards ?? [] }
   get approvalDetails(): readonly import('./contracts.ts').ApprovalDetail[] { return this.state.approvalDetails ?? [] }
   saveApprovalDetail(detail: import('./contracts.ts').ApprovalDetail): Promise<void> {
@@ -171,13 +149,34 @@ export class DotStore {
   get lastConversationAt(): number | undefined { return this.state.lastConversationAt }
   get lastFactoryResetAt(): number | undefined { return this.state.lastFactoryResetAt }
 
+  get updateStatus(): import('./auto-update.ts').UpdateStatus | undefined { return this.state.update }
+  setUpdateStatus(next: import('./auto-update.ts').UpdateStatus | undefined): Promise<void> {
+    return this.setDot({ update: next })
+  }
+
   addCard(card: import('./card-state.ts').DotCardRecord): Promise<void> {
-    return this.setDot({ cardSequence: card.number, cards: [...this.cards.map(row => row.answer ? row : { ...row, expired: true }), card] })
+    const updated = [...this.cards.map(row => row.answer || row.keepAlive ? row : { ...row, expired: true }), card]
+    if (updated.length <= MAX_STORED_CARDS) {
+      return this.setDot({ cardSequence: card.number, cards: updated })
+    }
+    let toDrop = updated.length - MAX_STORED_CARDS
+    const pruned = updated.filter(row => {
+      if (toDrop <= 0 || row.id === card.id || row.notificationPending || (!row.expired && !row.answer)) return true
+      toDrop -= 1
+      return false
+    })
+    return this.setDot({ cardSequence: card.number, cards: pruned })
   }
 
   expireCards(keepId?: string): Promise<void> {
-    if (!this.cards.some(card => !card.expired && !card.answer && card.id !== keepId)) return Promise.resolve()
-    return this.setDot({ cards: this.cards.map(card => card.answer || card.id === keepId ? card : { ...card, expired: true }) })
+    if (!this.cards.some(card => !card.expired && !card.answer && !card.keepAlive && card.id !== keepId)) return Promise.resolve()
+    return this.setDot({ cards: this.cards.map(card => card.answer || card.keepAlive || card.id === keepId ? card : { ...card, expired: true }) })
+  }
+
+  /** Mark one unanswered card expired — a human request that ended without an answer. */
+  expireCard(id: string): Promise<void> {
+    if (!this.cards.some(card => card.id === id && !card.expired && !card.answer)) return Promise.resolve()
+    return this.setDot({ cards: this.cards.map(card => card.id === id && !card.answer ? { ...card, expired: true } : card) })
   }
 
   setCardAnswer(id: string, answer: NonNullable<import('./card-state.ts').DotCardRecord['answer']>, notificationPending = false): Promise<void> {
@@ -226,7 +225,7 @@ export class DotStore {
       dotSessionId: next.sessionId,
       segment: next,
       pastSegments: past,
-      ...(moved ? { cards: this.cards.map(card => card.answer ? card : { ...card, expired: true }) } : {}),
+      ...(moved ? { cards: this.cards.map(card => card.answer || card.keepAlive ? card : { ...card, expired: true }) } : {}),
     }
     this.changed()
     return this.write('state', STATE_KEY, this.state)
@@ -245,14 +244,20 @@ export class DotStore {
     return this.write('state', STATE_KEY, this.state)
   }
 
+  /** Usage of a keepalive ping joins the carried totals: it never appears in any segment's log. */
+  addUsageCarry(usage: DotContextUsage): Promise<void> {
+    return this.setDot({ usageCarry: addUsage(this.state.usageCarry, usage) })
+  }
+
   /** Refresh the frozen inputs of a segment dot has not replied in yet. */
-  refreezeSegment(patch: Pick<Segment, 'persona' | 'model' | 'agreements' | 'cognition'>): Promise<void> {
+  refreezeSegment(patch: Pick<Segment, 'persona' | 'model' | 'agreements' | 'cognition' | 'capabilities'>): Promise<void> {
     const segment = this.segment
     if (!segment) return Promise.resolve()
-    const { model: _model, agreements: _agreements, agreementsSeen: _aseen, cognition: _cognition, cognitionSeen: _cseen, ...rest } = segment
+    const { model: _model, agreements: _agreements, agreementsSeen: _aseen, cognition: _cognition, cognitionSeen: _cseen, capabilities: _caps, ...rest } = segment
     return this.setDot({ segment: {
       ...rest,
       persona: patch.persona,
+      ...patch.capabilities !== undefined ? { capabilities: patch.capabilities } : {},
       ...patch.model !== undefined ? { model: patch.model } : {},
       ...patch.agreements !== undefined ? { agreements: patch.agreements } : {},
       ...patch.cognition !== undefined ? { cognition: patch.cognition } : {},
@@ -279,12 +284,6 @@ export class DotStore {
   get agreementsUndo(): string | undefined { return this.state.agreementsUndo }
   get cognition(): string { return this.state.cognition ?? '' }
   get cognitionHistory(): readonly CognitionVersion[] { return this.state.cognitionHistory ?? [] }
-  /** Whether the one-time legacy import already ran; cleared content is never re-imported after it. */
-  get knowledgeMigrated(): boolean { return this.state.knowledgeMigrated !== undefined }
-  /** Legacy note text from old state rows; only migration reads it. */
-  get legacyMemory(): string | undefined { return this.state.memory }
-  get legacyMemoryUndo(): string | undefined { return this.state.memoryUndo }
-
   /** Replace the agreements; the text before them is what one undo restores. */
   setAgreements(text: string): Promise<void> {
     const before = this.agreements
@@ -397,35 +396,6 @@ export class DotStore {
     return this.setDot({ reflections: next })
   }
 
-  /**
-   * Commit the one-time legacy import. Unlike {@link setDot}, the in-memory state
-   * (including the migration marker) is updated only after the write is durable,
-   * so a failed import is retried instead of being silently marked done.
-   */
-  commitKnowledgeMigration(patch: Partial<Pick<DotState, 'agreements' | 'agreementsUndo' | 'cognition' | 'cognitionHistory' | 'knowledgeMigrated'>>): Promise<void> {
-    // The one-time import may seed an initial cognition rollback version, but it must
-    // never replace history the store already holds; drop the key so the state spread
-    // keeps the existing history instead of overwriting it.
-    const effective = { ...patch }
-    if (effective.cognitionHistory !== undefined && (this.state.cognitionHistory?.length ?? 0) > 0) delete effective.cognitionHistory
-    const domain = this.domain
-    if (domain === undefined) {
-      this.state = { ...this.state, ...effective }
-      this.changed()
-      return Promise.resolve()
-    }
-    const op = this.tail.then(async () => {
-      const next = { ...this.state, ...effective }
-      await this.durable(() => domain.table('state').put(STATE_KEY, next))
-      // Merge onto the latest memory state so concurrent settings/segment fields survive;
-      // the state write that landed meanwhile is re-issued with the latest snapshot below.
-      this.state = { ...this.state, ...effective }
-      this.changed()
-    })
-    this.tail = op.catch(() => undefined)
-    return op
-  }
-
   get settings(): DotSettings { return this.current }
   get uiLocale(): CopyLocale | undefined { return this.localePref }
 
@@ -444,12 +414,11 @@ export class DotStore {
 
   /**
    * Wipe Dorothy's durable tables and in-memory ledger. Settings return to
-   * defaults. The migration marker stays so legacy note files are not
-   * re-imported. `lastFactoryResetAt` is the surviving audit.
+   * defaults. `lastFactoryResetAt` is the surviving audit.
    */
   async factoryReset(now = Date.now()): Promise<void> {
     await this.flush()
-    const names: TableName[] = ['tasks', 'tickets', 'schedules', 'proposals', 'changes', 'inputs', 'runs', 'verifications', 'peers']
+    const names: TableName[] = ['tasks', 'schedules', 'recipes', 'links', 'recipe_proposals', 'proposals', 'changes', 'inputs', 'runs', 'verifications', 'peers']
     const domain = this.domain
     const op = this.tail.then(async () => {
       if (domain) {
@@ -460,14 +429,16 @@ export class DotStore {
         }
       }
       this.tasks.clear()
-      this.tickets.clear()
       this.reminders.clear()
+      this.recipeRows.clear()
+      this.linkRows.clear()
+      this.recipeProposalRows.clear()
       this.proposals.clear()
       this.work.clear()
       this.localePref = undefined
       this.current = parseSettings(undefined)
       this.cognitionRevision++
-      this.state = { lastFactoryResetAt: now, knowledgeMigrated: '1' }
+      this.state = { lastFactoryResetAt: now }
       if (domain) await this.durable(() => domain.table('state').put(STATE_KEY, this.state))
       this.changed()
     })
@@ -479,18 +450,6 @@ export class DotStore {
     this.state = { ...this.state, ...next }
     this.changed()
     return this.write('state', STATE_KEY, this.state)
-  }
-
-  ticket(id: string): Ticket | undefined { return this.tickets.get(id) }
-  listTickets(): Ticket[] { return [...this.tickets.values()] }
-  ticketForSession(sessionId: string): Ticket | undefined {
-    const id = this.tasks.get(sessionId)?.ticketId
-    return id ? this.tickets.get(id) : [...this.tickets.values()].find(ticket => ticket.sessions.some(row => row.sessionId === sessionId))
-  }
-
-  private pruneTickets(): void {
-    const finished = [...this.tickets.values()].filter(ticket => ticket.status === 'done' || ticket.status === 'cancelled').sort((a, b) => a.updatedAt - b.updatedAt)
-    for (const ticket of finished.slice(0, Math.max(0, this.tickets.size - MAX_TASKS))) this.tickets.delete(ticket.id)
   }
 
   /** Sessions dot opened. Dot's own session and a merely watched human session are not included. */
@@ -507,7 +466,6 @@ export class DotStore {
       ...(this.dotSessionId ? { dotSessionId: this.dotSessionId } : {}),
       runs: this.work.listRuns(),
       tasks: this.list(),
-      tickets: this.listTickets(),
     }
   }
 
@@ -606,14 +564,108 @@ export class DotStore {
     return op.then(() => true)
   }
 
+  /** dot's task recipes, ordered by name. */
+  get recipes(): readonly RecipeRecord[] {
+    return [...this.recipeRows.values()].sort((a, b) => a.name.toLowerCase().localeCompare(b.name.toLowerCase()) || a.id.localeCompare(b.id))
+  }
+
+  /** Links between a change and a GitHub target, oldest first. */
+  get links(): readonly TaskLink[] {
+    return [...this.linkRows.values()].sort((a, b) => a.addedAt - b.addedAt || a.id.localeCompare(b.id))
+  }
+
+  /** The board's work row for one change: workView plus its link chips. */
+  workViewWithLinks(changeId: string) {
+    const row = this.work.workView(changeId)
+    if (!row) return undefined
+    const links = this.linksFor(changeId)
+    return links.length > 0 ? { ...row, links } : row
+  }
+
+  linksFor(changeId: string): readonly TaskLink[] {
+    return this.links.filter(link => link.changeId === changeId)
+  }
+
+  link(id: string): TaskLink | undefined { return this.linkRows.get(id) }
+
+  putLink(record: TaskLink): Promise<void> {
+    this.linkRows.set(record.id, record)
+    this.changed()
+    return this.write('links', record.id, record)
+  }
+
+  deleteLink(id: string): Promise<void> {
+    if (!this.linkRows.delete(id)) return Promise.resolve()
+    this.changed()
+    const domain = this.domain
+    if (!domain) return Promise.resolve()
+    const op = this.tail.then(() => this.durable(() => domain.table('links').delete(id)))
+    this.tail = op.catch(() => undefined)
+    return op
+  }
+
+  /** Drop every link a pruned change owned. */
+  async deleteLinksFor(changeId: string): Promise<void> {
+    for (const link of this.linksFor(changeId)) await this.deleteLink(link.id)
+  }
+
+  /** Look a recipe up by id, or by exact name case-insensitively. */
+  recipe(idOrName: string): RecipeRecord | undefined {
+    const direct = this.recipeRows.get(idOrName)
+    if (direct) return direct
+    const folded = idOrName.trim().toLowerCase()
+    return [...this.recipeRows.values()].find(row => row.name.toLowerCase() === folded)
+  }
+
+  putRecipe(record: RecipeRecord): Promise<void> {
+    this.recipeRows.set(record.id, record)
+    this.changed()
+    return this.write('recipes', record.id, record)
+  }
+
+  /** @returns false when no recipe has that id. Its proposals go with it. */
+  deleteRecipe(id: string): Promise<boolean> {
+    if (!this.recipeRows.delete(id)) return Promise.resolve(false)
+    this.changed()
+    const domain = this.domain
+    const op = this.tail.then(async () => {
+      if (domain) await this.durable(() => domain.table('recipes').delete(id))
+      for (const proposal of this.recipeProposalRows.values()) {
+        if (proposal.recipeId !== id) continue
+        this.recipeProposalRows.delete(proposal.id)
+        if (domain) await this.durable(() => domain.table('recipe_proposals').delete(proposal.id))
+      }
+    })
+    this.tail = op.catch(() => undefined)
+    return op.then(() => true)
+  }
+
+  get recipeProposals(): readonly RecipeProposal[] {
+    return [...this.recipeProposalRows.values()].sort((a, b) => a.createdAt - b.createdAt || a.id.localeCompare(b.id))
+  }
+
+  recipeProposalsFor(recipeId: string): readonly RecipeProposal[] {
+    return this.recipeProposals.filter(row => row.recipeId === recipeId)
+  }
+
+  /** At most one pending proposal per recipe: the human decides one at a time. */
+  pendingRecipeProposal(recipeId: string): RecipeProposal | undefined {
+    return this.recipeProposals.find(row => row.recipeId === recipeId && row.status === 'pending')
+  }
+
+  recipeProposal(id: string): RecipeProposal | undefined { return this.recipeProposalRows.get(id) }
+
+  putRecipeProposal(record: RecipeProposal): Promise<void> {
+    this.recipeProposalRows.set(record.id, record)
+    this.changed()
+    return this.write('recipe_proposals', record.id, record)
+  }
+
   workLedger() { return projectWorkLedger(this.work) }
   workIdle() { return projectWorkIdle(this.work) }
 
   summary(pending: readonly PendingView[], now = Date.now()): string {
-    const work = this.workLedger()
-    return work.length > 0
-      ? ledgerSummary([...this.tasks.values()], pending, now, this.listTickets(), work)
-      : ledgerSummary([...this.tasks.values()], pending, now)
+    return ledgerSummary([...this.tasks.values()], pending, now, this.workLedger())
   }
 
   board(pending: readonly PendingView[]): BoardView {
@@ -621,16 +673,24 @@ export class DotStore {
     const watched = all.filter(task => task.origin === 'watched')
     const started = all.filter(task => task.origin === 'started')
     const work = this.work.listChanges()
-      .map(change => this.work.workView(change.id))
+      .map(change => this.workViewWithLinks(change.id))
       .filter((row): row is NonNullable<typeof row> => row !== undefined)
     return {
       ...this.state.dotSessionId === undefined ? {} : { dotSessionId: this.state.dotSessionId },
       tasks: watched,
       ...(started.length > 0 ? { startedTasks: started } : {}),
-      tickets: deriveTicketViews(this.tickets.values(), this.tasks.values(), pending),
       ...(work.length > 0 ? { work } : {}),
       pending,
-      schedules: this.schedules,
+      schedules: this.schedules.map(row => {
+        const recipe = row.recipe ? this.recipe(row.recipe) : undefined
+        return recipe ? { ...row, recipeName: recipe.name } : row
+      }),
+      ...(this.recipeProposalRows.size > 0 ? {
+        recipeProposals: this.recipeProposals.filter(row => row.status === 'pending').map(row => ({
+          id: row.id, recipeId: row.recipeId, recipeName: this.recipeRows.get(row.recipeId)?.name ?? row.recipeId,
+          kind: row.kind, createdAt: row.createdAt,
+        })),
+      } : {}),
     }
   }
 
@@ -638,6 +698,9 @@ export class DotStore {
     this.listeners.add(listener)
     return () => { this.listeners.delete(listener) }
   }
+
+  /** A work-row mutation that bypassed a DotStore write still needs the board signal. */
+  workChanged(): void { this.changed() }
 
   /** Wait for queued writes; used on shutdown and in tests. */
   async flush(): Promise<void> { await this.tail.catch(() => undefined) }
@@ -649,12 +712,29 @@ export class DotStore {
     return this.write('tasks', task.sessionId, task)
   }
 
+  /** Evict oldest terminal WorkBook changes from both memory and durable storage. */
+  pruneWorkHistory(maxKeep?: number, beforeRemove?: (change: ChangeRecord, failedRounds: number) => Promise<void>, at = Date.now()): Promise<{ readonly prunedChanges: readonly string[]; readonly keptArtifacts: ReadonlySet<string> }> {
+    return this.work.pruneCompletedChanges(maxKeep, async (table, key) => {
+      const domain = this.domain
+      if (!domain) return
+      const op = this.tail.then(() => this.durable(() => domain.table(table).delete(key)))
+      this.tail = op.catch(() => undefined)
+      await op
+    }, beforeRemove, at)
+  }
+
   private prune(): void {
     if (this.tasks.size <= MAX_TASKS) return
     const archived = [...this.tasks.values()].filter(task => task.status === 'archived').sort((a, b) => a.updatedAt - b.updatedAt)
-    // Pruned rows leave the memory view only; the domain has no delete and the
-    // stale row is skipped again on the next load by the same cap.
-    for (const task of archived.slice(0, this.tasks.size - MAX_TASKS)) this.tasks.delete(task.sessionId)
+    const evicted = archived.slice(0, this.tasks.size - MAX_TASKS)
+    for (const task of evicted) this.tasks.delete(task.sessionId)
+    const domain = this.domain
+    if (domain && evicted.length > 0) {
+      const op = this.tail.then(async () => {
+        for (const task of evicted) await this.durable(() => domain.table('tasks').delete(task.sessionId))
+      })
+      this.tail = op.catch(() => undefined)
+    }
   }
 
   private write(table: TableName, key: string, value: unknown): Promise<void> {
@@ -662,7 +742,7 @@ export class DotStore {
     if (domain === undefined) return Promise.resolve()
     // State is a single document: read the latest in-memory state when the queued
     // slot actually runs, so an older queued snapshot cannot overwrite a change that
-    // landed in the meantime (e.g. the migration marker merged into it).
+    // landed in the meantime.
     const op = this.tail.then(() => this.durable(() => domain.table(table).put(key, table === 'state' ? this.state : value)))
     this.tail = op.catch(() => undefined)
     return op

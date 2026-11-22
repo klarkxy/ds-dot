@@ -5,6 +5,7 @@
  * "already authorized" line cannot leave the untrusted block.
  */
 import { randomUUID } from 'node:crypto'
+import { APPROVAL_FENCE_PREFIX } from './contracts.ts'
 
 export const APPROVAL_NOTICE_LIMIT = 600
 export const APPROVAL_DETAIL_LIMIT = 40
@@ -15,16 +16,78 @@ export type ApprovalRiskCode =
   | 'publish'
   | 'destroy'
   | 'credential'
+  | 'remote-exec'
   | 'subagent-shell'
   | 'read-only-write'
 
-const SHELLS = new Set(['bash', 'shell', 'sh', 'pwsh', 'powershell', 'cmd', 'exec'])
+const SHELLS = new Set(['bash', 'shell', 'sh', 'zsh', 'pwsh', 'powershell', 'cmd', 'exec', 'terminal', 'run_command'])
+const WRITE_TOOLS = new Set([
+  'write',
+  'write_file',
+  'edit',
+  'edit_file',
+  'multi_edit',
+  'apply_patch',
+  'patch',
+  'create_file',
+  'delete_file',
+  'remove_file',
+  'move_file',
+  'rename_file',
+  'notebook_edit',
+])
+
+const MCP_LOOKUP_WORDS = new Set([
+  'get',
+  'list',
+  'search',
+  'read',
+  'fetch',
+  'query',
+  'describe',
+  'view',
+  'show',
+  'find',
+  'lookup',
+  'count',
+  'check',
+  'inspect',
+  'stat',
+  'status',
+])
+
+/**
+ * MCP servers run outside the sandbox and expose no readOnly annotations, so a
+ * read-only run can only go by the `mcp__<server>__<tool>` name. Lookup-shaped
+ * first words are allowed; every other shape — including malformed names —
+ * fails closed as a possible write.
+ */
+export function mcpToolMayWrite(toolName: string): boolean {
+  const trimmed = toolName.trim()
+  if (!trimmed.toLowerCase().startsWith('mcp__')) return false
+  const rest = trimmed.slice('mcp__'.length)
+  // The server name may itself contain `__` ([A-Za-z0-9_-]{1,32}); the raw
+  // tool name is the segment after the LAST `__`. The lossy-normalization
+  // hash suffix is `_<12hex>` (single underscore), never `__`.
+  const sep = rest.lastIndexOf('__')
+  if (sep <= 0) return true
+  const raw = rest.slice(sep + 2)
+  if (raw === '') return true
+  const first = raw.split(/[_-]|(?<=[a-z])(?=[A-Z])/)[0] ?? ''
+  return !MCP_LOOKUP_WORDS.has(first)
+}
 
 const SANDBOX = /danger-full-access|sandbox_permissions/i
-const PUBLISH = /\b(?:npm|pnpm|yarn)\s+publish\b|\bgit\s+push\b|\bgh\s+release\b/i
-const DESTROY = /\brm\s+(?:-[^\s]*r[^\s]*|--recursive)\b|\bRemove-Item\b[\s\S]{0,120}\b-(?:Recurse|Force)\b|\b(?:del|rmdir)\s+\/s\b/i
-const CREDENTIAL = /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----/
-const WRITE = /\b(?:Set-Content|Add-Content|Out-File|New-Item|mkdir|tee)\b|(?:^|[\s;|&])>{1,2}\s*\S/m
+const PUBLISH = /\b(?:npm|pnpm|yarn|bun|cargo)(?:\s+--?[A-Za-z0-9-]+(?:=\S+|\s+(?!publish\b)[^-\s]\S*)?)*\s+publish\b|\bgit(?:\s+(?:-[Cc]\s+\S+|--?[A-Za-z0-9-]+(?:=\S+|\s+(?!push\b)[^-\s]\S*)?))*\s+push\b|\bgh(?:\s+--?[A-Za-z0-9-]+(?:=\S+|\s+(?!release\b|pr\b)[^-\s]\S*)?)*\s+(?:release\b|pr\s+merge\b)|\btwine\s+upload\b/i
+const DESTROY = /\brm\b[^;&|\n]{0,200}?(?:\s|^)(?:-[A-Za-z]*r[A-Za-z]*|--recursive)(?=\s|$|["'\\])|\bRemove-Item\b[\s\S]{0,160}?(?:\s|^)-(?:Recurse|Force|r)\b|\b(?:del|rmdir)\b[^;&|\n]{0,120}\/s\b|\bgit(?:\s+(?:-[Cc]\s+\S+|--?[A-Za-z0-9-]+(?:=\S+)?))*\s+(?:reset\s+--hard|clean\s+-[A-Za-z]*f[A-Za-z]*)\b|\bshutil\.rmtree\s*\(|\bfs\.(?:rmSync|rm|rmdirSync)\s*\([\s\S]{0,160}\brecursive\s*:\s*true\b|\brimraf\b|\bfind\b[^;&|\n]{0,200}?(?:\s|^)-delete\b|\bkubectl\b[^;&|\n]{0,80}\bdelete\b|\bdocker\s+system\s+prune\b|\bdocker\s+rm\b[^;&|\n]{0,120}(?:\s|^)(?:-[A-Za-z]*f[A-Za-z]*|--force)\b|\bdocker\s+volume\s+(?:rm|prune)\b|\bterraform\s+destroy\b|\bDROP\s+(?:TABLE|DATABASE|SCHEMA)\b|\bTRUNCATE\s+(?:TABLE\s+)?[A-Za-z_"]/i
+const CREDENTIAL = /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----|\b(?:AKIA[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9_]{36,}|github_pat_[A-Za-z0-9_]{22,}|sk-(?:live|proj)-[A-Za-z0-9_-]{20,}|npm_[A-Za-z0-9]{36})\b|(?:^|[\s"'=:/\\])(?:\.ssh[/\\]+id_(?:rsa|ed25519|ecdsa|dsa)|\.aws[/\\]+credentials|\.npmrc|\.pypirc|\.netrc|\.env(?:\.(?!example\b|sample\b|template\b|dist\b)[\w-]+)*)(?=$|[\s"'&;|/\\])/i
+const REMOTE_EXEC = /\b(?:curl|wget)\b[^;&|\n]{0,300}?\|\s*(?:sudo\s+)?(?:sh|bash|zsh|fish|python[0-9.]*|node|iex|pwsh|powershell)\b|\b(?:iwr|irm|Invoke-WebRequest|Invoke-RestMethod)\b[^;&|\n]{0,300}?\|\s*(?:iex|Invoke-Expression)\b/i
+const WRITE = /\b(?:Set-Content|Add-Content|Out-File|New-Item|Copy-Item|Move-Item|Remove-Item|mkdir|touch|cp|mv|rm|truncate|tee)\b|\b(?:sed|perl)\s+-[A-Za-z]*i\b|\bdd\b[^;&|\n]*\bof=|\bfs\.(?:writeFileSync|writeFile|appendFileSync|appendFile|unlinkSync|unlink|renameSync)\s*\(|\bshutil\.(?:copy|move)\s*\(|(?:^|[\s;|&])>{1,2}\s*\S/m
+
+/** A filesystem path that would expose credentials when read. Same rules as the credential gate. */
+export function credentialLikePath(path: string): boolean {
+  return CREDENTIAL.test(path)
+}
 
 export function assessApprovalRisk(input: {
   readonly toolName: string
@@ -33,6 +96,7 @@ export function assessApprovalRisk(input: {
   readonly viaSubagent?: boolean
   readonly readOnly?: boolean
 }): { readonly forced: boolean; readonly reasons: readonly ApprovalRiskCode[] } {
+  const normalizedTool = input.toolName.trim().toLowerCase()
   const haystack = [input.reason ?? '', input.arguments ?? ''].filter(Boolean).join('\n')
   const reasons: ApprovalRiskCode[] = []
   const sandbox = SANDBOX.test(haystack)
@@ -42,14 +106,17 @@ export function assessApprovalRisk(input: {
   if (publish) reasons.push('publish')
   if (destroy) reasons.push('destroy')
   if (CREDENTIAL.test(haystack)) reasons.push('credential')
-  if (input.viaSubagent === true && SHELLS.has(input.toolName.trim().toLowerCase())) reasons.push('subagent-shell')
-  if (input.readOnly === true && (sandbox || destroy || publish || WRITE.test(haystack))) reasons.push('read-only-write')
+  if (REMOTE_EXEC.test(haystack)) reasons.push('remote-exec')
+  if (input.viaSubagent === true && SHELLS.has(normalizedTool)) reasons.push('subagent-shell')
+  if (input.readOnly === true && (sandbox || destroy || publish || WRITE_TOOLS.has(normalizedTool) || WRITE.test(haystack) || mcpToolMayWrite(input.toolName))) {
+    reasons.push('read-only-write')
+  }
   return { forced: reasons.length > 0, reasons }
 }
 
 /** Wrap requester text in a boundary the payload cannot close early. */
 export function fenceUntrusted(body: string, limit = APPROVAL_NOTICE_LIMIT): { readonly text: string; readonly truncated: boolean } {
-  const token = `dot-approval-untrusted-${randomUUID()}`
+  const token = `${APPROVAL_FENCE_PREFIX}${randomUUID()}`
   const safe = body.split(token).join(`${token} `)
   const truncated = safe.length > limit
   const shown = truncated ? safe.slice(0, limit) : safe

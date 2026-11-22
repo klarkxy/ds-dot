@@ -41,16 +41,16 @@ const DITHERING: Record<CopyLocale, RegExp> = {
   pt: /distraíd/,
   ru: /рассеянн/,
 }
-/** Phrases added for this policy. They must not be words the previous default already used. */
-const DECISION: Record<CopyLocale, string> = {
-  zh: '已经选定的做法',
-  en: 'the choice you already made',
-  ja: 'すでに選んだやり方',
-  de: 'deine Entscheidung',
-  es: 'la decisión que ya tomaste',
-  fr: 'seul l’utilisateur tranche',
-  pt: 'escolha que você já fez',
-  ru: 'уже выбранный шаг',
+/** The speaking-style rule every locale keeps: lead with the outcome, nothing about decision formats. */
+const LEAD_WITH_OUTCOME: Record<CopyLocale, string> = {
+  zh: '聊正事时先给结论',
+  en: 'lead with the outcome',
+  ja: 'まず結果を伝えます',
+  de: 'zuerst das Ergebnis',
+  es: 've al grano: el resultado',
+  fr: 'le résultat d’abord',
+  pt: 'comece pelo resultado',
+  ru: 'сразу называй итог',
 }
 const SILENCE: Record<CopyLocale, string> = {
   zh: '不把沉默当成同意',
@@ -64,13 +64,13 @@ const SILENCE: Record<CopyLocale, string> = {
 }
 const QUESTION_POLICY: Record<CopyLocale, { readonly label: string; readonly help: string }> = {
   zh: { label: '可逆的自己定', help: '缺授权，或不可逆、外部、费用后果' },
-  en: { label: 'Choose reversible defaults', help: 'Missing authority, or an irreversible, external, or costly effect' },
-  ja: { label: 'ドロシーが可逆なものを決める', help: 'ドロシーが目標内の可逆な既定を決めます' },
-  de: { label: 'Umkehrbares selbst entscheiden', help: 'Fehlende Befugnis oder eine unumkehrbare, externe oder teure Folge' },
-  es: { label: 'Decidir lo reversible', help: 'Si falta autorización, o el efecto es irreversible, externo o costoso' },
-  fr: { label: 'Décider le réversible', help: 'Sans autorisation, ou si l’effet est irréversible, externe ou coûteux' },
-  pt: { label: 'Decidir o reversível', help: 'Sem autorização, ou se o efeito for irreversível, externo ou custoso' },
-  ru: { label: 'Решать обратимое', help: 'Нет разрешения, или эффект необратим, внешний или платный' },
+  en: { label: 'She decides', help: 'Missing authority, or an irreversible, external, or costly effect' },
+  ja: { label: '彼女が決める', help: 'ドロシーが目標内の可逆な既定を決めます' },
+  de: { label: 'Sie entscheidet', help: 'Fehlende Befugnis oder eine unumkehrbare, externe oder teure Folge' },
+  es: { label: 'Ella decide', help: 'Si falta autorización, o el efecto es irreversible, externo o costoso' },
+  fr: { label: 'Elle décide', help: 'Sans autorisation, ou si l’effet est irréversible, externe ou coûteux' },
+  pt: { label: 'Ela decide', help: 'Sem autorização, ou se o efeito for irreversível, externo ou custoso' },
+  ru: { label: 'Она решает', help: 'Нет разрешения, или эффект необратим, внешний или платный' },
 }
 
 const human = (text: string, time: number): RawEvent => ({
@@ -118,12 +118,16 @@ function makeFakeDomain(seed: Record<string, Record<string, unknown>> = {}) {
     tasks: new Map(Object.entries(seed.tasks ?? {})),
     tickets: new Map(Object.entries(seed.tickets ?? {})),
     schedules: new Map(Object.entries(seed.schedules ?? {})),
+    recipes: new Map(Object.entries(seed.recipes ?? {})),
+    recipe_proposals: new Map(Object.entries(seed.recipe_proposals ?? {})),
     proposals: new Map(Object.entries(seed.proposals ?? {})),
     changes: new Map(Object.entries(seed.changes ?? {})),
     inputs: new Map(Object.entries(seed.inputs ?? {})),
     runs: new Map(Object.entries(seed.runs ?? {})),
     verifications: new Map(Object.entries(seed.verifications ?? {})),
     peers: new Map(Object.entries(seed.peers ?? {})),
+    inbox: new Map(Object.entries(seed.inbox ?? {})),
+    links: new Map(Object.entries(seed.links ?? {})),
   }
   const domain: DotDomainHandle = {
     table: name => ({
@@ -186,6 +190,9 @@ function makeFakeHost() {
     async releaseDot() {},
     async readEvents(sessionId) { return events.get(sessionId) ?? [] },
     async summarize() { return 'HANDOFF NOTE' },
+    async ping() {},
+    dotModel: () => undefined,
+    sessionModel: () => undefined,
     modelKey: () => undefined,
     async say(sessionId, text) { said.push({ sessionId, text }) },
     async stop() {},
@@ -437,7 +444,7 @@ describe('i18n locale resolution and pack completeness', () => {
       expect(pers, `${loc} banned terms`).not.toMatch(BANNED_PERSONA_TERMS)
       expect(pers, `${loc} dithering`).not.toMatch(DITHERING[loc])
       // String presence only. This does not run a model and is not evidence of live behavior.
-      expect(pers, `${loc} decision phrase`).toContain(DECISION[loc])
+      expect(pers, `${loc} lead-with-outcome`).toContain(LEAD_WITH_OUTCOME[loc])
       expect(pers, `${loc} silence is not consent`).toContain(SILENCE[loc])
       expect(t(loc, 'sQuestions_dot'), `${loc} questions label`).toBe(QUESTION_POLICY[loc].label)
       expect(t(loc, 'sQuestionsDesc_dot'), `${loc} questions help`).toContain(QUESTION_POLICY[loc].help)
@@ -676,7 +683,7 @@ describe('i18n end-to-end lifecycle and PersonaPanel integration', () => {
       expect(current.address).toBe('Alice')
       expect(current.persona).toBe('Custom voice')
       expect(personaInput.value).toBe('Custom voice')
-      expect(personaInput.value).not.toContain(DECISION[loc])
+      expect(personaInput.value).not.toContain(LEAD_WITH_OUTCOME[loc])
 
       const restoreButtons = () => [...document.querySelectorAll('button')].filter(btn => btn.textContent === t(loc, 'pRestore'))
       expect(restoreButtons()).toHaveLength(2)
@@ -690,7 +697,7 @@ describe('i18n end-to-end lifecycle and PersonaPanel integration', () => {
       await act(async () => { restoreButtons()[1]!.click() })
       expect(current.persona).toBeUndefined()
       expect(personaInput.value).toBe(defaultPersona(loc))
-      expect(personaInput.value).toContain(DECISION[loc])
+      expect(personaInput.value).toContain(LEAD_WITH_OUTCOME[loc])
       expect(personaInput.value).toContain(SILENCE[loc])
 
       await act(async () => { root.unmount() })

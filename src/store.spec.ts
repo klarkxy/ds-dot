@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { DEFAULT_SETTINGS } from './contracts.ts'
+import { reasonBeforeDelivery } from './segments.ts'
 import { DotStore, type DotDomainHandle } from './store.ts'
 
 function fakeDomain(seed: Record<string, Record<string, unknown>> = {}) {
@@ -8,12 +9,16 @@ function fakeDomain(seed: Record<string, Record<string, unknown>> = {}) {
     tasks: new Map(Object.entries(seed.tasks ?? {})),
     tickets: new Map(Object.entries(seed.tickets ?? {})),
     schedules: new Map(Object.entries(seed.schedules ?? {})),
+    recipes: new Map(Object.entries(seed.recipes ?? {})),
+    recipe_proposals: new Map(Object.entries(seed.recipe_proposals ?? {})),
     proposals: new Map(Object.entries(seed.proposals ?? {})),
     changes: new Map(Object.entries(seed.changes ?? {})),
     inputs: new Map(Object.entries(seed.inputs ?? {})),
     runs: new Map(Object.entries(seed.runs ?? {})),
     verifications: new Map(Object.entries(seed.verifications ?? {})),
     peers: new Map(Object.entries(seed.peers ?? {})),
+    inbox: new Map(Object.entries(seed.inbox ?? {})),
+    links: new Map(Object.entries(seed.links ?? {})),
   }
   const puts: string[] = []
   const domain: DotDomainHandle = {
@@ -46,45 +51,6 @@ function unknownState(): Error {
   return error
 }
 
-describe('ticket migration', () => {
-  const task = (sessionId: string, origin: 'started' | 'watched', status: 'idle' | 'archived' = 'idle') => ({ sessionId, origin, status, title: sessionId, goal: 'goal', cwd: '/work', createdAt: 1, updatedAt: 2, unseenTurns: 0 })
-  it('migrates started sessions once and preserves watched sessions', async () => {
-    const { domain, tables } = fakeDomain({ tasks: { a: task('a', 'started'), b: task('b', 'started', 'archived'), c: task('c', 'watched') } })
-    const store = new DotStore(domain)
-    await store.migrateTickets()
-    expect(store.listTickets().map(row => row.status)).toEqual(['active', 'done'])
-    expect(store.task('a')).toMatchObject({ ticketId: 't-1', role: 'work' })
-    expect(store.task('c')).toEqual(task('c', 'watched'))
-    await new DotStore(domain).migrateTickets()
-    expect(tables.tickets!.size).toBe(2)
-  })
-  it('keeps only the newest finished tickets in the capped memory view', async () => {
-    const tickets = Object.fromEntries(Array.from({ length: 301 }, (_, index) => {
-      const id = `t-${index + 1}`
-      return [id, { id, title: String(index), goal: 'g', dir: '/work', access: 'read', priority: 2, status: 'done', sessions: [], rounds: [], history: [], createdAt: index, updatedAt: index }]
-    }))
-    const { domain } = fakeDomain({ tickets })
-    const store = new DotStore(domain)
-    expect(store.listTickets()).toHaveLength(300)
-    expect(store.ticket('t-1')).toBeUndefined()
-    expect(store.ticket('t-301')).toBeDefined()
-  })
-  it('retries safely when a session row write fails', async () => {
-    const { domain, tables } = fakeDomain({ tasks: { a: task('a', 'started') } })
-    const original = domain.table.bind(domain)
-    let fail = true
-    const failing: DotDomainHandle = { ...domain, table: name => {
-      const table = original(name)
-      return name === 'tasks' ? { ...table, put: async (key, value) => { if (fail) { fail = false; throw new Error('failed') }; await table.put(key, value) } } : table
-    } }
-    const store = new DotStore(failing)
-    await expect(store.migrateTickets()).rejects.toThrow('failed')
-    expect(tables.state!.get('current')).toBeUndefined()
-    await new DotStore(domain).migrateTickets()
-    expect(tables.tickets!.size).toBe(1)
-    expect(tables.state!.get('current')).toMatchObject({ ticketsMigrated: '1' })
-  })
-})
 
 describe('DotStore', () => {
   it('round-trips tasks and the dot identity through the domain', async () => {
@@ -132,18 +98,36 @@ describe('DotStore', () => {
     expect(store.board([]).tasks.map(task => task.sessionId)).toEqual(['w'])
   })
 
-  it('shows tasks on the board with derived flags and keeps only watched sessions in tasks', async () => {
-    const ticket = { id: 't-1', title: 'Ship it', goal: 'g', dir: '/work', access: 'write', priority: 2, status: 'active', sessions: [{ sessionId: 's', role: 'work', at: 3 }], rounds: [], history: [], createdAt: 1, updatedAt: 2 }
-    const { domain, puts } = fakeDomain({ tickets: { [ticket.id]: ticket }, tasks: {
-      s: { sessionId: 's', origin: 'started', title: 'T', goal: 'G', cwd: '/work', ticketId: ticket.id, role: 'work', status: 'idle', createdAt: 3, updatedAt: 3, unseenTurns: 0 },
-    } })
+
+  it('round-trips task links and deletes them for good', async () => {
+    const { domain, tables, puts } = fakeDomain()
     const store = new DotStore(domain)
-    const board = store.board([{ id: 'ap-1', kind: 'approval', sessionId: 's', createdAt: 4, subject: 'bash' }])
-    expect(puts).toEqual([])
-    expect(store.ticketForSession('s')).toEqual(ticket)
-    expect(board.tasks).toEqual([])
-    expect(board.tickets).toHaveLength(1)
-    expect(board.tickets[0]).toMatchObject({ id: ticket.id, status: 'active', waiting: true, orphaned: false })
+    await store.putLink({ id: 'link-a', changeId: 'c-1', repo: 'acme/widgets', number: 12, origin: 'dot', state: 'open', addedAt: 1 })
+    await store.putLink({ id: 'link-b', changeId: 'c-1', repo: 'acme/widgets', branch: 'feature/x', url: 'https://gh/x', origin: 'auto', state: 'merged', addedAt: 2, lastEvent: { type: 'workflow_run.completed', title: 'CI failure', summary: 's', url: 'https://gh/ci', at: 5, count: 3 } })
+    await store.putLink({ id: 'link-bad', changeId: 'c-1', repo: 'acme/widgets', origin: 'dot', state: 'open', addedAt: 0.5 })
+    const reloaded = new DotStore(domain)
+    expect(reloaded.links.map(link => link.id)).toEqual(['link-bad', 'link-a', 'link-b'])
+    expect(reloaded.linksFor('c-1')).toHaveLength(3)
+    expect(reloaded.link('link-b')).toMatchObject({ branch: 'feature/x', state: 'merged', lastEvent: { count: 3 } })
+    expect(reloaded.linksFor('c-404')).toEqual([])
+    await reloaded.deleteLink('link-a')
+    await reloaded.deleteLink('link-a')
+    expect(tables.links!.has('link-a')).toBe(false)
+    expect(puts.at(-1)).toBe('links:-link-a')
+    expect(new DotStore(domain).links.map(link => link.id)).toEqual(['link-bad', 'link-b'])
+  })
+
+  it('attaches links to work rows on the board', async () => {
+    const { domain } = fakeDomain()
+    const store = new DotStore(domain)
+    const change = await store.work.createChange({ title: 'Linked', cwd: '/repo', goal: 'g', at: 1 })
+    const bare = await store.work.createChange({ title: 'Bare', cwd: '/repo', goal: 'g', at: 2 })
+    await store.putLink({ id: 'link-a', changeId: change.id, repo: 'acme/widgets', number: 12, origin: 'dot', state: 'open', addedAt: 1 })
+    const board = store.board([])
+    const linked = board.work!.find(row => row.id === change.id)!
+    expect(linked.links).toHaveLength(1)
+    expect(linked.links![0]).toMatchObject({ repo: 'acme/widgets', number: 12, state: 'open' })
+    expect(board.work!.find(row => row.id === bare.id)!.links).toBeUndefined()
   })
 
   it('keeps reminders across a reload, the one due first on top, and deletes them for good', async () => {
@@ -161,6 +145,52 @@ describe('DotStore', () => {
     expect(tables.schedules!.has('sch-a')).toBe(false)
     expect(puts.at(-1)).toBe('schedules:-sch-a')
     expect(new DotStore(domain).schedules.map(record => record.id)).toEqual(['sch-b'])
+  })
+
+  it('round-trips a recipe-bound reminder and resolves its name on the board', async () => {
+    const { domain } = fakeDomain()
+    const store = new DotStore(domain)
+    await store.putSchedule({ id: 'sch-r', title: 'bound', prompt: '', timing: { kind: 'every', minutes: 60, anchor: 1 }, createdAt: 3, nextAt: 600, recipe: 'rcp-1' })
+    await store.putSchedule({ id: 'sch-p', title: 'plain', prompt: 'p', timing: { kind: 'every', minutes: 30, anchor: 1 }, createdAt: 2, nextAt: 300 })
+    const reloaded = new DotStore(domain)
+    expect(reloaded.schedule('sch-r')?.recipe).toBe('rcp-1')
+    expect(reloaded.schedule('sch-p')?.recipe).toBeUndefined()
+    await reloaded.putRecipe({ id: 'rcp-1', name: 'Weekly', revision: 1, history: [], outcomes: [], goal: 'g', requirements: [{ requirementRef: 'g', text: 'g', required: true }], createdAt: 1, updatedAt: 1 })
+    expect(reloaded.board([]).schedules.find(row => row.id === 'sch-r')?.recipeName).toBe('Weekly')
+    expect(reloaded.board([]).schedules.find(row => row.id === 'sch-p')?.recipeName).toBeUndefined()
+  })
+
+  it('keeps a capabilities-changed rollover reason on current and past segments across a reload', async () => {
+    const { domain } = fakeDomain()
+    const store = new DotStore(domain)
+    await store.setDot({ dotSessionId: 'dot-1' })
+    await store.beginSegment({ sessionId: 'dot-1', startedAt: 1, persona: 'p' })
+    await store.beginSegment(
+      { sessionId: 'dot-2', startedAt: 2, persona: 'p', reason: 'capabilities-changed' },
+      { reason: 'capabilities-changed' },
+    )
+    const reloaded = new DotStore(domain)
+    expect(reloaded.segment?.sessionId).toBe('dot-2')
+    expect(reloaded.segment?.reason).toBe('capabilities-changed')
+    expect(reloaded.pastSegments.at(-1)).toMatchObject({ sessionId: 'dot-1', reason: 'capabilities-changed' })
+  })
+
+  it('keeps the frozen capabilities signature on the current segment across a reload', async () => {
+    const { domain } = fakeDomain()
+    const store = new DotStore(domain)
+    await store.setDot({ dotSessionId: 'dot-1' })
+    const signature = '{"tool:bash":"auto"}'
+    await store.beginSegment({ sessionId: 'dot-1', startedAt: 1, persona: 'p', capabilities: signature })
+    const reloaded = new DotStore(domain)
+    expect(reloaded.segment?.capabilities).toBe(signature)
+    expect(reasonBeforeDelivery({
+      replied: true,
+      now: 10,
+      persona: 'p',
+      frozenPersona: 'p',
+      capabilities: signature,
+      frozenCapabilities: reloaded.segment?.capabilities,
+    })).toBeUndefined()
   })
 
   it('serializes writes in call order', async () => {
@@ -205,6 +235,65 @@ describe('DotStore', () => {
     const illegal = new DotStore(illegalDomain)
     expect(illegal.work.recoveryError).toMatch(/illegal runs/)
     expect(await illegal.work.reserveRun({ changeId: 'c-1', writeScope: { kind: 'paths', paths: [] } })).toMatchObject({ code: 'recovery' })
+  })
+
+
+  it('puts the first input and change, then updates the saved change', async () => {
+    const { domain, puts, tables } = fakeDomain()
+    await expect(domain.table('inputs').update!('input-1', value => value)).rejects.toMatchObject({ code: 'missing-key' })
+    const store = new DotStore(domain)
+    const change = await store.work.createChange({ title: 'Recipe', cwd: 'H:\\shared', goal: 'land it', at: 1 })
+    expect(puts.slice(0, 2)).toEqual(['inputs:input-1', 'changes:c-1'])
+    expect(puts.some(op => op.startsWith('inputs:update:') || op.startsWith('changes:update:'))).toBe(false)
+    const reserved = await store.work.reserveRun({ changeId: change.id, cwd: 'H:\\shared', writeScope: { kind: 'paths', paths: [] }, at: 2 })
+    if (!reserved.ok) throw new Error(reserved.message)
+    expect(puts).toContain(`runs:${reserved.run.id}`)
+    expect(puts).not.toContain(`runs:update:${reserved.run.id}`)
+    const paused = await store.work.setControl(change.id, 'paused', 3)
+    expect(paused).toMatchObject({ id: change.id, control: 'paused' })
+    expect(puts.at(-1)).toBe(`changes:update:${change.id}`)
+    const reloaded = new DotStore(domain)
+    expect(reloaded.work.change(change.id)?.control).toBe('paused')
+    expect(reloaded.work.input(change.currentInputRef)?.goal).toBe('land it')
+    expect(tables.inputs!.has('input-1')).toBe(true)
+    expect(tables.changes!.has(change.id)).toBe(true)
+  })
+
+  it('seals scheduling when updating an existing work row is unknown', async () => {
+    const { domain } = fakeDomain()
+    const original = domain.table.bind(domain)
+    let unknown = false
+    const wrapped: DotDomainHandle = {
+      ...domain,
+      table: name => {
+        const table = original(name)
+        return {
+          ...table,
+          update: async (key, recipe) => {
+            if (unknown && name === 'changes') throw unknownState()
+            return table.update!(key, recipe)
+          },
+        }
+      },
+    }
+    const store = new DotStore(wrapped)
+    const change = await store.work.createChange({ title: 'A', cwd: 'H:\\proj', goal: 'a', at: 1 })
+    unknown = true
+    await expect(store.work.setControl(change.id, 'paused', 2)).rejects.toMatchObject({ code: 'unknown-state' })
+    expect(store.work.change(change.id)?.control).toBe('open')
+    expect(store.work.recoveryError).toMatch(/unknown-state/)
+    expect(await store.work.reserveRun({ changeId: change.id, cwd: 'H:\\else', writeScope: { kind: 'paths', paths: [] }, at: 3 })).toMatchObject({ code: 'recovery' })
+  })
+
+  it('shows watched sessions in tasks and started sessions under startedTasks', async () => {
+    const { domain } = fakeDomain({ tasks: {
+      s: { sessionId: 's', origin: 'started', title: 'T', goal: 'G', cwd: '/work', status: 'idle', createdAt: 3, updatedAt: 3, unseenTurns: 0 },
+      w: { sessionId: 'w', origin: 'watched', title: 'W', goal: 'G', cwd: '/home', status: 'running', createdAt: 2, updatedAt: 4, unseenTurns: 2 },
+    } })
+    const store = new DotStore(domain)
+    const board = store.board([{ id: 'ap-1', kind: 'approval', sessionId: 's', createdAt: 4, subject: 'bash' }])
+    expect(board.tasks.map(task => task.sessionId)).toEqual(['w'])
+    expect(board.startedTasks?.map(task => task.sessionId)).toEqual(['s'])
   })
 
   it('seals scheduling when a schedule delete, proposal delete, or direct state write is unknown', async () => {
@@ -260,7 +349,7 @@ describe('DotStore', () => {
     mode = 'off'
     const state = new DotStore(wrapped)
     mode = 'state'
-    await expect(state.commitKnowledgeMigration({ knowledgeMigrated: '1' })).rejects.toMatchObject({ code: 'unknown-state' })
+    await expect(state.setAgreements('a rule')).rejects.toMatchObject({ code: 'unknown-state' })
     expect(state.work.dispatchAllowed(reserved.run.id)).toMatchObject({ code: 'recovery' })
     expect(await state.work.addDelivery(reserved.run.id, followUp)).toMatchObject({ code: 'recovery' })
     expect(await state.work.reserveRun({ changeId: change.id, cwd: 'D:\\else', writeScope: { kind: 'paths', paths: [] }, at: 5 })).toMatchObject({ code: 'recovery' })
@@ -271,53 +360,6 @@ describe('DotStore', () => {
     await expect(plain.deleteSchedule('sch-2')).rejects.toThrow('disk failure')
     expect(plain.work.recoveryError).toBeUndefined()
     expect(plain.work.dispatchAllowed(reserved.run.id)).toEqual({ ok: true })
-  })
-
-  it('puts the first input and change, then updates the saved change', async () => {
-    const { domain, puts, tables } = fakeDomain()
-    await expect(domain.table('inputs').update!('input-1', value => value)).rejects.toMatchObject({ code: 'missing-key' })
-    const store = new DotStore(domain)
-    const change = await store.work.createChange({ title: 'Recipe', cwd: 'H:\\shared', goal: 'land it', at: 1 })
-    expect(puts.slice(0, 2)).toEqual(['inputs:input-1', 'changes:c-1'])
-    expect(puts.some(op => op.startsWith('inputs:update:') || op.startsWith('changes:update:'))).toBe(false)
-    const reserved = await store.work.reserveRun({ changeId: change.id, cwd: 'H:\\shared', writeScope: { kind: 'paths', paths: [] }, at: 2 })
-    if (!reserved.ok) throw new Error(reserved.message)
-    expect(puts).toContain(`runs:${reserved.run.id}`)
-    expect(puts).not.toContain(`runs:update:${reserved.run.id}`)
-    const paused = await store.work.setControl(change.id, 'paused', 3)
-    expect(paused).toMatchObject({ id: change.id, control: 'paused' })
-    expect(puts.at(-1)).toBe(`changes:update:${change.id}`)
-    const reloaded = new DotStore(domain)
-    expect(reloaded.work.change(change.id)?.control).toBe('paused')
-    expect(reloaded.work.input(change.currentInputRef)?.goal).toBe('land it')
-    expect(tables.inputs!.has('input-1')).toBe(true)
-    expect(tables.changes!.has(change.id)).toBe(true)
-  })
-
-  it('seals scheduling when updating an existing work row is unknown', async () => {
-    const { domain } = fakeDomain()
-    const original = domain.table.bind(domain)
-    let unknown = false
-    const wrapped: DotDomainHandle = {
-      ...domain,
-      table: name => {
-        const table = original(name)
-        return {
-          ...table,
-          update: async (key, recipe) => {
-            if (unknown && name === 'changes') throw unknownState()
-            return table.update!(key, recipe)
-          },
-        }
-      },
-    }
-    const store = new DotStore(wrapped)
-    const change = await store.work.createChange({ title: 'A', cwd: 'H:\\proj', goal: 'a', at: 1 })
-    unknown = true
-    await expect(store.work.setControl(change.id, 'paused', 2)).rejects.toMatchObject({ code: 'unknown-state' })
-    expect(store.work.change(change.id)?.control).toBe('open')
-    expect(store.work.recoveryError).toMatch(/unknown-state/)
-    expect(await store.work.reserveRun({ changeId: change.id, cwd: 'H:\\else', writeScope: { kind: 'paths', paths: [] }, at: 3 })).toMatchObject({ code: 'recovery' })
   })
 })
 
@@ -334,15 +376,6 @@ describe('DotStore settings proposals', () => {
 })
 
 describe('DotStore agreements and cognition', () => {
-  it('preserves existing cognition history when a legacy import supplies an undo version', async () => {
-    const { domain } = fakeDomain()
-    const store = new DotStore(domain)
-    const existing = [{ text: 'an existing version', at: 10 }]
-    await store.setDot({ cognitionHistory: existing })
-    await store.commitKnowledgeMigration({ cognition: 'imported notes', cognitionHistory: [{ text: 'old undo', at: 20 }], knowledgeMigrated: '1' })
-    expect(store.cognitionHistory).toEqual(existing)
-    expect(new DotStore(domain).cognitionHistory).toEqual(existing)
-  })
 
   it('keeps agreements and one undo step across a reload', async () => {
     const { domain } = fakeDomain()
@@ -399,79 +432,11 @@ describe('DotStore agreements and cognition', () => {
     expect(store.cognition).toBe('')
   })
 
-  it('exposes the legacy fields only to migration and marks the import done', async () => {
-    const { domain } = fakeDomain({ state: { current: { memory: 'old notes', memoryUndo: 'older notes' } } })
-    const store = new DotStore(domain)
-    expect(store.legacyMemory).toBe('old notes')
-    expect(store.legacyMemoryUndo).toBe('older notes')
-    expect(store.knowledgeMigrated).toBe(false)
-    await store.commitKnowledgeMigration({ knowledgeMigrated: '1' })
-    expect(new DotStore(domain).knowledgeMigrated).toBe(true)
-  })
 })
 
-describe('DotStore knowledge migration commit', () => {
-  it('sets the marker only after the write succeeds, so a failed import retries without losing the note', async () => {
-    const tables: Record<string, Map<string, unknown>> = { state: new Map(), tasks: new Map(), tickets: new Map(), schedules: new Map(), proposals: new Map() }
-    let failStatePut = true
-    const domain: DotDomainHandle = {
-      table: name => ({
-        entries: () => tables[name]!.entries(),
-        get: key => tables[name]!.get(key),
-        put: async (key, value) => {
-          if (name === 'state' && failStatePut) { failStatePut = false; throw new Error('put down') }
-          tables[name]!.set(key, value)
-        },
-        delete: async key => tables[name]!.delete(key),
-      }),
-      close: async () => {},
-    }
-    const store = new DotStore(domain)
-    await expect(store.commitKnowledgeMigration({ agreements: '- old note\n', knowledgeMigrated: '1' })).rejects.toThrow('put down')
-    // Nothing reached memory, so the next attempt retries from the old note.
-    expect(store.agreements).toBe('')
-    expect(store.knowledgeMigrated).toBe(false)
-    await store.commitKnowledgeMigration({ agreements: '- old note\n', knowledgeMigrated: '1' })
-    expect(store.knowledgeMigrated).toBe(true)
-    expect(new DotStore(domain).agreements).toBe('- old note\n')
-  })
-
-  it('keeps concurrent settings and the migration marker when the state write is slow', async () => {
-    const tables: Record<string, Map<string, unknown>> = { state: new Map(), tasks: new Map(), tickets: new Map(), schedules: new Map(), proposals: new Map() }
-    let release!: () => void
-    const gate = new Promise<void>(resolve => { release = resolve })
-    let firstStatePut = true
-    const domain: DotDomainHandle = {
-      table: name => ({
-        entries: () => tables[name]!.entries(),
-        get: key => tables[name]!.get(key),
-        put: async (key, value) => {
-          if (name === 'state' && firstStatePut) { firstStatePut = false; await gate }
-          tables[name]!.set(key, value)
-        },
-        delete: async key => tables[name]!.delete(key),
-      }),
-      close: async () => {},
-    }
-    const store = new DotStore(domain)
-    const committing = store.commitKnowledgeMigration({ agreements: '- old note\n', knowledgeMigrated: '1' })
-    // A settings write lands while the migration's state put is still in flight (queued, not awaited yet).
-    const setting = store.setSettings({ ...DEFAULT_SETTINGS, scope: 'tracked' })
-    release()
-    await Promise.all([committing, setting])
-    await store.flush()
-    const reloaded = new DotStore(domain)
-    // Neither the concurrent setting nor the import was lost on disk or in memory.
-    expect(reloaded.knowledgeMigrated).toBe(true)
-    expect(reloaded.agreements).toBe('- old note\n')
-    expect(reloaded.settings.scope).toBe('tracked')
-    expect(store.settings.scope).toBe('tracked')
-    expect(store.knowledgeMigrated).toBe(true)
-  })
-})
 
 describe('factory reset of the store', () => {
-  it('wipes tables, restores default settings, and keeps the migration marker', async () => {
+  it('wipes tables, restores default settings, and wipes data clean', async () => {
     const { domain, tables } = fakeDomain({
       tasks: { s1: { sessionId: 's1', origin: 'started', title: 't', goal: 'g', cwd: '/w', status: 'idle', createdAt: 1, updatedAt: 1, unseenTurns: 0 } },
       schedules: { sch: { id: 'sch', title: 'ping', prompt: 'check', timing: { kind: 'once', at: 9 }, createdAt: 1, nextAt: 9 } },
@@ -485,11 +450,11 @@ describe('factory reset of the store', () => {
     await store.factoryReset(5000)
     expect(store.list()).toEqual([])
     expect(store.schedules).toEqual([])
+    expect(store.recipes).toEqual([])
     expect(store.settingProposals).toEqual([])
     expect(store.agreements).toBe('')
     expect(store.cognition).toBe('')
     expect(store.settings).toEqual(DEFAULT_SETTINGS)
-    expect(store.knowledgeMigrated).toBe(true)
     expect(store.lastFactoryResetAt).toBe(5000)
     expect(store.dotSessionId).toBeUndefined()
     expect([...tables.tasks.keys()]).toEqual([])
@@ -497,7 +462,74 @@ describe('factory reset of the store', () => {
     const reloaded = new DotStore(domain)
     expect(reloaded.settings).toEqual(DEFAULT_SETTINGS)
     expect(reloaded.lastFactoryResetAt).toBe(5000)
-    expect(reloaded.knowledgeMigrated).toBe(true)
     expect(reloaded.list()).toEqual([])
+  })
+
+})
+
+
+describe('task recipe storage', () => {
+  const recipeRow = {
+    id: 'rcp-abc123', name: 'Weekly', revision: 2, reason: 'v2', createdAt: 1, updatedAt: 2,
+    goal: 'write the weekly report',
+    requirements: [{ requirementRef: 'goal', text: 'write the weekly report', required: true }],
+    notes: 'be terse', dir: '/proj', preset: 'cordis', access: 'read' as const,
+    history: [{ goal: 'report', requirements: [], revision: 1, name: 'Weekly', reason: 'v1', at: 1 }],
+    outcomes: [{ changeId: 'c-1', title: 'Run', revision: 1, result: 'accepted' as const, failedRounds: 0, at: 2 }],
+  }
+
+  it('round-trips a recipe, resolves it by id or name, and deletes it', async () => {
+    const { domain, tables } = fakeDomain()
+    const store = new DotStore(domain)
+    await store.putRecipe(recipeRow)
+    expect([...tables.recipes.keys()]).toEqual(['rcp-abc123'])
+    const reloaded = new DotStore(domain)
+    expect(reloaded.recipe('rcp-abc123')).toMatchObject({ name: 'Weekly', revision: 2 })
+    expect(reloaded.recipe('weekly')).toMatchObject({ id: 'rcp-abc123' })
+    expect(reloaded.recipe('missing')).toBeUndefined()
+    expect(await reloaded.deleteRecipe('rcp-abc123')).toBe(true)
+    expect(reloaded.recipe('rcp-abc123')).toBeUndefined()
+    expect(new DotStore(domain).recipes).toEqual([])
+  })
+
+  it('round-trips outcome cost fields while legacy outcomes stay readable', () => {
+    const { domain } = fakeDomain({ recipes: { 'rcp-abc123': {
+      ...recipeRow,
+      outcomes: [
+        { changeId: 'c-1', title: 'Run', revision: 2, result: 'accepted', failedRounds: 0, tokens: 12_800, wallMs: 252_000, at: 2 },
+        { changeId: 'c-2', title: 'Old', revision: 2, result: 'cancelled', failedRounds: 1, at: 3 },
+      ],
+    } } })
+    const store = new DotStore(domain)
+    const outcomes = store.recipe('rcp-abc123')!.outcomes
+    expect(outcomes[0]).toMatchObject({ changeId: 'c-1', tokens: 12_800, wallMs: 252_000 })
+    expect(outcomes[1]).toMatchObject({ changeId: 'c-2', result: 'cancelled' })
+    expect(outcomes[1]).not.toHaveProperty('tokens')
+    expect(outcomes[1]).not.toHaveProperty('wallMs')
+  })
+
+  it('reads a malformed recipe row as absent', () => {
+    const { domain } = fakeDomain({ recipes: {
+      'rcp-bad': { id: 'rcp-bad', name: 5 },
+      'rcp-stray': { ...recipeRow, id: 'rcp-other' },
+      'rcp-abc123': recipeRow,
+    } })
+    const store = new DotStore(domain)
+    expect(store.recipes.map(row => row.id)).toEqual(['rcp-abc123'])
+  })
+
+  it('still loads a change row written before the recipe tag existed', () => {
+    const { domain } = fakeDomain({ changes: {
+      'c-1': {
+        id: 'c-1', title: 'Old', cwd: '/w', priority: 2, control: 'open', maxConcurrentRuns: 1,
+        currentRevision: 1, currentInputRef: 'input-1', steps: [], createdAt: 1, updatedAt: 1,
+      },
+    }, inputs: {
+      'input-1': { id: 'input-1', changeId: 'c-1', revision: 1, goal: 'g', requirements: [], steps: [], source: 'create', createdAt: 1 },
+    } })
+    const store = new DotStore(domain)
+    const change = store.work.change('c-1')
+    expect(change).toMatchObject({ id: 'c-1', title: 'Old' })
+    expect(change?.recipe).toBeUndefined()
   })
 })

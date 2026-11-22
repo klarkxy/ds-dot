@@ -6,8 +6,7 @@ const APPROVAL_NOTICE = (id: string, cmd = 'gh run view --log') => [
   '[dot notice] Updates from other sessions:',
   `- approval · session-f922364c-9f84-4ca4-af18-38f650070997: ${id} · approval from untracked session in H:\\Code\\dsh-plugins · "pwsh"`,
   `  detail: arguments: {"command":"${cmd}"}`,
-  '  Decide it yourself with dot_answer: approve silently (no chat reply) when the action fits the session\'s goal, stays inside its project, and can be undone.',
-  'Report what matters to the human, handle waiting requests by your rules, and stay silent about routine progress.',
+  '  human-required: remote-exec; do not use dot_answer.',
 ].join('\n')
 
 describe('filterVisibleChat', () => {
@@ -26,13 +25,17 @@ describe('filterVisibleChat', () => {
     const move: ChatItem = { ...read, key: 'm', args: { action: 'move' } }
     expect(filterVisibleChat([notice, move]).items.map(row => row.key)).toEqual(['n', 'm'])
   })
-  it('hides any ending text on a pure idle query, and keeps a question card', () => {
+  it('hides a silent pure idle query, shows its reply text, and keeps a question card', () => {
     const notice: ChatItem = { kind: 'notice', key: 'n', text: '[dot notice] Updates:\nTasks:\n- idle-check · dot: Routine check: t-1 ready', at: 1, turn: 1 }
     const note: ChatItem = { kind: 'bot', key: 'b', text: '本次为后台例行检查，无新情况，未打扰用户。', at: 2, turn: 1 }
     const read: ChatItem = { kind: 'tool', key: 'r', name: 'dot_task', args: { action: 'list' }, status: 'done', at: 3, turn: 1 }
-    expect(filterVisibleChat([notice, read, note]).items).toEqual([])
+    expect(filterVisibleChat([notice, read]).items).toEqual([])
+    // Plain-text replies are first-class now: once Dorothy writes one, the turn
+    // stays visible like a card would.
+    expect(filterVisibleChat([notice, read, note]).items.map(item => item.key)).toEqual(['n', 'r', 'b'])
     const card: ChatItem = { kind: 'view', key: 'v', presentation: { viewId: 'ask' }, at: 4, turn: 1 }
-    expect(filterVisibleChat([notice, card, note]).items.map(item => item.key)).toEqual(['n', 'v'])
+    // A card beside text no longer swallows the text; the whole block stays visible.
+    expect(filterVisibleChat([notice, card, note]).items.map(item => item.key)).toEqual(['n', 'v', 'b'])
   })
   it('does not hide an idle check mixed with a person or another notice', () => {
     const idle: ChatItem = { kind: 'notice', key: 'n', text: '[dot notice] Updates:\nTasks:\n- idle-check · dot: Routine check: t-1 ready', at: 1, turn: 1 }
@@ -57,10 +60,14 @@ describe('filterVisibleChat', () => {
     expect(filterVisibleChat([notice, added, note]).items.map(item => item.key)).toEqual(['n', 'a', 'b'])
     expect(filterVisibleChat([notice, removed, note]).items.map(item => item.key)).toEqual(['n', 'd', 'b'])
     expect(filterVisibleChat([notice, unknown, note]).items.map(item => item.key)).toEqual(['n', 'u', 'b'])
-    expect(filterVisibleChat([notice, listed, note]).items).toEqual([])
+    expect(filterVisibleChat([notice, listed]).items).toEqual([])
+    expect(filterVisibleChat([notice, listed, { ...note, text: ' ' }]).items).toEqual([])
+    expect(filterVisibleChat([notice, listed, note]).items.map(item => item.key)).toEqual(['n', 'l', 'b'])
     expect(filterVisibleChat([notice, created, note]).items.map(item => item.key)).toEqual(['n', 'c', 'b'])
-    expect(filterVisibleChat([notice, inspected, note]).items).toEqual([])
-    expect(filterVisibleChat([notice, files, note]).items).toEqual([])
+    expect(filterVisibleChat([notice, inspected]).items).toEqual([])
+    expect(filterVisibleChat([notice, inspected, note]).items.map(item => item.key)).toEqual(['n', 'i', 'b'])
+    expect(filterVisibleChat([notice, files]).items).toEqual([])
+    expect(filterVisibleChat([notice, files, note]).items.map(item => item.key)).toEqual(['n', 'f', 'b'])
     expect(filterVisibleChat([notice, moved, note]).items.map(item => item.key)).toEqual(['n', 'm', 'b'])
     expect(filterVisibleChat([notice, noted, note]).items.map(item => item.key)).toEqual(['n', 't', 'b'])
   })
@@ -85,7 +92,7 @@ describe('filterVisibleChat', () => {
     expect(filterVisibleChat([notice, answer({ id: 'ap-1', allow: true }), note('已批准该操作。')]).items.map(item => item.key)).toEqual(['n', 'a', 'b'])
     expect(filterVisibleChat([notice, answer({ id: 'q-1', answers: [{ id: 'q', selected: ['a'] }] }), note('已提交答案。')]).items.map(item => item.key)).toEqual(['n', 'a', 'b'])
   })
-  it('uses turn boundaries for card suppression and keeps human no-card fallback', () => {
+  it('keeps text beside a card within the same turn and drops only failed cards', () => {
     const items: ChatItem[] = [
       { kind: 'user', key: 'u1', text: 'hello', at: 1, turn: 1, trigger: 'human' },
       { kind: 'bot', key: 'b1', text: 'preface', at: 2, turn: 1, trigger: 'human' },
@@ -97,7 +104,7 @@ describe('filterVisibleChat', () => {
       { kind: 'view', key: 'bad', failed: true, at: 8, turn: 3, trigger: 'human' },
       { kind: 'bot', key: 'fallback', text: 'plain reply', at: 9, turn: 3, trigger: 'human' },
     ]
-    expect(filterVisibleChat(items).items.map(item => item.key)).toEqual(['u1', 'v1', 'n2', 'b3', 'u3', 'fallback'])
+    expect(filterVisibleChat(items).items.map(item => item.key)).toEqual(['u1', 'b1', 'v1', 'b2', 'n2', 'b3', 'u3', 'fallback'])
   })
   it('hides requests already answered in their own session and routine silent settlements', () => {
     const items: ChatItem[] = [
@@ -145,7 +152,7 @@ describe('filterVisibleChat', () => {
       { kind: 'bot', key: 'b1', text: '这条命令会推送代码到远端，请确认是否放行：', at: 3 },
       { kind: 'view', key: 'v1', title: '确认推送', view: { type: 'confirm', id: 'ok' }, presentation: { viewId: 'view-1' }, at: 4 },
     ]
-    expect(filterVisibleChat(withCard).items.map(item => item.key)).toEqual(['n1', 't1', 'v1'])
+    expect(filterVisibleChat(withCard).items.map(item => item.key)).toEqual(['n1', 't1', 'b1', 'v1'])
   })
 
   it('preserves rejections explained to the human and strips silent requests from mixed task-update notices', () => {
@@ -160,7 +167,6 @@ describe('filterVisibleChat', () => {
       '[dot notice] Updates from other sessions:',
       '- turn-end · session-task-1: "修复链接" finished a turn: 修好了 3 处失效链接',
       '- approval · session-f922364c-9f84-4ca4-af18-38f650070997: ap-27 · approval from untracked session in H:\\Code\\dsh-plugins · "pwsh"',
-      'Report what matters to the human, handle waiting requests by your rules, and stay silent about routine progress.',
     ].join('\n')
     const mixed: ChatItem[] = [
       { kind: 'notice', key: 'nm', text: mixedNotice, at: 10 },
@@ -190,5 +196,26 @@ describe('filterVisibleChat', () => {
       expect(res.items.map(item => item.key)).toEqual(['n1', 'w1'])
       expect(res.silentTail).toBe(true)
     }
+  })
+
+  it('keeps committed bot replies visible during running turns, also while a card is being prepared', () => {
+    const stepItems: ChatItem[] = [
+      { kind: 'user', key: 'u1', text: 'check status', at: 1, turn: 1, trigger: 'human' },
+      { kind: 'bot', key: 'b1', text: '我先查一下当前会话状态。', at: 2, turn: 1, trigger: 'human' },
+      { kind: 'tool', key: 't1', name: 'dot_overview', status: 'running', at: 3, turn: 1, trigger: 'human' },
+    ]
+    // A card beside text no longer swallows the text; preparingCard only steers
+    // the live streaming overlay in the panel, not the committed item list.
+    expect(filterVisibleChat(stepItems, { running: true, preparingCard: false }).items.map(i => i.key)).toEqual(['u1', 'b1', 't1'])
+    expect(filterVisibleChat(stepItems, { running: true, preparingCard: true }).items.map(i => i.key)).toEqual(['u1', 'b1', 't1'])
+  })
+
+  it('shows bot text next to a card in the same reply', () => {
+    const items: ChatItem[] = [
+      { kind: 'user', key: 'u1', text: 'summary?', at: 1, turn: 1, trigger: 'human' },
+      { kind: 'bot', key: 'b1', text: 'Here is the rundown.', at: 2, turn: 1, trigger: 'human' },
+      { kind: 'view', key: 'v1', presentation: { viewId: 'view-1' }, at: 3, turn: 1 },
+    ]
+    expect(filterVisibleChat(items).items.map(i => i.key)).toEqual(['u1', 'b1', 'v1'])
   })
 })

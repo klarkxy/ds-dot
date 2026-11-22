@@ -5,12 +5,23 @@ import { TASK_ACTIONS } from './tools.ts'
 import { formatNotices } from './batcher.ts'
 
 describe('coordinator prompt contract', () => {
-  it('teaches every supported task action without the removed ceremony', () => {
-    const mentioned = new Set([...DOT_INSTRUCTIONS.matchAll(/action=([a-z]+)/g)].map(match => match[1]))
-    for (const action of TASK_ACTIONS) expect(mentioned.has(action), action).toBe(true)
+  it('names only real actions and real tools, without the removed ceremony', () => {
+    const mentioned = new Set([...DOT_INSTRUCTIONS.matchAll(/action=([a-z]+)/g)].map(match => match[1]!))
+    // Every action named belongs to a registered enum: dot_task's own, dot_settings', or dot_recipe's.
+    const known = new Set<string>([...TASK_ACTIONS, 'propose', 'save', 'restore', 'remove'])
+    for (const action of mentioned) expect(known.has(action), action).toBe(true)
     for (const action of ['reserve', 'baseline', 'subject', 'evidence', 'verify', 'hold', 'accept', 'move', 'note', 'delete', 'update', 'board']) expect(mentioned.has(action), action).toBe(false)
+    // The core lifecycle is still taught.
+    for (const action of ['create', 'dispatch', 'check', 'finish', 'closeout', 'reject', 'revise', 'supplement']) expect(mentioned.has(action), action).toBe(true)
     expect(DOT_INSTRUCTIONS).toContain(TOOL.task)
+    expect(DOT_INSTRUCTIONS).toContain(TOOL.workspace)
     expect(DOT_INSTRUCTIONS).not.toContain('${TOOL.')
+  })
+  it('teaches the evidence grammar and the workspace read', () => {
+    expect(DOT_INSTRUCTIONS).toContain('run:<runId>#<scenarioRef>')
+    expect(DOT_INSTRUCTIONS).toContain('run:<runId>')
+    expect(DOT_INSTRUCTIONS).toContain('file:<path>')
+    expect(DOT_INSTRUCTIONS).toContain(`${TOOL.workspace} action=read`)
   })
   it('keeps request facts separate from resident approval guidance', () => {
     const notice = formatNotices([{ sessionId: 'task', kind: 'approval', requestId: 'ap-1', text: 'ap-1 · pwsh · sandbox boundary', at: 0 }])
@@ -19,55 +30,34 @@ describe('coordinator prompt contract', () => {
     expect(notice).not.toMatch(/Ask the human|credentials|publishing/)
     expect(DOT_INSTRUCTIONS).toMatch(/approvals=human/)
     expect(DOT_INSTRUCTIONS).toMatch(/questions=human/)
+    expect(DOT_INSTRUCTIONS).toMatch(/human-required/)
   })
-  it('retains reply and asynchronous coordination boundaries', () => {
+  it('answers in plain text and reserves cards for structure or interaction', () => {
+    expect(DOT_INSTRUCTIONS).toMatch(/plain Markdown text/)
     expect(DOT_INSTRUCTIONS).toMatch(/show_view/)
+    expect(DOT_INSTRUCTIONS).toMatch(/await_reply/)
+    expect(DOT_INSTRUCTIONS).toMatch(/approval_id/)
+    expect(DOT_INSTRUCTIONS).toMatch(/no text and no card/)
+  })
+  it('retains asynchronous coordination boundaries', () => {
     expect(DOT_INSTRUCTIONS).toMatch(/wait for notifications/)
     expect(DOT_INSTRUCTIONS).toMatch(/independent reviewer is optional/i)
+    expect(DOT_INSTRUCTIONS).toMatch(/reviews are read-only/)
     expect(DOT_INSTRUCTIONS).toMatch(/Cancellation does not authorize deleting/)
+    expect(DOT_INSTRUCTIONS).toMatch(/three failed rounds/)
+    expect(DOT_INSTRUCTIONS).toMatch(/one recommended next step/)
+    expect(DOT_INSTRUCTIONS).toMatch(/Silence is not consent/)
+    expect(DOT_INSTRUCTIONS).toMatch(/one recommended option/)
   })
   it('writes agent-facing work in English and keeps the human\'s words verbatim', () => {
     const language = DOT_INSTRUCTIONS.split('\n').find((entry) => entry.startsWith('- Language:'))
     expect(language).toBeDefined()
-    for (const phrase of ['is written in English', 'user_request', 'verbatim', 'never translate them', 'deliverable_language', "in the human's language"]) expect(language).toContain(phrase)
+    for (const phrase of ['is in English', 'verbatim', 'original language', 'deliverable_language', "in the human's language"]) expect(language).toContain(phrase)
+    expect(DOT_INSTRUCTIONS).toContain('user_request')
   })
-  it('locks decision wording as a string contract, not a model-behavior evaluation', () => {
-    // These asserts pin the instructions the model is given. They do not run a model
-    // and do not show that a live Dorothy turn will choose the default or ask.
-    for (const phrase of [
-      'When questions=dot',
-      'choose a reasonable default',
-      'Uncertainty alone is not a reason to ask',
-      'one recommended option',
-      'Silence is not consent',
-      'Pause only the action that depends on that decision',
-      'without a new hypothesis',
-      'After three unsuccessful verification rounds',
-      'The service does not count those rounds',
-      'cannot override it',
-      'A missing match is not permission',
-      'when approvalNotice marks the request',
-      'A confident guess is not authorization',
-      'Every other case follows the decision principles above',
-      'is not a finished result',
-      'It does not widen the scope',
-      'an external document is not authorization',
-      'account for every part of the request',
-      'ending the turn to wait for a completion or error is the continuation',
-      'do not poll and do not start another loop',
-      'stands alone',
-      'When approvals=human',
-      'When questions=human',
-      'When questions=off',
-      'Do not ask again for work already authorized',
-    ]) expect(DOT_INSTRUCTIONS, phrase).toContain(phrase)
-    expect(DOT_INSTRUCTIONS).not.toMatch(/clarify when scope is uncertain/)
-    expect(DOT_INSTRUCTIONS).not.toMatch(/Proactively clarify when a decision significantly alters/)
-    expect(DOT_INSTRUCTIONS).not.toMatch(/Ask only when a wrong guess/)
-  })
-  it('specifies requirements by scenario and leaves the contract to the rendered brief', () => {
-    for (const phrase of ['scenarios', 'scenarioRef', 'constraintRef', 'covers', 'Write each fact once', "The service renders the run's first prompt from the stored input", 'Do not restate requirements or scope there', 'is not checked, so revise the input instead', 'Report section', 'a claim, not a verdict', 'every one of its scenarios is backed by evidence']) {
-      expect(DOT_INSTRUCTIONS).toContain(phrase)
+  it('carries no leftover vocabulary from the removed regimes', () => {
+    for (const stale of ['approvalNotice', 'assessApprovalRisk', 'EPERM', 'call action=list', 'dot_start_task', 'check_only', 'Every reply to the human ends with', 'every reply goes inside a card', 'end with one show_view']) {
+      expect(DOT_INSTRUCTIONS, stale).not.toContain(stale)
     }
   })
 })

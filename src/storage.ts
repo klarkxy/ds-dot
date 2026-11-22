@@ -7,9 +7,10 @@
 import { defineDomain, domainTable } from '@deepseek-ai/dsh-storage-domain'
 import { z } from 'zod'
 import type { ViewNode } from '@klarkxy/dsh-deep-view/contracts'
-import { SETTING_FIELDS, type CognitionVersion, type DotContextUsage, type DotUsageOffset, type ReflectionRun, type ScheduleRecord, type SettingProposal, type TaskRecord, type Ticket } from './contracts.ts'
+import { SETTING_FIELDS, type CognitionVersion, type DotContextUsage, type DotUsageOffset, type InboxRecord, type RecipeProposal, type RecipeRecord, type TaskLink, type ReflectionRun, type ScheduleRecord, type SettingProposal, type TaskRecord } from './contracts.ts'
+import type { UpdateStatus } from './auto-update.ts'
 import type { PastSegment, Segment } from './segments.ts'
-import { changeSchema, inputSchema, runSchema, storedVerificationSchema } from './work.ts'
+import { changeSchema, constraintSchema, inputSchema, requirementSchema, runSchema, storedVerificationSchema } from './work.ts'
 
 export const STATE_KEY = 'current'
 
@@ -18,10 +19,10 @@ type StoredTaskRecord = Omit<TaskRecord, 'createdAt' | 'updatedAt'> & {
   readonly updatedAt?: number
 }
 
-const taskSchema = z.object({
+// The earliest task rows predate the ledger timestamps; unknown keys of older
+// rows are stripped on read.
+const storedTaskSchema = z.object({
   sessionId: z.string().min(1),
-  ticketId: z.string().optional(),
-  role: z.enum(['work', 'rework', 'review']).optional(),
   origin: z.enum(['started', 'watched']),
   title: z.string(),
   goal: z.string(),
@@ -29,48 +30,25 @@ const taskSchema = z.object({
   workspaceId: z.string().optional(),
   preset: z.string().optional(),
   status: z.enum(['running', 'idle', 'blocked', 'error', 'archived']),
-  createdAt: z.number(),
-  updatedAt: z.number(),
-  lastNote: z.string().optional(),
-  unseenTurns: z.number().int().nonnegative(),
-}).strict()
-
-// The earliest task rows predate the ledger timestamps. Startup restores the
-// two missing values from the session log; other invalid rows still fail open.
-const storedTaskSchema = taskSchema.extend({
   createdAt: z.number().optional(),
   updatedAt: z.number().optional(),
+  lastNote: z.string().optional(),
+  unseenTurns: z.number().int().nonnegative(),
 })
 
-const ticketStatusSchema = z.enum(['draft', 'todo', 'active', 'review', 'done', 'cancelled'])
-const ticketRoleSchema = z.enum(['work', 'rework', 'review'])
-const ticketSchema = z.object({
-  id: z.string().min(1), title: z.string().max(80), goal: z.string().max(600),
-  deliverable: z.string().max(400).optional(), acceptance: z.string().max(1200).optional(),
-  access: z.enum(['read', 'write']), dir: z.string(), workspaceId: z.string().optional(),
-  status: ticketStatusSchema, priority: z.union([z.literal(1), z.literal(2), z.literal(3)]), humanReview: z.boolean().optional(),
-  sessions: z.array(z.object({ sessionId: z.string(), role: ticketRoleSchema, at: z.number() }).strict()).max(20),
-  rounds: z.array(z.object({ n: z.number(), at: z.number(), sessionId: z.string().optional(), role: ticketRoleSchema, summary: z.string().max(600), verdict: z.enum(['pass', 'fail']).optional() }).strict()).max(20),
-  history: z.array(z.object({ at: z.number(), from: ticketStatusSchema.optional(), to: ticketStatusSchema, by: z.enum(['dot', 'human']), reason: z.string().max(600) }).strict()).max(50),
-  createdAt: z.number(), updatedAt: z.number(),
-}).strict()
-
-const reasonSchema = z.enum(['context-full', 'idle-expired', 'model-switch', 'prompt-changed', 'lost', 'manual', 'dot-requested'])
+const reasonSchema = z.enum(['context-full', 'idle-expired', 'model-switch', 'prompt-changed', 'capabilities-changed', 'lost', 'manual', 'dot-requested'])
 
 const handoffSchema = z.object({
   tier: z.enum(['verbatim', 'summary', 'tail']),
   summary: z.string().optional(),
-  rows: z.array(z.object({ role: z.enum(['human', 'notice', 'dot']), text: z.string(), at: z.number() }).strict()),
-}).strict()
+  rows: z.array(z.object({ role: z.enum(['human', 'notice', 'dot']), text: z.string(), at: z.number() })),
+})
 
 const segmentSchema = z.object({
   sessionId: z.string().min(1),
   startedAt: z.number(),
   persona: z.string(),
   model: z.string().optional(),
-  /** Legacy notes block frozen before the split into agreements and cognition. */
-  memory: z.string().optional(),
-  memorySeen: z.string().optional(),
   /** Agreements block of the system prompt as it read when the segment started; absent while there are none. */
   agreements: z.string().optional(),
   /** Agreements block as this segment's conversation last accounted for it (dot's own change). */
@@ -80,22 +58,23 @@ const segmentSchema = z.object({
   /** Cognition block as this segment's conversation last accounted for it. */
   cognitionSeen: z.string().optional(),
   opening: z.string().optional(),
-  openCard: z.string().optional(),
   handoff: handoffSchema.optional(),
   reason: reasonSchema.optional(),
-}).strict()
+  /** Extra-capability grant signature as it read when the segment started; old rows predating the field open without it. */
+  capabilities: z.string().optional(),
+})
 
 const pastSegmentSchema = z.object({
   sessionId: z.string().min(1),
   startedAt: z.number(),
   endedAt: z.number(),
   reason: reasonSchema.optional(),
-}).strict()
+})
 
 const timingSchema = z.discriminatedUnion('kind', [
-  z.object({ kind: z.literal('once'), at: z.number() }).strict(),
-  z.object({ kind: z.literal('every'), minutes: z.number().int().positive(), anchor: z.number() }).strict(),
-  z.object({ kind: z.literal('daily'), time: z.string().regex(/^\d{2}:\d{2}$/), weekdays: z.array(z.number().int().min(1).max(7)).optional() }).strict(),
+  z.object({ kind: z.literal('once'), at: z.number() }),
+  z.object({ kind: z.literal('every'), minutes: z.number().int().positive(), anchor: z.number() }),
+  z.object({ kind: z.literal('daily'), time: z.string().regex(/^\d{2}:\d{2}$/), weekdays: z.array(z.number().int().min(1).max(7)).optional() }),
 ])
 
 const scheduleSchema = z.object({
@@ -107,45 +86,57 @@ const scheduleSchema = z.object({
   nextAt: z.number(),
   lastFiredAt: z.number().optional(),
   deliveredAt: z.number().optional(),
-}).strict()
+  recipe: z.string().min(1).optional(),
+})
 
 const usageSchema = z.object({
   input: z.number().nonnegative(),
   cacheRead: z.number().nonnegative(),
   cacheWrite: z.number().nonnegative(),
   output: z.number().nonnegative(),
-}).strict()
+})
 
 const usageOffsetSchema = usageSchema.extend({
   sessionId: z.string().min(1),
-}).strict()
+})
 
 const cognitionVersionSchema = z.object({
   text: z.string(),
   at: z.number(),
-}).strict()
+})
 
 const reflectionRunSchema = z.object({
   sessionId: z.string().min(1),
   startedAt: z.number(),
   endedAt: z.number().optional(),
   ok: z.boolean(),
-}).strict()
+})
 
 const cardSchema = z.object({
   id: z.string(), number: z.number().int().positive(), sessionId: z.string(), callId: z.string(),
   title: z.string(), view: z.custom<ViewNode>(), expired: z.boolean(), approvalId: z.string().optional(),
-  approvalDetail: z.object({ requestId: z.string(), sessionId: z.string(), callerSessionId: z.string().optional(), callId: z.string().optional(), toolName: z.string(), reason: z.string().optional(), arguments: z.string().optional() }).strict().optional(),
+  approvalDetail: z.object({ requestId: z.string(), sessionId: z.string(), callerSessionId: z.string().optional(), callId: z.string().optional(), toolName: z.string(), reason: z.string().optional(), arguments: z.string().optional() }).optional(),
   notificationPending: z.boolean().optional(),
   answer: z.object({ id: z.string(), action: z.string(), values: z.record(z.string(), z.unknown()) }).optional(),
-}).strict()
+  keepAlive: z.literal(true).optional(),
+})
+
+const updateStatusSchema = z.object({
+  lastCheckAt: z.number().optional(),
+  lastResult: z.object({
+    kind: z.enum(['updated', 'up-to-date', 'not-updatable', 'unavailable', 'restart-required', 'failed']),
+    at: z.number(),
+    from: z.string().optional(),
+    to: z.string().optional(),
+    message: z.string().optional(),
+  }).optional(),
+  pending: z.object({ from: z.string().min(1), to: z.string().min(1), at: z.number() }).optional(),
+})
 
 const stateSchema = z.object({
-  ticketSequence: z.number().int().nonnegative().optional(),
-  ticketsMigrated: z.string().optional(),
   cardSequence: z.number().int().nonnegative().optional(),
   cards: z.array(cardSchema).optional(),
-  approvalDetails: z.array(z.object({ requestId: z.string(), sessionId: z.string(), callerSessionId: z.string().optional(), callId: z.string().optional(), toolName: z.string(), reason: z.string().optional(), arguments: z.string().optional() }).strict()).optional(),
+  approvalDetails: z.array(z.object({ requestId: z.string(), sessionId: z.string(), callerSessionId: z.string().optional(), callId: z.string().optional(), toolName: z.string(), reason: z.string().optional(), arguments: z.string().optional() })).optional(),
   lastReplyAt: z.number().optional(),
   lastConversationAt: z.number().optional(),
   dotSessionId: z.string().optional(),
@@ -153,10 +144,6 @@ const stateSchema = z.object({
   settings: z.record(z.string(), z.unknown()).optional(),
   segment: segmentSchema.optional(),
   pastSegments: z.array(pastSegmentSchema).optional(),
-  /** Legacy notes captured in old state rows; read only by the one-time migration. */
-  memory: z.string().optional(),
-  /** Legacy note undo snapshot; the migration preserves it as cognition history. */
-  memoryUndo: z.string().optional(),
   /** The human's own standing requirements, verbatim. */
   agreements: z.string().optional(),
   /** What one undo of the agreements restores. */
@@ -165,8 +152,6 @@ const stateSchema = z.object({
   cognition: z.string().optional(),
   /** Earlier cognition texts, newest first; used for rollback. */
   cognitionHistory: z.array(cognitionVersionSchema).optional(),
-  /** Marker once the legacy notes have been imported; cleared content is never re-imported after it. */
-  knowledgeMigrated: z.string().optional(),
   /** When dot's last successful background reflection finished. */
   lastReflectedAt: z.number().optional(),
   /** When the last background reflection attempt started; drives the failure cooldown. */
@@ -181,30 +166,25 @@ const stateSchema = z.object({
   usageOffset: usageOffsetSchema.optional(),
   /** When the human last restored factory settings. Survives the wipe as the audit. */
   lastFactoryResetAt: z.number().optional(),
-}).strict()
+  update: updateStatusSchema.optional(),
+})
 
 const proposalValueSchema = z.union([z.string(), z.number(), z.boolean(), z.null(), z.record(z.string(), z.unknown()), z.array(z.unknown())])
 
 /**
- * Fields a stored proposal may name. `policy` was a setting before the
- * agreements took its place; old rows still have to open, so the name stays
- * readable, but it is no longer in SETTING_FIELDS and can never be proposed
- * again. Deciding such a row is refused as an unknown setting.
+ * A stored proposal may name any field; rows naming a retired or unknown field
+ * are dropped on load instead of reaching the human.
  */
-const PROPOSAL_FIELDS = [...SETTING_FIELDS, 'policy'] as const
-
 const proposalSchema = z.object({
   id: z.string().min(1),
-  field: z.enum(PROPOSAL_FIELDS),
+  field: z.string().min(1),
   before: proposalValueSchema,
   after: proposalValueSchema,
   reason: z.string().min(1).max(2000),
   createdAt: z.number(),
-}).strict()
+})
 
 export interface DotState {
-  readonly ticketSequence?: number
-  readonly ticketsMigrated?: string
   readonly cardSequence?: number
   readonly cards?: readonly import('./card-state.ts').DotCardRecord[]
   readonly approvalDetails?: readonly import('./contracts.ts').ApprovalDetail[]
@@ -218,10 +198,6 @@ export interface DotState {
   readonly segment?: Segment
   /** Ended segments, oldest first. */
   readonly pastSegments?: readonly PastSegment[]
-  /** Legacy notes captured in old state rows; read only by the one-time migration. */
-  readonly memory?: string
-  /** Legacy note undo snapshot; the migration preserves it as cognition history. */
-  readonly memoryUndo?: string
   /** The human's own standing requirements, verbatim. */
   readonly agreements?: string
   /** What one undo of the agreements restores. */
@@ -230,8 +206,6 @@ export interface DotState {
   readonly cognition?: string
   /** Earlier cognition texts, newest first. */
   readonly cognitionHistory?: readonly CognitionVersion[]
-  /** Marker once the legacy notes have been imported; cleared content is never re-imported after it. */
-  readonly knowledgeMigrated?: string
   /** When dot's last successful background reflection finished. */
   readonly lastReflectedAt?: number
   /** When the last background reflection attempt started; drives the failure cooldown. */
@@ -248,11 +222,14 @@ export interface DotState {
   readonly usageOffset?: DotUsageOffset
   /** When the human last restored factory settings. */
   readonly lastFactoryResetAt?: number
+  /** Self-update bookkeeping: last check, its outcome, an apply still in flight. */
+  readonly update?: UpdateStatus
 }
 
 export function parseSettingProposal(value: unknown): SettingProposal | undefined {
   const parsed = proposalSchema.safeParse(value)
-  return parsed.success ? parsed.data as SettingProposal : undefined
+  if (!parsed.success || !(SETTING_FIELDS as readonly string[]).includes(parsed.data.field)) return undefined
+  return parsed.data as SettingProposal
 }
 
 export const peerDeliverySchema = z.object({
@@ -262,7 +239,7 @@ export const peerDeliverySchema = z.object({
   text: z.string(),
   status: z.enum(['intent', 'accepted', 'unknown']),
   updatedAt: z.number(),
-}).strict()
+})
 
 export type PeerDelivery = z.infer<typeof peerDeliverySchema>
 
@@ -271,50 +248,146 @@ export function parsePeerDelivery(value: unknown): PeerDelivery | undefined {
   return parsed.success ? parsed.data : undefined
 }
 
+const inboxRecordSchema = z.object({
+  id: z.string().min(1),
+  source: z.string().min(1),
+  sourceId: z.string().min(1),
+  deliveryId: z.string().min(1),
+  deliveryIds: z.array(z.string().min(1)),
+  type: z.string().min(1),
+  subject: z.string(),
+  title: z.string(),
+  actor: z.string().optional(),
+  url: z.string().optional(),
+  summary: z.string(),
+  count: z.number().int().positive(),
+  status: z.enum(['pending', 'delivered']),
+  receivedAt: z.number(),
+  headRef: z.string().optional(),
+  headRepo: z.string().optional(),
+  updatedAt: z.number(),
+  deliveredAt: z.number().optional(),
+})
+
+export function parseInboxRecord(value: unknown): InboxRecord | undefined {
+  const parsed = inboxRecordSchema.safeParse(value)
+  return parsed.success ? parsed.data as InboxRecord : undefined
+}
+
+const recipeBodyFields = {
+  goal: z.string(),
+  requirements: z.array(requirementSchema),
+  requirementsFromGoal: z.boolean().optional(),
+  constraints: z.array(constraintSchema).optional(),
+  notes: z.string().optional(),
+  deliverableLanguage: z.string().optional(),
+  dir: z.string().optional(),
+  preset: z.string().optional(),
+  model: z.string().optional(),
+  access: z.enum(['read', 'write']).optional(),
+  humanReview: z.boolean().optional(),
+  isolation: z.literal('worktree').optional(),
+}
+
+const linkEventSchema = z.object({
+  type: z.string(),
+  title: z.string(),
+  summary: z.string(),
+  url: z.string().optional(),
+  at: z.number(),
+  count: z.number().int().positive(),
+})
+
+const taskLinkSchema = z.object({
+  id: z.string().min(1),
+  changeId: z.string().min(1),
+  repo: z.string().min(1),
+  number: z.number().int().positive().optional(),
+  branch: z.string().optional(),
+  headRepo: z.string().optional(),
+  url: z.string().optional(),
+  origin: z.enum(['dot', 'auto']),
+  state: z.enum(['open', 'closed', 'merged']),
+  addedAt: z.number(),
+  lastEvent: linkEventSchema.optional(),
+})
+
+/** A malformed link reads as absent. */
+export function parseTaskLink(value: unknown): TaskLink | undefined {
+  const parsed = taskLinkSchema.safeParse(value)
+  return parsed.success ? parsed.data as TaskLink : undefined
+}
+
+const recipeSchema = z.object({
+  ...recipeBodyFields,
+  id: z.string().min(1),
+  name: z.string().min(1),
+  revision: z.number().int().positive(),
+  reason: z.string().optional(),
+  history: z.array(z.object({ ...recipeBodyFields, revision: z.number().int().positive(), name: z.string(), reason: z.string().optional(), at: z.number() })),
+  outcomes: z.array(z.object({
+    changeId: z.string().min(1), title: z.string(), revision: z.number().int(),
+    result: z.enum(['accepted', 'cancelled']), failedRounds: z.number().int().nonnegative(),
+    tokens: z.number().optional(), wallMs: z.number().optional(), at: z.number(),
+  })),
+  createdAt: z.number(),
+  updatedAt: z.number(),
+})
+
+/** A malformed recipe reads as absent. */
+export function parseRecipeRecord(value: unknown): RecipeRecord | undefined {
+  const parsed = recipeSchema.safeParse(value)
+  return parsed.success ? parsed.data as RecipeRecord : undefined
+}
+
+const recipeProposalSchema = z.object({
+  id: z.string().min(1),
+  recipeId: z.string().min(1),
+  baseRevision: z.number().int().positive(),
+  kind: z.enum(['restore', 'revise']),
+  targetRevision: z.number().int().positive().optional(),
+  patch: z.object({
+    goal: z.string().optional(),
+    requirements: z.array(requirementSchema).optional(),
+    constraints: z.array(constraintSchema).optional(),
+    notes: z.string().optional(),
+  }).optional(),
+  reason: z.string(),
+  origin: z.enum(['detector', 'reflection']),
+  regression: z.enum(['acceptance', 'rework', 'cost']).optional(),
+  status: z.enum(['pending', 'approved', 'dismissed', 'stale']),
+  createdAt: z.number(),
+  decidedAt: z.number().optional(),
+})
+
+/** A malformed proposal reads as absent. */
+export function parseRecipeProposal(value: unknown): RecipeProposal | undefined {
+  const parsed = recipeProposalSchema.safeParse(value)
+  return parsed.success ? parsed.data as RecipeProposal : undefined
+}
+
 export const dotDomain = defineDomain({
   name: 'klarkxy_dsh_dot',
-  // v6 adds peer-delivery rows and still reads v1–v5 rows.
-  version: 6,
-  compatibleVersions: [1, 2, 3, 4, 5],
+  // v9 adds task links; v10 adds recipe proposals. Older rows still open: read
+  // schemas strip keys they no longer declare and dropped tables are never read.
+  version: 10,
+  compatibleVersions: [1, 2, 3, 4, 5, 6, 7, 8, 9],
   tables: {
     state: domainTable<string, DotState>(stateSchema),
     tasks: domainTable<string, StoredTaskRecord>(storedTaskSchema),
-    tickets: domainTable<string, Ticket>(ticketSchema),
     schedules: domainTable<string, ScheduleRecord>(scheduleSchema),
-    proposals: domainTable<string, SettingProposal>(proposalSchema),
+    proposals: domainTable<string, unknown>(proposalSchema),
     changes: domainTable(changeSchema),
     inputs: domainTable(inputSchema),
     runs: domainTable(runSchema),
     verifications: domainTable(storedVerificationSchema),
     peers: domainTable<string, PeerDelivery>(peerDeliverySchema),
+    inbox: domainTable<string, InboxRecord>(inboxRecordSchema),
+    recipes: domainTable<string, RecipeRecord>(recipeSchema),
+    links: domainTable<string, TaskLink>(taskLinkSchema),
+    recipe_proposals: domainTable<string, RecipeProposal>(recipeProposalSchema),
   },
 })
-
-export async function restoreTaskTimestamps(
-  domain: { table(name: 'tasks'): { entries(): IterableIterator<[unknown, unknown]>; put(key: string, value: unknown): Promise<void> } },
-  readTimes: (sessionId: string) => Promise<readonly number[]>,
-  log: (message: string) => void = () => {},
-): Promise<void> {
-  for (const [key, value] of domain.table('tasks').entries()) {
-    const stored = storedTaskSchema.safeParse(value)
-    if (!stored.success || stored.data.sessionId !== key || (stored.data.createdAt !== undefined && stored.data.updatedAt !== undefined)) continue
-    try {
-      const times = (await readTimes(key)).filter(time => Number.isFinite(time) && time >= 0)
-      const createdAt = stored.data.createdAt ?? times[0]
-      const updatedAt = stored.data.updatedAt ?? times.at(-1)
-      if (createdAt === undefined || updatedAt === undefined) continue
-      await domain.table('tasks').put(key, taskSchema.parse({ ...stored.data, createdAt, updatedAt }))
-    } catch (error) {
-      // A lost session may be retried later; it must not block other tasks.
-      log(`dsh-dot: task timestamp migration for ${key} failed: ${error instanceof Error ? error.message : String(error)}`)
-    }
-  }
-}
-
-export function parseTicket(value: unknown): Ticket | undefined {
-  const parsed = ticketSchema.safeParse(value)
-  return parsed.success ? parsed.data as Ticket : undefined
-}
 
 /** A malformed reminder reads as absent. */
 export function parseScheduleRecord(value: unknown): ScheduleRecord | undefined {
@@ -322,10 +395,16 @@ export function parseScheduleRecord(value: unknown): ScheduleRecord | undefined 
   return parsed.success ? parsed.data as ScheduleRecord : undefined
 }
 
-/** A malformed row reads as absent instead of breaking the ledger. */
+/** A malformed row reads as absent instead of breaking the ledger; timestamps of the oldest rows default to 0. */
 export function parseTask(value: unknown): TaskRecord | undefined {
-  const parsed = taskSchema.safeParse(value)
-  return parsed.success ? parsed.data as TaskRecord : undefined
+  const parsed = storedTaskSchema.safeParse(value)
+  if (!parsed.success) return undefined
+  const task = parsed.data
+  return {
+    ...task,
+    createdAt: task.createdAt ?? task.updatedAt ?? 0,
+    updatedAt: task.updatedAt ?? task.createdAt ?? 0,
+  } as TaskRecord
 }
 
 export function parseState(value: unknown): DotState {

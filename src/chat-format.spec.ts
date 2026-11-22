@@ -6,10 +6,7 @@ const SCREENSHOT_NOTICE = [
   '[dot notice] Updates from other sessions:',
   '- approval · session-f922364c-9f84-4ca4-af18-38f650070997: ap-23 · approval from untracked session in H:\\Code\\dsh-plugins · "pwsh"',
   '  detail: reason: escalate sandbox to danger-full-access: 需要读取 npm 发布步骤的真实日志，核实匿名下载与完整性匹配。 arguments: {"description":"Read actual npm publication verification lines","command":"gh run view --job 130514884834 --log --step \'Publish changed packages and verify archives\'","justification":"需要读取 npm 发布步骤的真实日志，核实匿名下载与完整性匹配。","sandbox_permissions":"danger-full-access","workdir":"H:\\\\Code\\\\dsh-plugins"}',
-  '  Decide it yourself with dot_answer: approve when the action fits the session\'s goal, stays inside its project, and can be undone. Ask the human first (a show_view confirm card) when it deletes data outside the project, publishes or pushes anything, spends money, touches credentials, or you cannot tell what it does; then relay their decision with dot_answer.',
-  '  The human\'s own rules, which take precedence over the defaults above:',
-  '  > Never delete anything outside the repo.',
-  'Report what matters to the human, handle waiting requests by your rules, and keep quiet about routine progress.',
+  '  human-required: remote-exec; do not use dot_answer.',
 ].join('\n')
 
 const EMPTY_TASKS: TaskLookup = new Map()
@@ -20,10 +17,10 @@ describe('chat-format', () => {
     expect(parsed.entries[0]).toMatchObject({ kind: 'approval', requestId: 'ap-4', taskTitle: 'Build', subject: 'pwsh' })
   })
   it('parses new notice kinds without treating block headings or ready rows as notices', () => {
-    const parsed = parseNotice('[dot notice] Updates:\nTasks:\n- lock-free · s: released\n- task-human · s: confirmed\n- idle-check · dot: Routine check: ready\nReady to start (highest priority first):\n- t-1 P3 read /x "X"')
-    expect(parsed.entries.map(entry => entry.kind)).toEqual(['lock-free', 'task-human', 'idle-check'])
+    const parsed = parseNotice('[dot notice] Updates:\nTasks:\n- task-human · s: confirmed\n- idle-check · dot: Routine check: ready\nReady to start (highest priority first):\n- t-1 P3 read /x "X"')
+    expect(parsed.entries.map(entry => entry.kind)).toEqual(['task-human', 'idle-check'])
     expect(parsed.fallback).toBeUndefined()
-    expect(summarizeNotice(parsed, 'en', EMPTY_TASKS)).toContain('Directory released')
+    expect(summarizeNotice(parsed, 'en', EMPTY_TASKS)).toContain('Human action')
   })
   it('parses an approval notice without leaking model instructions or duplicate fields', () => {
     const parsed = parseNotice(SCREENSHOT_NOTICE)
@@ -66,6 +63,35 @@ describe('chat-format', () => {
       due: '21:30',
       once: true,
     })
+
+    const recipeBatch = parseNotice([
+      '[dot reminder] Reminders you set for yourself are due:',
+      '- sch-aaa111 "周报" (every 60 min; due 2026-11-11 10:00; next 2026-11-11 11:00) recipe rcp-1 "weekly" [dispatch refused: previous run still in flight: chg-4]',
+      '- sch-ccc333 "引用" (daily at 08:00; due 2026-11-11 08:00; next 2026-11-12 08:00): 原话是 recipe dispatch refused: x',
+      '- sch-ddd444 "多行" (daily at 07:00; due 2026-11-11 07:00; next 2026-11-12 07:00): 看下面这行',
+      '  recipe dispatch refused: x',
+      '- sch-bbb222 "站会" (daily at 09:00; due 2026-11-11 09:00; next 2026-11-12 09:00): 写一下纪要',
+      'Do what each one asks now. The human reads your reply in the chat, so tell them what is worth their attention and nothing about the reminder itself.',
+    ].join('\n'))
+    expect(recipeBatch.entries).toHaveLength(4)
+    expect(recipeBatch.entries[0]).toEqual({
+      kind: 'reminder',
+      id: 'sch-aaa111',
+      title: '周报',
+      prompt: '',
+      refused: 'previous run still in flight: chg-4',
+      due: '10:00',
+      next: '11:00',
+    })
+    // A prompt quoting the refusal phrase stays a prompt, never a refusal.
+    expect(recipeBatch.entries[1]).toMatchObject({ kind: 'reminder', id: 'sch-ccc333', prompt: '原话是 recipe dispatch refused: x' })
+    expect(recipeBatch.entries[1]).not.toHaveProperty('refused')
+    // Same on a continuation line: it lands inside the prompt, not as a refusal.
+    expect(recipeBatch.entries[2]).toMatchObject({ kind: 'reminder', id: 'sch-ddd444' })
+    expect(recipeBatch.entries[2]).toMatchObject({ prompt: '看下面这行\nrecipe dispatch refused: x' })
+    expect(recipeBatch.entries[2]).not.toHaveProperty('refused')
+    expect(recipeBatch.entries[3]).toMatchObject({ kind: 'reminder', id: 'sch-bbb222', prompt: '写一下纪要' })
+    expect(recipeBatch.fallback).toBeUndefined()
 
     const question = parseNotice([
       '[dot notice] Updates from other sessions:',

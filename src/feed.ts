@@ -31,6 +31,7 @@ export class ChatFeed {
   private lastSeq = -1
   private rev = 1
   private itemsRev = 1
+  private boardRev = 1
   private streaming = ''
   private streamTimer: ReturnType<typeof setTimeout> | undefined
   private readonly waiters = new Set<() => void>()
@@ -46,6 +47,11 @@ export class ChatFeed {
   constructor(private readonly host: DotHost, private readonly cardStore?: import('./store.ts').DotStore) {}
 
   cardsChanged(): void { this.bump(true) }
+
+  boardChanged(): void {
+    this.boardRev += 1
+    this.bump(false)
+  }
 
   /**
    * Point the feed at dot's current session. A new session starts a fresh
@@ -132,7 +138,7 @@ export class ChatFeed {
       }
       this.fold = fold
     }
-    const base = { sessionId, running: this.host.isRunning(sessionId), streaming: this.streaming, preparingCard: this.preparingCard, rev: this.rev, itemsRev: this.itemsRev }
+    const base = { sessionId, running: this.host.isRunning(sessionId), streaming: this.streaming, preparingCard: this.preparingCard, rev: this.rev, itemsRev: this.itemsRev, boardRev: this.boardRev }
     if (knownItemsRev === this.itemsRev) return base
     const cards = new Map(this.cardStore?.cards.map(card => [card.id, card]))
     const answers = { ...this.historyAnswers, ...this.fold.answers }
@@ -142,6 +148,24 @@ export class ChatFeed {
       const card = cards.get(item.presentation.viewId)
       return card ? { ...item, presentation: { ...item.presentation, dotCard: { number: card.number, expired: card.expired } } } : item
     })
+    // Approval cards raised beside tool calls (capability asks, install
+    // proposals) exist only in the card store: no tool event folds into a view
+    // row for them, so each gets a synthetic one placed where it was shown.
+    for (const card of cards.values()) {
+      if (!card.callId.startsWith('capability:') && !card.callId.startsWith('install:')) continue
+      // A card outlives its segment: rows synthesize for the current session
+      // or any shown past segment, not only the session the feed is attached to.
+      const current = card.sessionId === sessionId
+      const segment = current ? undefined : this.past.find(row => row.sessionId === card.sessionId)
+      if (!current && segment === undefined) continue
+      // Records persisted before shownAt keep their old end position; a past
+      // segment's card without one lands just before that segment's marker.
+      const at = card.shownAt ?? (current ? Number.MAX_SAFE_INTEGER : segment!.endedAt - 1)
+      const row: ChatItem = { kind: 'view', key: card.callId, title: card.title, view: card.view, at, presentation: { owner: 'dsh-deep-view', title: card.title, view: card.view, awaitReply: true, viewId: card.id, dotCard: { number: card.number, expired: card.expired } } }
+      const later = items.findIndex(item => item.at > row.at)
+      if (later === -1) items.push(row)
+      else items.splice(later, 0, row)
+    }
     return { ...base, items, answers }
   }
 

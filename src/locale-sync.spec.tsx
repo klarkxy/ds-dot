@@ -6,6 +6,7 @@ import { join } from 'node:path'
 import { act } from 'react'
 import { JSDOM } from 'jsdom'
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
+import { uiEn, uiZh } from '@klarkxy/dsh-deep-view/copy'
 import type { HostRpcContext } from '@klarkxy/dsh-plugin-kit/host-rpc'
 import { DEFAULT_SETTINGS, RPC_CHANNEL, SERVICE_NAME } from './contracts.ts'
 import {
@@ -35,12 +36,16 @@ function fakeDomain(seed: Record<string, Record<string, unknown>> = {}) {
     tasks: new Map(Object.entries(seed.tasks ?? {})),
     tickets: new Map(Object.entries(seed.tickets ?? {})),
     schedules: new Map(Object.entries(seed.schedules ?? {})),
+    recipes: new Map(Object.entries(seed.recipes ?? {})),
+    recipe_proposals: new Map(Object.entries(seed.recipe_proposals ?? {})),
     proposals: new Map(Object.entries(seed.proposals ?? {})),
     changes: new Map(Object.entries(seed.changes ?? {})),
     inputs: new Map(Object.entries(seed.inputs ?? {})),
     runs: new Map(Object.entries(seed.runs ?? {})),
     verifications: new Map(Object.entries(seed.verifications ?? {})),
     peers: new Map(Object.entries(seed.peers ?? {})),
+    inbox: new Map(Object.entries(seed.inbox ?? {})),
+    links: new Map(Object.entries(seed.links ?? {})),
   }
   const domain: DotDomainHandle = {
     table: name => ({
@@ -120,13 +125,13 @@ describe('i18n core & zh/en packs', () => {
     expect(t('en', 'sTaskModelsList')).toBe('{mode}: {models}')
     expect(t('zh', 'sTaskModelsNone')).toBe('{mode}（{empty}）')
     expect(t('en', 'sTaskModelsNone')).toBe('{mode} ({empty})')
-    expect(Object.keys(cardCopy('en'))).toHaveLength(30)
+    expect(cardCopy('en')).toEqual(uiEn)
     expect(Object.keys(configI18n())).toEqual([...SUPPORTED_LOCALES])
     expect(approvalCardCopy('zh').title).toBe('审批')
     expect(approvalCardCopy('en').title).toBe('Approval')
     const zhMeta = JSON.parse(readFileSync(join(process.cwd(), 'locale/zh.json'), 'utf8')) as { meta: { detail?: string } }
     expect(zhMeta.meta.detail).toBe('docs/README.zh-CN.md')
-    expect(DOT_INSTRUCTIONS).toContain('When no message from the human sets another language yet (for example on a reminder or proactive check), use the language of your persona section.')
+    expect(DOT_INSTRUCTIONS).toContain('when the human has not written in this exchange (a reminder or a routine check), use the language of your persona section')
     expect(Config).toBeDefined()
     expect(pluginInject).not.toContain('settings')
   })
@@ -138,11 +143,13 @@ describe('i18n core & zh/en packs', () => {
     expect(defaultAddress('en')).toBe('you')
     expect(enPersona.length).toBeLessThanOrEqual(1200)
     for (const heading of [
-      '[Who you are]',
       '[Personality and what matters to you]',
       '[How you speak]',
       '[Your relationship with the user]',
     ]) expect(enPersona).toContain(heading)
+    // sectionLead already introduces the persona, so the body opens without a heading.
+    expect(enPersona.startsWith('[')).toBe(false)
+    expect(enPersona).toContain('lead with the outcome.')
     expect(enPersona).not.toMatch(/姐姐|妹妹|鲸鱼娘|大肥鱼|粉色虎鲸|粉毛小狗|大小姐|sister|At work|Off duty|the human/i)
     expect(personaPack('en').sectionLead).toBe('Who you are:')
     expect(personaSection({}, 'en')).toContain('Who you are:')
@@ -395,7 +402,7 @@ describe('UI locale wiring & client RPC sync', () => {
     expect(personaBox).toBeDefined()
     expect(personaBox.value).toBe(defaultPersona('en'))
     expect(document.body.textContent).toContain('Allow selected: DeepSeek / DeepSeek Chat')
-    expect(document.body.textContent).toContain('视图数据无效')
+    expect(document.body.textContent).toContain(uiZh.invalid)
     await act(async () => root.unmount())
   })
 

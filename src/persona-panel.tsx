@@ -7,7 +7,7 @@ import { Button, Input, Tag } from '@deepseek-ai/dsh-client-ui-primitives'
 import { useCallback, useEffect, useState } from 'react'
 import type { DotSettings, KnowledgeView, SettingField } from './contracts.ts'
 import { ADDRESS_MAX_CHARS, PERSONA_MAX_CHARS, defaultAddress, defaultPersona } from './persona.ts'
-import { LockToggle, PaneSkeleton, type SaveNotice, type SettingsApi, type SettingsPatch } from './settings-panel.tsx'
+import { HelpTip, LockToggle, PaneSkeleton, type SaveNotice, type SettingsApi, type SettingsPatch } from './settings-panel.tsx'
 import { formatWhen, t, type CopyLocale } from './ui-copy.ts'
 
 export interface KnowledgeApi {
@@ -28,6 +28,8 @@ function TextBlock({
   maxChars,
   rows,
   empty,
+  discardSignal,
+  onChanged,
   onSave,
   onUndo,
 }: {
@@ -38,12 +40,16 @@ function TextBlock({
   maxChars: number
   rows: number
   empty?: string
+  discardSignal?: number
+  onChanged?: (changed: boolean) => void
   onSave: (text: string) => void
   onUndo?: (() => void) | undefined
 }) {
   const [draft, setDraft] = useState(value)
-  useEffect(() => { setDraft(value) }, [value])
+  useEffect(() => { setDraft(value) }, [value, discardSignal])
   const changed = draft !== value
+  useEffect(() => { onChanged?.(changed) }, [changed, onChanged])
+  useEffect(() => () => { onChanged?.(false) }, [onChanged])
   const over = draft.trim().length > maxChars
   return (
     <>
@@ -104,15 +110,21 @@ function CognitionHistory({ locale, knowledge, onRestore }: {
  * Dorothy's knowledge: the agreements you set and her own cognition. The
  * agreements keep one step of undo; the cognition keeps its last versions.
  */
-function KnowledgeSection({ locale, api, onStatus, locked, onLock }: {
+function KnowledgeSection({ locale, api, onStatus, locked, onLock, discardSignal, onDirtyChange }: {
   locale: CopyLocale
   api: KnowledgeApi
   onStatus: (status: SaveNotice | undefined) => void
   locked: boolean
   onLock: (field: SettingField, locked: boolean) => void
+  discardSignal?: number
+  onDirtyChange?: (dirty: boolean) => void
 }) {
   const [knowledge, setKnowledge] = useState<KnowledgeView>()
   const [failed, setFailed] = useState<string>()
+  const [agreementsDirty, setAgreementsDirty] = useState(false)
+  const [cognitionDirty, setCognitionDirty] = useState(false)
+  useEffect(() => { onDirtyChange?.(agreementsDirty || cognitionDirty) }, [agreementsDirty, cognitionDirty, onDirtyChange])
+  useEffect(() => () => { onDirtyChange?.(false) }, [onDirtyChange])
   useEffect(() => {
     const lifetime = new AbortController()
     api.knowledge(lifetime.signal).then(
@@ -149,12 +161,14 @@ function KnowledgeSection({ locale, api, onStatus, locked, onLock }: {
         <div className="dsh-ui-form">
           <div className="dsh-ui-field">
             <div className="dsh-dot-setting-head">
-              <span className="dsh-ui-label">{t(locale, 'pAgreements')}</span>
+              <span className="dsh-ui-label">
+                <span>{t(locale, 'pAgreements')}</span>
+                <HelpTip locale={locale} fieldLabel={t(locale, 'pAgreements')} text={t(locale, 'pAgreementsHint')} />
+              </span>
               <div className="dsh-dot-setting-tools">
-                <LockToggle locale={locale} label={t(locale, 'pAgreements')} locked={locked} onLock={next => onLock('memory', next)} />
+                <LockToggle locale={locale} label={t(locale, 'pAgreements')} locked={locked} onLock={next => onLock('agreements', next)} />
               </div>
             </div>
-            <span className="dsh-ui-help">{t(locale, 'pAgreementsHint')}</span>
             <TextBlock
               locale={locale}
               label={t(locale, 'pAgreements')}
@@ -163,6 +177,8 @@ function KnowledgeSection({ locale, api, onStatus, locked, onLock }: {
               maxChars={agreements.maxChars}
               rows={7}
               empty={t(locale, 'pAgreementsEmpty')}
+              {...discardSignal === undefined ? {} : { discardSignal }}
+              onChanged={setAgreementsDirty}
               onSave={text => run(api.setAgreements(text))}
               {...agreements.canUndo ? { onUndo: () => run(api.undoAgreements()) } : {}}
             />
@@ -173,9 +189,11 @@ function KnowledgeSection({ locale, api, onStatus, locked, onLock }: {
         <div className="dsh-ui-form">
           <div className="dsh-ui-field">
             <div className="dsh-dot-setting-head">
-              <span className="dsh-ui-label">{t(locale, 'pCognition')}</span>
+              <span className="dsh-ui-label">
+                <span>{t(locale, 'pCognition')}</span>
+                <HelpTip locale={locale} fieldLabel={t(locale, 'pCognition')} text={t(locale, 'pCognitionHint')} />
+              </span>
             </div>
-            <span className="dsh-ui-help">{t(locale, 'pCognitionHint')}</span>
             <TextBlock
               locale={locale}
               label={t(locale, 'pCognition')}
@@ -184,6 +202,8 @@ function KnowledgeSection({ locale, api, onStatus, locked, onLock }: {
               maxChars={cognition.maxChars}
               rows={7}
               empty={t(locale, 'pCognitionEmpty')}
+              {...discardSignal === undefined ? {} : { discardSignal }}
+              onChanged={setCognitionDirty}
               onSave={text => run(api.setCognition(text))}
             />
             <div className="dsh-dot-setting-head dsh-dot-versions-head">
@@ -197,38 +217,56 @@ function KnowledgeSection({ locale, api, onStatus, locked, onLock }: {
   )
 }
 
-export function PersonaPanel({ locale, api, settings, onSaved, onStatusChange }: {
+export function PersonaPanel({ locale, api, settings, onSaved, onStatusChange, discardSignal, onDirtyChange }: {
   locale: CopyLocale
   api: SettingsApi & KnowledgeApi
   settings?: DotSettings
   onSaved: (next: DotSettings) => void
   onStatusChange?: (status: SaveNotice | undefined) => void
+  discardSignal?: number
+  onDirtyChange?: (dirty: boolean) => void
 }) {
   const [status, setStatus] = useState<SaveNotice>()
+  const [knowledgeDirty, setKnowledgeDirty] = useState(false)
   const defaultAddr = defaultAddress(locale)
   const defaultPers = defaultPersona(locale)
   const savedAddress = settings?.address ?? defaultAddr
   const savedPersona = settings?.persona ?? defaultPers
   const [address, setAddress] = useState(savedAddress)
   const [persona, setPersona] = useState(savedPersona)
-  useEffect(() => { setAddress(savedAddress) }, [savedAddress])
-  useEffect(() => { setPersona(savedPersona) }, [savedPersona])
+  // The address field commits on blur. Once that save is submitted, the drawer
+  // guard must not treat the same text as an unsaved draft: blur runs before the
+  // click that leaves the page, and Discard cannot undo a save already in flight.
+  const [addressSubmitted, setAddressSubmitted] = useState<string | undefined>()
+  useEffect(() => { setAddress(savedAddress) }, [savedAddress, discardSignal])
+  useEffect(() => { setPersona(savedPersona) }, [savedPersona, discardSignal])
+  useEffect(() => { setAddressSubmitted(undefined) }, [discardSignal])
+  const addressDirty = Boolean(settings) && address.trim() !== '' && address.trim() !== savedAddress && address.trim() !== addressSubmitted
+  const personaDirty = Boolean(settings) && persona !== savedPersona
+  const anyDirty = addressDirty || personaDirty || knowledgeDirty
+  useEffect(() => { onDirtyChange?.(anyDirty) }, [anyDirty, onDirtyChange])
+  useEffect(() => () => { onDirtyChange?.(false) }, [onDirtyChange])
   const reportStatus = useCallback((next: SaveNotice | undefined) => {
     setStatus(next)
     onStatusChange?.(next)
   }, [onStatusChange])
 
-  const save = (patch: SettingsPatch) => {
+  const save = (patch: SettingsPatch, onError?: () => void) => {
     reportStatus(undefined)
     api.setSettings(patch).then(
       next => { onSaved(next); reportStatus({ kind: 'saved' }) },
-      failure => reportStatus({ kind: 'error', message: failure instanceof Error ? failure.message : String(failure) }),
+      failure => {
+        onError?.()
+        reportStatus({ kind: 'error', message: failure instanceof Error ? failure.message : String(failure) })
+      },
     )
   }
   const commitAddress = () => {
     const text = address.trim()
-    if (!text) { setAddress(savedAddress); return }
-    if (text !== savedAddress) save({ address: text })
+    if (!text) { setAddress(savedAddress); setAddressSubmitted(undefined); return }
+    if (text === savedAddress) return
+    setAddressSubmitted(text)
+    save({ address: text }, () => setAddressSubmitted(current => current === text ? undefined : current))
   }
 
   if (!settings) return <PaneSkeleton label={t(locale, 'settingsLoading')} rows={3} />
@@ -279,7 +317,7 @@ export function PersonaPanel({ locale, api, settings, onSaved, onStatusChange }:
         </div>
         </div>
       </div>
-      <KnowledgeSection locale={locale} api={api} onStatus={reportStatus} locked={settings.locks?.memory === true} onLock={onLock} />
+      <KnowledgeSection locale={locale} api={api} onStatus={reportStatus} locked={settings.locks?.agreements === true} onLock={onLock} {...discardSignal === undefined ? {} : { discardSignal }} onDirtyChange={setKnowledgeDirty} />
       <p className="dsh-ui-hint dsh-dot-settings-note">{t(locale, 'pNote')}</p>
     </div>
   )

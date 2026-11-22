@@ -1,8 +1,9 @@
 import { act } from 'react'
+import { Simulate } from 'react-dom/test-utils'
 import { JSDOM } from 'jsdom'
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 import { DEFAULT_SETTINGS, type ChatItem, type ChatSnapshot } from './contracts.ts'
-import { ChatPanel, rowsOf, type ChatApi } from './chat-panel.tsx'
+import { ChatPanel, chatCss, rowsOf, type ChatApi } from './chat-panel.tsx'
 import { filterVisibleChat } from './chat-filter.ts'
 import { createDotCards } from './client.tsx'
 
@@ -10,25 +11,29 @@ const dom = new JSDOM('<div id="root"></div>', { url: 'https://local.test' })
 vi.stubGlobal('window', dom.window)
 vi.stubGlobal('document', dom.window.document)
 vi.stubGlobal('navigator', dom.window.navigator)
+vi.stubGlobal('localStorage', dom.window.localStorage)
 vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
+dom.window.requestAnimationFrame = (callback: FrameRequestCallback) => {
+  callback(0)
+  return 0
+}
+vi.stubGlobal('requestAnimationFrame', dom.window.requestAnimationFrame)
 let createRoot: typeof import('react-dom/client').createRoot
 beforeAll(async () => { createRoot = (await import('react-dom/client')).createRoot })
-afterEach(() => { document.body.innerHTML = '<div id="root"></div>' })
+afterEach(() => { dom.window.localStorage.clear(); document.body.innerHTML = '<div id="root"></div>' })
 
 const NOTICE_TEXT = [
   '[dot notice] Updates from other sessions:',
   '- approval · session-f922364c-9f84-4ca4-af18-38f650070997: ap-23 · approval from untracked session in H:\\Code\\dsh-plugins · "pwsh"',
   '  detail: reason: escalate sandbox to danger-full-access: 需要读取 npm 发布步骤的真实日志，核实匿名下载与完整性匹配。 arguments: {"description":"Read actual npm publication verification lines","command":"gh run view --job 130514884834 --log --step \'Publish changed packages and verify archives\'","justification":"需要读取 npm 发布步骤的真实日志，核实匿名下载与完整性匹配。","sandbox_permissions":"danger-full-access","workdir":"H:\\\\Code\\\\dsh-plugins"}',
-  '  Decide it yourself with dot_answer: approve when the action fits the session\'s goal, stays inside its project, and can be undone.',
-  'Report what matters to the human, handle waiting requests by your rules, and keep quiet about routine progress.',
+  '  human-required: remote-exec; do not use dot_answer.',
 ].join('\n')
 
 const ESCALATED_NOTICE_TEXT = [
   '[dot notice] Updates from other sessions:',
   '- approval · session-f922364c-9f84-4ca4-af18-38f650070997: ap-25 · approval from untracked session in H:\\Code\\dsh-plugins · "pwsh"',
   '  detail: reason: escalate sandbox to danger-full-access: 需要发布包到 npm 仓库。 arguments: {"description":"Publish changed packages","command":"pnpm publish -r --access public","justification":"需要发布包到 npm 仓库。","sandbox_permissions":"danger-full-access","workdir":"H:\\\\Code\\\\dsh-plugins"}',
-  '  Decide it yourself with dot_answer: approve silently (no chat reply) when the action fits the session\'s goal, stays inside its project, and can be undone.',
-  'Report what matters to the human, handle waiting requests by your rules, and stay silent about routine progress.',
+  '  human-required: remote-exec; do not use dot_answer.',
 ].join('\n')
 
 function makeApi(snapshot: ChatSnapshot): ChatApi {
@@ -64,7 +69,7 @@ function makeApi(snapshot: ChatSnapshot): ChatApi {
 }
 
 describe('ChatPanel activity and notice cards', () => {
-  it('sends a starter prompt from the empty chat and explains a segment mark when opened', async () => {
+  it('fills the composer from a starter chip instead of sending, and explains a segment mark when opened', async () => {
     const empty: ChatSnapshot = { sessionId: 'dot-1', running: false, streaming: '', rev: 1, itemsRev: 1, items: [] }
     const api = makeApi(empty)
     api.say = vi.fn(async () => {})
@@ -73,7 +78,9 @@ describe('ChatPanel activity and notice cards', () => {
     await act(async () => { await Promise.resolve() })
     const starter = document.querySelector<HTMLButtonElement>('.dsh-dot-starter')!
     await act(async () => { starter.click() })
-    expect(api.say).toHaveBeenCalledWith(starter.textContent, [])
+    await act(async () => { await Promise.resolve(); await new Promise(resolve => setTimeout(resolve, 30)) })
+    expect(api.say).not.toHaveBeenCalled()
+    expect(document.querySelector<HTMLTextAreaElement>('.dsh-dot-input')?.value).toBe(starter.textContent)
     await act(async () => { root.unmount() })
 
     const segmented: ChatSnapshot = { ...empty, items: [
@@ -199,7 +206,7 @@ describe('ChatPanel activity and notice cards', () => {
     expect(document.body.textContent).not.toContain('The card failed to display.')
     await act(async () => root.unmount())
   })
-  it('disables an expired numbered card and hides duplicate prose', async () => {
+  it('disables an expired numbered card and keeps the prose beside it', async () => {
     const view = { type: 'confirm', id: 'ok' }
     const presentation = { owner: 'dsh-deep-view', title: 'Deploy', view, viewId: 'dot-card-4', interactive: true, awaitReply: true, dotCard: { number: 4, expired: true } }
     const call = vi.fn(async (endpoint: string, payload: unknown) => endpoint === 'card.detail'
@@ -214,10 +221,10 @@ describe('ChatPanel activity and notice cards', () => {
     await act(async () => { root.render(<ChatPanel locale="en" api={makeApi(snapshot)} Card={Card} onOpenSession={() => {}} />) })
     await act(async () => { await Promise.resolve() })
     expect(document.body.textContent).toContain('#4 · Expired')
-    expect(document.body.textContent).not.toContain('duplicate prose')
-    const confirm = [...document.querySelectorAll<HTMLButtonElement>('.dvui-root button')].find(button => button.textContent === 'Confirm')!
-    expect(confirm).toBeDefined()
-    // Expired cards are shown but cannot be submitted; the button must be absent or disabled.
+    // A card beside text no longer swallows the text.
+    expect(document.body.textContent).toContain('duplicate prose')
+    // Expired cards are closed: the button must be absent or disabled.
+    const confirm = [...document.querySelectorAll<HTMLButtonElement>('.dvui-root button')].find(button => button.textContent === 'Confirm')
     expect(confirm == null || confirm.disabled).toBe(true)
     // card.answer must NOT be called for an expired card.
     expect(call).not.toHaveBeenCalledWith('card.answer', expect.anything())
@@ -423,12 +430,140 @@ describe('ChatPanel activity and notice cards', () => {
     await act(async () => { root.unmount() })
   })
 
-  it('shows card preparation instead of streamed ordinary prose', async () => {
+  it('shows card preparation instead of streamed ordinary prose, and renders streamed prose when not preparing a card', async () => {
     const snapshot: ChatSnapshot = { sessionId: 'dot', running: true, streaming: 'hidden streamed prose', preparingCard: true, rev: 1, itemsRev: 1, items: [{ kind: 'user', key: 'u', text: 'hi', at: 1 }] }
     const root = createRoot(document.getElementById('root')!)
     await act(async () => { root.render(<ChatPanel locale="zh" api={makeApi(snapshot)} onOpenSession={() => {}} />) })
     expect(document.body.textContent).toContain('正在生成卡片…')
     expect(document.body.textContent).not.toContain('hidden streamed prose')
+
+    const liveStream: ChatSnapshot = { ...snapshot, preparingCard: false, streaming: '实时流式回复内容' }
+    await act(async () => { root.render(<ChatPanel locale="zh" api={makeApi(liveStream)} onOpenSession={() => {}} />) })
+    expect(document.body.textContent).toContain('实时流式回复内容')
+    expect(document.body.textContent).not.toContain('思考中…')
+    await act(async () => { root.unmount() })
+  })
+
+  it('guards unsaved PersonaPanel edits before switching tabs or closing the drawer, and supports reminder removal undo', async () => {
+    vi.useFakeTimers()
+    try {
+      const snapshot: ChatSnapshot = { sessionId: 'dot-1', running: false, streaming: '', rev: 1, itemsRev: 1, items: [] }
+      const removed: string[] = []
+      const base = makeApi(snapshot)
+      const api: ChatApi = {
+        ...base,
+        board: async () => ({
+          pending: [],
+          tasks: [],
+          tickets: [],
+          schedules: [{ id: 'sch-undo', title: '每日站会', prompt: 'standup', timing: { kind: 'daily', time: '09:30' }, createdAt: 1, nextAt: 5_000_000_000_000 }],
+        }),
+        removeSchedule: async id => { removed.push(id); return true },
+      }
+      const root = createRoot(document.getElementById('root')!)
+      await act(async () => { root.render(<ChatPanel locale="zh" api={api} onOpenSession={() => {}} />) })
+      await act(async () => { await Promise.resolve(); await Promise.resolve() })
+
+      const gear = document.querySelector<HTMLButtonElement>('button[aria-label="设置"]')!
+      await act(async () => { gear.click() })
+      const nav = (key: string) => document.querySelector<HTMLButtonElement>(`.dsh-dot-drawer-nav button[data-nav="${key}"]`)!
+      await act(async () => { nav('persona').click() })
+      await act(async () => { await Promise.resolve(); await Promise.resolve() })
+
+      const textarea = document.querySelector<HTMLTextAreaElement>('textarea.dsh-dot-persona-text')!
+      // react-dom is initialized before this spec stubs the JSDOM globals, so its
+      // input/change listener support is off; drive the controlled field through
+      // React's own event path instead of a raw DOM event.
+      await act(async () => {
+        Simulate.change(textarea, { target: { value: '未保存的新人设草稿' } } as never)
+      })
+      expect(document.querySelector('.dsh-dot-dirty-dot')).not.toBeNull()
+
+      // The composer /settings shortcut is another drawer entrance: it must pass the
+      // same guard instead of swapping tabs underneath the dirty draft.
+      const quickBtn = document.querySelector<HTMLButtonElement>('button[aria-label="快捷指令"]')!
+      await act(async () => { quickBtn.click() })
+      const settingsOption = [...document.querySelectorAll<HTMLButtonElement>('.dsh-dot-slash-item')].find(b => b.textContent?.includes('/settings'))!
+      await act(async () => { settingsOption.click(); await Promise.resolve() })
+      expect(document.querySelector('.dsh-dot-unsaved-bar')?.textContent).toContain('当前页有未保存的修改')
+      expect(document.querySelector('aside.dsh-dot-drawer [role="region"]')?.getAttribute('aria-label')).toBe('人设与约定')
+
+      await act(async () => { nav('context').click() })
+      expect(document.querySelector('.dsh-dot-unsaved-bar')?.textContent).toContain('当前页有未保存的修改')
+      expect(document.querySelector('aside.dsh-dot-drawer [role="region"]')?.getAttribute('aria-label')).toBe('人设与约定')
+
+      const discard = [...document.querySelectorAll<HTMLButtonElement>('.dsh-dot-unsaved-bar button')].find(b => b.textContent === '放弃改动')!
+      await act(async () => { discard.click() })
+      expect(document.querySelector('aside.dsh-dot-drawer [role="region"]')?.getAttribute('aria-label')).toBe('上下文用量')
+
+      const tasksBtn = [...document.querySelectorAll<HTMLButtonElement>('.dsh-dot-head button')].find(b => b.textContent?.startsWith('任务'))!
+      await act(async () => { tasksBtn.click() })
+      expect(document.body.textContent).toContain('每日站会')
+      const removeBtn = [...document.querySelectorAll<HTMLButtonElement>('.dsh-dot-reminder button')].find(b => b.textContent === '移除')!
+      await act(async () => { removeBtn.click() })
+      expect(removed).toEqual([])
+      expect(document.querySelector('.dsh-dot-undo-bar')?.textContent).toContain('已移除提醒「每日站会」')
+
+      const undoBtn = [...document.querySelectorAll<HTMLButtonElement>('.dsh-dot-undo-bar button')].find(b => b.textContent === '撤销')!
+      await act(async () => { undoBtn.click() })
+      await act(async () => { vi.advanceTimersByTime(5_000) })
+      expect(removed).toEqual([])
+      expect(document.body.textContent).toContain('每日站会')
+
+      const removeAgain = [...document.querySelectorAll<HTMLButtonElement>('.dsh-dot-reminder button')].find(b => b.textContent === '移除')!
+      await act(async () => { removeAgain.click() })
+      await act(async () => { vi.advanceTimersByTime(5_000); await Promise.resolve() })
+      expect(removed).toEqual(['sch-undo'])
+
+      await act(async () => { root.unmount() })
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('lets a blurred address save leave the persona page, and still guards an address edit that has not blurred', async () => {
+    const snapshot: ChatSnapshot = { sessionId: 'dot-1', running: false, streaming: '', rev: 1, itemsRev: 1, items: [] }
+    const saved: unknown[] = []
+    const api: ChatApi = {
+      ...makeApi(snapshot),
+      setSettings: async patch => { saved.push(patch); return { ...DEFAULT_SETTINGS, ...patch } },
+    }
+    const root = createRoot(document.getElementById('root')!)
+    await act(async () => { root.render(<ChatPanel locale="zh" api={api} onOpenSession={() => {}} />) })
+    await act(async () => { await Promise.resolve(); await Promise.resolve() })
+
+    const gear = document.querySelector<HTMLButtonElement>('button[aria-label="设置"]')!
+    await act(async () => { gear.click() })
+    const personaTab = () => document.querySelector<HTMLButtonElement>('.dsh-dot-drawer-nav button[data-nav="persona"]')!
+    await act(async () => { personaTab().click() })
+    await act(async () => { await Promise.resolve(); await Promise.resolve() })
+
+    const address = () => document.querySelector<HTMLInputElement>('input[aria-label="对你的称呼"]')!
+    await act(async () => { Simulate.change(address(), { target: { value: '朋友' } } as never) })
+    expect(document.querySelector('.dsh-dot-dirty-dot')).not.toBeNull()
+    // Blur commits the address before the click that leaves, so the guard must not
+    // raise a bar Discard cannot undo.
+    await act(async () => { Simulate.blur(address()) })
+    const contextTab = document.querySelector<HTMLButtonElement>('.dsh-dot-drawer-nav button[data-nav="context"]')!
+    await act(async () => { contextTab.click() })
+    expect(document.querySelector('.dsh-dot-unsaved-bar')).toBeNull()
+    expect(document.querySelector('aside.dsh-dot-drawer [role="region"]')?.getAttribute('aria-label')).toBe('上下文用量')
+    expect(saved).toEqual([{ address: '朋友' }])
+
+    await act(async () => { personaTab().click() })
+    await act(async () => { Simulate.change(address(), { target: { value: '伙伴' } } as never) })
+    expect(document.querySelector('.dsh-dot-dirty-dot')).not.toBeNull()
+    await act(async () => {
+      document.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+    })
+    expect(document.querySelector('.dsh-dot-unsaved-bar')?.textContent).toContain('当前页有未保存的修改')
+    expect(document.querySelector('aside.dsh-dot-drawer [role="region"]')?.getAttribute('aria-label')).toBe('人设与约定')
+    expect(saved).toEqual([{ address: '朋友' }])
+    const discard = [...document.querySelectorAll<HTMLButtonElement>('.dsh-dot-unsaved-bar button')].find(b => b.textContent === '放弃改动')!
+    await act(async () => { discard.click() })
+    expect(document.querySelector('aside.dsh-dot-drawer')).toBeNull()
+    expect(saved).toEqual([{ address: '朋友' }])
+
     await act(async () => { root.unmount() })
   })
   it('silences background/already-handled requests while showing structured cards for requests needing the human', async () => {
@@ -490,7 +625,7 @@ describe('ChatPanel activity and notice cards', () => {
     expect(noticeBody.textContent).toContain('完全访问')
     expect(noticeBody.textContent).toContain('需要发布包到 npm 仓库。')
     expect(noticeBody.textContent).toContain('pnpm publish -r --access public')
-    expect(noticeBody.textContent).not.toContain('Decide it yourself with dot_answer')
+    expect(noticeBody.textContent).not.toContain('do not use dot_answer')
     expect(noticeBody.textContent).not.toContain('sandbox_permissions')
     expect(noticeBody.textContent).not.toContain('escalate sandbox to')
 
@@ -607,12 +742,17 @@ describe('ChatPanel activity and notice cards', () => {
     await act(async function () { root.unmount() })
   })
 
-  it('opens the settings drawer with proposal count badge, header status, tab switching, and close button', async () => {
+  it('opens the settings drawer with vertical navigation, conditional proposals, header status, and close controls', async () => {
     const snapshot: ChatSnapshot = { sessionId: 'dot-1', running: false, streaming: '', rev: 1, itemsRev: 1, items: [] }
     const base = makeApi(snapshot)
+    let proposals = [{ id: 'p-1', field: 'scope' as const, before: 'all', after: 'tracked', reason: 'test', createdAt: 1 }]
     const api: ChatApi = {
       ...base,
-      settingProposals: async () => [{ id: 'p-1', field: 'scope', before: 'all', after: 'tracked', reason: 'test', createdAt: 1 }],
+      settingProposals: async () => [...proposals],
+      decideSetting: async (id: string) => {
+        proposals = proposals.filter(row => row.id !== id)
+        return 'ok'
+      },
     }
     const root = createRoot(document.getElementById('root')!)
     await act(async () => { root.render(<ChatPanel locale="zh" api={api} onOpenSession={() => {}} />) })
@@ -622,43 +762,66 @@ describe('ChatPanel activity and notice cards', () => {
     await act(async () => { gear.click() })
     await act(async () => { await Promise.resolve() })
 
-    // The gear opens the settings drawer over a mask; tasks live in their own drawer.
+    // The gear opens the settings drawer with vertical sidebar nav; tasks live in their own drawer.
     const drawer = document.querySelector('aside.dsh-dot-drawer')!
     expect(drawer.getAttribute('data-kind')).toBe('settings')
     expect(document.querySelector('.dsh-dot-drawer-backdrop')).not.toBeNull()
     expect(gear.querySelector('.dsh-dot-gear-dot')).not.toBeNull()
     const region = () => document.querySelector('aside.dsh-dot-drawer [role="region"]')!.getAttribute('aria-label')
-    const navButtons = [...drawer.querySelectorAll<HTMLButtonElement>('.dsh-dot-drawer-tabs button')]
-    expect(navButtons.map(node => node.querySelector('.dsh-dot-nav-label')?.textContent)).toEqual(['设置', '人设', '上下文', '轨迹'])
-    expect(navButtons[0]!.querySelector('.dsh-dot-nav-badge')?.textContent).toBe('1')
-    expect(region()).toBe('设置')
+    const headerTitle = () => drawer.querySelector('.dsh-dot-drawer-title')?.textContent
+    const navButtons = () => [...drawer.querySelectorAll<HTMLButtonElement>('.dsh-dot-drawer-nav button')]
+    const navBy = (key: string) => drawer.querySelector<HTMLButtonElement>(`.dsh-dot-drawer-nav button[data-nav="${key}"]`)!
+    expect(navButtons().map(node => node.querySelector('.dsh-dot-nav-label')?.textContent)).toEqual([
+      '待确认', '常规', '会话接管', '派发任务', '额外能力', '人设', '上下文', '轨迹',
+    ])
+    expect(navBy('proposals').querySelector('.dsh-dot-nav-badge')?.textContent).toBe('1')
+    expect(region()).toBe('常规')
+    expect(headerTitle()).toBe('常规')
 
-    // Trigger a save and confirm the non-jumping header status appears.
+    // Switch to Takeover, trigger a save and confirm the non-jumping header status appears.
+    await act(async () => { navBy('takeover').click() })
+    expect(region()).toBe('会话接管')
+    expect(headerTitle()).toBe('会话接管')
     const trackedTab = [...drawer.querySelectorAll<HTMLButtonElement>('[role="tab"]')].find(node => node.textContent === '所有会话')!
     await act(async () => { trackedTab.click() })
     await act(async () => { await Promise.resolve() })
     expect(drawer.querySelector('.dsh-dot-settings-status')?.textContent).toContain('已保存')
 
-    await act(async () => { navButtons[1]!.click() })
-    expect(region()).toBe('人设与约定')
+    await act(async () => { navBy('dispatch').click() })
+    expect(region()).toBe('派发任务')
     expect(drawer.querySelector('.dsh-dot-settings-status')).toBeNull()
-    await act(async () => { navButtons[2]!.click() })
+    await act(async () => { navBy('capabilities').click() })
+    expect(region()).toBe('额外能力')
+    await act(async () => { navBy('persona').click() })
+    expect(region()).toBe('人设与约定')
+    await act(async () => { navBy('context').click() })
     expect(region()).toBe('上下文用量')
-    await act(async () => { navButtons[3]!.click() })
+    await act(async () => { navBy('trajectory').click() })
     expect(region()).toBe('运行轨迹')
+
+    // Resolving the last proposal removes the Proposals nav item and returns to General.
+    await act(async () => { navBy('proposals').click() })
+    await act(async () => { await Promise.resolve() })
+    expect(region()).toBe('待确认的修改')
+    const approveBtn = drawer.querySelector<HTMLButtonElement>('.dsh-dot-proposal button')!
+    await act(async () => { approveBtn.click() })
+    await act(async () => { await Promise.resolve(); await Promise.resolve() })
+    expect(drawer.querySelector('.dsh-dot-drawer-nav button[data-nav="proposals"]')).toBeNull()
+    expect(gear.querySelector('.dsh-dot-gear-dot')).toBeNull()
+    expect(region()).toBe('常规')
 
     const widen = drawer.querySelector<HTMLButtonElement>('button[aria-label="加宽抽屉"]')!
     await act(async () => { widen.click() })
     expect(drawer.hasAttribute('data-wide')).toBe(true)
 
-    // The gear closes its own drawer; the tasks button opens the other one, with no settings tabs.
+    // The gear closes its own drawer; the tasks button opens the other one, with no settings nav.
     await act(async () => { gear.click() })
     expect(document.querySelector('aside.dsh-dot-drawer')).toBeNull()
     const tasks = [...document.querySelectorAll<HTMLButtonElement>('.dsh-dot-head button')].find(node => node.textContent?.startsWith('任务'))!
     await act(async () => { tasks.click() })
     const tasksDrawer = document.querySelector('aside.dsh-dot-drawer')!
     expect(tasksDrawer.getAttribute('data-kind')).toBe('tasks')
-    expect(tasksDrawer.querySelector('.dsh-dot-drawer-tabs')).toBeNull()
+    expect(tasksDrawer.querySelector('.dsh-dot-drawer-nav')).toBeNull()
     expect(tasksDrawer.querySelector('.dsh-dot-drawer-title')?.textContent).toContain('任务')
     expect(tasksDrawer.querySelector('.dsh-dot-filters')).not.toBeNull()
 
@@ -669,6 +832,78 @@ describe('ChatPanel activity and notice cards', () => {
     await act(async () => { document.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'Escape' })) })
     expect(document.querySelector('aside.dsh-dot-drawer')).toBeNull()
     await act(async () => { root.unmount() })
+  })
+
+  it('refreshes cache keepalive after approving a model proposal while preserving armed running session model', async () => {
+    const flush = async () => {
+      await Promise.resolve()
+      await Promise.resolve()
+      await new Promise(resolve => setTimeout(resolve, 0))
+    }
+    const setInputValue = (el: HTMLInputElement, value: string) => {
+      el.value = value
+      const key = Object.keys(el).find(k => k.startsWith('__reactProps'))
+      const props = key ? (el as unknown as Record<string, { onChange?: (event: { target: HTMLElement }) => void }>)[key] : undefined
+      props?.onChange?.({ target: el })
+    }
+    const snapshot: ChatSnapshot = { sessionId: 'dot-1', running: false, streaming: '', rev: 1, itemsRev: 1, items: [] }
+
+    const verifyCase = async (armedModel: { provider: string; model: string } | undefined, expectedKey: string, nextMinutes: number) => {
+      let current = { ...DEFAULT_SETTINGS, model: { provider: 'p', model: 'old' } }
+      let proposals = [{ id: 'pm-1', field: 'model' as const, before: { provider: 'p', model: 'old' }, after: { provider: 'p', model: 'new' }, reason: 'faster', createdAt: 1 }]
+      const saved: Array<Record<string, unknown>> = []
+      let keepaliveCalls = 0
+      const api: ChatApi = {
+        ...makeApi(snapshot),
+        models: async () => ({ groups: [{ id: 'p', name: 'P', models: [{ id: 'old', name: 'Old' }, { id: 'new', name: 'New' }] }] }),
+        settings: async () => current,
+        setSettings: async patch => { saved.push(patch as Record<string, unknown>); current = { ...current, ...patch } as typeof current; return current },
+        keepalive: async () => {
+          keepaliveCalls += 1
+          const m = armedModel ?? current.model ?? { provider: 'p', model: 'old' }
+          return { provider: m.provider, model: m.model, minutes: current.cacheTtl?.[`${m.provider}/${m.model}`] ?? 15, defaultMinutes: 15 }
+        },
+        settingProposals: async () => [...proposals],
+        decideSetting: async (id, allow) => {
+          proposals = proposals.filter(row => row.id !== id)
+          if (allow) current = { ...current, model: { provider: 'p', model: 'new' } }
+          return 'ok'
+        },
+      }
+      const root = createRoot(document.getElementById('root')!)
+      await act(async () => { root.render(<ChatPanel locale="en" api={api} onOpenSession={() => {}} />) })
+      await act(flush)
+      await act(async () => { document.querySelector<HTMLButtonElement>('button[aria-label="Settings"]')!.click() })
+      await act(flush)
+      await act(async () => { document.querySelector<HTMLButtonElement>('.dsh-dot-drawer-nav button[data-nav="proposals"]')!.click() })
+      await act(flush)
+      const callsBeforeApprove = keepaliveCalls
+      await act(async () => { document.querySelector<HTMLButtonElement>('.dsh-dot-proposal button')!.click() })
+      await act(flush)
+      expect(keepaliveCalls).toBeGreaterThan(callsBeforeApprove)
+      expect(document.querySelector('aside.dsh-dot-drawer [role="region"]')?.getAttribute('aria-label')).toBe('General')
+      expect(document.body.textContent).toContain(expectedKey)
+      const ttlInput = document.querySelector<HTMLInputElement>('input[aria-label="Cache lifetime"]')!
+      await act(async () => { setInputValue(ttlInput, String(nextMinutes)) })
+      await act(async () => { ttlInput.dispatchEvent(new dom.window.FocusEvent('focusout', { bubbles: true })) })
+      expect(saved.at(-1)).toEqual({ cacheTtl: { [expectedKey]: nextMinutes } })
+      await act(async () => { root.unmount() })
+    }
+
+    await verifyCase(undefined, 'p/new', 25)
+    await verifyCase({ provider: 'p', model: 'running' }, 'p/running', 30)
+  })
+
+  it('orders the narrow drawer container query after base settings padding and wraps long rail labels', () => {
+    const baseRule = '.dsh-dot-chat .dsh-dot-settings { display: flex;'
+    const narrowQuery = '@container dot-drawer-body (max-width: 439px)'
+    const baseIndex = chatCss.indexOf(baseRule)
+    const queryIndex = chatCss.indexOf(narrowQuery)
+    expect(baseIndex).toBeGreaterThan(-1)
+    expect(queryIndex).toBeGreaterThan(baseIndex)
+    const block = chatCss.slice(queryIndex, chatCss.indexOf('\n}\n', queryIndex) + 3)
+    expect(block).toContain('.dsh-dot-chat .dsh-dot-settings { padding: 14px 14px 28px; }')
+    expect(block).toContain('white-space: normal;')
   })
 })
 
@@ -704,10 +939,16 @@ describe('ChatPanel bottom pin', () => {
     await stream(2)
     expect(top).toBe(1000)
 
-    // Slight upward scroll (30px, inside STICK_PX): the update must not pull it back.
+    // Slight upward scroll (30px, inside STICK_PX): the update must not pull it back, and shows the jump-to-latest pill.
     await scrollTo(570)
     await stream(3)
     expect(top).toBe(570)
+    const fab = document.querySelector<HTMLButtonElement>('.dsh-dot-scroll-fab')
+    expect(fab).not.toBeNull()
+    expect(fab!.hasAttribute('data-unread')).toBe(true)
+    await act(async () => { fab!.click() })
+    expect(top).toBe(1000)
+    expect(document.querySelector('.dsh-dot-scroll-fab')).toBeNull()
 
     // Back at the bottom: following resumes.
     await scrollTo(600)
@@ -754,6 +995,324 @@ describe('Composer images', () => {
     await pick(new File([Uint8Array.from([1, 2, 3, 4])], 'note.txt', { type: 'text/plain' }))
     expect(document.body.textContent).toContain('Only PNG, JPEG, WebP and GIF')
     expect(document.body.textContent).not.toContain('note.txt')
+    await act(async () => root.unmount())
+  })
+
+  it('keeps the toolbar minimal while supporting slash quick-actions, low-frequency /segment and /settings entries, history recall, expand, and clear', async () => {
+    const snapshot: ChatSnapshot = {
+      sessionId: 'dot-composer-streamlined',
+      running: false,
+      streaming: '',
+      rev: 1,
+      itemsRev: 1,
+      items: [
+        { kind: 'user', key: 'u1', text: 'check nightly build', at: 1 },
+        { kind: 'bot', key: 'b1', text: 'All green.', at: 2 },
+      ],
+    }
+    const api = makeApi(snapshot)
+    api.newSegment = vi.fn(async () => 'dot-seg-2')
+
+    const root = createRoot(document.getElementById('root')!)
+    await act(async () => { root.render(<ChatPanel locale="en" api={api} onOpenSession={() => {}} />) })
+    await act(async () => { await Promise.resolve(); await Promise.resolve() })
+
+    // No persistent model pill or segment button in the bottom composer bar.
+    expect(document.querySelector('.dsh-dot-composer-bar .dsh-dot-model-pill')).toBeNull()
+    expect(document.querySelector('.dsh-dot-composer-bar button[aria-label="Start new segment"]')).toBeNull()
+
+    const input = document.querySelector<HTMLTextAreaElement>('textarea.dsh-dot-input')!
+
+    // ArrowUp on empty input recalls the last sent user prompt; ArrowDown restores empty draft.
+    await act(async () => {
+      input.setSelectionRange(0, 0)
+      input.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'ArrowUp', bubbles: true }))
+    })
+    expect(input.value).toBe('check nightly build')
+    await act(async () => {
+      input.setSelectionRange(input.value.length, input.value.length)
+      input.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }))
+    })
+    expect(input.value).toBe('')
+
+    // Quick actions button opens the slash menu and inserts the structured task template.
+    const quickBtn = document.querySelector<HTMLButtonElement>('button[aria-label="Quick actions"]')!
+    await act(async () => { quickBtn.click() })
+    const taskOption = [...document.querySelectorAll<HTMLButtonElement>('.dsh-dot-slash-item')].find(btn => btn.textContent?.includes('/task'))!
+    expect(taskOption).toBeDefined()
+    await act(async () => { taskOption.click() })
+    expect(input.value).toContain('Please start a new task:')
+    expect(document.querySelector('.dsh-dot-slash-menu')).toBeNull()
+
+    // Expand toggle appears for multi-line template and Clear resets both text and expanded state.
+    const expandBtn = document.querySelector<HTMLButtonElement>('button[aria-label="Expand editor"]')!
+    await act(async () => { expandBtn.click() })
+    expect(document.querySelector('.dsh-dot-composer-card')?.hasAttribute('data-expanded')).toBe(true)
+    const clearBtn = document.querySelector<HTMLButtonElement>('button[aria-label="Clear input"]')!
+    await act(async () => { clearBtn.click() })
+    expect(input.value).toBe('')
+    expect(document.querySelector('.dsh-dot-composer-card')?.hasAttribute('data-expanded')).toBe(false)
+
+    // Low-frequency /segment and /settings entries remain reachable via the / menu.
+    await act(async () => { quickBtn.click() })
+    const segOption = [...document.querySelectorAll<HTMLButtonElement>('.dsh-dot-slash-item')].find(btn => btn.textContent?.includes('/segment'))!
+    await act(async () => { segOption.click(); await Promise.resolve() })
+    expect(api.newSegment).toHaveBeenCalledOnce()
+    expect(document.querySelector('.dsh-dot-seg-feedback')?.textContent).toContain('Started a new segment')
+
+    await act(async () => { quickBtn.click() })
+    const settingsOption = [...document.querySelectorAll<HTMLButtonElement>('.dsh-dot-slash-item')].find(btn => btn.textContent?.includes('/settings'))!
+    await act(async () => { settingsOption.click(); await Promise.resolve() })
+    expect(document.querySelector('aside.dsh-dot-drawer')?.getAttribute('data-kind')).toBe('settings')
+
+    await act(async () => root.unmount())
+  })
+
+  // jsdom loads before React marks the input event supported, so onChange follows the
+  // keyup polyfill: focus the field, set the value underneath the tracker, then keyup.
+  function typeInto(input: HTMLTextAreaElement, value: string) {
+    const setter = Object.getOwnPropertyDescriptor(dom.window.HTMLTextAreaElement.prototype, 'value')?.set
+    input.dispatchEvent(new dom.window.FocusEvent('focusin', { bubbles: true }))
+    setter?.call(input, value)
+    input.dispatchEvent(new dom.window.KeyboardEvent('keyup', { bubbles: true }))
+  }
+
+  function key(input: HTMLTextAreaElement, name: string) {
+    input.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: name, bubbles: true }))
+  }
+
+  it('walks older prompts with ArrowUp after the caret moves to the end of a recall', async () => {
+    const snapshot: ChatSnapshot = {
+      sessionId: 'dot-history',
+      running: false,
+      streaming: '',
+      rev: 1,
+      itemsRev: 1,
+      items: [
+        { kind: 'user', key: 'u1', text: 'older prompt', at: 1 },
+        { kind: 'bot', key: 'b1', text: 'ok', at: 2 },
+        { kind: 'user', key: 'u2', text: 'newer prompt', at: 3 },
+      ],
+    }
+    const root = createRoot(document.getElementById('root')!)
+    await act(async () => { root.render(<ChatPanel locale="en" api={makeApi(snapshot)} onOpenSession={() => {}} />) })
+    await act(async () => { await Promise.resolve() })
+    const input = document.querySelector<HTMLTextAreaElement>('textarea.dsh-dot-input')!
+    await act(async () => { input.setSelectionRange(0, 0); key(input, 'ArrowUp') })
+    expect(input.value).toBe('newer prompt')
+    await act(async () => { key(input, 'ArrowUp') })
+    expect(input.value).toBe('older prompt')
+    await act(async () => { key(input, 'ArrowDown') })
+    expect(input.value).toBe('newer prompt')
+    await act(async () => { key(input, 'ArrowDown') })
+    expect(input.value).toBe('')
+    await act(async () => root.unmount())
+  })
+
+  it('runs a slash command from Enter and does not send when the highlighted command is disabled', async () => {
+    const snapshot: ChatSnapshot = { sessionId: 'dot-slash', running: true, streaming: '', rev: 1, itemsRev: 1, items: [] }
+    const api = makeApi(snapshot)
+    api.say = vi.fn(async () => {})
+    api.newSegment = vi.fn(async () => 'dot-2')
+    const root = createRoot(document.getElementById('root')!)
+    await act(async () => { root.render(<ChatPanel locale="en" api={api} onOpenSession={() => {}} />) })
+    await act(async () => { await Promise.resolve() })
+    const input = document.querySelector<HTMLTextAreaElement>('textarea.dsh-dot-input')!
+    const activeCmd = () => document.querySelector('.dsh-dot-slash-item[data-active] code')?.textContent
+
+    // Typing "/" opens the menu on the first command; arrows move that highlight,
+    // and Enter runs the highlighted command instead of sending the slash text.
+    await act(async () => { typeInto(input, '/') })
+    expect(document.querySelector('.dsh-dot-slash-menu')).not.toBeNull()
+    expect(activeCmd()).toBe('/overview')
+    await act(async () => { key(input, 'ArrowDown') })
+    expect(activeCmd()).toBe('/pending')
+    await act(async () => { key(input, 'Enter') })
+    expect(input.value).toBe('Is anything waiting on my call?')
+    expect(api.say).not.toHaveBeenCalled()
+
+    await act(async () => { typeInto(input, '/task') })
+    await act(async () => { key(input, 'Enter') })
+    expect(input.value).toContain('Please start a new task:')
+    expect(api.say).not.toHaveBeenCalled()
+
+    await act(async () => { typeInto(input, '/segment') })
+    await act(async () => { key(input, 'Enter') })
+    expect(api.say).not.toHaveBeenCalled()
+    expect(input.value).toBe('/segment')
+    expect(api.newSegment).not.toHaveBeenCalled()
+
+    const quickBtn = document.querySelector<HTMLButtonElement>('button[aria-label="Quick actions"]')!
+    expect(document.querySelector('.dsh-dot-slash-menu')).not.toBeNull()
+    await act(async () => { quickBtn.click() })
+    expect(document.querySelector('.dsh-dot-slash-menu')).toBeNull()
+    await act(async () => { quickBtn.click() })
+    expect(document.querySelector('.dsh-dot-slash-menu')).not.toBeNull()
+    expect(activeCmd()).toBe('/segment')
+    await act(async () => root.unmount())
+  })
+
+  it('carries an unsent draft onto a new segment and restores it after remount', async () => {
+    const first: ChatSnapshot = { sessionId: 'seg-a', running: false, streaming: '', rev: 1, itemsRev: 1, items: [] }
+    let release: (snapshot: ChatSnapshot | undefined) => void = () => {}
+    let waits = 0
+    const api = makeApi(first)
+    api.wait = () => {
+      waits += 1
+      if (waits === 1) return new Promise(resolve => { release = resolve })
+      return new Promise(() => {})
+    }
+    const root = createRoot(document.getElementById('root')!)
+    await act(async () => { root.render(<ChatPanel locale="en" api={api} onOpenSession={() => {}} />) })
+    await act(async () => { await Promise.resolve(); await Promise.resolve() })
+    expect(waits).toBe(1)
+    const input = document.querySelector<HTMLTextAreaElement>('textarea.dsh-dot-input')!
+    await act(async () => { typeInto(input, 'hold this') })
+    expect(dom.window.localStorage.getItem('dsh-dot:draft:seg-a')).toBe('hold this')
+    await act(async () => {
+      release({ sessionId: 'seg-b', running: false, streaming: '', rev: 2, itemsRev: 2, items: [] })
+      await Promise.resolve()
+    })
+    expect(input.value).toBe('hold this')
+    expect(dom.window.localStorage.getItem('dsh-dot:draft:seg-b')).toBe('hold this')
+    await act(async () => root.unmount())
+
+    const again = createRoot(document.getElementById('root')!)
+    await act(async () => { again.render(<ChatPanel locale="en" api={makeApi({ sessionId: 'seg-b', running: false, streaming: '', rev: 3, itemsRev: 3, items: [] })} onOpenSession={() => {}} />) })
+    await act(async () => { await Promise.resolve(); await Promise.resolve() })
+    expect(document.querySelector<HTMLTextAreaElement>('textarea.dsh-dot-input')!.value).toBe('hold this')
+    await act(async () => again.unmount())
+  })
+
+  it('prefers a command-id prefix over description text and still runs a complete id', async () => {
+    const snapshot: ChatSnapshot = { sessionId: 'dot-prefix', running: false, streaming: '', rev: 1, itemsRev: 1, items: [] }
+    const api = makeApi(snapshot)
+    api.say = vi.fn(async () => {})
+    const root = createRoot(document.getElementById('root')!)
+    await act(async () => { root.render(<ChatPanel locale="en" api={api} onOpenSession={() => {}} />) })
+    await act(async () => { await Promise.resolve() })
+    const input = document.querySelector<HTMLTextAreaElement>('textarea.dsh-dot-input')!
+    const activeCmd = () => document.querySelector('.dsh-dot-slash-item[data-active] code')?.textContent
+    const drawerKind = () => document.querySelector('aside.dsh-dot-drawer')?.getAttribute('data-kind')
+
+    await act(async () => { typeInto(input, '/se') })
+    expect(activeCmd()).toBe('/settings')
+    await act(async () => { key(input, 'Enter') })
+    expect(api.say).not.toHaveBeenCalled()
+    expect(drawerKind()).toBe('settings')
+    expect(input.value).toBe('')
+
+    await act(async () => { typeInto(input, '/re') })
+    expect(activeCmd()).toBe('/remind')
+    await act(async () => { key(input, 'Enter') })
+    expect(api.say).not.toHaveBeenCalled()
+    expect(input.value).toContain('Remind me every day at 09:00')
+
+    await act(async () => { typeInto(input, '/set') })
+    expect(activeCmd()).toBe('/settings')
+    await act(async () => { key(input, 'Enter') })
+    expect(api.say).not.toHaveBeenCalled()
+    expect(drawerKind()).toBe('settings')
+
+    await act(async () => { typeInto(input, '/task') })
+    expect(activeCmd()).toBe('/task')
+    await act(async () => { key(input, 'Enter') })
+    expect(api.say).not.toHaveBeenCalled()
+    expect(input.value).toContain('Please start a new task:')
+
+    await act(async () => { typeInto(input, '/model') })
+    expect(activeCmd()).toBe('/settings')
+    await act(async () => root.unmount())
+  })
+
+  it('shows a visible selection on a disabled slash row and does not send', async () => {
+    const style = document.createElement('style')
+    style.textContent = chatCss
+    document.head.appendChild(style)
+    const snapshot: ChatSnapshot = { sessionId: 'dot-disabled-highlight', running: true, streaming: '', rev: 1, itemsRev: 1, items: [] }
+    const api = makeApi(snapshot)
+    api.say = vi.fn(async () => {})
+    api.newSegment = vi.fn(async () => 'dot-2')
+    const root = createRoot(document.getElementById('root')!)
+    await act(async () => { root.render(<ChatPanel locale="en" api={api} onOpenSession={() => {}} />) })
+    await act(async () => { await Promise.resolve() })
+    const input = document.querySelector<HTMLTextAreaElement>('textarea.dsh-dot-input')!
+    const row = (cmd: string) => [...document.querySelectorAll<HTMLButtonElement>('.dsh-dot-slash-item')].find(button => button.querySelector('code')?.textContent === cmd)
+    const paint = (cmd: string) => dom.window.getComputedStyle(row(cmd)!).backgroundColor
+    await act(async () => { typeInto(input, '/se') })
+    expect(row('/settings')?.hasAttribute('data-active')).toBe(true)
+    await act(async () => { key(input, 'ArrowDown') })
+    const segment = row('/segment')!
+    const segmentPaint = paint('/segment')
+    const settingsPaint = paint('/settings')
+    expect(segment.hasAttribute('data-active')).toBe(true)
+    expect(row('/settings')?.hasAttribute('data-active')).toBe(false)
+    expect(segment.disabled).toBe(true)
+    expect({ segmentPaint, settingsPaint }).toEqual({
+      segmentPaint: 'rgba(128, 128, 128, 0.22)',
+      settingsPaint: 'rgba(0, 0, 0, 0)',
+    })
+    await act(async () => { key(input, 'Enter') })
+    expect(api.say).not.toHaveBeenCalled()
+    expect(api.newSegment).not.toHaveBeenCalled()
+    expect(input.value).toBe('/se')
+    await act(async () => root.unmount())
+    style.remove()
+  })
+
+  it('writes a recalled prompt to the draft and puts the empty draft back on ArrowDown', async () => {
+    const snapshot: ChatSnapshot = {
+      sessionId: 'dot-history-draft',
+      running: false,
+      streaming: '',
+      rev: 1,
+      itemsRev: 1,
+      items: [{ kind: 'user', key: 'u1', text: 'sent one', at: 1 }],
+    }
+    const root = createRoot(document.getElementById('root')!)
+    await act(async () => { root.render(<ChatPanel locale="en" api={makeApi(snapshot)} onOpenSession={() => {}} />) })
+    await act(async () => { await Promise.resolve() })
+    const input = document.querySelector<HTMLTextAreaElement>('textarea.dsh-dot-input')!
+    const keyName = 'dsh-dot:draft:dot-history-draft'
+    expect(dom.window.localStorage.getItem(keyName)).toBeNull()
+    await act(async () => { input.setSelectionRange(0, 0); key(input, 'ArrowUp') })
+    expect(input.value).toBe('sent one')
+    expect(dom.window.localStorage.getItem(keyName)).toBe('sent one')
+    await act(async () => { key(input, 'ArrowDown') })
+    expect(input.value).toBe('')
+    expect(dom.window.localStorage.getItem(keyName)).toBeNull()
+    await act(async () => root.unmount())
+
+    const again = createRoot(document.getElementById('root')!)
+    await act(async () => { again.render(<ChatPanel locale="en" api={makeApi(snapshot)} onOpenSession={() => {}} />) })
+    await act(async () => { await Promise.resolve(); await Promise.resolve() })
+    expect(document.querySelector<HTMLTextAreaElement>('textarea.dsh-dot-input')!.value).toBe('')
+    await act(async () => again.unmount())
+  })
+
+  it('shows the drop mask on drag enter and clears it when the pointer leaves', async () => {
+    const snapshot: ChatSnapshot = { sessionId: 'dot-drag', running: false, streaming: '', rev: 1, itemsRev: 1, items: [] }
+    const root = createRoot(document.getElementById('root')!)
+    await act(async () => { root.render(<ChatPanel locale="en" api={makeApi(snapshot)} onOpenSession={() => {}} />) })
+    await act(async () => { await Promise.resolve() })
+    const card = document.querySelector<HTMLDivElement>('.dsh-dot-composer-card')!
+    const drag = (type: string) => {
+      const event = new dom.window.Event(type, { bubbles: true, cancelable: true })
+      Object.defineProperty(event, 'dataTransfer', { value: { types: ['Files'], dropEffect: 'none', files: [] } })
+      return event
+    }
+    await act(async () => { card.dispatchEvent(drag('dragenter')) })
+    expect(card.hasAttribute('data-dragging')).toBe(true)
+    expect(card.querySelector('.dsh-dot-drop-mask')).not.toBeNull()
+    await act(async () => { card.dispatchEvent(drag('dragleave')) })
+    expect(card.hasAttribute('data-dragging')).toBe(false)
+    expect(card.querySelector('.dsh-dot-drop-mask')).toBeNull()
+    await act(async () => {
+      card.dispatchEvent(drag('dragenter'))
+      card.dispatchEvent(drag('dragleave'))
+    })
+    expect(card.hasAttribute('data-dragging')).toBe(false)
+    expect(card.querySelector('.dsh-dot-drop-mask')).toBeNull()
     await act(async () => root.unmount())
   })
 })

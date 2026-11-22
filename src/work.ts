@@ -5,6 +5,8 @@
  */
 import path from 'node:path'
 import { subjectKey, subjectMaterial, type DeliverySubject, type SubjectLook } from './acceptance.ts'
+import { totalUsage } from './context.ts'
+import type { DotContextUsage } from './contracts.ts'
 import { z } from 'zod'
 
 export type ChangeControl = 'open' | 'paused' | 'cancelled'
@@ -17,6 +19,30 @@ export type CheckVerdict = 'pass' | 'fail' | 'unverified' | 'not-applicable'
 export type VerificationVerdict = 'accept' | 'rework' | 'unverified'
 
 const TERMINAL: ReadonlySet<RunPhase> = new Set(['completed', 'failed', 'stopped'])
+export const MAX_COMPLETED_CHANGES = 200
+/** How long a terminal run that still owes usage can defer its change's prune. */
+export const USAGE_PRUNE_GRACE_MS = 24 * 60 * 60_000
+
+/** Terminal run — usage and wall time can be recorded against it. */
+export function runIsTerminal(run: Pick<RunRecord, 'phase'>): boolean { return TERMINAL.has(run.phase) }
+
+/**
+ * Tokens and wall time summed over a change's finished runs. Only runs that
+ * recorded the fields contribute, so the totals track the terminal set and a
+ * run that never reported usage simply does not count.
+ */
+export function runCostTotals(runs: readonly RunRecord[]): { readonly tokens?: number; readonly wallMs?: number } {
+  let tokens = 0
+  let counted = false
+  let wallMs = 0
+  let timed = false
+  for (const run of runs) {
+    if (!TERMINAL.has(run.phase)) continue
+    if (run.usage) { tokens += totalUsage(run.usage); counted = true }
+    if (run.wallMs !== undefined) { wallMs += run.wallMs; timed = true }
+  }
+  return { ...(counted ? { tokens } : {}), ...(timed ? { wallMs } : {}) }
+}
 
 export interface WritePath { readonly path: string; readonly type: 'file' | 'directory' }
 export type WriteScope = { readonly kind: 'paths'; readonly paths: readonly WritePath[] } | { readonly kind: 'workspace-exclusive' }
@@ -69,8 +95,24 @@ export interface ChangeRecord {
   readonly closeout?: { readonly verificationId: string; readonly source: string; readonly inputRef?: string; readonly subjectKey?: string; readonly at?: number }
   /** The user asked to see this input. A version field on accept does not replace the recorded decision. */
   readonly oversight?: OversightRecord
+  /** The recipe and revision this change was created from; kept after the recipe is removed or revised. */
+  readonly recipe?: { readonly id: string; readonly revision: number }
+  /** A change whose runs wrote into a dot-managed git worktree instead of the checkout. */
+  readonly isolation?: TaskIsolation
   readonly createdAt: number
   readonly updatedAt: number
+}
+/** Where an isolated change's worktree lives and how the human chose to integrate it. */
+export interface TaskIsolation {
+  readonly kind: 'worktree'
+  readonly repoRoot: string
+  readonly worktree: string
+  readonly branch: string
+  readonly baseSha: string
+  readonly state: 'active' | 'committed' | 'merged' | 'discarded'
+  readonly commitSha?: string
+  readonly mergedInto?: string
+  readonly at: number
 }
 export interface InputRecord {
   readonly id: string
@@ -78,12 +120,12 @@ export interface InputRecord {
   readonly revision: number
   readonly goal: string
   readonly requirements: readonly Requirement[]
+  /** Whether the implicit goal requirement follows later goal edits. */
+  readonly requirementsFromGoal?: boolean
   readonly steps: readonly StepSpec[]
   readonly constraints?: readonly Constraint[]
   readonly userRequest?: string
   readonly deliverableLanguage?: string
-  /** Free text from inputs written before constraints existed. */
-  readonly behaviorNotes?: string
   readonly designNotes?: string
   readonly supersedes?: string
   readonly source: string
@@ -129,6 +171,10 @@ export interface RunRecord {
   readonly reworkOf?: string
   readonly createdAt: number
   readonly updatedAt: number
+  /** Folded provider usage from the run's session events, captured once the run is terminal. */
+  readonly usage?: DotContextUsage
+  /** Wall time of the run's session — first to last event, else updatedAt − createdAt. */
+  readonly wallMs?: number
 }
 export interface CheckRecord {
   readonly requirementRef: string
@@ -180,33 +226,33 @@ const scenarioSchema = z.object({
   given: z.string().optional(),
   when: z.string(),
   then: z.string(),
-}).strict()
-const requirementSchema = z.object({
+})
+export const requirementSchema = z.object({
   requirementRef: z.string().min(1),
   text: z.string(),
   required: z.boolean(),
   scenarios: z.array(scenarioSchema).optional(),
-}).strict()
+})
 const stepSpecSchema = z.object({
   stepRef: z.string().min(1),
   text: z.string(),
   covers: z.array(z.string().min(1)).optional(),
   after: z.array(z.string().min(1)).optional(),
-}).strict()
-const constraintSchema = z.object({ constraintRef: z.string().min(1), text: z.string() }).strict()
-const stepViewSchema = z.object({ stepRef: z.string().min(1), done: z.boolean(), runId: z.string().optional(), inputRef: z.string().min(1), subjectRef: z.unknown().optional() }).strict().transform(({ subjectRef: _oldProof, ...step }) => step)
-const baselineSchema = z.object({ workspaceRoot: z.string().min(1), scopeKey: z.string().min(1), artifactRef: z.string().min(1) }).strict()
-const writePathSchema = z.object({ path: z.string().min(1), type: z.enum(['file', 'directory']) }).strict()
+})
+export const constraintSchema = z.object({ constraintRef: z.string().min(1), text: z.string() })
+const stepViewSchema = z.object({ stepRef: z.string().min(1), done: z.boolean(), runId: z.string().optional(), inputRef: z.string().min(1) })
+const baselineSchema = z.object({ workspaceRoot: z.string().min(1), scopeKey: z.string().min(1), artifactRef: z.string().min(1) })
+const writePathSchema = z.object({ path: z.string().min(1), type: z.enum(['file', 'directory']) })
 const writeScopeSchema = z.union([
-  z.object({ kind: z.literal('paths'), paths: z.array(writePathSchema) }).strict(),
-  z.object({ kind: z.literal('workspace-exclusive') }).strict(),
+  z.object({ kind: z.literal('paths'), paths: z.array(writePathSchema) }),
+  z.object({ kind: z.literal('workspace-exclusive') }),
 ])
 const deliverySchema = z.object({
   id: z.string().min(1), kind: z.enum(['initial', 'context', 'coordination']), targetSessionId: z.string(),
   inputRevision: z.number().int(), contentRef: z.string(), hostRequestId: z.string().optional(), source: z.string(),
   status: z.enum(['intent', 'accepted', 'rejected', 'unknown']), evidence: z.string().optional(),
   createdAt: z.number(), updatedAt: z.number(),
-}).strict()
+})
 
 export const changeSchema = z.object({
   id: z.string().min(1), title: z.string(), cwd: z.string().min(1), baselineRefs: z.unknown().optional().transform(() => [] as BaselineRef[]),
@@ -216,25 +262,32 @@ export const changeSchema = z.object({
   closeout: z.object({
     verificationId: z.string().min(1), source: z.string(),
     inputRef: z.string().min(1).optional(), subjectKey: z.string().min(1).optional(), at: z.number().optional(),
-  }).strict().optional(),
+  }).optional(),
   oversight: z.object({
     requested: z.boolean(), inputRef: z.string().min(1), inputRevision: z.number().int(),
     decision: z.object({
       result: z.enum(['accept', 'reject']), verificationId: z.string().min(1).optional(),
       subjectKey: z.string().min(1).optional(), source: z.string(), at: z.number(),
       notifiedAt: z.number().optional(),
-    }).strict().optional(),
-  }).strict().optional(),
+    }).optional(),
+  }).optional(),
+  recipe: z.object({ id: z.string().min(1), revision: z.number().int().positive() }).optional(),
+  isolation: z.object({
+    kind: z.literal('worktree'), repoRoot: z.string().min(1), worktree: z.string().min(1),
+    branch: z.string().min(1), baseSha: z.string().min(1),
+    state: z.enum(['active', 'committed', 'merged', 'discarded']),
+    commitSha: z.string().min(1).optional(), mergedInto: z.string().min(1).optional(), at: z.number(),
+  }).optional(),
   createdAt: z.number(), updatedAt: z.number(),
-}).strict()
+})
 export const inputSchema = z.object({
   id: z.string().min(1), changeId: z.string().min(1), revision: z.number().int().positive(), goal: z.string(),
-  requirements: z.array(requirementSchema), steps: z.array(stepSpecSchema),
+  requirements: z.array(requirementSchema), requirementsFromGoal: z.boolean().optional(), steps: z.array(stepSpecSchema),
   constraints: z.array(constraintSchema).optional(),
   userRequest: z.string().optional(), deliverableLanguage: z.string().optional(),
-  behaviorNotes: z.string().optional(), designNotes: z.string().optional(), supersedes: z.string().optional(),
+  designNotes: z.string().optional(), supersedes: z.string().optional(),
   source: z.string(), createdAt: z.number(),
-}).strict()
+})
 export const runSchema = z.object({
   id: z.string().min(1), changeId: z.string().min(1), kind: z.enum(['work', 'rework', 'review']),
   inputRevision: z.number().int(), inputRef: z.string().min(1), stepRefs: z.array(z.string()),
@@ -249,25 +302,27 @@ export const runSchema = z.object({
   closeReason: z.string().optional(),
   closeIntent: z.enum(['completed', 'failed', 'stopped']).optional(),
   actionClaim: z.enum(['session', 'prompt']).optional(),
-  closureEvidence: z.object({ queueCleared: z.boolean(), agentIdle: z.boolean(), jobsSettled: z.boolean() }).strict().optional(),
+  closureEvidence: z.object({ queueCleared: z.boolean(), agentIdle: z.boolean(), jobsSettled: z.boolean() }).optional(),
   observation: z.string().optional(),
   cursor: z.object({
     seq: z.number().int().nonnegative().optional(),
     running: z.boolean().optional(),
     queue: z.enum(['empty', 'pending', 'unknown']).optional(),
     idle: z.boolean().optional(),
-  }).strict().optional(),
+  }).optional(),
   reworkOf: z.string().optional(),
   createdAt: z.number(), updatedAt: z.number(),
-}).strict()
+  usage: z.object({ input: z.number(), cacheRead: z.number(), cacheWrite: z.number(), output: z.number() }).optional(),
+  wallMs: z.number().optional(),
+})
 const subjectSchema = z.object({
   workspaceRoot: z.string().min(1), cwd: z.string().min(1),
   baselineRefs: z.array(baselineSchema), artifactRef: z.string().min(1),
-  changes: z.array(z.object({ path: z.string().min(1), kind: z.enum(['added', 'modified', 'deleted']), sha256: z.string().optional() }).strict()),
+  changes: z.array(z.object({ path: z.string().min(1), kind: z.enum(['added', 'modified', 'deleted']), sha256: z.string().optional() })),
   protectedDirty: z.array(z.string()),
-  exclusions: z.array(z.object({ path: z.string().min(1), reason: z.string().min(1) }).strict()),
+  exclusions: z.array(z.object({ path: z.string().min(1), reason: z.string().min(1) })),
   writeScope: writeScopeSchema.optional(), outOfScopePaths: z.array(z.string()).optional(),
-}).strict()
+})
 export const verificationSchema = z.object({
   id: z.string().min(1), changeId: z.string().min(1), inputRevision: z.number().int(), inputRef: z.string().min(1),
   runIds: z.array(z.string()),
@@ -276,9 +331,9 @@ export const verificationSchema = z.object({
   checks: z.array(z.object({
     requirementRef: z.string(), applicability: z.enum(['applicable', 'not-applicable']),
     verdict: z.enum(['pass', 'fail', 'unverified', 'not-applicable']), evidenceRefs: z.array(z.string()), note: z.string().optional(),
-  }).strict()),
+  })),
   verdict: z.enum(['accept', 'rework', 'unverified']), createdAt: z.number(),
-}).strict()
+})
 
 export function parseChange(value: unknown): ChangeRecord | undefined {
   const parsed = changeSchema.safeParse(value)
@@ -566,6 +621,8 @@ export class WorkBook {
   private readonly quarantined = new Map<string, IllegalVerification & { readonly record: unknown }>()
   /** In-process session lookups. A restarted book does not have these, so a persisted claim is leftover. */
   private readonly liveSessionClaims = new Set<string>()
+  /** In-process relay/peer followups currently awaiting host completion. */
+  private readonly liveRelayClaims = new Set<string>()
 
   constructor(private readonly persist: WorkPersist, private readonly platform: NodeJS.Platform = process.platform) {}
 
@@ -606,6 +663,7 @@ export class WorkBook {
     this.verifications.clear()
     this.quarantined.clear()
     this.liveSessionClaims.clear()
+    this.liveRelayClaims.clear()
     this.chain = Promise.resolve()
     this.currentRevision = 0
     this.changeSeq = 0
@@ -649,6 +707,32 @@ export class WorkBook {
   /** One stored verification. Reading evidence uses this id; it does not fall through to a newer row. */
   verification(id: string): VerificationRecord | undefined { return this.verifications.get(id) }
 
+  /**
+   * Failed rounds against the change's current input: writer/rework runs settled
+   * with verdict fail plus verifications recorded as rework or unverified.
+   */
+  failedRounds(changeId: string): number {
+    const change = this.changes.get(changeId)
+    if (!change) return 0
+    const failedRuns = [...this.runs.values()].filter(run =>
+      run.changeId === changeId && run.kind !== 'review' && run.phase === 'failed'
+      && run.inputRef === change.currentInputRef && run.inputRevision === change.currentRevision).length
+    const failedVerifications = [...this.verifications.values()].filter(row =>
+      row.changeId === changeId && row.inputRef === change.currentInputRef && row.inputRevision === change.currentRevision
+      && (row.verdict === 'rework' || row.verdict === 'unverified')).length
+    return failedRuns + failedVerifications
+  }
+
+  /** Failed rounds across every input revision, for whole-change outcome stats. */
+  failedRoundsAcrossInputs(changeId: string): number {
+    if (!this.changes.has(changeId)) return 0
+    const failedRuns = [...this.runs.values()].filter(run =>
+      run.changeId === changeId && run.kind !== 'review' && run.phase === 'failed').length
+    const failedVerifications = [...this.verifications.values()].filter(row =>
+      row.changeId === changeId && (row.verdict === 'rework' || row.verdict === 'unverified')).length
+    return failedRuns + failedVerifications
+  }
+
   /** Read-only board projection. Done is derived from closeout plus released runs. */
   workView(changeId: string) {
     const change = this.changes.get(changeId)
@@ -678,9 +762,14 @@ export class WorkBook {
       id: change.id, title: change.title, priority: change.priority, revision: change.currentRevision,
       inputRef: change.currentInputRef, control: change.control, status,
       ...(material?.goal ? { summary: material.goal } : {}),
+      ...runCostTotals(runs),
       runs: runs.map(run => ({
         id: run.id, kind: run.kind, phase: run.phase, cwd: run.cwd,
+        ...(run.sessionId ? { sessionId: run.sessionId } : {}),
         writeScope: run.writeScope,
+        ...(run.usage ? { usage: run.usage } : {}),
+        ...(run.wallMs !== undefined ? { wallMs: run.wallMs } : {}),
+        ...(!TERMINAL.has(run.phase) ? { startedAt: run.createdAt } : {}),
         deliveries: run.deliveries.map(item => ({
           id: item.id, kind: item.kind, status: item.status, contentRef: item.contentRef,
           ...(item.evidence ? { evidence: item.evidence } : {}),
@@ -703,6 +792,7 @@ export class WorkBook {
         } : {}),
       } : undefined,
       closeout: closeoutCurrent ? change.closeout : undefined,
+      ...(change.isolation ? { isolation: change.isolation } : {}),
       oversight: change.oversight,
       humanAction: !change.closeout && !verdictBlocks && !awaitsHumanDecision && verification?.verdict === 'accept' && verification.subjectKey
         && verification.inputRef === change.currentInputRef && verification.inputRevision === change.currentRevision ? {
@@ -761,7 +851,7 @@ export class WorkBook {
     })
   }
 
-  createChange(input: { title: string; cwd: string; goal: string; requirements?: readonly Requirement[]; steps?: readonly StepSpec[]; source?: string; priority?: 1 | 2 | 3; maxConcurrentRuns?: number; behaviorNotes?: string; constraints?: readonly Constraint[]; userRequest?: string; deliverableLanguage?: string; at?: number }): Promise<ChangeRecord> {
+  createChange(input: { title: string; cwd: string; goal: string; requirements?: readonly Requirement[]; requirementsFromGoal?: boolean; steps?: readonly StepSpec[]; source?: string; priority?: 1 | 2 | 3; maxConcurrentRuns?: number; constraints?: readonly Constraint[]; userRequest?: string; deliverableLanguage?: string; recipe?: { readonly id: string; readonly revision: number }; isolation?: TaskIsolation; at?: number }): Promise<ChangeRecord> {
     return this.exclusive(async () => {
       this.assertRecovered()
       const requirements = input.requirements ?? []
@@ -771,7 +861,7 @@ export class WorkBook {
       const at = input.at ?? Date.now()
       const changeId = `c-${++this.changeSeq}`
       const inputRow = this.inputRow(changeId, 1, input.goal, requirements, steps, input.source ?? 'user', at, {
-        behaviorNotes: input.behaviorNotes,
+        requirementsFromGoal: input.requirementsFromGoal,
         constraints: input.constraints,
         userRequest: input.userRequest,
         deliverableLanguage: input.deliverableLanguage,
@@ -783,6 +873,8 @@ export class WorkBook {
         currentRevision: 1, currentInputRef: inputRow.id, control: 'open',
         steps: inputRow.steps.map(step => ({ stepRef: step.stepRef, done: false, inputRef: inputRow.id })),
         maxConcurrentRuns: clampConcurrency(input.maxConcurrentRuns), priority: input.priority ?? 2,
+        ...(input.recipe ? { recipe: input.recipe } : {}),
+        ...(input.isolation ? { isolation: input.isolation } : {}),
         createdAt: at, updatedAt: at,
       }
       await this.commit('changes', change.id, change)
@@ -792,14 +884,14 @@ export class WorkBook {
     })
   }
 
-  reviseChange(changeId: string, patch: { goal?: string; requirements?: readonly Requirement[]; steps?: readonly StepSpec[]; cwd?: string; behaviorNotes?: string; constraints?: readonly Constraint[]; userRequest?: string; deliverableLanguage?: string; title?: string; priority?: 1 | 2 | 3; maxConcurrentRuns?: number; source?: string; at?: number }): Promise<ChangeRecord | WorkRefusal> {
+  reviseChange(changeId: string, patch: { goal?: string; requirements?: readonly Requirement[]; requirementsFromGoal?: boolean; steps?: readonly StepSpec[]; cwd?: string; constraints?: readonly Constraint[]; userRequest?: string; deliverableLanguage?: string; title?: string; priority?: 1 | 2 | 3; maxConcurrentRuns?: number; source?: string; at?: number }): Promise<ChangeRecord | WorkRefusal> {
     return this.exclusive(async () => {
       const refused = this.recoveryRefusal()
       if (refused) return refused
       const current = this.changes.get(changeId)
       if (!current) return { ok: false, code: 'missing', message: `unknown change ${changeId}` }
       const at = patch.at ?? Date.now()
-      const semantic = patch.goal !== undefined || patch.requirements !== undefined || patch.steps !== undefined || patch.cwd !== undefined || patch.behaviorNotes !== undefined || patch.constraints !== undefined || patch.userRequest !== undefined || patch.deliverableLanguage !== undefined
+      const semantic = patch.goal !== undefined || patch.requirements !== undefined || patch.requirementsFromGoal !== undefined || patch.steps !== undefined || patch.cwd !== undefined || patch.constraints !== undefined || patch.userRequest !== undefined || patch.deliverableLanguage !== undefined
       if (!semantic) {
         const next: ChangeRecord = {
           ...current,
@@ -815,17 +907,17 @@ export class WorkBook {
       }
       const previous = this.inputs.get(current.currentInputRef)
       if (!previous) return { ok: false, code: 'missing', message: `missing input ${current.currentInputRef}` }
-      const requirements = patch.requirements ?? previous.requirements
+      const requirementsFromGoal = patch.requirementsFromGoal ?? (patch.requirements !== undefined ? false : previous.requirementsFromGoal)
+      const nextGoal = patch.goal ?? previous.goal
+      const requirements = patch.requirements ?? (requirementsFromGoal && patch.goal !== undefined
+        ? [{ requirementRef: 'goal', text: nextGoal, required: true }]
+        : previous.requirements)
       const steps = patch.steps ?? previous.steps
       const constraints = patch.constraints !== undefined ? patch.constraints : previous.constraints
-      if (patch.behaviorNotes !== undefined && patch.constraints === undefined && previous.constraints !== undefined) {
-        return { ok: false, code: 'invalid', message: `${previous.id} uses structured constraints, so behavior_notes would be ignored. Revise with constraints instead.` }
-      }
       const problem = inputContractError(requirements, steps, constraints)
       if (problem) return { ok: false, code: 'invalid', message: problem }
-      const inputRow = this.inputRow(changeId, current.currentRevision + 1, patch.goal ?? previous.goal, requirements, steps, patch.source ?? 'revision', at, {
-        // Structured constraints replace legacy notes; carrying both would let old notes resurface.
-        ...(patch.constraints !== undefined ? {} : { behaviorNotes: patch.behaviorNotes ?? previous.behaviorNotes }),
+      const inputRow = this.inputRow(changeId, current.currentRevision + 1, nextGoal, requirements, steps, patch.source ?? 'revision', at, {
+        requirementsFromGoal,
         constraints,
         userRequest: patch.userRequest !== undefined ? patch.userRequest : previous.userRequest,
         deliverableLanguage: patch.deliverableLanguage !== undefined ? patch.deliverableLanguage : previous.deliverableLanguage,
@@ -1006,7 +1098,7 @@ export class WorkBook {
         stepRefs: [...(input.stepRefs ?? material.steps.map(step => step.stepRef))], cwd,
         workspaceRoot: identity.workspaceRoot, exclusiveRoot: identity.exclusiveRoot, uncertainBoundary,
         writeScope: input.writeScope, baselineRefs: [], requestedSessionId: `session-${id}`, creation: 'intent',
-        access: scopeWrites(input.writeScope) ? 'write' : 'read',
+        access: input.kind === 'review' ? 'read' : scopeWrites(input.writeScope) ? 'write' : 'read',
         deliveries: [delivery], phase: 'reserved', ...(input.reworkOf ? { reworkOf: input.reworkOf } : {}),
         createdAt: at, updatedAt: at,
       }
@@ -1460,6 +1552,12 @@ export class WorkBook {
 
   releaseLiveSessionClaim(runId: string): void { this.liveSessionClaims.delete(runId) }
 
+  claimLiveRelay(deliveryId: string): void { this.liveRelayClaims.add(deliveryId) }
+
+  releaseLiveRelay(deliveryId: string): void { this.liveRelayClaims.delete(deliveryId) }
+
+  hasLiveRelay(deliveryId: string): boolean { return this.liveRelayClaims.has(deliveryId) }
+
   /** A persisted cancel covers every run that never reached settling. */
   adoptCancel(runId: string, at = Date.now()): Promise<{ readonly ok: true; readonly adopted: boolean } | WorkRefusal> {
     return this.exclusive(async () => {
@@ -1529,6 +1627,49 @@ export class WorkBook {
       this.runs.set(next.id, next)
       this.currentRevision += 1
       return { ok: true, abandoned: true }
+    })
+  }
+
+  /** Reset a reserved run whose earlier lookup/create failed once the host confirms no session exists. */
+  abandonUnknownCreation(runId: string, at = Date.now()): Promise<{ readonly ok: true; readonly reset: boolean } | WorkRefusal> {
+    return this.exclusive(async () => {
+      const refused = this.recoveryRefusal()
+      if (refused) return refused
+      const run = this.runs.get(runId)
+      if (!run) return { ok: false, code: 'missing', message: `unknown run ${runId}` }
+      if (run.phase !== 'reserved' || run.creation !== 'unknown' || run.sessionId !== undefined) return { ok: true, reset: false }
+      if (this.liveSessionClaims.has(runId)) return { ok: true, reset: false }
+      if (run.deliveries.some(item => item.status === 'accepted' || item.status === 'unknown' || item.hostRequestId !== undefined)) {
+        return { ok: true, reset: false }
+      }
+      const next: RunRecord = dropClaim({ ...run, creation: 'intent', updatedAt: at })
+      await this.commit('runs', next.id, next)
+      this.runs.set(next.id, next)
+      this.currentRevision += 1
+      return { ok: true, reset: true }
+    })
+  }
+
+  /** Release a cancelled/settling run whose creation was unknown once the host confirms the session is absent. */
+  releaseAbsentUnknown(runId: string, seenUpdatedAt: number, at = Date.now()): Promise<{ readonly ok: true; readonly phase: RunPhase } | WorkRefusal> {
+    return this.exclusive(async () => {
+      const refused = this.recoveryRefusal()
+      if (refused) return refused
+      const run = this.runs.get(runId)
+      if (!run) return { ok: false, code: 'missing', message: `unknown run ${runId}` }
+      if (run.updatedAt !== seenUpdatedAt) return { ok: false, code: 'stale', message: `${runId} changed while it was stopping` }
+      if (run.phase !== 'settling' || run.closeIntent !== 'stopped') return { ok: false, code: 'closed-run', message: `${runId} is ${run.phase}` }
+      if (this.liveSessionClaims.has(runId) || run.creation !== 'unknown' || run.sessionId !== undefined) {
+        return { ok: false, code: 'unknown', message: `${runId} creation is still bound` }
+      }
+      if (run.deliveries.some(item => item.status === 'accepted' || item.status === 'unknown' || item.hostRequestId !== undefined)) {
+        return { ok: false, code: 'unknown', message: `${runId} already attempted delivery` }
+      }
+      const next: RunRecord = dropClaim({ ...run, phase: 'stopped', closeReason: 'unsent', updatedAt: at })
+      await this.commit('runs', next.id, next)
+      this.runs.set(next.id, next)
+      this.currentRevision += 1
+      return { ok: true, phase: next.phase }
     })
   }
 
@@ -1745,11 +1886,22 @@ export class WorkBook {
       }
       if (run.closeIntent !== phase) return { ok: false, code: 'unknown', message: `${runId} has no persisted ${phase} close` }
       if (run.creation === 'inflight' || run.creation === 'unknown' || run.creation === 'rejected') return { ok: false, code: 'unknown', message: `${runId} still has an unconfirmed host call` }
-      if (run.deliveries.some(item => item.status === 'unknown' || (item.status === 'intent' && item.hostRequestId !== undefined))) {
+      if (!evidence?.queueCleared || !evidence.agentIdle || !evidence.jobsSettled) return { ok: false, code: 'unknown', message: `${runId} is not confirmed stopped` }
+      const hasBlockingDelivery = run.deliveries.some(item => {
+        if (item.status === 'intent' && item.hostRequestId !== undefined) return true
+        if (item.status !== 'unknown') return false
+        if (phase !== 'stopped' || item.kind === 'initial' || this.liveRelayClaims.has(item.id)) return true
+        return false
+      })
+      if (hasBlockingDelivery) {
         return { ok: false, code: 'unknown', message: `${runId} still has an in-flight delivery` }
       }
-      if (!evidence?.queueCleared || !evidence.agentIdle || !evidence.jobsSettled) return { ok: false, code: 'unknown', message: `${runId} is not confirmed stopped` }
-      const next: RunRecord = { ...run, phase, closureEvidence: evidence, closeReason: phase, updatedAt: at }
+      const deliveries = phase === 'stopped'
+        ? run.deliveries.map(item => item.status === 'unknown' && item.kind !== 'initial' && !this.liveRelayClaims.has(item.id)
+          ? { ...item, status: 'rejected' as const, evidence: 'superseded-by-verified-stop', updatedAt: at }
+          : item)
+        : run.deliveries
+      const next: RunRecord = { ...run, deliveries, phase, closureEvidence: evidence, closeReason: phase, updatedAt: at }
       await this.commit('runs', next.id, next)
       this.runs.set(next.id, next)
       this.currentRevision += 1
@@ -1779,6 +1931,28 @@ export class WorkBook {
     })
   }
 
+  /**
+   * Recorded once, after the run is terminal: folded session usage and wall
+   * time. A no-op on a live run and on a run that already carries usage, so
+   * later capture passes never rewrite a committed number. Usage is metadata,
+   * not a state transition, so the revision does not move — a baseline
+   * published against the revision read before this write still applies.
+   */
+  recordRunUsage(runId: string, usage: DotContextUsage, wallMs: number): Promise<RunRecord | WorkRefusal> {
+    return this.exclusive(async () => {
+      const refused = this.recoveryRefusal()
+      if (refused) return refused
+      const run = this.runs.get(runId)
+      if (!run) return { ok: false, code: 'missing', message: `unknown run ${runId}` }
+      if (!TERMINAL.has(run.phase)) return { ok: false, code: 'invalid', message: `run ${runId} is still ${run.phase}; usage is recorded once it settles` }
+      if (run.usage) return run
+      const next: RunRecord = { ...run, usage, wallMs }
+      await this.commit('runs', next.id, next)
+      this.runs.set(next.id, next)
+      return next
+    })
+  }
+
   /** Remember a session the host created after the run was no longer dispatchable. Does not prompt or reopen it. */
   noteHostSession(runId: string, sessionId: string, at = Date.now()): Promise<RunRecord | WorkRefusal> {
     return this.exclusive(async () => {
@@ -1796,6 +1970,126 @@ export class WorkBook {
       this.runs.set(next.id, next)
       this.currentRevision += 1
       return next
+    })
+  }
+
+  /**
+   * Human-only escape hatch: release wedged runs on an already-cancelled change
+   * so a permanently unreachable session or missing host job registry cannot
+   * brick the workspace forever. Never called automatically by model tools.
+   */
+  /** Patch an isolated change's integration state (merge/keep/discard outcomes). */
+  updateIsolation(changeId: string, patch: Partial<Omit<TaskIsolation, 'kind' | 'repoRoot' | 'worktree' | 'branch' | 'baseSha'>>, at = Date.now()): Promise<{ readonly ok: true } | WorkRefusal> {
+    return this.exclusive(async () => {
+      const refused = this.recoveryRefusal()
+      if (refused) return refused
+      const current = this.changes.get(changeId)
+      if (!current) return { ok: false, code: 'missing', message: `unknown change ${changeId}` }
+      if (!current.isolation) return { ok: false, code: 'invalid', message: `${changeId} is not an isolated change` }
+      const next: ChangeRecord = { ...current, isolation: { ...current.isolation, ...patch, at }, updatedAt: at }
+      await this.commit('changes', next.id, next)
+      this.changes.set(next.id, next)
+      this.currentRevision += 1
+      return { ok: true }
+    })
+  }
+
+  forceReleaseChange(changeId: string, at = Date.now()): Promise<{ readonly ok: true; readonly released: readonly string[] } | WorkRefusal> {
+    return this.exclusive(async () => {
+      const refused = this.recoveryRefusal()
+      if (refused) return refused
+      const change = this.changes.get(changeId)
+      if (!change) return { ok: false, code: 'missing', message: `unknown change ${changeId}` }
+      if (change.control !== 'cancelled') {
+        return { ok: false, code: 'invalid', message: `cancel ${changeId} before force-releasing its runs` }
+      }
+      const open = [...this.runs.values()].filter(run => run.changeId === changeId && !TERMINAL.has(run.phase))
+      const released: string[] = []
+      for (const run of open) {
+        const deliveries = run.deliveries.map(item => item.status === 'unknown' || item.status === 'intent'
+          ? { ...item, status: 'rejected' as const, evidence: 'force-released-by-human', updatedAt: at }
+          : item)
+        const next: RunRecord = dropClaim({
+          ...run,
+          deliveries,
+          phase: 'stopped',
+          closeReason: 'force-released',
+          updatedAt: at,
+        })
+        await this.commit('runs', next.id, next)
+        this.runs.set(next.id, next)
+        this.liveSessionClaims.delete(next.id)
+        for (const item of run.deliveries) this.liveRelayClaims.delete(item.id)
+        released.push(next.id)
+      }
+      if (released.length > 0) this.currentRevision += 1
+      return { ok: true, released }
+    })
+  }
+
+  /** All artifact snapshot ids referenced by remaining changes, runs, and verifications. */
+  referencedArtifacts(): Set<string> {
+    const refs = new Set<string>()
+    for (const run of this.runs.values()) {
+      for (const base of run.baselineRefs) refs.add(base.artifactRef)
+    }
+    for (const verification of this.verifications.values()) {
+      if (verification.subject?.artifactRef) refs.add(verification.subject.artifactRef)
+      for (const base of verification.subject?.baselineRefs ?? []) refs.add(base.artifactRef)
+    }
+    return refs
+  }
+
+  /**
+   * Evict oldest terminal (done or cancelled, with zero non-terminal runs) changes
+   * past `maxKeep` so durable work tables and snapshots stay bounded over time.
+   */
+  pruneCompletedChanges(
+    maxKeep = MAX_COMPLETED_CHANGES,
+    removeDurable?: (table: 'changes' | 'inputs' | 'runs' | 'verifications', key: string) => Promise<void>,
+    beforeRemove?: (change: ChangeRecord, failedRounds: number) => Promise<void>,
+    at = Date.now(),
+  ): Promise<{ readonly prunedChanges: readonly string[]; readonly keptArtifacts: ReadonlySet<string> }> {
+    return this.exclusive(async () => {
+      if (this.recovery) return { prunedChanges: [], keptArtifacts: this.referencedArtifacts() }
+      const terminalChanges = [...this.changes.values()]
+        .filter(change => changeIsTerminal(change, [...this.runs.values()].filter(run => run.changeId === change.id)))
+        .sort((a, b) => a.updatedAt - b.updatedAt || Number(a.id.slice(2)) - Number(b.id.slice(2)))
+      const excess = Math.max(0, terminalChanges.length - Math.max(1, maxKeep))
+      if (excess === 0) return { prunedChanges: [], keptArtifacts: this.referencedArtifacts() }
+      const victims = terminalChanges.slice(0, excess)
+      const prunedChanges: string[] = []
+      for (const change of victims) {
+        const changeRuns = [...this.runs.values()].filter(run => run.changeId === change.id)
+        // A run that still owes usage keeps its change for a later prune: usage
+        // capture runs outside this exclusive lane and must commit first, or a
+        // change that closed between capture and selection loses its cost. The
+        // deferral is bounded — a run whose session can never be read again
+        // must not pin its change in history forever.
+        if (changeRuns.some(run => runIsTerminal(run) && run.sessionId !== undefined && run.usage === undefined && at - run.updatedAt < USAGE_PRUNE_GRACE_MS)) continue
+        if (beforeRemove) {
+          try { await beforeRemove(change, this.failedRounds(change.id)) } catch { /* outcome recording is best-effort */ }
+        }
+        const changeInputs = [...this.inputs.values()].filter(inp => inp.changeId === change.id)
+        const changeVers = [...this.verifications.values()].filter(ver => ver.changeId === change.id)
+        for (const ver of changeVers) {
+          if (removeDurable) await removeDurable('verifications', ver.id)
+          this.verifications.delete(ver.id)
+        }
+        for (const run of changeRuns) {
+          if (removeDurable) await removeDurable('runs', run.id)
+          this.runs.delete(run.id)
+        }
+        for (const inp of changeInputs) {
+          if (removeDurable) await removeDurable('inputs', inp.id)
+          this.inputs.delete(inp.id)
+        }
+        if (removeDurable) await removeDurable('changes', change.id)
+        this.changes.delete(change.id)
+        prunedChanges.push(change.id)
+      }
+      if (prunedChanges.length > 0) this.currentRevision += 1
+      return { prunedChanges, keptArtifacts: this.referencedArtifacts() }
     })
   }
 
@@ -1967,14 +2261,14 @@ export class WorkBook {
     return found
   }
 
-  private inputRow(changeId: string, revision: number, goal: string, requirements: readonly Requirement[], steps: readonly StepSpec[], source: string, at: number, fields: { readonly behaviorNotes?: string; readonly constraints?: readonly Constraint[]; readonly userRequest?: string; readonly deliverableLanguage?: string; readonly supersedes?: string } = {}): InputRecord {
+  private inputRow(changeId: string, revision: number, goal: string, requirements: readonly Requirement[], steps: readonly StepSpec[], source: string, at: number, fields: { readonly requirementsFromGoal?: boolean; readonly constraints?: readonly Constraint[]; readonly userRequest?: string; readonly deliverableLanguage?: string; readonly supersedes?: string } = {}): InputRecord {
     const id = `input-${++this.inputSeq}`
     return {
       id, changeId, revision, goal,
       requirements: requirements.map(copyRequirement),
+      ...(fields.requirementsFromGoal !== undefined ? { requirementsFromGoal: fields.requirementsFromGoal } : {}),
       steps: steps.map(copyStep),
       source, createdAt: at,
-      ...(fields.behaviorNotes !== undefined ? { behaviorNotes: fields.behaviorNotes } : {}),
       ...(fields.constraints !== undefined ? { constraints: fields.constraints.map(item => ({ constraintRef: item.constraintRef, text: item.text })) } : {}),
       ...(fields.userRequest !== undefined ? { userRequest: fields.userRequest } : {}),
       ...(fields.deliverableLanguage !== undefined ? { deliverableLanguage: fields.deliverableLanguage } : {}),
@@ -1991,6 +2285,12 @@ export class WorkBook {
 
 function sameBaseline(left: BaselineRef, right: BaselineRef): boolean {
   return left.workspaceRoot === right.workspaceRoot && left.scopeKey === right.scopeKey && left.artifactRef === right.artifactRef
+}
+
+/** Settled for good: every run is terminal and the change was closed out or cancelled. */
+export function changeIsTerminal(change: ChangeRecord, runs: readonly RunRecord[]): boolean {
+  if (runs.some(run => !TERMINAL.has(run.phase))) return false
+  return change.control === 'cancelled' || change.closeout !== undefined
 }
 
 /** Why this input must not be stored. Undefined means the refs and the step order are usable. */

@@ -11,7 +11,7 @@ const result = (text: string, seq: number): RawEvent => ({ type: 'tool/result', 
 const LOG = [
   human('ship v2 on Friday', 1),
   reply('On it. I will open a task.', 2),
-  call('dot_start_task', { title: 'release v2' }, 3),
+  call('dot_task', { title: 'release v2' }, 3),
   result('Started s7 in /proj', 4),
   notice('[dot notice] s7 finished its turn', 5),
   reply('The release task is done.', 6),
@@ -23,7 +23,7 @@ describe('historyRows', () => {
   it('keeps the conversation and leaves tool traffic out unless asked', () => {
     expect(historyRows(LOG).map(row => [row.seq, row.role])).toEqual([[1, 'human'], [2, 'dot'], [5, 'notice'], [6, 'dot']])
     expect(historyRows(LOG, true).map(row => [row.seq, row.role])).toEqual([[1, 'human'], [2, 'dot'], [3, 'tool-call'], [4, 'tool-result'], [5, 'notice'], [6, 'dot']])
-    expect(historyRows(LOG, true)[2]!.text).toBe('dot_start_task {"title":"release v2"}')
+    expect(historyRows(LOG, true)[2]!.text).toBe('dot_task {"title":"release v2"}')
   })
 
   it('leaves out the calls of the named tools together with their results', () => {

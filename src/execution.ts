@@ -163,19 +163,27 @@ async function settleRelay(book: WorkBook, host: RunSessionHost, runId: string, 
   const beforeSend = book.dispatchAllowed(runId)
   if (!beforeSend.ok) return beforeSend
   let call: 'sent' | 'rejected' | 'unknown' = 'sent'
+  // Hold the claim through the proof and the receipt write. Releasing it before
+  // relayInserts lets a verified stop treat this in-flight delivery as quiescent
+  // and reject a message the host already inserted.
+  book.claimLiveRelay(deliveryId)
   try {
-    const status = await host.relay(sessionId, senderId, text, deliveryId)
-    call = status === 'rejected' ? 'rejected' : 'sent'
-  } catch { call = 'unknown' }
-  let after: number | undefined
-  try { after = await host.relayInserts(sessionId, deliveryId, senderId, text) } catch { after = undefined }
-  const gate = book.dispatchAllowed(runId)
-  const status = after === 1 && gate.ok ? 'accepted' : after === 0 && call === 'rejected' && gate.ok ? 'rejected' : 'unknown'
-  const settled = await book.settleDelivery(runId, deliveryId, status, undefined, at)
-  if (!settled.ok) return settled
-  if (!gate.ok) return gate
-  if (status === 'unknown') return { ok: false, code: 'unknown', message: `${runId} delivery ${deliveryId} was not proved` }
-  return { ok: true, phase: settled.phase }
+    try {
+      const status = await host.relay(sessionId, senderId, text, deliveryId)
+      call = status === 'rejected' ? 'rejected' : 'sent'
+    } catch { call = 'unknown' }
+    let after: number | undefined
+    try { after = await host.relayInserts(sessionId, deliveryId, senderId, text) } catch { after = undefined }
+    const gate = book.dispatchAllowed(runId)
+    const status = after === 1 ? 'accepted' : after === 0 && call === 'rejected' && gate.ok ? 'rejected' : 'unknown'
+    const settled = await book.settleDelivery(runId, deliveryId, status, undefined, at)
+    if (!settled.ok) return settled
+    if (!gate.ok) return gate
+    if (status === 'unknown') return { ok: false, code: 'unknown', message: `${runId} delivery ${deliveryId} was not proved` }
+    return { ok: true, phase: settled.phase }
+  } finally {
+    book.releaseLiveRelay(deliveryId)
+  }
 }
 
 async function ensureAccess(book: WorkBook, host: RunSessionHost, runId: string): Promise<WorkRefusal | undefined> {
@@ -222,7 +230,18 @@ async function releaseStopped(book: WorkBook, host: RunSessionHost, runId: strin
   if (!run) return false
   // A found session whose cwd, preset, or identity was not proved is not this run.
   // Stopping it would act on someone else's session, and the scope stays occupied.
-  if (run.creation === 'rejected' || run.creation === 'unknown') return false
+  if (run.creation === 'rejected') return false
+  if (run.creation === 'unknown') {
+    if (phase === 'stopped' && run.sessionId === undefined) {
+      let confirmedAbsent = false
+      try { confirmedAbsent = await host.findSession(run.requestedSessionId) === undefined } catch { confirmedAbsent = false }
+      if (confirmedAbsent) {
+        const released = await book.releaseAbsentUnknown(runId, seenUpdatedAt, at)
+        return released.ok
+      }
+    }
+    return false
+  }
   const sessionId = run.sessionId ?? run.requestedSessionId
   let absent = false
   try { absent = await host.findSession(sessionId) === undefined } catch { absent = false }
@@ -267,7 +286,13 @@ export async function reconcileReserved(book: WorkBook, host: RunSessionHost, ru
     if (!('id' in marked)) return marked
     return { ok: false, code: 'unknown', message: `${runId} session lookup failed; no second session was created` }
   }
-  if (!located) return { ok: true, action: 'absent', created: false, prompted: false }
+  if (!located) {
+    if (run.creation === 'unknown' && run.sessionId === undefined) {
+      const reset = await book.abandonUnknownCreation(runId)
+      if (!reset.ok) return reset
+    }
+    return { ok: true, action: 'absent', created: false, prompted: false }
+  }
   const confirmed = await book.confirmSession(runId, {
     sessionId: run.requestedSessionId,
     ...(located.cwd !== undefined ? { cwd: located.cwd } : {}),
@@ -362,7 +387,18 @@ async function continueClose(book: WorkBook, host: RunSessionHost, runId: string
       return { ok: true, action: 'held', created: false, prompted: false }
     }
   }
-  if (current.creation === 'rejected' || current.creation === 'unknown') {
+  if (current.creation === 'rejected') {
+    return { ok: true, action: 'held', created: false, prompted: false }
+  }
+  if (current.creation === 'unknown') {
+    if (current.closeIntent === 'stopped' && current.sessionId === undefined) {
+      let confirmedAbsent = false
+      try { confirmedAbsent = await host.findSession(current.requestedSessionId) === undefined } catch { confirmedAbsent = false }
+      if (confirmedAbsent) {
+        const released = await book.releaseAbsentUnknown(runId, current.updatedAt, at)
+        if (released.ok) return { ok: true, action: 'closed', created: false, prompted: false }
+      }
+    }
     return { ok: true, action: 'held', created: false, prompted: false }
   }
   const sessionId = current.sessionId ?? current.requestedSessionId

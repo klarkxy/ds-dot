@@ -3,9 +3,13 @@
  * session. The delivery row is written before followup, and an unknown row is
  * never followed up again.
  */
+import path from 'node:path'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { defineTool } from '@deepseek-ai/dsh-tools'
+import { scopeContainsPath } from './acceptance.ts'
+import { mcpToolMayWrite } from './approval-risk.ts'
 import type { PeerDelivery } from './storage.ts'
+import { scopeWithinRoot, scopeWrites, type WriteScope } from './work.ts'
 
 /** Model-facing tool on a session dot opened. Not one of dot's own preset tools. */
 export const PEER_TOOL = 'dot_peer'
@@ -34,7 +38,7 @@ export const CHILD_SESSION_TOOLS = [
 const CHILD_SESSION_TOOL_SET: ReadonlySet<string> = new Set(CHILD_SESSION_TOOLS)
 const DELIVERY_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/
 const TEXT_MAX = 8_000
-const DENY_REASON = 'This session cannot start or control another session (subagent, teammate, Team, workflow). Use dot_peer to message a peer session that dot already opened.'
+const DENY_REASON = 'This task session cannot spawn or control nested sessions (subagent, teammate, team, or workflow). Use dot_peer to message an active peer session opened by dot.'
 const SEALED = Symbol('dot.child-seal')
 
 export function isChildSessionTool(name: string): boolean {
@@ -45,7 +49,6 @@ export interface OwnedSessionInput {
   readonly dotSessionId?: string
   readonly runs: readonly { readonly sessionId?: string; readonly requestedSessionId: string; readonly creation: string }[]
   readonly tasks: readonly { readonly sessionId: string; readonly origin: string }[]
-  readonly tickets: readonly { readonly sessions: readonly { readonly sessionId: string }[] }[]
 }
 
 /** Sessions dot opened. A reserved id that was never sent to the host is not one of them. */
@@ -56,7 +59,6 @@ export function ownedSessionIds(input: OwnedSessionInput): string[] {
     if (run.requestedSessionId && run.creation !== 'intent') ids.add(run.requestedSessionId)
   }
   for (const task of input.tasks) if (task.origin === 'started') ids.add(task.sessionId)
-  for (const ticket of input.tickets) for (const session of ticket.sessions) ids.add(session.sessionId)
   if (input.dotSessionId) ids.delete(input.dotSessionId)
   return [...ids]
 }
@@ -208,8 +210,117 @@ const TEXT_OUTPUT = {
   render: (_args: unknown, value: string) => [{ type: 'text' as const, text: value }],
 }
 
+const FILE_MUTATION_TOOLS = new Set([
+  'write',
+  'write_file',
+  'edit',
+  'edit_file',
+  'multi_edit',
+  'create_file',
+  'delete_file',
+  'remove_file',
+  'move_file',
+  'rename_file',
+  'notebook_edit',
+  'apply_patch',
+  'patch',
+])
+
+const PATH_FIELDS = ['file_path', 'path', 'filePath', 'target_file', 'targetFile', 'notebook_path', 'source', 'destination', 'from_path', 'to_path'] as const
+const PATCH_FILE_RE = /^\*\*\*\s+(?:Add|Update|Delete)\s+File:\s*(.+)$/gm
+const PATCH_MOVE_RE = /^\*\*\*\s+Move\s+to:\s*(.+)$/gm
+
+export interface PreExecuteToolCall {
+  readonly name: string
+  readonly input?: unknown
+  readonly arguments?: unknown
+  readonly args?: unknown
+}
+
+export type ChildToolGuard = (exec: PreExecuteToolCall) => { readonly allow: true } | { readonly allow: false; readonly reason: string }
+
+function parseToolPayload(exec: PreExecuteToolCall): Record<string, unknown> | undefined {
+  for (const candidate of [exec.input, exec.args, exec.arguments]) {
+    if (candidate && typeof candidate === 'object' && !Array.isArray(candidate)) return candidate as Record<string, unknown>
+    if (typeof candidate === 'string' && candidate.trim()) {
+      try {
+        const parsed: unknown = JSON.parse(candidate)
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) return parsed as Record<string, unknown>
+      } catch {
+        return { patch: candidate }
+      }
+    }
+  }
+  return undefined
+}
+
+function extractMutationPaths(payload: Record<string, unknown> | undefined): string[] {
+  if (!payload) return []
+  const found: string[] = []
+  const push = (val: unknown) => {
+    if (typeof val === 'string' && val.trim()) found.push(val.trim())
+  }
+  for (const key of PATH_FIELDS) push(payload[key])
+  if (Array.isArray(payload.edits)) {
+    for (const edit of payload.edits) {
+      if (edit && typeof edit === 'object') {
+        for (const key of PATH_FIELDS) push((edit as Record<string, unknown>)[key])
+      }
+    }
+  }
+  for (const patchKey of ['patch', 'diff', 'input', 'content']) {
+    const raw = payload[patchKey]
+    if (typeof raw !== 'string' || !raw.includes('*** ')) continue
+    for (const match of raw.matchAll(PATCH_FILE_RE)) push(match[1])
+    for (const match of raw.matchAll(PATCH_MOVE_RE)) push(match[1])
+  }
+  return [...new Set(found)]
+}
+
+/** Enforce a run's declared read/write scope at tool pre-execution time for structured file tools. */
+export function guardRunWriteTool(
+  run: { readonly id: string; readonly cwd: string; readonly workspaceRoot: string; readonly writeScope: WriteScope; readonly access?: 'read' | 'write' },
+  exec: PreExecuteToolCall,
+  platform: NodeJS.Platform = process.platform,
+): { readonly allow: true } | { readonly allow: false; readonly reason: string } {
+  const readOnly = run.access === 'read' || !scopeWrites(run.writeScope)
+  // MCP servers run outside the sandbox, so a read-only run refuses any MCP
+  // tool whose name does not read as a lookup.
+  if (readOnly && mcpToolMayWrite(exec.name)) {
+    return { allow: false, reason: `Run ${run.id} is read-only and cannot call MCP tool "${exec.name}", which may write outside the sandbox.` }
+  }
+  const tool = exec.name.trim().toLowerCase()
+  if (!FILE_MUTATION_TOOLS.has(tool)) return { allow: true }
+  if (readOnly) {
+    return { allow: false, reason: `Run ${run.id} is read-only and cannot execute file-modifying tool "${exec.name}".` }
+  }
+  const api = platform === 'win32' ? path.win32 : path.posix
+  const targets = extractMutationPaths(parseToolPayload(exec))
+  if (targets.length === 0) {
+    if (run.writeScope.kind === 'paths') {
+      return { allow: false, reason: `Run ${run.id} restricts writes to declared paths, and "${exec.name}" did not name a verifiable target path.` }
+    }
+    return { allow: true }
+  }
+  const root = run.workspaceRoot || run.cwd
+  for (const raw of targets) {
+    const abs = api.isAbsolute(raw) ? api.normalize(raw) : api.resolve(run.cwd, raw)
+    if (!scopeWithinRoot(root, abs, platform)) {
+      return { allow: false, reason: `Path "${raw}" is outside workspace root ${root} for run ${run.id}.` }
+    }
+    if (run.writeScope.kind === 'paths') {
+      const rel = api.relative(root, abs).replaceAll('\\', '/')
+      if (!scopeContainsPath(run.writeScope, root, rel, platform)) {
+        const allowed = run.writeScope.paths.map(item => item.path).join(', ')
+        return { allow: false, reason: `Path "${raw}" is outside run ${run.id}'s write scope (${allowed}).` }
+      }
+    }
+  }
+  return { allow: true }
+}
+
 /** Hide global child-session tools and gate scoped calls before publishing the seal. */
-export function sealChildSession(agent: unknown, send: (input: PeerSendInput) => Promise<string>, refreshers: Set<() => void>): { readonly applied: boolean; release(): void } {
+export function sealChildSession(agent: unknown, send: (input: PeerSendInput) => Promise<string>, refreshers: Set<() => void>, guardTool?: ChildToolGuard): { readonly applied: boolean; release(): void } {
   const live = agent as Agent & { [SEALED]?: boolean }
   if (live[SEALED]) return { applied: false, release() {} }
   const ctx = live.ctx
@@ -230,20 +341,22 @@ export function sealChildSession(agent: unknown, send: (input: PeerSendInput) =>
     refresh()
     disposers.push(ctx.on('tools/pre-execute', (exec, next) => {
       if (isChildSessionTool(exec.name)) return Promise.resolve({ kind: 'deny', reason: DENY_REASON })
+      const verdict = guardTool?.(exec as PreExecuteToolCall)
+      if (verdict && !verdict.allow) return Promise.resolve({ kind: 'deny', reason: verdict.reason })
       return next()
     }))
     disposers.push(ctx.systemPrompt.section({
       name: 'dot:peer-session',
       order: 80,
-      text: 'Child sessions are disabled in this session. Do not call subagent, subagent_fork, spawn_teammate, list_subagent_models, list_agents, send_message, wait_agent, interrupt_agent, team_task_create, team_task_list, team_task_get, team_task_update, or workflow. To wake another session that dot opened, call dot_peer only when that session\'s run is still active and still holds its scope. A finished or superseded run is refused. Reuse a delivery_id only to reconcile that same message. If the result is unknown, do not send it again.',
+      text: 'Nested child sessions are disabled in this session: never call subagent, subagent_fork, spawn_teammate, list_subagent_models, list_agents, send_message, wait_agent, interrupt_agent, team_task_create, team_task_list, team_task_get, team_task_update, or workflow. To coordinate with another active session opened by dot, call dot_peer (only active runs holding their scope accept messages; finished or superseded runs are refused). Treat delivery_id as an idempotency key for one exact message: reuse the same id only to reconcile delivery status, and if the outcome is unknown, never resend under a new id.',
     }))
     disposers.push(ctx.tools.register(defineTool({
       name: PEER_TOOL,
-      description: 'Wake one other session that dot opened and deliver one message as this session. Do not pass a sender; the caller is this session. target_session_id must be a different session whose run is still active and still holds its input and scope. A finished, stopped, settling, or superseded run is refused and nothing is sent. delivery_id is the idempotency key for this exact text: the same id is never followed up twice. unknown means the send was not proved — do not retry with this id or a new one. A new id is a new message and can double-send.',
+      description: 'Send one idempotent message from this session to another active session opened by dot (caller identity is automatic; do not pass a sender). target_session_id must belong to a different active run that still holds its input and scope; finished, settling, stopped, or superseded runs are refused. delivery_id uniquely identifies this exact message: repeating the same id reconciles status without double-sending, whereas an unknown result means delivery was unconfirmed and must not be retried with a new id.',
       parameters: {
-        target_session_id: { type: 'string', required: true, description: 'Session id of the peer dot opened.' },
-        delivery_id: { type: 'string', required: true, description: 'Idempotency key, 1–64 letters, digits, or . _ : -.' },
-        text: { type: 'string', required: true, description: 'Message text, 1–8000 characters.' },
+        target_session_id: { type: 'string', required: true, description: 'Active peer session id opened by dot.' },
+        delivery_id: { type: 'string', required: true, description: 'Idempotency key (1–64 letters, digits, or . _ : -).' },
+        text: { type: 'string', required: true, description: 'Message body (1–8000 characters).' },
       },
       output: TEXT_OUTPUT,
       isConcurrencySafe: () => false,

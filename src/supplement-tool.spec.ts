@@ -183,7 +183,7 @@ describe('dot_task supplement', () => {
       expect(h.relays).toEqual([])
       expect(contextDeliveries(h, runId)).toEqual([])
       const sessionId = h.store.work.run(runId)?.sessionId ?? h.store.work.run(runId)?.requestedSessionId
-      await expect(h.send.execute({ session_id: sessionId, message: 'bypass' })).rejects.toMatchObject({ code: 'dot/legacy-closed' })
+      await expect(h.send.execute({ session_id: sessionId, message: 'bypass' })).rejects.toMatchObject({ code: 'dot/send-closed' })
       expect(h.relays).toEqual([])
       expect(contextDeliveries(h, runId)).toEqual([])
     } finally {

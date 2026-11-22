@@ -71,7 +71,7 @@ describe('Dorothy self-management controls', () => {
 
     expect(document.body.textContent).not.toContain('默认任务权限')
     const tabLabels = [...document.querySelectorAll<HTMLButtonElement>('[role="tab"]')].map(node => node.textContent)
-    expect(tabLabels).toEqual(expect.arrayContaining(['桃乐丝管', '用户管', '一律不许']))
+    expect(tabLabels).toEqual(expect.arrayContaining(['桃乐丝管', '我来管', '一律拒绝']))
     // The blanket allow mode is gone; the task permission is its own field.
     expect(tabLabels).not.toContain('一律允许')
     expect(tabLabels).toEqual(expect.arrayContaining(['工作区写入', '完全访问', '跟随宿主']))
@@ -80,9 +80,9 @@ describe('Dorothy self-management controls', () => {
     await act(async () => fullAccessTab.click())
     expect(current.taskPermission).toBe('danger-full-access')
 
-    // The reflection switch is a direct on/off setting, not a model proposal.
-    const reflectionOff = [...document.querySelectorAll<HTMLButtonElement>('[role="tab"]')].find(node => node.textContent === '关闭')!
-    await act(async () => reflectionOff.click())
+    // The reflection switch is a direct on/off Switch control, not a model proposal.
+    const reflectionSwitch = document.querySelector<HTMLButtonElement>('button[role="switch"][aria-label="后台反思"]')!
+    await act(async () => reflectionSwitch.click())
     expect(current.reflection).toBe(false)
 
     const allowTab = [...document.querySelectorAll<HTMLButtonElement>('[role="tab"]')].find(node => node.textContent === '仅允许所选')!
@@ -170,7 +170,7 @@ describe('Dorothy self-management controls', () => {
     // The agreements keep a lock toggle, so an existing lock can be lifted here.
     const lock = document.querySelector<HTMLButtonElement>('button[aria-label="禁止桃乐丝修改：约定"]')!
     await act(async () => lock.click())
-    expect(current.locks).toEqual({ memory: true })
+    expect(current.locks).toEqual({ agreements: true })
     const unlock = document.querySelector<HTMLButtonElement>('button[aria-label="允许桃乐丝申请修改：约定"]')!
     expect(unlock.hasAttribute('data-locked')).toBe(true)
 
@@ -287,6 +287,9 @@ describe('Dorothy self-management controls', () => {
 
     expect(document.body.textContent).toContain('查看全局 · dot_overview')
     expect(document.body.textContent).toContain('结束：已停止')
+    const recHead = document.querySelector<HTMLButtonElement>('.dsh-dot-tr-recordhead')!
+    await act(async () => recHead.click())
+    expect(document.querySelectorAll('.dsh-dot-tr-copy').length).toBeGreaterThanOrEqual(2)
     await act(async () => root.unmount())
   })
 

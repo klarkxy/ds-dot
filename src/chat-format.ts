@@ -31,7 +31,7 @@ export interface QuestionRow {
 
 export type NoticeEntry =
   | {
-      readonly kind: 'approval' | 'question' | 'turn-end' | 'error' | 'archived' | 'lock-free' | 'task-human' | 'idle-check'
+      readonly kind: 'approval' | 'question' | 'turn-end' | 'error' | 'task-human' | 'idle-check' | 'inbox' | 'recipe-run' | 'recipe-proposal'
       readonly sessionId: string
       readonly requestId?: string
       readonly subject?: string
@@ -55,6 +55,8 @@ export type NoticeEntry =
       readonly next?: string
       readonly once?: boolean
       readonly late?: boolean
+      /** A recipe-bound reminder whose direct dispatch was refused. */
+      readonly refused?: string
     }
 
 export interface ParsedNotice {
@@ -65,12 +67,11 @@ export interface ParsedNotice {
 
 const NOTICE_HEAD = /^\[dot notice\]/i
 const REMINDER_PREFIX = /^\[dot reminder\]/i
-const MODEL_FOOTER = /^(?:Report what matters to the human,|Do what each one asks now\.)/
-const ROUTE_LINE = /^(?:Decide it yourself with dot_answer:|Answer it yourself (?:silently )?with dot_answer\b|Ask the human in this chat\b|The human's own rules, which take precedence\b)/
-const SESSION_BULLET = /^- (approval|question|turn-end|error|archived|lock-free|task-human|idle-check)\s*·\s*([^:]+):\s*(.*)$/
-const REMINDER_BULLET = /^- (\S+)\s+"([^"]+)"\s*\(([^)]*)\):\s*(.*)$/
+const MODEL_FOOTER = /^Do what each one asks now\./
+const SESSION_BULLET = /^- (approval|question|turn-end|error|task-human|idle-check|inbox)\s*·\s*([^:]+):\s*(.*)$/
+const REMINDER_BULLET = /^- (\S+)\s+"([^"]+)"\s*\(([^)]*)\)(?:\s+recipe\s+\S+\s+"[^"]*")?(?:\s+\[dispatch refused:\s*([^\]]*)\])?(?::\s*(.*))?$/
 const REQUEST_HEAD = /^(\S+)\s*·\s*(?:approval|question) from (?:task "(.+?)"|untracked session(?: in (.+?))?)\s*·\s*"(.*)"$/
-const TICKET_REQUEST_HEAD = /^(\S+) for task (\S+) "(.*?)": (?:approval|question)\s*·\s*"(.*)"$/
+const CHANGE_REQUEST_HEAD = /^(\S+) for task (\S+) "(.*?)": (?:approval|question)\s*·\s*"(.*)"$/
 const TURN_END_HEAD = /^"(.+?)" finished a turn:\s*(.*)$/
 const QUESTION_LINE = /^\[([^\]]+)\]\s*(.*)$/
 const ESCALATE_PREFIX = /^escalate sandbox to ([a-z0-9_-]+)(?::\s*(.*))?$/i
@@ -292,42 +293,32 @@ export function parseNotice(text: string): ParsedNotice {
   let section: 'notice' | 'reminder' = isReminder ? 'reminder' : 'notice'
   const rawItems: { section: 'notice' | 'reminder'; head: string; sublines: string[] }[] = []
   const stray: string[] = []
-  let skippingPolicy = false
   let skippingReady = false
 
   for (const line of lines) {
     const trimmed = line.trim()
-    if (!trimmed) { skippingPolicy = false; continue }
+    if (!trimmed) continue
     if (NOTICE_HEAD.test(trimmed)) {
       section = 'notice'
-      skippingPolicy = false
       const inline = trimmed.replace(/^\[dot notice\]\s*(?:Updates from other sessions:|Updates:)?\s*/i, '').trim()
       if (inline) stray.push(inline)
       continue
     }
     if (REMINDER_PREFIX.test(trimmed)) {
       section = 'reminder'
-      skippingPolicy = false
       const inline = trimmed.replace(/^\[dot reminder\]\s*(?:Reminders you set for yourself are due:)?\s*/i, '').trim()
       if (inline) stray.push(inline)
       continue
     }
-    if (MODEL_FOOTER.test(trimmed)) { skippingPolicy = false; continue }
+    if (MODEL_FOOTER.test(trimmed)) continue
     if (/^Ready to start(?: \(highest priority first\))?:$/.test(trimmed)) { skippingReady = true; continue }
-    if (/^(Requests waiting for you|Errors|Tasks|Watched sessions):$/.test(trimmed)) { skippingReady = false; continue }
+    if (/^(Requests waiting for you|Errors|External events|Tasks|Watched sessions):$/.test(trimmed)) { skippingReady = false; continue }
     if (skippingReady) continue
     if (line.startsWith('- ')) {
-      skippingPolicy = false
       rawItems.push({ section, head: line, sublines: [] })
       continue
     }
     if (line.startsWith('  ') && rawItems.length > 0) {
-      if (skippingPolicy && trimmed.startsWith('>')) continue
-      skippingPolicy = false
-      if (ROUTE_LINE.test(trimmed)) {
-        if (trimmed.startsWith("The human's own rules")) skippingPolicy = true
-        continue
-      }
       rawItems.at(-1)!.sublines.push(line.slice(2))
       continue
     }
@@ -339,13 +330,14 @@ export function parseNotice(text: string): ParsedNotice {
     if (item.section === 'reminder') {
       const m = REMINDER_BULLET.exec(item.head)
       if (m) {
-        const promptLines = [m[4]!, ...item.sublines].join('\n').trim()
+        const promptLines = [m[5] ?? '', ...item.sublines].join('\n').trim()
         entries.push({
           kind: 'reminder',
           id: m[1]!,
           title: m[2]!,
           prompt: promptLines,
           ...parseReminderFacts(m[3]!),
+          ...m[4] !== undefined ? { refused: m[4].trim() } : {},
         })
         continue
       }
@@ -355,17 +347,17 @@ export function parseNotice(text: string): ParsedNotice {
       stray.push([item.head.replace(/^- /, ''), ...item.sublines].join('\n').trim())
       continue
     }
-    const kind = sm[1] as 'approval' | 'question' | 'turn-end' | 'error' | 'archived' | 'lock-free' | 'task-human' | 'idle-check'
+    const kind = sm[1] as 'approval' | 'question' | 'turn-end' | 'error' | 'task-human' | 'idle-check' | 'inbox'
     const sessionId = sm[2]!.trim()
     const headline = sm[3]!.trim()
 
     if (kind === 'approval' || kind === 'question') {
       const req = REQUEST_HEAD.exec(headline)
-      const ticketReq = TICKET_REQUEST_HEAD.exec(headline)
-      const requestId = ticketReq?.[1] ?? req?.[1]
-      const taskTitle = ticketReq?.[3] ?? req?.[2]
+      const changeReq = CHANGE_REQUEST_HEAD.exec(headline)
+      const requestId = changeReq?.[1] ?? req?.[1]
+      const taskTitle = changeReq?.[3] ?? req?.[2]
       const whereCwd = req?.[3]
-      const subject = ticketReq?.[4] ?? req?.[4] ?? headline
+      const subject = changeReq?.[4] ?? req?.[4] ?? headline
 
       let detailInfo: ReturnType<typeof parseApprovalDetail> = {}
       const questions: QuestionRow[] = []
@@ -408,6 +400,12 @@ export function parseNotice(text: string): ParsedNotice {
       continue
     }
 
+    if (kind === 'inbox') {
+      // The event detail rides the indented subline; keep it with the headline.
+      entries.push({ kind, sessionId, summary: [headline, ...item.sublines.map(row => row.trim())].filter(Boolean).join('\n') })
+      continue
+    }
+
     entries.push({ kind, sessionId, summary: headline })
   }
 
@@ -436,7 +434,7 @@ export function summarizeNotice(parsed: ParsedNotice, locale: CopyLocale, tasks:
     } else if (first.kind === 'error') {
       lead = `${badge.label} · ${t(locale, 'error')}`
     } else {
-      const label = first.kind === 'lock-free' ? 'lockFree' : first.kind === 'task-human' ? 'taskHuman' : first.kind === 'idle-check' ? 'idleCheck' : 'archived'
+      const label = first.kind === 'inbox' ? 'inboxEvent' : first.kind === 'task-human' ? 'taskHuman' : 'idleCheck'
       lead = `${badge.label} · ${t(locale, label)}`
     }
   }
@@ -619,10 +617,6 @@ export function summarizeToolCall(item: ToolItem, locale: CopyLocale, tasks: Tas
         return { summary: [id, t(locale, 'decisionAnswer')].filter(Boolean).join(' · ') }
       }
       return id ? { summary: id } : {}
-    }
-    case TOOL.startTask: {
-      const title = strOf(args.title)
-      return title ? { summary: clipInline(title, 44) } : {}
     }
     case TOOL.read: {
       const sid = strOf(args.session_id)

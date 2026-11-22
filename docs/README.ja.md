@@ -8,7 +8,7 @@
 
 ## インストール
 
-DSH `0.2.2-rc.3` 以降が必要です。使用中のプロファイルに追加してください：
+DSH `0.2.2-rc.5` 以降が必要です。使用中のプロファイルに追加してください：
 
 ```sh
 dsh plugin --profile web add ds-dot
@@ -76,6 +76,54 @@ D:\work\site にワークスペースを作成し、ドキュメントページ�
 ### 出荷時設定にリセット
 
 設定画面の下部から、消去対象（追跡中タスク、変更とラン、リマインダー、タスクレシピ、提案、カード、アーカイブされるセッション（彼女自身の会話・バックグラウンドセッションを含む）、取り決め、認知、設定）をプレビューしてから初期化できます。あなた自身のセッション、プロジェクトファイル、ホストのペルソナは変更されません。
+
+## GitHub イベント（任意）
+
+ドロシーは Pull Request、Issue、コメント、レビュー、CI の実行、デフォルトブランチへの push、Release を追跡できます。イベントはまず永続的な受信箱に入り、再配信されたものは破棄され、同じ PR や Issue のイベントはまとめられ、ドロシーの手が空いたときに届きます。イベントの内容は常に信頼できないデータとして扱われ、確認や相談のきっかけにはなっても、それ自体が何かを許可することはありません。ping、star、fork、watch、check run、成功・スキップ・neutral となった CI 結果は除外されます。どのリポジトリとイベントを受け取るかは GitHub の webhook 設定で選びます。
+
+1. 同じプロファイルに webhook ランタイムと GitHub アダプターを、DSH と同じバージョンでインストールします（npm の `latest` タグはまだ古い 0.1 系を指しています）：
+
+   ```sh
+   dsh plugin --profile web add @deepseek-ai/dsh-webhook@0.2.2-rc.5 @deepseek-ai/dsh-webhook-github@0.2.2-rc.5
+   ```
+
+2. 次のオーバーレイを `$DSH_HOME/profiles/web/dot-github/cordis.yml`（`DSH_HOME` 未設定時は `~/.dsh`）として保存します。`127.0.0.1:3081` に `POST /github` だけを受け付ける別のリスナーを開きます：
+
+   ```yaml
+   - insert:
+       - id: webhook-runtime
+         name: '@deepseek-ai/dsh-webhook'
+
+       - id: github-webhook-ingress
+         name: cordis:group
+         group: true
+         isolate:
+           webServer: true
+         config:
+           - id: github-webhook-server
+             name: '@deepseek-ai/dsh-host-webserver'
+             config:
+               host: '127.0.0.1'
+               port: 3081
+
+           - id: github-webhook-adapter
+             name: '@deepseek-ai/dsh-webhook-github'
+             config:
+               source: primary-github
+               path: /github
+               secretEnv: DSH_GITHUB_WEBHOOK_SECRET
+               maxBodyBytes: 1048576
+   ```
+
+3. 十分に長いランダムなシークレットを `DSH_GITHUB_WEBHOOK_SECRET`（環境変数または `$DSH_HOME/.env`）に設定し、再起動後も同じ値を保ったまま、オーバーレイ付きで DSH を起動します：
+
+   ```sh
+   dsh web --patch "${DSH_HOME:-$HOME/.dsh}/profiles/web/dot-github/cordis.yml"
+   ```
+
+4. TLS リバースプロキシまたはトンネル経由で `127.0.0.1:3081/github` だけを公開します。ポート 3080 の UI は非公開のままにします。
+
+5. リポジトリの GitHub webhook 設定で、Payload URL に `https://<your-host>/github`、Content type に `application/json`、Secret に同じシークレットを指定し、ドロシーに届けたいイベントを選びます。
 
 ## 旧バージョンからのアップグレード
 

@@ -204,8 +204,10 @@ export class DotService {
       store: options.store,
       now: this.now,
       deliver: text => this.remind(text),
-      // The reflection check rides the reminder clock's periodic wake-up.
-      onPeriodic: () => { this.scheduleRunUsage(); void this.reflection.tick().catch(() => undefined) },
+      // The reflection check and a usage pass ride the reminder clock's
+      // periodic wake-up; usage goes straight in (not revision-gated) so a
+      // drained backlog still resumes on the next tick.
+      onPeriodic: () => { void this.captureRunUsage(); void this.reflection.tick().catch(() => undefined) },
       ...options.timer ? { timer: options.timer } : {},
       ...options.log ? { log: options.log } : {},
     })
@@ -1178,6 +1180,8 @@ export class DotService {
   private usagePass: Promise<void> | undefined
   private usageWanted = false
   private usageSeenRevision = -1
+  /** Runs that failed to read during the current drain; cleared when it ends. */
+  private readonly usageFailed = new Set<string>()
   /** Set while a factory reset wipes the book: no pass may start or commit. */
   private usageStopped = false
 
@@ -1221,16 +1225,23 @@ export class DotService {
    */
   private async captureRunUsageNow(): Promise<void> {
     const candidates = this.store.work.listRuns()
-      .filter(run => runIsTerminal(run) && run.sessionId !== undefined && run.usage === undefined)
+      .filter(run => runIsTerminal(run) && run.sessionId !== undefined && run.usage === undefined && !this.usageFailed.has(run.id))
       .slice(0, 20)
     let recorded = 0
     for (const run of candidates) {
       if (this.closing || this.usageStopped) return
       if (await this.captureRunUsageFor(run.id)) recorded += 1
+      else this.usageFailed.add(run.id)
     }
     // Usage does not move the work revision, so the panel needs the store's
     // change signal (the same one other writes use) to fetch the new numbers.
     if (recorded > 0) this.store.workChanged()
+    // A full batch means the backlog continues: chain a follow-up pass through
+    // the shared usageWanted slot. Runs that already failed in this drain are
+    // skipped so one unreadable session cannot loop the chain; a non-full
+    // pass ends the drain and they become eligible again on the next trigger.
+    if (candidates.length === 20) this.usageWanted = true
+    else this.usageFailed.clear()
   }
 
   /** Read one terminal run's session events and persist its cost. Returns true when usage is now recorded. */

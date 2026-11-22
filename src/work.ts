@@ -2019,10 +2019,14 @@ export class WorkBook {
       const victims = terminalChanges.slice(0, excess)
       const prunedChanges: string[] = []
       for (const change of victims) {
+        const changeRuns = [...this.runs.values()].filter(run => run.changeId === change.id)
+        // A run that still owes usage keeps its change for a later prune: usage
+        // capture runs outside this exclusive lane and must commit first, or a
+        // change that closed between capture and selection loses its cost.
+        if (changeRuns.some(run => runIsTerminal(run) && run.sessionId !== undefined && run.usage === undefined)) continue
         if (beforeRemove) {
           try { await beforeRemove(change, this.failedRounds(change.id)) } catch { /* outcome recording is best-effort */ }
         }
-        const changeRuns = [...this.runs.values()].filter(run => run.changeId === change.id)
         const changeInputs = [...this.inputs.values()].filter(inp => inp.changeId === change.id)
         const changeVers = [...this.verifications.values()].filter(ver => ver.changeId === change.id)
         for (const ver of changeVers) {

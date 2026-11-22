@@ -1048,8 +1048,8 @@ describe('DotService reminders', () => {
     expect(h.relayed[0]!.text).toContain('Read the release task and report.')
     await vi.waitFor(() => expect(h.store.schedules.map(record => record.deliveredAt)).toEqual([1000 + 10 * 60_000]))
     // The periodic reflection check keeps the clock armed even with no reminders;
-    // the usage capture debounce rides the same periodic wake.
-    expect(h.delays().sort((a, b) => a - b)).toEqual([2000, 30 * 60_000])
+    // usage capture runs inside the periodic wake itself (no debounce timer).
+    expect(h.delays()).toEqual([30 * 60_000])
   })
 
   it('moves to a new segment first when one is due as the reminder fires', async () => {
@@ -2758,6 +2758,85 @@ describe('run usage capture triggers', () => {
     await prune.pruneWorkArtifactsIfNeeded(1)
     const recipe = h.store.recipes[0]!
     expect(recipe.outcomes[0]).toMatchObject({ changeId: first.id, result: 'cancelled', tokens: 18, wallMs: 2000 })
+    await h.service.dispose()
+  })
+
+  it('defers a change that closed mid-capture instead of pruning it without cost', async () => {
+    const h = setup()
+    const cwd = dir()
+    await h.service.ensureDot()
+    await h.service.manageRecipe({ action: 'save', name: 'stats', goal: 'run the pass', dir: cwd })
+    // The still-open change is created first so it sorts ahead of the terminal
+    // ones by id and becomes the victim selection's first row once it closes.
+    const late = JSON.parse(await h.service.manageTask({ action: 'create', recipe: 'stats' })) as { id: string }
+    const done = JSON.parse(await h.service.manageTask({ action: 'create', recipe: 'stats' })) as { id: string }
+    const tail = JSON.parse(await h.service.manageTask({ action: 'create', recipe: 'stats' })) as { id: string }
+    const startedLate = await h.service.manageTask({ action: 'dispatch', task_id: late.id })
+    const runLate = h.store.work.run(/started (run-\d+)/.exec(startedLate)?.[1]!)!
+    h.events.set(runLate.sessionId!, [{ type: 'assistant/message', time: 1000, data: { usage: { inputTokens: 7, outputTokens: 3 } } }])
+    const startedDone = await h.service.manageTask({ action: 'dispatch', task_id: done.id })
+    const runDone = h.store.work.run(/started (run-\d+)/.exec(startedDone)?.[1]!)!
+    h.events.set(runDone.sessionId!, [{ type: 'assistant/message', time: 1, data: { usage: { inputTokens: 1, outputTokens: 1 } } }])
+    await h.service.manageTask({ action: 'cancel', task_id: done.id })
+    await h.service.manageTask({ action: 'cancel', task_id: tail.id })
+    // Park the pre-prune capture inside readEvents so `late` can close in between.
+    let entered = false
+    let release: () => void = () => {}
+    const gate = new Promise<void>(resolve => { release = resolve })
+    const original = h.host.readEvents.bind(h.host)
+    h.host.readEvents = async id => {
+      if (!entered) { entered = true; await gate }
+      return original(id)
+    }
+    const prune = h.service as unknown as { pruneWorkArtifactsIfNeeded(maxKeep?: number): Promise<void> }
+    const first = prune.pruneWorkArtifactsIfNeeded(1)
+    await vi.waitFor(() => expect(entered).toBe(true))
+    await h.service.manageTask({ action: 'cancel', task_id: late.id })
+    release()
+    await first
+    // `late` closed while its capture was parked: it was skipped this pass, not
+    // pruned empty; the already-captured change went instead.
+    expect(h.store.work.change(late.id)).toBeDefined()
+    expect(h.store.work.change(done.id)).toBeUndefined()
+    expect(h.store.work.change(tail.id)).toBeDefined()
+    expect(h.store.recipes[0]!.outcomes).toEqual([expect.objectContaining({ changeId: done.id })])
+    // Next prune captures it first and records the cost into the outcome.
+    await prune.pruneWorkArtifactsIfNeeded(1)
+    expect(h.store.work.change(late.id)).toBeUndefined()
+    // Outcomes list the newest prune first.
+    expect(h.store.recipes[0]!.outcomes).toEqual([
+      expect.objectContaining({ changeId: late.id, tokens: 10 }),
+      expect.objectContaining({ changeId: done.id }),
+    ])
+    await h.service.dispose()
+  })
+
+  it('drains a usage backlog larger than one pass without a work change', async () => {
+    const h = setup()
+    await h.service.ensureDot()
+    for (let i = 0; i < 45; i++) {
+      await settledRun(h, [{ type: 'assistant/message', time: 1, data: { usage: { inputTokens: 1, outputTokens: 1 } } }], `r${i}`)
+    }
+    expect(h.store.work.listRuns().filter(run => run.usage === undefined)).toHaveLength(45)
+    // A single pass takes 20; full batches chain follow-ups on their own.
+    await h.service.reconcile()
+    await vi.waitFor(() => expect(h.store.work.listRuns().filter(run => run.usage === undefined)).toHaveLength(0))
+    await h.service.dispose()
+  })
+
+  it('skips runs that already failed once during the same drain', async () => {
+    const h = setup()
+    await h.service.ensureDot()
+    for (let i = 0; i < 25; i++) await settledRun(h, [], `r${i}`)
+    for (const run of h.store.work.listRuns()) h.unreadable.add(run.sessionId!)
+    let reads = 0
+    const original = h.host.readEvents.bind(h.host)
+    h.host.readEvents = async id => { reads += 1; return original(id) }
+    await h.service.reconcile()
+    // Pass one failed all 20; the chained pass skips them and fails the last 5.
+    await vi.waitFor(() => expect(reads).toBe(25))
+    await new Promise(resolve => setTimeout(resolve, 50))
+    expect(reads).toBe(25)
     await h.service.dispose()
   })
 

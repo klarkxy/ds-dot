@@ -7,8 +7,8 @@ import { totalUsage } from './context.ts'
 import { formatAge } from './ledger.ts'
 import { formatDuration, formatTokens, t, type CopyLocale, type TextKey } from './ui-copy.ts'
 import {
-  acceptPayload, forceReleasePayload, groupWork, lookRequest, rejectPayload, resumePayload, scopeText, shortId, workFactKey, workFactTone, workFailure,
-  type PendingGlance, type WorkAcceptPayload, type WorkBoardItem, type WorkChangeView, type WorkLinkView, type WorkReadRequest, type WorkRejectPayload, type WorkRunView, type WorkStatus,
+  acceptPayload, forceReleasePayload, groupWork, integrateActions, lookRequest, rejectPayload, resumePayload, scopeText, shortId, workFactKey, workFactTone, workFailure,
+  type PendingGlance, type WorkAcceptPayload, type WorkBoardItem, type WorkChangeView, type WorkIntegratePayload, type WorkLinkView, type WorkReadRequest, type WorkRejectPayload, type WorkRunView, type WorkStatus,
 } from './work-board.ts'
 
 const STATUS_KEY: Record<WorkStatus, TextKey> = {
@@ -18,6 +18,10 @@ const STATUS_KEY: Record<WorkStatus, TextKey> = {
 const STATUS_TONE: Record<WorkStatus, TagTone> = {
   cancelled: 'quiet', rework: 'danger', unverified: 'warning', done: 'success',
   review: 'warning', settling: 'info', running: 'info', waiting: 'neutral',
+}
+const ISOLATION_STATE_KEY: Record<'committed' | 'merged' | 'discarded', TextKey> = {
+  committed: 'workIsolationCommitted',
+  merged: 'workIsolationMerged', discarded: 'workIsolationDiscarded',
 }
 const FAILURE_KEY: Record<ReturnType<typeof workFailure>, TextKey> = {
   stale: 'workStale', withdrawn: 'workWithdrawn', conflict: 'workConflict', unknown: 'workUnknown',
@@ -29,6 +33,7 @@ export interface WorkApi {
   workAnswer(payload: { readonly id: string; readonly allow: boolean; readonly note?: string }): Promise<void>
   workResume(payload: { readonly id: string }): Promise<void>
   workForceRelease?(payload: { readonly id: string }): Promise<void>
+  workIntegrate?(payload: WorkIntegratePayload): Promise<void>
   workRead?(request: WorkReadRequest): Promise<{ readonly source: string; readonly body: string; readonly truncated?: boolean; readonly totalBytes?: number }>
 }
 
@@ -37,7 +42,7 @@ type WorkRead = NonNullable<WorkApi['workRead']>
 /** Which groups the drawer filter keeps: everything, only what needs the human, or only work in progress. */
 export type WorkFilter = 'all' | 'waiting' | 'active'
 
-export function WorkBoard({ locale, items, pending, notice, filter = 'all', onAccept, onReject, onAnswer, onResume, onForceRelease, onRead, onOpenSession }: {
+export function WorkBoard({ locale, items, pending, notice, filter = 'all', onAccept, onReject, onAnswer, onResume, onForceRelease, onIntegrate, onRead, onOpenSession }: {
   readonly locale: CopyLocale
   readonly filter?: WorkFilter
   readonly items: readonly WorkBoardItem[]
@@ -48,6 +53,7 @@ export function WorkBoard({ locale, items, pending, notice, filter = 'all', onAc
   readonly onAnswer: (payload: { readonly id: string; readonly allow: boolean; readonly note?: string }) => void
   readonly onResume: (payload: { readonly id: string }) => void
   readonly onForceRelease?: (payload: { readonly id: string }) => void
+  readonly onIntegrate?: (payload: WorkIntegratePayload) => Promise<void>
   readonly onRead?: WorkRead
   readonly onOpenSession?: (sessionId: string) => void
 }) {
@@ -57,7 +63,7 @@ export function WorkBoard({ locale, items, pending, notice, filter = 'all', onAc
   const section = (title: TextKey, rows: readonly WorkBoardItem[]) => rows.length === 0 ? null : (
     <section className="dsh-ui-stack" aria-label={t(locale, title)}>
       <span className="dsh-ui-meta">{t(locale, title)} · {rows.length}</span>
-      {rows.map(row => <WorkRow key={row.id} locale={locale} item={row} pending={pending} onAccept={onAccept} onReject={onReject} onAnswer={onAnswer} onResume={onResume} {...onForceRelease ? { onForceRelease } : {}} {...onRead ? { onRead } : {}} {...onOpenSession ? { onOpenSession } : {}} />)}
+      {rows.map(row => <WorkRow key={row.id} locale={locale} item={row} pending={pending} onAccept={onAccept} onReject={onReject} onAnswer={onAnswer} onResume={onResume} {...onForceRelease ? { onForceRelease } : {}} {...onIntegrate ? { onIntegrate } : {}} {...onRead ? { onRead } : {}} {...onOpenSession ? { onOpenSession } : {}} />)}
     </section>
   )
   return (
@@ -72,7 +78,7 @@ export function WorkBoard({ locale, items, pending, notice, filter = 'all', onAc
             <Button variant="ghost" size="sm" className="dsh-dot-fold" aria-expanded={showDone} onClick={() => setShowDone(open => !open)}>
               {t(locale, 'workDone')} · {groups.done.length}
             </Button>
-            {showDone ? groups.done.slice(0, FINISHED_SHOWN).map(row => <WorkRow key={row.id} locale={locale} item={row} pending={pending} onAccept={onAccept} onReject={onReject} onAnswer={onAnswer} onResume={onResume} {...onForceRelease ? { onForceRelease } : {}} {...onRead ? { onRead } : {}} {...onOpenSession ? { onOpenSession } : {}} />) : null}
+            {showDone ? groups.done.slice(0, FINISHED_SHOWN).map(row => <WorkRow key={row.id} locale={locale} item={row} pending={pending} onAccept={onAccept} onReject={onReject} onAnswer={onAnswer} onResume={onResume} {...onForceRelease ? { onForceRelease } : {}} {...onIntegrate ? { onIntegrate } : {}} {...onRead ? { onRead } : {}} {...onOpenSession ? { onOpenSession } : {}} />) : null}
           </section>
         ) : null}
       </div>
@@ -603,7 +609,7 @@ function itemDot(item: WorkBoardItem, needsHuman: boolean): StateDotState {
   return 'ongoing'
 }
 
-function WorkRow({ locale, item, pending, onAccept, onReject, onAnswer, onResume, onForceRelease, onRead, onOpenSession }: {
+function WorkRow({ locale, item, pending, onAccept, onReject, onAnswer, onResume, onForceRelease, onIntegrate, onRead, onOpenSession }: {
   readonly locale: CopyLocale
   readonly item: WorkBoardItem
   readonly pending: readonly PendingGlance[]
@@ -612,12 +618,16 @@ function WorkRow({ locale, item, pending, onAccept, onReject, onAnswer, onResume
   readonly onAnswer: (payload: { readonly id: string; readonly allow: boolean; readonly note?: string }) => void
   readonly onResume: (payload: { readonly id: string }) => void
   readonly onForceRelease?: (payload: { readonly id: string }) => void
+  readonly onIntegrate?: (payload: WorkIntegratePayload) => Promise<void>
   readonly onRead?: WorkRead
   readonly onOpenSession?: (sessionId: string) => void
 }) {
   const [rejectMode, setRejectMode] = useState<'reject' | 'look' | undefined>()
   const [rejectNote, setRejectNote] = useState('')
   const [releaseArmed, setReleaseArmed] = useState(false)
+  const [integrateBusy, setIntegrateBusy] = useState(false)
+  const [integrateError, setIntegrateError] = useState<string>()
+  const [discardArmed, setDiscardArmed] = useState(false)
   const releaseTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
   const accept = acceptPayload(item)
   const reject = rejectPayload(item)
@@ -626,7 +636,16 @@ function WorkRow({ locale, item, pending, onAccept, onReject, onAnswer, onResume
   const look = lookRequest(item, pending)
   const lookOpen = Boolean(look && look !== 'stale' && look !== 'withdrawn')
   const latestSessionId = useMemo(() => [...item.runs].reverse().find(run => Boolean(run.sessionId))?.sessionId, [item.runs])
-  const actions = lookOpen || accept || reject || resume || forceRelease || Boolean(latestSessionId && onOpenSession)
+  const integrates = onIntegrate ? integrateActions(item) : []
+  const runIntegrate = async (mode: 'merge' | 'keep' | 'discard') => {
+    if (!onIntegrate || integrateBusy) return
+    setIntegrateBusy(true)
+    setIntegrateError(undefined)
+    try { await onIntegrate({ id: item.id, mode }) }
+    catch (failure) { setIntegrateError(failure instanceof Error ? failure.message : String(failure)) }
+    finally { setIntegrateBusy(false); setDiscardArmed(false) }
+  }
+  const actions = lookOpen || accept || reject || resume || forceRelease || integrates.length > 0 || Boolean(latestSessionId && onOpenSession)
   const delivery = item.runs.flatMap(run => run.deliveries ?? []).at(-1)
   useEffect(() => {
     if (rejectMode === 'reject' && !reject) { setRejectMode(undefined); setRejectNote('') }
@@ -670,6 +689,7 @@ function WorkRow({ locale, item, pending, onAccept, onReject, onAnswer, onResume
           <span className="dsh-dot-work-meta">
             <Tag tone={STATUS_TONE[item.status]}>{t(locale, STATUS_KEY[item.status])}</Tag>
             {item.priority === 3 ? <Tag tone="warning">{t(locale, 'priorityHigh')}</Tag> : null}
+            {item.isolation ? <Tag tone="neutral">worktree · {item.isolation.branch}{item.isolation.state !== 'active' ? ` · ${t(locale, ISOLATION_STATE_KEY[item.isolation.state])}` : ''}</Tag> : null}
             {item.tokens !== undefined && item.tokens > 0 ? (
               <Tag tone="neutral">{formatTokens(item.tokens)} {t(locale, 'workTokens')}{item.wallMs !== undefined ? ` · ${formatDuration(item.wallMs)}` : ''}</Tag>
             ) : null}
@@ -694,6 +714,16 @@ function WorkRow({ locale, item, pending, onAccept, onReject, onAnswer, onResume
                 </>
               : <Button variant="ghost" size="sm" onClick={armRelease}>{t(locale, 'workForceRelease')}</Button>
           ) : null}
+          {integrates.includes('merge') ? <Button variant="primary" size="sm" disabled={integrateBusy} onClick={() => void runIntegrate('merge')}>{t(locale, 'workIntegrateMerge')}</Button> : null}
+          {integrates.includes('keep') ? <Button variant="ghost" size="sm" disabled={integrateBusy} onClick={() => void runIntegrate('keep')}>{t(locale, 'workIntegrateKeep')}</Button> : null}
+          {integrates.includes('discard') ? (
+            discardArmed
+              ? <>
+                  <Button variant="primary" size="sm" className="dsh-dot-danger" disabled={integrateBusy} onClick={() => void runIntegrate('discard')}>{t(locale, 'workIntegrateDiscardConfirm')}</Button>
+                  <Button variant="ghost" size="sm" onClick={() => setDiscardArmed(false)}>{t(locale, 'workRejectCancel')}</Button>
+                </>
+              : <Button variant="ghost" size="sm" disabled={integrateBusy} onClick={() => setDiscardArmed(true)}>{t(locale, 'workIntegrateDiscard')}</Button>
+          ) : null}
           {latestSessionId && onOpenSession ? (
             <Button variant="ghost" size="sm" className="dsh-dot-work-open" onClick={() => onOpenSession(latestSessionId)}>
               {t(locale, 'workOpenSession')} ↗
@@ -701,6 +731,7 @@ function WorkRow({ locale, item, pending, onAccept, onReject, onAnswer, onResume
           ) : null}
         </div>
       ) : null}
+      {integrateError ? <p className="dsh-ui-hint" role="alert">{integrateError}</p> : null}
       {rejectMode ? (
         <div className="dsh-dot-work-reject-box">
           <Input
@@ -756,6 +787,7 @@ export function WorkBoardPanel({ locale, api, items, pending, filter = 'all', on
       onAnswer={payload => run(api.workAnswer(payload))}
       onResume={payload => run(api.workResume(payload))}
       {...api.workForceRelease ? { onForceRelease: payload => run(api.workForceRelease!(payload)) } : {}}
+      {...api.workIntegrate ? { onIntegrate: async payload => { try { await api.workIntegrate!(payload) } finally { onChanged() } } } : {}}
       {...api.workRead ? { onRead: api.workRead } : {}}
       {...onOpenSession ? { onOpenSession } : {}}
     />

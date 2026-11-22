@@ -499,9 +499,11 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
         case 'work.read': {
           const kind = field(payload, 'kind')
           if (kind !== 'evidence' && kind !== 'change') return { ok: false, error: { code: 'dot/invalid', message: 'kind must be evidence or change' } }
+          const view = field(payload, 'view')
+          if (view !== undefined && view !== 'diff') return { ok: false, error: { code: 'dot/invalid', message: 'view must be diff' } }
           const read = service.readWorkSource(str(payload, 'id'), kind, str(payload, 'ref'), {
             verificationId: str(payload, 'verificationId'), inputRef: str(payload, 'inputRef'), inputRevision: num(payload, 'inputRevision'),
-          }, { forceFull: field(payload, 'forceFull') === true })
+          }, { forceFull: field(payload, 'forceFull') === true, ...(view === 'diff' ? { view: 'diff' as const } : {}) })
           if (!read.ok) return { ok: false, error: { code: `dot/${read.code}`, message: read.message } }
           return { ok: true, value: { source: read.source, body: read.body, truncated: read.truncated, totalBytes: read.totalBytes } }
         }

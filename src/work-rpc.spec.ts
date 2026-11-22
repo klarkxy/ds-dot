@@ -6,11 +6,23 @@
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { DotService } from './service.ts'
 import { DotStore } from './store.ts'
 import { DEFAULT_SETTINGS } from './contracts.ts'
 import { rejectPayload } from './work-board.ts'
+
+/** Lets one test drive jsdiff's abortable return without a pathological input. */
+const diffControl = vi.hoisted(() => ({ fail: false, options: [] as unknown[] }))
+vi.mock('diff', async importOriginal => {
+  const actual = await importOriginal<typeof import('diff')>()
+  const patched = (...args: Parameters<typeof actual.createTwoFilesPatch>) => {
+    diffControl.options.push(args[6])
+    if (diffControl.fail) return undefined
+    return actual.createTwoFilesPatch(...args)
+  }
+  return { ...actual, createTwoFilesPatch: patched as typeof actual.createTwoFilesPatch }
+})
 
 const str = (payload: unknown, key: string): string => typeof (payload as Record<string, unknown> | null)?.[key] === 'string' ? (payload as Record<string, string>)[key] : ''
 const num = (payload: unknown, key: string): number | undefined => typeof (payload as Record<string, unknown> | null)?.[key] === 'number' ? (payload as Record<string, number>)[key] : undefined
@@ -46,6 +58,13 @@ async function setup() {
       calls.push(`create ${id}`)
       return id
     },
+    createDot: async () => {
+      const id = `dot-${sessions.size}`
+      sessions.set(id, {})
+      calls.push(`dot ${id}`)
+      return id
+    },
+    resumeDot: async () => false,
     prompt: async () => { calls.push('prompt') },
     stopActivity: async () => { calls.push('stop'); return { cancelAccepted: true, queueCleared: true, idle: true, jobsSettled: true } },
   }
@@ -333,6 +352,188 @@ describe('work.* RPC contract', () => {
     expect(h.service.readWorkSource(change.id, 'evidence', `run:${run.id}`, moved)).toMatchObject({ ok: false, code: 'stale' })
     expect(h.service.readWorkSource(change.id, 'evidence', 'run:run-9', bound)).toMatchObject({ ok: false, code: 'stale' })
     expect(h.service.readWorkSource(change.id, 'evidence', 'run:run-9', moved)).toMatchObject({ ok: true, body: 'REV2_ONLY' })
+    rmSync(h.project, { recursive: true, force: true })
+    rmSync(h.home, { recursive: true, force: true })
+  })
+})
+
+/** Workspace-wide delivery with one modified, one added and one deleted file — and a binary added file. */
+async function readyDiffChange(h: Awaited<ReturnType<typeof setup>>) {
+  writeFileSync(join(h.project, 'a.ts'), 'line alpha\nline beta\nline gamma\n')
+  writeFileSync(join(h.project, 'gone.ts'), 'line gone\n')
+  const change = await h.service.createWorkChange({ title: 'Diff it', cwd: h.project, goal: 'land it', requirements: [{ requirementRef: 'r1', text: 'edits', required: true }], at: 1 })
+  const reserved = await h.service.reserveWorkRun({ changeId: change.id, kind: 'work', cwd: h.project, root: { workspaceRoot: h.project }, writeScope: { kind: 'workspace-exclusive' }, at: 2 })
+  if (!reserved.ok) throw new Error(reserved.message)
+  const run = reserved.run
+  await h.service.captureWorkBaseline(run.id)
+  const launched = await h.service.launchWorkRun(run.id, 'edit it')
+  if (!launched.ok) throw new Error(launched.message)
+  rmSync(join(h.project, 'gone.ts'))
+  writeFileSync(join(h.project, 'a.ts'), 'line alpha\nline beta edited\nline gamma\nline delta\n')
+  writeFileSync(join(h.project, 'new.ts'), 'fresh body\n')
+  writeFileSync(join(h.project, 'bin.dat'), Buffer.from([0xff, 0xfe, 0x01, 0x02, 0x80, 0x81]))
+  const prepared = await h.store.work.prepareFinish(run.id, 'completed', 3)
+  if (!prepared.ok) throw new Error(prepared.message)
+  const finished = await h.store.work.finishSettled(run.id, prepared.updatedAt, 'completed', { queueCleared: true, agentIdle: true, jobsSettled: true }, 4)
+  if (!finished.ok) throw new Error(`finishSettled: ${finished.message}`)
+  const review = await h.service.reserveWorkRun({ changeId: change.id, kind: 'review', cwd: h.project, root: { workspaceRoot: h.project }, writeScope: { kind: 'workspace-exclusive' }, at: 5 })
+  if (!review.ok) throw new Error(review.message)
+  await h.service.captureWorkBaseline(review.run.id)
+  const launchedReview = await h.service.launchWorkRun(review.run.id, 'check it')
+  if (!launchedReview.ok) throw new Error(launchedReview.message)
+  const held = await h.service.holdWorkReview(review.run.id)
+  if (!('id' in held)) throw new Error(held.message)
+  const subject = await h.service.captureWorkSubject(change.id)
+  const current = h.store.work.change(change.id)!
+  mkdirSync(join(h.home, 'artifacts', 'evidence'), { recursive: true })
+  writeFileSync(join(h.home, 'artifacts', 'evidence', `${run.id}.md`), 'built')
+  const verified = await h.service.recordWorkVerification(change.id, [
+    { requirementRef: 'r1', applicability: 'applicable', verdict: 'pass', evidenceRefs: [`run:${run.id}`], note: 'built' },
+  ], [run.id], {
+    inputRef: current.currentInputRef, inputRevision: current.currentRevision,
+    reviewRunId: review.run.id, reviewerSessionId: h.store.work.run(review.run.id)!.sessionId, subject,
+  })
+  if (!('id' in verified) || !verified.subjectKey) throw new Error('verification failed')
+  return { change, run, review: review.run, subject, verified, current }
+}
+
+describe('work.read diff view', () => {
+  it('diffs modified, added and deleted deliveries against the writer baseline', async () => {
+    const h = await setup()
+    const { change, subject, verified, current } = await readyDiffChange(h)
+    expect(subject.changes.map(row => `${row.kind}:${row.path}`)).toEqual(
+      expect.arrayContaining(['modified:a.ts', 'deleted:gone.ts', 'added:new.ts', 'added:bin.dat']),
+    )
+    // Both the writer's and the review's baselines are bound; the writer one is the left side.
+    expect(subject.baselineRefs.length).toBeGreaterThanOrEqual(2)
+    const bound = { verificationId: verified.id, inputRef: current.currentInputRef, inputRevision: current.currentRevision }
+    const modified = h.service.readWorkSource(change.id, 'change', 'a.ts', bound, { view: 'diff' })
+    expect(modified.ok).toBe(true)
+    if (modified.ok) {
+      expect(modified.body).toContain('--- a/a.ts')
+      expect(modified.body).toContain('+++ b/a.ts')
+      expect(modified.body).toContain('-line beta')
+      expect(modified.body).toContain('+line beta edited')
+      expect(modified.body).toContain('+line delta')
+    }
+    const added = h.service.readWorkSource(change.id, 'change', 'new.ts', bound, { view: 'diff' })
+    expect(added.ok).toBe(true)
+    if (added.ok) {
+      expect(added.body).toContain('+fresh body')
+      expect(added.body).not.toContain('-line')
+    }
+    const deleted = h.service.readWorkSource(change.id, 'change', 'gone.ts', bound, { view: 'diff' })
+    expect(deleted.ok).toBe(true)
+    if (deleted.ok) {
+      expect(deleted.body).toContain('-line gone')
+      expect(deleted.body).not.toContain('+line')
+    }
+    rmSync(h.project, { recursive: true, force: true })
+    rmSync(h.home, { recursive: true, force: true })
+  })
+
+  it('refuses binary or oversized diff sides and keeps the full read', async () => {
+    const h = await setup()
+    const { change, verified, current } = await readyDiffChange(h)
+    const bound = { verificationId: verified.id, inputRef: current.currentInputRef, inputRevision: current.currentRevision }
+    const binary = h.service.readWorkSource(change.id, 'change', 'bin.dat', bound, { view: 'diff' })
+    expect(binary).toMatchObject({ ok: false, code: 'invalid' })
+    if (!binary.ok) expect(binary.message).toContain('open the full file')
+    writeFileSync(join(h.project, 'big.txt'), 'x'.repeat(300_000))
+    const rebaseline = await h.service.captureWorkSubject(change.id)
+    const now = h.store.work.change(change.id)!
+    const reverify = await h.service.recordWorkVerification(change.id, [
+      { requirementRef: 'r1', applicability: 'applicable', verdict: 'pass', evidenceRefs: [] },
+    ], [], { inputRef: now.currentInputRef, inputRevision: now.currentRevision, subject: rebaseline })
+    if (!('id' in reverify)) throw new Error(reverify.message)
+    const rebound = { verificationId: reverify.id, inputRef: now.currentInputRef, inputRevision: now.currentRevision }
+    expect(h.service.readWorkSource(change.id, 'change', 'big.txt', rebound, { view: 'diff' })).toMatchObject({ ok: false, code: 'invalid' })
+    // The oversized row still reads through the full view, truncated as usual.
+    expect(h.service.readWorkSource(change.id, 'change', 'big.txt', rebound)).toMatchObject({ ok: true, truncated: true })
+    // Staleness and kind checks apply before any diff work.
+    expect(h.service.readWorkSource(change.id, 'change', 'a.ts', { ...bound, verificationId: 'v-nope' }, { view: 'diff' })).toMatchObject({ ok: false, code: 'stale' })
+    expect(h.service.readWorkSource(change.id, 'evidence', 'file:a.ts', bound, { view: 'diff' })).toMatchObject({ ok: false, code: 'invalid' })
+    rmSync(h.project, { recursive: true, force: true })
+    rmSync(h.home, { recursive: true, force: true })
+  })
+
+  it('bounds the diff computation and refuses when jsdiff gives up', async () => {
+    const h = await setup()
+    const { change, verified, current } = await readyDiffChange(h)
+    const bound = { verificationId: verified.id, inputRef: current.currentInputRef, inputRevision: current.currentRevision }
+    diffControl.fail = true
+    try {
+      const refused = h.service.readWorkSource(change.id, 'change', 'a.ts', bound, { view: 'diff' })
+      expect(refused).toMatchObject({ ok: false, code: 'invalid' })
+      if (!refused.ok) expect(refused.message).toContain('too many changes')
+    } finally {
+      diffControl.fail = false
+    }
+    // The patch call carries a timeout so heavy rewrites cannot stall the loop.
+    expect(h.service.readWorkSource(change.id, 'change', 'a.ts', bound, { view: 'diff' }).ok).toBe(true)
+    expect(diffControl.options.at(-1)).toMatchObject({ timeout: 1500 })
+    rmSync(h.project, { recursive: true, force: true })
+    rmSync(h.home, { recursive: true, force: true })
+  })
+
+  it('reads baseline manifests once per subject across file diffs', async () => {
+    const h = await setup()
+    const { change, verified, current } = await readyDiffChange(h)
+    const bound = { verificationId: verified.id, inputRef: current.currentInputRef, inputRevision: current.currentRevision }
+    let manifestReads = 0
+    const service = h.service as unknown as { subjectLook: () => { read: (ref: string) => unknown } }
+    const realLook = service.subjectLook.bind(h.service)
+    vi.spyOn(service, 'subjectLook').mockImplementation(() => {
+      const look = realLook() as { read: (ref: string) => unknown }
+      return { ...look, read: (ref: string) => { manifestReads += 1; return look.read(ref) } }
+    })
+    expect(h.service.readWorkSource(change.id, 'change', 'a.ts', bound, { view: 'diff' }).ok).toBe(true)
+    const afterFirst = manifestReads
+    expect(afterFirst).toBeGreaterThan(0)
+    expect(h.service.readWorkSource(change.id, 'change', 'gone.ts', bound, { view: 'diff' }).ok).toBe(true)
+    expect(manifestReads).toBe(afterFirst)
+    rmSync(h.project, { recursive: true, force: true })
+    rmSync(h.home, { recursive: true, force: true })
+  })
+
+  it('refuses the diff as missing when a baseline snapshot is unreadable', async () => {
+    const h = await setup()
+    const { change, subject, verified, current } = await readyDiffChange(h)
+    const bound = { verificationId: verified.id, inputRef: current.currentInputRef, inputRevision: current.currentRevision }
+    rmSync(join(h.home, 'artifacts', subject.baselineRefs[0]!.artifactRef), { recursive: true, force: true })
+    expect(h.service.readWorkSource(change.id, 'change', 'a.ts', bound, { view: 'diff' })).toMatchObject({ ok: false, code: 'missing' })
+    rmSync(h.project, { recursive: true, force: true })
+    rmSync(h.home, { recursive: true, force: true })
+  })
+
+  it('clears memoized baselines on factory reset so reused ids cannot hit stale priors', async () => {
+    const h = await setup()
+    const first = await readyDiffChange(h)
+    const bound1 = { verificationId: first.verified.id, inputRef: first.current.currentInputRef, inputRevision: first.current.currentRevision }
+    let manifestReads = 0
+    const service = h.service as unknown as { subjectLook: () => { read: (ref: string) => unknown } }
+    const realLook = service.subjectLook.bind(h.service)
+    vi.spyOn(service, 'subjectLook').mockImplementation(() => {
+      const look = realLook() as { read: (ref: string) => unknown }
+      return { ...look, read: (ref: string) => { manifestReads += 1; return look.read(ref) } }
+    })
+    expect(h.service.readWorkSource(first.change.id, 'change', 'a.ts', bound1, { view: 'diff' }).ok).toBe(true)
+    const afterFirst = manifestReads
+    expect(afterFirst).toBeGreaterThan(0)
+    // A second file of the same subject is served from the memo, not re-scanned.
+    expect(h.service.readWorkSource(first.change.id, 'change', 'gone.ts', bound1, { view: 'diff' }).ok).toBe(true)
+    expect(manifestReads).toBe(afterFirst)
+
+    await h.service.ensureDot()
+    await h.service.confirmFactoryReset(h.service.previewFactoryReset().token)
+    // Ids restart after reset; the memo must not answer for the new delivery.
+    // Preparing the second delivery reads manifests itself, so the check needs
+    // the count after preparation, not the count from before reset.
+    const second = await readyDiffChange(h)
+    const afterPrep = manifestReads
+    const bound2 = { verificationId: second.verified.id, inputRef: second.current.currentInputRef, inputRevision: second.current.currentRevision }
+    expect(h.service.readWorkSource(second.change.id, 'change', 'a.ts', bound2, { view: 'diff' }).ok).toBe(true)
+    expect(manifestReads).toBeGreaterThan(afterPrep)
     rmSync(h.project, { recursive: true, force: true })
     rmSync(h.home, { recursive: true, force: true })
   })

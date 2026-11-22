@@ -1452,32 +1452,39 @@ export class DotService {
     return `Removed reminder ${key}.`
   }
 
+  /** Recipe ids whose change was created but whose dispatch has not finished; a second call refuses instead of stacking. */
+  private readonly recipeStarting = new Set<string>()
+
   /**
    * Create + dispatch a recipe-tagged change through the same paths as
    * `dot_task action=create recipe=` followed by `action=dispatch`: identical
    * validation, scope reservation, baseline capture and outcome tagging.
    * Never stacks runs of one recipe: a non-terminal change refuses the call.
+   * Only the in-flight check and the create hold the serial lane; dispatch
+   * awaits the host outside it, exactly like manageTask's dispatch branch.
    */
-  runRecipe(ref: string, opts: { readonly origin: 'reminder' | 'human'; readonly note?: string; readonly reminderTitle?: string }): Promise<{ readonly ok: true; readonly changeId: string; readonly runId?: string } | { readonly ok: false; readonly reason: string }> {
-    return this.serial(() => this.runRecipeNow(ref, opts))
-  }
-
-  private async runRecipeNow(ref: string, opts: { readonly origin: 'reminder' | 'human'; readonly note?: string; readonly reminderTitle?: string }): Promise<{ readonly ok: true; readonly changeId: string; readonly runId?: string } | { readonly ok: false; readonly reason: string }> {
+  async runRecipe(ref: string, opts: { readonly origin: 'reminder' | 'human'; readonly note?: string; readonly reminderTitle?: string }): Promise<{ readonly ok: true; readonly changeId: string; readonly runId?: string } | { readonly ok: false; readonly reason: string }> {
     const recipe = this.store.recipe(ref)
     if (!recipe) return { ok: false as const, reason: `unknown recipe ${ref}` }
-    const allRuns = this.store.work.listRuns()
-    const inFlight = this.store.work.listChanges().find(change =>
-      change.recipe?.id === recipe.id && !changeIsTerminal(change, allRuns.filter(run => run.changeId === change.id)))
-    if (inFlight) return { ok: false as const, reason: `previous run of ${recipe.id} "${recipe.name}" still in flight: ${inFlight.id}` }
     const userRequest = opts.origin === 'reminder'
       ? `[reminder "${opts.reminderTitle ?? ''}"]${opts.note?.trim() ? ` ${opts.note.trim()}` : ''}`
       : `Run recipe "${recipe.name}" (started from the Tasks panel)`
-    let change: ChangeRecord
-    try {
-      change = await this.createChangeFromTool({ action: 'create', recipe: recipe.id, user_request: userRequest })
-    } catch (error) {
-      return { ok: false as const, reason: messageOf(error) }
-    }
+    const started = await this.serial(async (): Promise<{ readonly ok: true; readonly change: ChangeRecord } | { readonly ok: false; readonly reason: string }> => {
+      if (this.recipeStarting.has(recipe.id)) return { ok: false as const, reason: `a run of ${recipe.id} "${recipe.name}" is already starting` }
+      const allRuns = this.store.work.listRuns()
+      const inFlight = this.store.work.listChanges().find(change =>
+        change.recipe?.id === recipe.id && !changeIsTerminal(change, allRuns.filter(run => run.changeId === change.id)))
+      if (inFlight) return { ok: false as const, reason: `previous run of ${recipe.id} "${recipe.name}" still in flight: ${inFlight.id}` }
+      this.recipeStarting.add(recipe.id)
+      try {
+        return { ok: true as const, change: await this.createChangeFromTool({ action: 'create', recipe: recipe.id, user_request: userRequest }) }
+      } catch (error) {
+        this.recipeStarting.delete(recipe.id)
+        return { ok: false as const, reason: messageOf(error) }
+      }
+    })
+    if (!started.ok) return started
+    const change = started.change
     try {
       await this.manageWorkAction({ action: 'dispatch', task_id: change.id, ...(opts.note?.trim() ? { message: opts.note.trim() } : {}) })
     } catch (error) {
@@ -1486,6 +1493,8 @@ export class DotService {
         ? `; fresh change ${change.id} was cancelled`
         : `; fresh change ${change.id} could not be cancelled`
       return { ok: false as const, reason: `${messageOf(error)}${cancelledNote}` }
+    } finally {
+      this.recipeStarting.delete(recipe.id)
     }
     const runId = this.store.work.listRuns().filter(run => run.changeId === change.id).at(-1)?.id
     return { ok: true as const, changeId: change.id, ...(runId ? { runId } : {}) }

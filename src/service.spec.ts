@@ -2661,6 +2661,48 @@ describe('runRecipe', () => {
     }
     await h.service.dispose()
   })
+
+  it('refuses a second concurrent run of the same recipe', async () => {
+    const h = setup()
+    const cwd = dir()
+    await h.service.manageRecipe({ action: 'save', name: 'report', goal: 'g', dir: cwd })
+    // Hold the host's createSession so the first dispatch is still in flight
+    // when the second call's serial check runs.
+    let release: (id: string) => void = () => {}
+    const gate = new Promise<string>(resolve => { release = resolve })
+    const original = h.host.createSession
+    h.host.createSession = async place => { await gate; return original(place) }
+    const first = h.service.runRecipe('report', { origin: 'human' })
+    await new Promise(resolve => setTimeout(resolve, 20))
+    const second = h.service.runRecipe('report', { origin: 'human' })
+    release('s-gate')
+    const [one, two] = await Promise.all([first, second])
+    expect([one, two].filter(result => result.ok)).toHaveLength(1)
+    const refused = one.ok ? two : one
+    expect(refused).toMatchObject({ ok: false })
+    if (!refused.ok) expect(refused.reason).toMatch(/in flight|already starting/)
+    expect(h.store.work.listChanges().filter(row => row.recipe?.id === h.store.recipe('report')!.id)).toHaveLength(1)
+    await h.service.dispose()
+  })
+
+  it('does not hold the serial lane while dispatch awaits the host', async () => {
+    const h = setup()
+    const cwd = dir()
+    await h.service.manageRecipe({ action: 'save', name: 'report', goal: 'g', dir: cwd })
+    let release: (id: string) => void = () => {}
+    const gate = new Promise<string>(resolve => { release = resolve })
+    const original = h.host.createSession
+    h.host.createSession = async place => { await gate; return original(place) }
+    const run = h.service.runRecipe('report', { origin: 'human' })
+    await new Promise(resolve => setTimeout(resolve, 20))
+    // Dispatch is parked on the host; a serial-lane op must still complete.
+    const lane = await h.service.serialSettings(async () => 'free')
+    expect(lane).toBe('free')
+    release('s-gate')
+    const result = await run
+    expect(result.ok).toBe(true)
+    await h.service.dispose()
+  })
 })
 
 describe('recipe-bound reminders', () => {

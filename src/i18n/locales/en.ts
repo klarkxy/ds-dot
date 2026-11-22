@@ -548,7 +548,7 @@ const enUi: UiText = {
   attentionTitle: 'Dorothy needs you',
   attentionBadge: '{n} need you',
   sNotify: 'Desktop notifications',
-  sNotifyDesc: 'Show a browser notification when Dorothy needs you while her panel is in the background.',
+  sNotifyDesc: 'Show a browser notification when Dorothy needs you while this window is hidden or not focused.',
   sNotifyBlocked: 'Blocked by the browser',
   sNotifyUnsupported: 'Not supported by this browser',
 }

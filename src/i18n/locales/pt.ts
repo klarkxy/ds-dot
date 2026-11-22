@@ -547,7 +547,7 @@ const ptUi: UiText = {
   attentionTitle: 'Dorothy precisa de você',
   attentionBadge: '{n} precisam de você',
   sNotify: 'Notificações de área de trabalho',
-  sNotifyDesc: 'Mostra uma notificação do navegador quando Dorothy precisa de você enquanto o painel está em segundo plano.',
+  sNotifyDesc: 'Mostra uma notificação do navegador quando Dorothy precisa de você enquanto esta janela está oculta ou sem foco.',
   sNotifyBlocked: 'Bloqueado pelo navegador',
   sNotifyUnsupported: 'Sem suporte neste navegador',
 }

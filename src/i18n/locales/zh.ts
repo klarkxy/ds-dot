@@ -548,7 +548,7 @@ export const zhUi = {
   attentionTitle: '桃乐丝需要你',
   attentionBadge: '{n} 项待你处理',
   sNotify: '桌面通知',
-  sNotifyDesc: '当桃乐丝需要你而面板处于后台时，显示一条浏览器通知。',
+  sNotifyDesc: '当桃乐丝需要你而此窗口被隐藏或未聚焦时，显示一条浏览器通知。',
   sNotifyBlocked: '已被浏览器阻止',
   sNotifyUnsupported: '此浏览器不支持',
 } as const

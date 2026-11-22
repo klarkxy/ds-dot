@@ -56,6 +56,19 @@ describe('attentionItems', () => {
     expect(items[1]!.since).toBeUndefined()
   })
 
+  it('drops a relayed approval card once its approval is withdrawn', () => {
+    const relayed = card({ approvalId: 'ap-9', title: 'Approve deploy' })
+    const pending = { id: 'ap-9', kind: 'approval' as const, sessionId: 's', createdAt: 3, subject: 'deploy' }
+    // Still pending: the card counts.
+    expect(attentionItems([relayed], board({ pending: [pending] })).map(item => item.id)).toEqual(['card:dot-card-1'])
+    // The originating session answered; the card row itself stays unanswered
+    // but no longer counts.
+    expect(attentionItems([relayed], board({ pending: [] }))).toEqual([])
+    expect(attentionItems([relayed], board({ pending: [{ ...pending, kind: 'question' as const }] }))).toEqual([])
+    // Plain interactive cards without approvalId are unaffected.
+    expect(attentionItems([card()], board({})).map(item => item.id)).toEqual(['card:dot-card-1'])
+  })
+
   it('changes the work id when the waiting decision changes', () => {
     const before = attentionItems([], board({ work: [workItem()] }))
     const nextSubject = workItem({

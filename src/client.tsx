@@ -124,10 +124,17 @@ export function apply(ctx: Context): void {
     notify: item => {
       try { if (localStorage.getItem(DESKTOP_NOTIFY_KEY) !== '1') return } catch { return }
       if (typeof Notification === 'undefined' || Notification.permission !== 'granted') return
+      const title = t(localeOf(), 'attentionTitle')
       let notification: Notification
       try {
-        notification = new Notification(t(localeOf(), 'attentionTitle'), { body: item.title, tag: item.id })
-      } catch { return }
+        notification = new Notification(title, { body: item.title, tag: item.id })
+      } catch {
+        // Android Chrome requires a service worker; no click handler there.
+        void navigator.serviceWorker?.getRegistration()
+          .then(registration => registration?.showNotification(title, { body: item.title, tag: item.id }))
+          .catch(() => {})
+        return
+      }
       notification.onclick = () => {
         window.focus()
         try { layout()?.selectPanel?.(PANEL_ID) } catch { /* an unregistered panel keeps the current view */ }

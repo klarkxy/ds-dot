@@ -69,8 +69,13 @@ export function headerBoardCounts(view: BoardView | undefined): { readonly liveC
  */
 export function attentionItems(cards: readonly DotCardRecord[], view: BoardView): AttentionItem[] {
   const items: AttentionItem[] = []
+  const pendingApprovals = new Set(view.pending.filter(row => row.kind === 'approval').map(row => row.id))
   for (const card of cards) {
     if (card.expired || card.answer) continue
+    // A relayed approval card only waits on the human while its approval is
+    // still pending; answering in the originating session withdraws it
+    // without marking the card answered.
+    if (card.approvalId !== undefined && !pendingApprovals.has(card.approvalId)) continue
     items.push({
       id: `card:${card.id}`,
       kind: 'card',

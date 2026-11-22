@@ -80,12 +80,19 @@ export function createAttentionWatcher({ fetch, intervalMs = 15_000, isAttended,
       }
     } finally {
       if (flight === controller) flight = undefined
-      if (running) timer = setTimeout(() => { void poll() }, intervalMs)
+      if (running) {
+        if (timer !== undefined) clearTimeout(timer)
+        timer = setTimeout(() => { timer = undefined; void poll() }, intervalMs)
+      }
     }
   }
 
   const onVisibility = () => {
-    if (typeof document !== 'undefined' && document.visibilityState === 'visible') void poll()
+    if (typeof document === 'undefined' || document.visibilityState !== 'visible') return
+    // Drop the armed timer so the immediate poll does not start a second loop;
+    // a poll already in flight re-arms from its own finally.
+    if (timer !== undefined) { clearTimeout(timer); timer = undefined }
+    void poll()
   }
 
   return {

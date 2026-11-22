@@ -547,7 +547,7 @@ const jaUi: UiText = {
   attentionTitle: 'ドロシーがあなたを待っています',
   attentionBadge: '{n} 件の要対応',
   sNotify: 'デスクトップ通知',
-  sNotifyDesc: 'パネルがバックグラウンドにある間にドロシーがあなたを必要としたとき、ブラウザー通知を表示します。',
+  sNotifyDesc: 'このウィンドウが非表示またはフォーカスされていない間にドロシーがあなたを必要としたとき、ブラウザー通知を表示します。',
   sNotifyBlocked: 'ブラウザーでブロックされています',
   sNotifyUnsupported: 'このブラウザーではサポートされていません',
 }

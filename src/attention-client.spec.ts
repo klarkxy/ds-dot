@@ -120,6 +120,32 @@ describe('createAttentionWatcher', () => {
     watcher.stop()
   })
 
+  it('keeps a single poll loop when the tab becomes visible mid-interval', async () => {
+    const fetch = vi.fn(async () => view(item('a')))
+    const watcher = createAttentionWatcher({ fetch, intervalMs: 1000, isAttended: () => true, notify: vi.fn() })
+    watcher.start()
+    await flush()
+    expect(fetch).toHaveBeenCalledTimes(1)
+
+    // Mid-interval the tab hides then returns: the armed timer is dropped and
+    // the immediate poll re-arms a single one.
+    await vi.advanceTimersByTimeAsync(400)
+    visible('hidden')
+    dom.window.document.dispatchEvent(new dom.window.Event('visibilitychange'))
+    await flush()
+    visible('visible')
+    dom.window.document.dispatchEvent(new dom.window.Event('visibilitychange'))
+    await flush()
+    expect(fetch).toHaveBeenCalledTimes(2)
+
+    // Several intervals later there is still exactly one fetch per interval.
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(fetch).toHaveBeenCalledTimes(3)
+    await vi.advanceTimersByTimeAsync(2000)
+    expect(fetch).toHaveBeenCalledTimes(5)
+    watcher.stop()
+  })
+
   it('keeps a stable snapshot identity and tells subscribers only on change', async () => {
     let items = view(item('a'))
     const fetch = vi.fn(async () => items)

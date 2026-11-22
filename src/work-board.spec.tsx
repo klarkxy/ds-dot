@@ -902,7 +902,7 @@ describe('WorkBoard', () => {
     expect(truncBar.parentElement!.className).not.toBe('dsh-dot-work-diff')
     // Rendered rows only: hunk header + content lines, no file header lines.
     expect(truncBar.textContent).toContain('2000')
-    expect(truncBar.textContent).toContain('6003')
+    expect(truncBar.textContent).toContain('6002')
     const showAll = buttonIncluding('Show all')!
     await act(async () => { showAll.click(); await Promise.resolve() })
     expect(rendered.textContent).toContain('tail marker row')
@@ -972,7 +972,7 @@ describe('WorkBoard', () => {
     expect(lines()).toBeLessThanOrEqual(2_000)
     const truncBar = document.querySelector('.dsh-dot-work-diff-trunc')
     expect(truncBar?.textContent).toContain('2000')
-    expect(truncBar?.textContent).toContain('2502')
+    expect(truncBar?.textContent).toContain('2501')
     const showAll = buttonIncluding('Show all')
     expect(showAll).toBeTruthy()
     await act(async () => { showAll!.click(); await Promise.resolve() })

@@ -438,7 +438,10 @@ function parsePatch(body: string): DiffLine[] {
   let oldNo = 0
   let newNo = 0
   let inHunks = false
-  for (const raw of body.split('\n')) {
+  // The patch ends with a newline; its trailing empty split is not a row.
+  const lines = body.split('\n')
+  if (lines.at(-1) === '') lines.pop()
+  for (const raw of lines) {
     const hunk = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(raw)
     if (hunk) {
       inHunks = true

@@ -321,14 +321,14 @@ describe('WorkBoard', () => {
     await act(async () => { root.render(<WorkBoard locale="en" items={[first]} pending={[]} onAccept={vi.fn()} onReject={vi.fn()} onAnswer={vi.fn()} onResume={vi.fn()} onRead={onRead} />); await Promise.resolve(); await Promise.resolve() })
     await openDetails()
     expect(document.body.textContent).toContain('OLD_MARKED_BODY')
-    expect(document.querySelectorAll('[data-evidence-body]')).toHaveLength(2)
+    expect(document.querySelectorAll('[data-evidence-body],[data-diff-body]')).toHaveLength(2)
     hang = true
     await act(async () => { root.render(<WorkBoard locale="en" items={[bumped]} pending={[]} onAccept={vi.fn()} onReject={vi.fn()} onAnswer={vi.fn()} onResume={vi.fn()} onRead={onRead} />); await Promise.resolve() })
     await openDetails()
     expect(document.body.textContent).toContain('Version 2')
     expect(document.body.textContent).toContain('v-1')
     expect(document.body.textContent).not.toContain('OLD_MARKED_BODY')
-    expect(document.querySelectorAll('[data-evidence-body]')).toHaveLength(0)
+    expect(document.querySelectorAll('[data-evidence-body],[data-diff-body]')).toHaveLength(0)
     await act(async () => root.unmount())
   })
 
@@ -353,14 +353,14 @@ describe('WorkBoard', () => {
     await act(async () => { root.render(<WorkBoard locale="en" items={[bumped]} pending={[]} onAccept={vi.fn()} onReject={vi.fn()} onAnswer={vi.fn()} onResume={vi.fn()} onRead={onRead} />); await Promise.resolve() })
     await openDetails()
     expect(document.body.textContent).toContain('Version 2')
-    expect(document.querySelectorAll('[data-evidence-body]')).toHaveLength(0)
+    expect(document.querySelectorAll('[data-evidence-body],[data-diff-body]')).toHaveLength(0)
     expect(calls.filter(wave => wave === 1).length).toBeGreaterThan(0)
     await act(async () => {
       early.splice(0).forEach(resolve => resolve({ source: 'evidence:log-1', body: 'OLD_MARKED_BODY' }))
       await Promise.resolve()
     })
     expect(document.body.textContent).not.toContain('OLD_MARKED_BODY')
-    expect(document.querySelectorAll('[data-evidence-body]')).toHaveLength(0)
+    expect(document.querySelectorAll('[data-evidence-body],[data-diff-body]')).toHaveLength(0)
     await act(async () => root.unmount())
   })
 
@@ -744,5 +744,99 @@ describe('WorkBoard', () => {
     expect(body.textContent).toContain('读取失败')
     expect(body.textContent).toContain('preview unavailable')
     await act(async () => root.unmount())
+  })
+
+  const diffed: WorkBoardItem = {
+    ...item, id: 'c-diff',
+    verification: {
+      id: 'v-3', verdict: 'accept', subjectKey: 'subject-key-long', inputRef: 'in-4', inputRevision: 4,
+      changes: [
+        { path: 'a.ts', kind: 'modified' },
+        { path: 'new.ts', kind: 'added' },
+        { path: 'gone.ts', kind: 'deleted' },
+      ],
+    },
+  }
+  const DIFF_BODIES: Record<string, string> = {
+    'a.ts': '===================================================================\n--- a/a.ts\n+++ b/a.ts\n@@ -1,3 +1,4 @@\n line alpha\n-line beta\n+line beta edited\n line gamma\n+line delta\n',
+    'new.ts': '===================================================================\n--- a/new.ts\n+++ b/new.ts\n@@ -0,0 +1 @@\n+fresh body\n',
+    'gone.ts': '===================================================================\n--- a/gone.ts\n+++ b/gone.ts\n@@ -1 +0,0 @@\n-line gone\n',
+  }
+  const diffRead = (request: WorkReadRequest) => request.view === 'diff'
+    ? Promise.resolve({ source: `diff:${request.ref}`, body: DIFF_BODIES[request.ref] ?? '' })
+    : Promise.resolve({ source: `change:${request.ref}`, body: `FULL_${request.ref}` })
+  const rowToggle = (path: string) => document.querySelector(`a[data-change-path="${path}"]`)?.parentElement?.querySelector('.dsh-dot-work-view')
+
+  it('shows the baseline diff by default and switches a row to the full body', async () => {
+    const root = createRoot(document.getElementById('root')!)
+    await act(async () => {
+      root.render(<WorkBoard locale="en" items={[diffed]} pending={[]} onAccept={vi.fn()} onReject={vi.fn()} onAnswer={vi.fn()} onResume={vi.fn()} onRead={diffRead} />)
+      await Promise.resolve(); await Promise.resolve()
+    })
+    await openDetails()
+    // Default view is the diff for all three kinds; deleted has no Full.
+    expect(document.querySelectorAll('[data-diff-body]')).toHaveLength(3)
+    const rendered = document.querySelector('[data-diff-body="gone.ts"]')
+    expect(rendered?.textContent).toContain('-line gone')
+    const goneToggle = rowToggle('gone.ts')!
+    expect(goneToggle.querySelectorAll('button')[1]!.disabled).toBe(true)
+    const addLine = document.querySelector('[data-diff-body="a.ts"] .dsh-dot-work-diff-line[data-sign="add"]')!
+    expect(addLine.textContent).toContain('line beta edited')
+    expect(addLine.querySelectorAll('.dsh-dot-work-diff-no')[1]!.textContent).toBe('2')
+    expect(document.querySelector('[data-diff-body="a.ts"]')!.textContent).toContain('@@ -1,3 +1,4 @@')
+
+    // Full switches the row to the delivered body.
+    const aToggle = rowToggle('a.ts')!
+    await act(async () => { aToggle.querySelectorAll('button')[1]!.click(); await Promise.resolve(); await Promise.resolve() })
+    expect(document.querySelector('[data-diff-body="a.ts"]')).toBeNull()
+    expect(document.querySelector('[data-evidence-body="change:a.ts"]')?.textContent).toContain('FULL_a.ts')
+    await act(async () => root.unmount())
+  })
+
+  it('falls back to the full view when the diff read refuses', async () => {
+    const onRead = (request: WorkReadRequest) => {
+      if (request.view === 'diff') {
+        const failure = new Error('a.ts is binary or larger than 256 KiB; open the full file') as Error & { code?: string }
+        failure.code = 'dot/invalid'
+        return Promise.reject(failure)
+      }
+      return Promise.resolve({ source: `change:${request.ref}`, body: `FULL_${request.ref}` })
+    }
+    const root = createRoot(document.getElementById('root')!)
+    await act(async () => {
+      root.render(<WorkBoard locale="en" items={[diffed]} pending={[]} onAccept={vi.fn()} onReject={vi.fn()} onAnswer={vi.fn()} onResume={vi.fn()} onRead={onRead} />)
+      await Promise.resolve(); await Promise.resolve(); await Promise.resolve()
+    })
+    await openDetails()
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); await Promise.resolve() })
+    expect(document.querySelectorAll('[data-diff-body]')).toHaveLength(0)
+    expect(document.querySelector('[data-evidence-body="change:a.ts"]')?.textContent).toContain('FULL_a.ts')
+    expect(document.body.textContent).toContain('open the full file')
+    await act(async () => root.unmount())
+  })
+
+  it('quotes a diff line into the send-back note only when a send-back action exists', async () => {
+    const root = createRoot(document.getElementById('root')!)
+    await act(async () => {
+      root.render(<WorkBoard locale="en" items={[diffed]} pending={[]} onAccept={vi.fn()} onReject={vi.fn()} onAnswer={vi.fn()} onResume={vi.fn()} onRead={diffRead} />)
+      await Promise.resolve(); await Promise.resolve()
+    })
+    await openDetails()
+    const quote = document.querySelector<HTMLButtonElement>('[data-diff-body="a.ts"] .dsh-dot-work-diff-line[data-sign="add"] .dsh-dot-work-diff-quote')!
+    await act(async () => { quote.click(); await Promise.resolve() })
+    const input = document.querySelector<HTMLInputElement>('.dsh-dot-work-reject-input input, input.dsh-dot-work-reject-input')!
+    expect(input.value).toBe('a.ts:2 line beta edited')
+
+    const quiet: WorkBoardItem = { ...diffed, id: 'c-quiet', runs: [], humanAction: undefined, oversight: undefined }
+    await act(async () => { root.unmount() })
+    const silent = createRoot(document.getElementById('root')!)
+    await act(async () => {
+      silent.render(<WorkBoard locale="en" items={[quiet]} pending={[]} onAccept={vi.fn()} onReject={vi.fn()} onAnswer={vi.fn()} onResume={vi.fn()} onRead={diffRead} />)
+      await Promise.resolve(); await Promise.resolve()
+    })
+    await openDetails()
+    expect(document.querySelectorAll('[data-diff-body]')).toHaveLength(3)
+    expect(document.querySelectorAll('.dsh-dot-work-diff-quote')).toHaveLength(0)
+    await act(async () => silent.unmount())
   })
 })

@@ -263,10 +263,10 @@ export function writerPrior(
   runs: readonly RunRecord[],
   read: (ref: string) => SubjectSnapshot | undefined,
   platform: NodeJS.Platform = process.platform,
-): { readonly files: readonly { readonly path: string; readonly sha256: string }[]; readonly missing?: string } {
+): { readonly files: readonly { readonly path: string; readonly sha256: string; readonly artifactRef: string }[]; readonly missing?: string } {
   const writers = new Set(runs.filter(run => run.kind !== 'review').flatMap(run => run.baselineRefs.map(ref => ref.artifactRef)))
   const reviewOnly = new Set(runs.filter(run => run.kind === 'review').flatMap(run => run.baselineRefs.map(ref => ref.artifactRef)).filter(id => !writers.has(id)))
-  const files: { path: string; sha256: string }[] = []
+  const files: { path: string; sha256: string; artifactRef: string }[] = []
   const seen = new Set<string>()
   for (const ref of baselines) {
     const snapshot = read(ref.artifactRef)
@@ -276,7 +276,7 @@ export function writerPrior(
       const key = pathKey(entry.path, platform)
       if (seen.has(key)) continue
       seen.add(key)
-      files.push({ path: entry.path, sha256: entry.sha256 })
+      files.push({ path: entry.path, sha256: entry.sha256, artifactRef: ref.artifactRef })
     }
   }
   return { files }

@@ -11,6 +11,7 @@ import { HarnessError } from '@deepseek-ai/dsh-llm'
 import { mkdir } from 'node:fs/promises'
 import { isAbsolute, join } from 'node:path'
 import { APPROVAL_DETAIL_LIMIT, approvalNotice } from './approval-risk.ts'
+import { createTwoFilesPatch } from 'diff'
 import { writerPrior, parseEvidenceRef, reportBullet, deliveryScope, scopeContainsPath, type DeliverySubject, type SubjectLook } from './acceptance.ts'
 import { captureScopeAsync, defaultIgnoreCover, foldRel, ignoreCovered, isLinkReason, pruneSnapshots, readManifest, readSnapshotEntry, relativePath, saveSnapshot, scanScope, scanScopeAsync, baselineCaptures, wipeArtifacts, type SnapshotExclusion, type SnapshotSource } from './artifacts.ts'
 import { renderBrief, renderSupplement, runTitle } from './brief.ts'
@@ -2403,7 +2404,8 @@ export class DotService {
    * The verification has to be the one requested and it has to match the current input.
    * An older input, an unbound id, or a path outside that delivery is refused before any file is opened.
    */
-  readWorkSource(changeId: string, kind: 'evidence' | 'change', ref: string, bound: { readonly verificationId: string; readonly inputRef: string; readonly inputRevision: number }, options?: { readonly forceFull?: boolean }): { readonly ok: true; readonly source: string; readonly body: string; readonly truncated?: boolean; readonly totalBytes?: number } | { readonly ok: false; readonly code: 'missing' | 'stale' | 'invalid'; readonly message: string } {
+  readWorkSource(changeId: string, kind: 'evidence' | 'change', ref: string, bound: { readonly verificationId: string; readonly inputRef: string; readonly inputRevision: number }, options?: { readonly forceFull?: boolean; readonly view?: 'diff' }): { readonly ok: true; readonly source: string; readonly body: string; readonly truncated?: boolean; readonly totalBytes?: number } | { readonly ok: false; readonly code: 'missing' | 'stale' | 'invalid'; readonly message: string } {
+    if (options?.view === 'diff' && kind !== 'change') return { ok: false, code: 'invalid', message: 'diff view applies to delivered files only' }
     const change = this.store.work.change(changeId)
     if (!change) return { ok: false, code: 'missing', message: `unknown change ${changeId}` }
     if (!bound.verificationId || !bound.inputRef || !Number.isInteger(bound.inputRevision) || bound.inputRevision < 1) {
@@ -2452,6 +2454,7 @@ export class DotService {
     const subject = verification.subject
     const named = subject?.changes.find(item => item.path === ref)
     if (!subject || !named) return { ok: false, code: 'stale', message: `${ref} is not a delivered file of ${verification.id}` }
+    if (options?.view === 'diff') return this.readWorkDiff(change, subject, named)
     if (named.kind === 'deleted' || !named.sha256) return { ok: false, code: 'missing', message: `${ref} was deleted in ${verification.id}` }
     if (!artifactName(subject.artifactRef) || artifactName(subject.artifactRef) !== subject.artifactRef) return { ok: false, code: 'invalid', message: 'delivery snapshot is not a single relative id' }
     try {
@@ -2461,6 +2464,46 @@ export class DotService {
     } catch {
       return { ok: false, code: 'missing', message: `${ref} could not be read` }
     }
+  }
+
+  /**
+   * Unified diff of one delivered file against the same writer baseline the
+   * added/modified/deleted classification compared against. `added` diffs
+   * against empty, `deleted` against the baseline body, so deletions are
+   * reviewable too. Binary or >256 KiB sides refuse with `invalid`; the
+   * reader falls back to the full view.
+   */
+  private readWorkDiff(change: ChangeRecord, subject: DeliverySubject, named: DeliverySubject['changes'][number]): { readonly ok: true; readonly source: string; readonly body: string } | { readonly ok: false; readonly code: 'missing' | 'invalid'; readonly message: string } {
+    const artifacts = join(this.options.homeDir, 'artifacts')
+    const invalid = { ok: false as const, code: 'invalid' as const, message: `${named.path} is binary or larger than 256 KiB; open the full file` }
+    let right: Uint8Array = new Uint8Array()
+    if (named.kind !== 'deleted') {
+      if (!artifactName(subject.artifactRef) || artifactName(subject.artifactRef) !== subject.artifactRef) return { ok: false, code: 'invalid', message: 'delivery snapshot is not a single relative id' }
+      let delivered: Uint8Array | undefined
+      try { delivered = readSnapshotEntry(join(artifacts, subject.artifactRef), named.path) } catch { delivered = undefined }
+      if (!delivered) return { ok: false, code: 'missing', message: `${named.path} is missing from the delivery snapshot` }
+      right = delivered
+    }
+    let left: Uint8Array = new Uint8Array()
+    if (named.kind !== 'added') {
+      const runs = this.store.work.listRuns().filter(run => run.changeId === change.id)
+      const prior = writerPrior(subject.baselineRefs, runs, ref => this.subjectLook().read(ref))
+      const entry = prior.files.find(file => foldRel(file.path) === foldRel(named.path))
+      if (entry) {
+        let before: Uint8Array | undefined
+        try { before = readSnapshotEntry(join(artifacts, entry.artifactRef), entry.path) } catch { before = undefined }
+        if (!before) return { ok: false, code: 'missing', message: `baseline ${entry.artifactRef} does not contain ${entry.path}` }
+        left = before
+      }
+    }
+    if (left.byteLength > 262_144 || right.byteLength > 262_144) return invalid
+    let leftText: string, rightText: string
+    const decoder = new TextDecoder('utf-8', { fatal: true })
+    try {
+      leftText = decoder.decode(left)
+      rightText = decoder.decode(right)
+    } catch { return invalid }
+    return { ok: true, source: `diff:${named.path}`, body: createTwoFilesPatch(`a/${named.path}`, `b/${named.path}`, leftText, rightText, undefined, undefined, { context: 3 }) }
   }
 
   /** Check the review, close it to new deliveries, then stop. A late delivery cannot reuse this stop. */

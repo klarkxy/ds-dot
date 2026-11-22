@@ -57,7 +57,11 @@ export function apply(ctx: Context): void {
       : payload
     try {
       const reply = await rpc.call(RPC_CHANNEL, endpoint, body, signal) as RpcReply<T>
-      if (!reply || reply.ok !== true) throw new Error(reply?.ok === false ? reply.error.message : 'rpc failed')
+      if (!reply || reply.ok !== true) {
+        const error = new Error(reply?.ok === false ? reply.error.message : 'rpc failed') as Error & { code?: string }
+        if (reply?.ok === false) error.code = (reply.error as { readonly code?: string }).code
+        throw error
+      }
       return reply.value
     } catch (error) {
       if (!signal?.aborted) logger.warn('rpc.call-failed', 'Dot client RPC call failed.', error, { endpoint })

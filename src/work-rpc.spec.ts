@@ -337,3 +337,104 @@ describe('work.* RPC contract', () => {
     rmSync(h.home, { recursive: true, force: true })
   })
 })
+
+/** Workspace-wide delivery with one modified, one added and one deleted file — and a binary added file. */
+async function readyDiffChange(h: Awaited<ReturnType<typeof setup>>) {
+  writeFileSync(join(h.project, 'a.ts'), 'line alpha\nline beta\nline gamma\n')
+  writeFileSync(join(h.project, 'gone.ts'), 'line gone\n')
+  const change = await h.service.createWorkChange({ title: 'Diff it', cwd: h.project, goal: 'land it', requirements: [{ requirementRef: 'r1', text: 'edits', required: true }], at: 1 })
+  const reserved = await h.service.reserveWorkRun({ changeId: change.id, kind: 'work', cwd: h.project, root: { workspaceRoot: h.project }, writeScope: { kind: 'workspace-exclusive' }, at: 2 })
+  if (!reserved.ok) throw new Error(reserved.message)
+  const run = reserved.run
+  await h.service.captureWorkBaseline(run.id)
+  const launched = await h.service.launchWorkRun(run.id, 'edit it')
+  if (!launched.ok) throw new Error(launched.message)
+  rmSync(join(h.project, 'gone.ts'))
+  writeFileSync(join(h.project, 'a.ts'), 'line alpha\nline beta edited\nline gamma\nline delta\n')
+  writeFileSync(join(h.project, 'new.ts'), 'fresh body\n')
+  writeFileSync(join(h.project, 'bin.dat'), Buffer.from([0xff, 0xfe, 0x01, 0x02, 0x80, 0x81]))
+  const prepared = await h.store.work.prepareFinish(run.id, 'completed', 3)
+  if (!prepared.ok) throw new Error(prepared.message)
+  const finished = await h.store.work.finishSettled(run.id, prepared.updatedAt, 'completed', { queueCleared: true, agentIdle: true, jobsSettled: true }, 4)
+  if (!finished.ok) throw new Error(`finishSettled: ${finished.message}`)
+  const review = await h.service.reserveWorkRun({ changeId: change.id, kind: 'review', cwd: h.project, root: { workspaceRoot: h.project }, writeScope: { kind: 'workspace-exclusive' }, at: 5 })
+  if (!review.ok) throw new Error(review.message)
+  await h.service.captureWorkBaseline(review.run.id)
+  const launchedReview = await h.service.launchWorkRun(review.run.id, 'check it')
+  if (!launchedReview.ok) throw new Error(launchedReview.message)
+  const held = await h.service.holdWorkReview(review.run.id)
+  if (!('id' in held)) throw new Error(held.message)
+  const subject = await h.service.captureWorkSubject(change.id)
+  const current = h.store.work.change(change.id)!
+  mkdirSync(join(h.home, 'artifacts', 'evidence'), { recursive: true })
+  writeFileSync(join(h.home, 'artifacts', 'evidence', `${run.id}.md`), 'built')
+  const verified = await h.service.recordWorkVerification(change.id, [
+    { requirementRef: 'r1', applicability: 'applicable', verdict: 'pass', evidenceRefs: [`run:${run.id}`], note: 'built' },
+  ], [run.id], {
+    inputRef: current.currentInputRef, inputRevision: current.currentRevision,
+    reviewRunId: review.run.id, reviewerSessionId: h.store.work.run(review.run.id)!.sessionId, subject,
+  })
+  if (!('id' in verified) || !verified.subjectKey) throw new Error('verification failed')
+  return { change, run, review: review.run, subject, verified, current }
+}
+
+describe('work.read diff view', () => {
+  it('diffs modified, added and deleted deliveries against the writer baseline', async () => {
+    const h = await setup()
+    const { change, subject, verified, current } = await readyDiffChange(h)
+    expect(subject.changes.map(row => `${row.kind}:${row.path}`)).toEqual(
+      expect.arrayContaining(['modified:a.ts', 'deleted:gone.ts', 'added:new.ts', 'added:bin.dat']),
+    )
+    // Both the writer's and the review's baselines are bound; the writer one is the left side.
+    expect(subject.baselineRefs.length).toBeGreaterThanOrEqual(2)
+    const bound = { verificationId: verified.id, inputRef: current.currentInputRef, inputRevision: current.currentRevision }
+    const modified = h.service.readWorkSource(change.id, 'change', 'a.ts', bound, { view: 'diff' })
+    expect(modified.ok).toBe(true)
+    if (modified.ok) {
+      expect(modified.body).toContain('--- a/a.ts')
+      expect(modified.body).toContain('+++ b/a.ts')
+      expect(modified.body).toContain('-line beta')
+      expect(modified.body).toContain('+line beta edited')
+      expect(modified.body).toContain('+line delta')
+    }
+    const added = h.service.readWorkSource(change.id, 'change', 'new.ts', bound, { view: 'diff' })
+    expect(added.ok).toBe(true)
+    if (added.ok) {
+      expect(added.body).toContain('+fresh body')
+      expect(added.body).not.toContain('-line')
+    }
+    const deleted = h.service.readWorkSource(change.id, 'change', 'gone.ts', bound, { view: 'diff' })
+    expect(deleted.ok).toBe(true)
+    if (deleted.ok) {
+      expect(deleted.body).toContain('-line gone')
+      expect(deleted.body).not.toContain('+line')
+    }
+    rmSync(h.project, { recursive: true, force: true })
+    rmSync(h.home, { recursive: true, force: true })
+  })
+
+  it('refuses binary or oversized diff sides and keeps the full read', async () => {
+    const h = await setup()
+    const { change, verified, current } = await readyDiffChange(h)
+    const bound = { verificationId: verified.id, inputRef: current.currentInputRef, inputRevision: current.currentRevision }
+    const binary = h.service.readWorkSource(change.id, 'change', 'bin.dat', bound, { view: 'diff' })
+    expect(binary).toMatchObject({ ok: false, code: 'invalid' })
+    if (!binary.ok) expect(binary.message).toContain('open the full file')
+    writeFileSync(join(h.project, 'big.txt'), 'x'.repeat(300_000))
+    const rebaseline = await h.service.captureWorkSubject(change.id)
+    const now = h.store.work.change(change.id)!
+    const reverify = await h.service.recordWorkVerification(change.id, [
+      { requirementRef: 'r1', applicability: 'applicable', verdict: 'pass', evidenceRefs: [] },
+    ], [], { inputRef: now.currentInputRef, inputRevision: now.currentRevision, subject: rebaseline })
+    if (!('id' in reverify)) throw new Error(reverify.message)
+    const rebound = { verificationId: reverify.id, inputRef: now.currentInputRef, inputRevision: now.currentRevision }
+    expect(h.service.readWorkSource(change.id, 'change', 'big.txt', rebound, { view: 'diff' })).toMatchObject({ ok: false, code: 'invalid' })
+    // The oversized row still reads through the full view, truncated as usual.
+    expect(h.service.readWorkSource(change.id, 'change', 'big.txt', rebound)).toMatchObject({ ok: true, truncated: true })
+    // Staleness and kind checks apply before any diff work.
+    expect(h.service.readWorkSource(change.id, 'change', 'a.ts', { ...bound, verificationId: 'v-nope' }, { view: 'diff' })).toMatchObject({ ok: false, code: 'stale' })
+    expect(h.service.readWorkSource(change.id, 'evidence', 'file:a.ts', bound, { view: 'diff' })).toMatchObject({ ok: false, code: 'invalid' })
+    rmSync(h.project, { recursive: true, force: true })
+    rmSync(h.home, { recursive: true, force: true })
+  })
+})

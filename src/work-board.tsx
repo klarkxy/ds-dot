@@ -6,7 +6,7 @@ import { FINISHED_SHOWN } from './board-groups.ts'
 import { t, type CopyLocale, type TextKey } from './ui-copy.ts'
 import {
   acceptPayload, forceReleasePayload, groupWork, lookRequest, rejectPayload, resumePayload, scopeText, shortId, workFactKey, workFactTone, workFailure,
-  type PendingGlance, type WorkAcceptPayload, type WorkBoardItem, type WorkReadRequest, type WorkRejectPayload, type WorkRunView, type WorkStatus,
+  type PendingGlance, type WorkAcceptPayload, type WorkBoardItem, type WorkChangeView, type WorkReadRequest, type WorkRejectPayload, type WorkRunView, type WorkStatus,
 } from './work-board.ts'
 
 const STATUS_KEY: Record<WorkStatus, TextKey> = {
@@ -85,10 +85,12 @@ function factLabel(locale: CopyLocale, group: 'kind' | 'phase' | 'verdict' | 'ch
 
 const PREVIEW_LIMIT = 65_536
 
-type SourceBody = { readonly ok: true; readonly body: string; readonly truncated: boolean; readonly totalBytes?: number } | { readonly ok: false; readonly message: string }
+type SourceBody = { readonly ok: true; readonly body: string; readonly truncated: boolean; readonly totalBytes?: number } | { readonly ok: false; readonly message: string; readonly code?: string }
 type FullBody = { readonly phase: 'loading' } | { readonly phase: 'ready'; readonly body: string } | { readonly phase: 'error'; readonly message: string }
 type SourcePane = 'evidence' | 'files'
-type SourceSlot = { readonly identity: string; readonly loaded: Readonly<Record<string, SourceBody>>; readonly full: Readonly<Record<string, FullBody>> }
+/** Delivered files default to the baseline diff; 'full' is the whole delivered body. */
+type FileView = 'diff' | 'full'
+type SourceSlot = { readonly identity: string; readonly loaded: Readonly<Record<string, SourceBody>>; readonly full: Readonly<Record<string, FullBody>>; readonly views: Readonly<Record<string, FileView>>; readonly denied: Readonly<Record<string, string>> }
 
 function previewFrom(result: { readonly body: string; readonly truncated?: boolean; readonly totalBytes?: number }): SourceBody {
   const cut = result.body.length > PREVIEW_LIMIT
@@ -108,11 +110,13 @@ function exclusionReason(locale: CopyLocale, reason: string): string {
   return reason
 }
 
-function WorkFacts({ locale, item, onRead, onOpenSession }: {
+function WorkFacts({ locale, item, onRead, onOpenSession, onQuote }: {
   readonly locale: CopyLocale
   readonly item: WorkBoardItem
   readonly onRead?: WorkRead
   readonly onOpenSession?: (sessionId: string) => void
+  /** Appends a `path:line text` quote to the shared send-back note; hidden without a send-back action. */
+  readonly onQuote?: (line: string) => void
 }) {
   const verification = item.verification
   const checks = verification?.checks ?? []
@@ -128,15 +132,15 @@ function WorkFacts({ locale, item, onRead, onOpenSession }: {
   const changeInputRef = item.inputRef
   const changeRevision = item.revision
   const identity = verificationId ? `${item.id}|${changeInputRef}|${changeRevision}|${verificationId}|${inputRef}|${inputRevision}` : ''
-  const [slot, setSlot] = useState<SourceSlot>({ identity: '', loaded: {}, full: {} })
+  const [slot, setSlot] = useState<SourceSlot>({ identity: '', loaded: {}, full: {}, views: {}, denied: {} })
   const [pane, setPane] = useState<SourcePane>('evidence')
   // Sources are read only once the human opens this card's details: a closed card costs no request and no preview text.
   const [open, setOpen] = useState(false)
   const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(() => new Set(
-    changes.length > 1 ? changes.slice(1).filter(c => c.kind !== 'deleted').map(c => `change:${c.path}`) : [],
+    changes.length > 1 ? changes.slice(1).map(c => `change:${c.path}`) : [],
   ))
   useEffect(() => {
-    setCollapsed(new Set(changes.length > 1 ? changes.slice(1).filter(c => c.kind !== 'deleted').map(c => `change:${c.path}`) : []))
+    setCollapsed(new Set(changes.length > 1 ? changes.slice(1).map(c => `change:${c.path}`) : []))
   }, [identity, changeKey, changes.length])
   const toggleSource = useCallback((key: string) => {
     setCollapsed(prev => {
@@ -147,33 +151,48 @@ function WorkFacts({ locale, item, onRead, onOpenSession }: {
   }, [])
   const loaded = slot.identity === identity ? slot.loaded : {}
   const fullState = slot.identity === identity ? slot.full : {}
+  const views = slot.identity === identity ? slot.views : {}
+  const denied = slot.identity === identity ? slot.denied : {}
+  const fileView = (path: string, kind?: string): FileView => kind === 'deleted' ? 'diff' : views[path] ?? 'diff'
   const fullFlights = useRef(new Set<string>())
   const slotRef = useRef(slot)
   slotRef.current = slot
   const life = useRef(0)
   useEffect(() => () => { life.current += 1 }, [])
-  const loadPreview = useCallback((kind: 'evidence' | 'change', ref: string, token: string, isCancelled?: () => boolean) => {
+  const loadSource = useCallback((kind: 'evidence' | 'change', ref: string, token: string, view?: 'diff', isCancelled?: () => boolean) => {
     if (!onRead || !verificationId) return
-    const key = `${kind}:${ref}`
+    const key = view === 'diff' ? `diff:${ref}` : `${kind}:${ref}`
     const snapshot = life.current
-    void onRead({ id: item.id, kind, ref, verificationId, inputRef, inputRevision }).then(result => {
+    void onRead({ id: item.id, kind, ref, verificationId, inputRef, inputRevision, ...(view ? { view } : {}) }).then(result => {
       if (isCancelled?.() || life.current !== snapshot) return
       const row = previewFrom(result)
       setSlot(current => current.identity === token ? { ...current, loaded: { ...current.loaded, [key]: row } } : current)
     }, failure => {
       if (isCancelled?.() || life.current !== snapshot) return
       const message = failure instanceof Error ? failure.message : String(failure)
-      setSlot(current => current.identity === token ? { ...current, loaded: { ...current.loaded, [key]: { ok: false, message } } } : current)
+      const code = typeof (failure as { readonly code?: unknown })?.code === 'string' ? (failure as { readonly code: string }).code : undefined
+      setSlot(current => current.identity === token ? { ...current, loaded: { ...current.loaded, [key]: { ok: false, message, ...(code ? { code } : {}) } } } : current)
+      // A diff that refuses (binary or too large) falls back to the full body.
+      if (view === 'diff' && code === 'dot/invalid') {
+        setSlot(current => current.identity === token ? { ...current, views: { ...current.views, [ref]: 'full' }, denied: { ...current.denied, [ref]: message } } : current)
+        loadSource(kind, ref, token, undefined, isCancelled)
+      }
     })
   }, [onRead, item.id, verificationId, inputRef, inputRevision])
   // A folded row has to open on the first click. Treating "not loaded yet" as
   // "only retry the read" leaves a slow or failed preview inside display:none,
   // so the chevron never expands and the error stays unreachable.
-  const onSourceHeadClick = (event: MouseEvent<HTMLAnchorElement>, kind: 'evidence' | 'change', ref: string, key: string, isCollapsed: boolean) => {
+  const onSourceHeadClick = (event: MouseEvent<HTMLAnchorElement>, kind: 'evidence' | 'change', ref: string, key: string, isCollapsed: boolean, view?: 'diff') => {
     event.preventDefault()
-    const needsLoad = Boolean(identity) && loaded[key]?.ok !== true
-    if (needsLoad) loadPreview(kind, ref, identity)
+    const loadedKey = view === 'diff' ? `diff:${ref}` : `${kind}:${ref}`
+    const needsLoad = Boolean(identity) && loaded[loadedKey]?.ok !== true
+    if (needsLoad) loadSource(kind, ref, identity, view)
     if (isCollapsed || !needsLoad) toggleSource(key)
+  }
+  const setFileView = (path: string, view: FileView) => {
+    setSlot(current => current.identity === identity ? { ...current, views: { ...current.views, [path]: view } } : current)
+    const key = view === 'diff' ? `diff:${path}` : `change:${path}`
+    if (loaded[key]?.ok !== true) loadSource('change', path, identity, view === 'diff' ? 'diff' : undefined)
   }
   const loadFull = useCallback((kind: 'evidence' | 'change', ref: string, token: string) => {
     if (!onRead || !verificationId || !token) return
@@ -198,20 +217,20 @@ function WorkFacts({ locale, item, onRead, onOpenSession }: {
     if (!open || !onRead || !verificationId) return
     let cancel = false
     const token = identity
-    setSlot(current => current.identity === token ? current : { identity: token, loaded: {}, full: {} })
-    const evidenceJobs = evidenceKey.split('\n').filter(Boolean).map(ref => ({ kind: 'evidence' as const, ref }))
-    const changeJobs = changeKey.split('\n').filter(Boolean).filter(row => !row.startsWith('deleted:')).map(row => ({ kind: 'change' as const, ref: row.slice(row.indexOf(':') + 1) }))
+    setSlot(current => current.identity === token ? current : { identity: token, loaded: {}, full: {}, views: {}, denied: {} })
+    const evidenceJobs = evidenceKey.split('\n').filter(Boolean).map(ref => ({ kind: 'evidence' as const, ref, view: undefined as 'diff' | undefined }))
+    const changeJobs = changeKey.split('\n').filter(Boolean).map(row => ({ kind: 'change' as const, ref: row.slice(row.indexOf(':') + 1), view: 'diff' as const }))
     // Reopening keeps what was already read; queue missing sources with bounded concurrency.
     const known = slotRef.current.identity === token ? slotRef.current.loaded : {}
-    const pendingJobs = [...evidenceJobs, ...changeJobs].filter(job => known[`${job.kind}:${job.ref}`]?.ok !== true)
+    const pendingJobs = [...evidenceJobs, ...changeJobs].filter(job => known[job.view === 'diff' ? `diff:${job.ref}` : `${job.kind}:${job.ref}`]?.ok !== true)
     let cursor = 0
     const pump = async () => {
       while (!cancel && cursor < pendingJobs.length) {
         const job = pendingJobs[cursor++]!
         await new Promise<void>(resolve => {
-          const key = `${job.kind}:${job.ref}`
+          const key = job.view === 'diff' ? `diff:${job.ref}` : `${job.kind}:${job.ref}`
           const snapshot = life.current
-          onRead({ id: item.id, kind: job.kind, ref: job.ref, verificationId, inputRef, inputRevision }).then(result => {
+          onRead({ id: item.id, kind: job.kind, ref: job.ref, verificationId, inputRef, inputRevision, ...(job.view ? { view: job.view } : {}) }).then(result => {
             if (!cancel && life.current === snapshot) {
               const row = previewFrom(result)
               setSlot(current => current.identity === token ? { ...current, loaded: { ...current.loaded, [key]: row } } : current)
@@ -220,7 +239,12 @@ function WorkFacts({ locale, item, onRead, onOpenSession }: {
           }, failure => {
             if (!cancel && life.current === snapshot) {
               const message = failure instanceof Error ? failure.message : String(failure)
-              setSlot(current => current.identity === token ? { ...current, loaded: { ...current.loaded, [key]: { ok: false, message } } } : current)
+              const code = typeof (failure as { readonly code?: unknown })?.code === 'string' ? (failure as { readonly code: string }).code : undefined
+              setSlot(current => current.identity === token ? { ...current, loaded: { ...current.loaded, [key]: { ok: false, message, ...(code ? { code } : {}) } } } : current)
+              if (job.view === 'diff' && code === 'dot/invalid') {
+                setSlot(current => current.identity === token ? { ...current, views: { ...current.views, [job.ref]: 'full' }, denied: { ...current.denied, [job.ref]: message } } : current)
+                loadSource('change', job.ref, token, undefined, () => cancel)
+              }
             }
             resolve()
           })
@@ -229,7 +253,7 @@ function WorkFacts({ locale, item, onRead, onOpenSession }: {
     }
     for (let worker = 0; worker < Math.min(4, pendingJobs.length); worker++) void pump()
     return () => { cancel = true }
-  }, [open, onRead, loadPreview, evidenceKey, changeKey, identity, verificationId])
+  }, [open, onRead, loadSource, evidenceKey, changeKey, identity, verificationId])
   const outcome = (kind: 'evidence' | 'change', ref: string) => {
     const key = `${kind}:${ref}`
     const row = loaded[key]
@@ -240,7 +264,7 @@ function WorkFacts({ locale, item, onRead, onOpenSession }: {
       return (
         <div className="dsh-dot-work-source-note">
           <p role="alert">{stale ? t(locale, 'workEvidenceStale') : missing ? t(locale, 'workEvidenceMissing') : `${t(locale, 'workEvidenceFailed')}${row.message}`}</p>
-          <Button variant="ghost" size="sm" onClick={() => loadPreview(kind, ref, identity)}>{t(locale, 'workEvidenceRetry')}</Button>
+          <Button variant="ghost" size="sm" onClick={() => loadSource(kind, ref, identity)}>{t(locale, 'workEvidenceRetry')}</Button>
         </div>
       )
     }
@@ -263,7 +287,7 @@ function WorkFacts({ locale, item, onRead, onOpenSession }: {
     )
   }
   const evidenceKeys = evidence.map(ref => `evidence:${ref}`)
-  const fileKeys = changes.filter(c => c.kind !== 'deleted').map(c => `change:${c.path}`)
+  const fileKeys = changes.map(c => `change:${c.path}`)
   const evidenceLabel = (ref: string) => {
     const parsed = parseEvidenceRef(ref)
     if (parsed?.kind === 'run') return parsed.scenario ? `${parsed.runId} report · ${parsed.scenario}` : `${parsed.runId} report`
@@ -284,22 +308,46 @@ function WorkFacts({ locale, item, onRead, onOpenSession }: {
       </div>
     )
   })
+  const fileOutcome = (change: WorkChangeView) => {
+    const view = fileView(change.path, change.kind)
+    if (view === 'diff') {
+      const key = `diff:${change.path}`
+      const row = loaded[key]
+      if (!row) return null
+      if (!row.ok) {
+        const stale = /not bound|not a delivered|no current verification/.test(row.message)
+        const missing = /missing|empty|deleted/.test(row.message)
+        return (
+          <div className="dsh-dot-work-source-note">
+            <p role="alert">{stale ? t(locale, 'workEvidenceStale') : missing ? t(locale, 'workEvidenceMissing') : `${t(locale, 'workEvidenceFailed')}${row.message}`}</p>
+            <Button variant="ghost" size="sm" onClick={() => loadSource('change', change.path, identity, 'diff')}>{t(locale, 'workEvidenceRetry')}</Button>
+          </div>
+        )
+      }
+      if (inputRef !== changeInputRef || inputRevision !== changeRevision) return null
+      return <DiffView locale={locale} path={change.path} body={row.body} {...onQuote ? { onQuote } : {}} />
+    }
+    return <>{denied[change.path] ? <p className="dsh-ui-hint">{denied[change.path]}</p> : null}{outcome('change', change.path)}</>
+  }
   const filesPane = changes.length === 0 ? null : changes.map(change => {
     const key = `change:${change.path}`
     const isCollapsed = collapsed.has(key)
+    const view = fileView(change.path, change.kind)
     return (
       <div key={change.path} className="dsh-dot-work-source">
-        {change.kind === 'deleted'
-          ? <span className="dsh-dot-work-source-head"><FileGlyph /><span>{change.path}</span><Tag tone="danger">{factLabel(locale, 'change', change.kind)}</Tag></span>
-          : (
-            <a className="dsh-dot-work-source-head" href={`#change-${encodeURIComponent(change.path)}`} data-change-path={change.path} aria-expanded={!isCollapsed} onClick={event => onSourceHeadClick(event, 'change', change.path, key, isCollapsed)}>
-              <span className="dsh-dot-work-chevron" aria-hidden="true">{isCollapsed ? '▸' : '▾'}</span>
-              <FileGlyph />
-              <span>{change.path}</span>
-              <Tag tone={change.kind === 'added' ? 'success' : 'info'}>{factLabel(locale, 'change', change.kind)}</Tag>
-            </a>
-          )}
-        {change.kind === 'deleted' ? null : <div className="dsh-dot-work-source-body" data-collapsed={isCollapsed ? '' : undefined}>{outcome('change', change.path)}</div>}
+        <a className="dsh-dot-work-source-head" href={`#change-${encodeURIComponent(change.path)}`} data-change-path={change.path} aria-expanded={!isCollapsed} onClick={event => onSourceHeadClick(event, 'change', change.path, key, isCollapsed, view === 'diff' ? 'diff' : undefined)}>
+          <span className="dsh-dot-work-chevron" aria-hidden="true">{isCollapsed ? '▸' : '▾'}</span>
+          <FileGlyph />
+          <span>{change.path}</span>
+          <Tag tone={change.kind === 'deleted' ? 'danger' : change.kind === 'added' ? 'success' : 'info'}>{factLabel(locale, 'change', change.kind)}</Tag>
+        </a>
+        <div className="dsh-dot-work-source-body" data-collapsed={isCollapsed ? '' : undefined}>
+          <span className="dsh-dot-work-view" role="group" aria-label={t(locale, 'workFileView')}>
+            <button type="button" data-active={view === 'diff' ? '' : undefined} onClick={() => setFileView(change.path, 'diff')}>{t(locale, 'workViewDiff')}</button>
+            <button type="button" data-active={view === 'full' ? '' : undefined} disabled={change.kind === 'deleted'} onClick={() => setFileView(change.path, 'full')}>{t(locale, 'workViewFull')}</button>
+          </span>
+          {fileOutcome(change)}
+        </div>
       </div>
     )
   })
@@ -376,6 +424,63 @@ function SourceTabs({ locale, value, evidence, files, onChange }: { locale: Copy
     { id: `${baseId}-files`, panelId: `${baseId}-files-panel`, value: 'files', label: `${t(locale, 'workFiles')} (${files})` },
   ]) as unknown as readonly [SegmentedTab<SourcePane>, ...SegmentedTab<SourcePane>[]], [baseId, locale, evidence, files])
   return <SegmentedTabs<SourcePane> size="sm" label={t(locale, 'workDetails')} items={items} value={value} onChange={onChange} />
+}
+
+interface DiffLine {
+  readonly kind: 'hunk' | 'line' | 'meta'
+  readonly sign?: 'ctx' | 'add' | 'del'
+  readonly oldNo?: number
+  readonly newNo?: number
+  readonly text: string
+}
+
+/** Split a unified patch into renderable rows; `old`/`new` numbers fill the gutters. */
+function parsePatch(body: string): DiffLine[] {
+  const rows: DiffLine[] = []
+  let oldNo = 0
+  let newNo = 0
+  for (const raw of body.split('\n')) {
+    const hunk = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(raw)
+    if (hunk) {
+      oldNo = Number(hunk[1])
+      newNo = Number(hunk[2])
+      rows.push({ kind: 'hunk', text: raw })
+      continue
+    }
+    if (raw.startsWith('--- ') || raw.startsWith('+++ ') || raw.startsWith('===') || raw.startsWith('Index:')) { rows.push({ kind: 'meta', text: raw }); continue }
+    if (raw.startsWith('\\')) { rows.push({ kind: 'hunk', text: raw }); continue }
+    if (raw.startsWith('-')) { rows.push({ kind: 'line', sign: 'del', oldNo: oldNo++, text: raw.slice(1) }); continue }
+    if (raw.startsWith('+')) { rows.push({ kind: 'line', sign: 'add', newNo: newNo++, text: raw.slice(1) }); continue }
+    rows.push({ kind: 'line', sign: 'ctx', oldNo: oldNo++, newNo: newNo++, text: raw.startsWith(' ') ? raw.slice(1) : raw })
+  }
+  return rows
+}
+
+function DiffView({ locale, path, body, onQuote }: { readonly locale: CopyLocale; readonly path: string; readonly body: string; readonly onQuote?: (line: string) => void }) {
+  const rows = useMemo(() => parsePatch(body), [body])
+  return (
+    <div className="dsh-dot-work-diff" data-diff-body={path}>
+      {rows.map((row, index) => row.kind === 'line' ? (
+        <div key={index} className="dsh-dot-work-diff-line" data-sign={row.sign}>
+          <span className="dsh-dot-work-diff-no">{row.oldNo ?? ''}</span>
+          <span className="dsh-dot-work-diff-no">{row.newNo ?? ''}</span>
+          <span className="dsh-dot-work-diff-sign">{row.sign === 'add' ? '+' : row.sign === 'del' ? '-' : ''}</span>
+          <span className="dsh-dot-work-diff-text">{row.text}</span>
+          {onQuote ? (
+            <button
+              type="button"
+              className="dsh-dot-work-diff-quote"
+              title={t(locale, 'workQuoteLine')}
+              aria-label={t(locale, 'workQuoteLine')}
+              onClick={() => onQuote(`${path}:${row.sign === 'del' ? row.oldNo : row.newNo} ${row.text.slice(0, 200)}`)}
+            >“</button>
+          ) : null}
+        </div>
+      ) : row.kind === 'meta' ? null : (
+        <div key={index} className="dsh-dot-work-diff-hunk">{row.text}</div>
+      ))}
+    </div>
+  )
 }
 
 function FileGlyph() {
@@ -458,6 +563,11 @@ function WorkRow({ locale, item, pending, onAccept, onReject, onAnswer, onResume
     setReleaseArmed(false)
     return () => { if (releaseTimer.current !== undefined) clearTimeout(releaseTimer.current) }
   }, [item.id])
+  const sendBack = Boolean(reject) || lookOpen
+  const quoteInNote = sendBack ? (line: string) => {
+    setRejectMode(mode => mode ?? (reject ? 'reject' : 'look'))
+    setRejectNote(prev => prev ? `${prev}\n${line}` : line)
+  } : undefined
   const disarmRelease = () => {
     if (releaseTimer.current !== undefined) { clearTimeout(releaseTimer.current); releaseTimer.current = undefined }
     setReleaseArmed(false)
@@ -532,7 +642,7 @@ function WorkRow({ locale, item, pending, onAccept, onReject, onAnswer, onResume
       ) : null}
       {look === 'stale' ? <p className="dsh-ui-hint">{t(locale, 'workLookStale')}</p> : null}
       {look === 'withdrawn' ? <p className="dsh-ui-hint">{t(locale, 'workLookWithdrawn')}</p> : null}
-      <WorkFacts locale={locale} item={item} {...onRead ? { onRead } : {}} {...onOpenSession ? { onOpenSession } : {}} />
+      <WorkFacts locale={locale} item={item} {...onRead ? { onRead } : {}} {...onOpenSession ? { onOpenSession } : {}} {...quoteInNote ? { onQuote: quoteInNote } : {}} />
     </div>
   )
 }

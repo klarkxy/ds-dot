@@ -310,13 +310,24 @@ describe('DotService segments', () => {
     // The segment freezes the applied snapshot, not the grants that never reached the agent.
     expect(h.store.segment).toMatchObject({ sessionId: dot, capabilities: 'sig-old' })
     const reapplied: string[] = []
-    ;(h.host as unknown as { reapplyCapabilities?: (id: string) => void }).reapplyCapabilities = id => {
+    let release: () => void = () => {}
+    const gate = new Promise<void>(done => { release = done })
+    ;(h.host as unknown as { reapplyCapabilities?: (id: string) => Promise<void> }).reapplyCapabilities = async id => {
       reapplied.push(id)
       // A successful re-apply moves the applied signature forward with the record.
+      await gate
       appliedSig = 'sig-new'
     }
-    await h.service.settingsChanged()
-    // The stored signature mismatches the live one, so the existing path re-applies it.
+    let settled = false
+    const changed = h.service.settingsChanged().then(() => { settled = true })
+    await new Promise(done => setTimeout(done, 0))
+    // The mismatch triggered the re-apply, and while it is still gated the
+    // check has not settled and the record holds the applied signature.
+    expect(reapplied).toEqual([dot])
+    expect(settled).toBe(false)
+    expect(h.store.segment!.capabilities).toBe('sig-old')
+    release()
+    await changed
     expect(reapplied).toEqual([dot])
     expect(h.store.segment!.capabilities).toBe('sig-new')
     await h.service.settingsChanged()

@@ -12,8 +12,8 @@ importers:
   .:
     dependencies:
       '@klarkxy/dsh-deep-view':
-        specifier: ^0.3.4
-        version: 0.3.4(f2add3747669d5c8985099c19b494259)
+        specifier: ^0.3.5
+        version: 0.3.5(f2add3747669d5c8985099c19b494259)
       '@klarkxy/dsh-dev-index':
         specifier: '>=0.3.2'
         version: 0.3.2(531ee26397a68bf0bac33295f78c3b4d)
@@ -23,6 +23,9 @@ importers:
       '@klarkxy/dsh-plugin-kit':
         specifier: ^0.8.1
         version: 0.8.1(32bc7bdae658a2d5472b2d7071c8ad24)
+      diff:
+        specifier: ^8.0.4
+        version: 8.0.4
       zod:
         specifier: 4.6.6
         version: 4.6.6
@@ -835,8 +838,8 @@ packages:
   '@juggle/resize-observer@3.4.0':
     resolution: {integrity: sha512-dfLbk+PwWvFzSxwk3n5ySL0hfBog779o8h68wK/7/APo/7cgyWp5jcXockbxdk5kFRkbeXWm4Fbi9FrdN381sA==}
 
-  '@klarkxy/dsh-deep-view@0.3.4':
-    resolution: {integrity: sha512-UdA3/9emQ2JObo7dywp7oepiqfSLMQXP3CgpaVSuUrzhQvhnkArZSwHWgJ2xCuPPUu8GZ8MMDWXPcc8pCu5vhQ==}
+  '@klarkxy/dsh-deep-view@0.3.5':
+    resolution: {integrity: sha512-vKgsURgTNrKWR7nsD0yMUoeUPedDR8YqegjyFJFsqYqVPl6qFIhn1mfO8rSaWBFm66nsxsWud7N1Ph8Csp9eCA==}
     engines: {dsh: '>=0.2.2-rc.3', node: '>=22'}
     peerDependencies:
       '@deepseek-ai/cordis': '>=4.0.4'
@@ -1708,6 +1711,10 @@ packages:
   delaunator@5.1.0:
     resolution: {integrity: sha512-AGrQ4QSgssa1NGmWmLPqN5NY2KajF5MqxetNEO+o0n3ZwZZeTmt7bBnvzHWrmkZFxGgr4HdyFgelzgi06otLuQ==}
 
+  diff@8.0.4:
+    resolution: {integrity: sha512-DPi0FmjiSU5EvQV0++GFDOJ9ASQUVFh5kD+OzOnYdi7n3Wpm9hWWGfB/O2blfHcMVTL5WkQXSnRiK9makhrcnw==}
+    engines: {node: '>=0.3.1'}
+
   dts-resolver@3.0.0:
     resolution: {integrity: sha512-1T1f+z+4tl9XD+m+0HBgWoL/nm0bOIffyWaUuUSBlFg/86IWvfx+wjNaO/ybU0AJzG9/Mi5hBUgGV6zCmWEN7Q==}
     engines: {node: ^22.18.0 || >=24.0.0}
@@ -1837,6 +1844,10 @@ packages:
 
   json-stringify-pretty-compact@4.0.0:
     resolution: {integrity: sha512-3CNZ2DnrpByG9Nqj6Xo8vqbjT4F6N+tb4Gb28ESAZjYZ5yqvmc56J+/kuIwkaAMOyblTQhUW7PxMkUb8Q36N3Q==}
+
+  jsonrepair@3.15.0:
+    resolution: {integrity: sha512-wy8OTjwsJwQRnQJkKnMJJ9vcytRdBPAgIF/Hy6+s1dAj42BHMKiyL8JzEieIl3JY7idt8eyHwBWTO8mh/+mtwA==}
+    hasBin: true
 
   katex@0.16.47:
     resolution: {integrity: sha512-Eeo8Ys1doU1z+x8AZsPpQu+p/QcZBI5PeOo7QGQdy2x2m0MU/hYagBbGOmXwr5KVbEfVuWv9LpnQWeehogurjg==}
@@ -3143,10 +3154,11 @@ snapshots:
 
   '@juggle/resize-observer@3.4.0': {}
 
-  '@klarkxy/dsh-deep-view@0.3.4(f2add3747669d5c8985099c19b494259)':
+  '@klarkxy/dsh-deep-view@0.3.5(f2add3747669d5c8985099c19b494259)':
     dependencies:
       '@klarkxy/dsh-plugin-kit': 0.8.1(32bc7bdae658a2d5472b2d7071c8ad24)
       '@xyflow/react': 12.12.1(@types/react-dom@18.3.7(@types/react@18.3.31))(@types/react@18.3.31)(react-dom@18.3.1(react@18.3.1))(react@18.3.1)
+      jsonrepair: 3.15.0
       mafs: 0.21.0(react-dom@18.3.1(react@18.3.1))(react@18.3.1)
       maplibre-gl: 6.18.0
       vega: 6.4.0
@@ -3806,6 +3818,8 @@ snapshots:
     dependencies:
       robust-predicates: 3.0.3
 
+  diff@8.0.4: {}
+
   dts-resolver@3.0.0: {}
 
   earcut@3.2.4: {}
@@ -3935,6 +3949,8 @@ snapshots:
   json-schema-traverse@1.0.0: {}
 
   json-stringify-pretty-compact@4.0.0: {}
+
+  jsonrepair@3.15.0: {}
 
   katex@0.16.47:
     dependencies:

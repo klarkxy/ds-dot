@@ -321,14 +321,14 @@ describe('WorkBoard', () => {
     await act(async () => { root.render(<WorkBoard locale="en" items={[first]} pending={[]} onAccept={vi.fn()} onReject={vi.fn()} onAnswer={vi.fn()} onResume={vi.fn()} onRead={onRead} />); await Promise.resolve(); await Promise.resolve() })
     await openDetails()
     expect(document.body.textContent).toContain('OLD_MARKED_BODY')
-    expect(document.querySelectorAll('[data-evidence-body]')).toHaveLength(2)
+    expect(document.querySelectorAll('[data-evidence-body],[data-diff-body]')).toHaveLength(2)
     hang = true
     await act(async () => { root.render(<WorkBoard locale="en" items={[bumped]} pending={[]} onAccept={vi.fn()} onReject={vi.fn()} onAnswer={vi.fn()} onResume={vi.fn()} onRead={onRead} />); await Promise.resolve() })
     await openDetails()
     expect(document.body.textContent).toContain('Version 2')
     expect(document.body.textContent).toContain('v-1')
     expect(document.body.textContent).not.toContain('OLD_MARKED_BODY')
-    expect(document.querySelectorAll('[data-evidence-body]')).toHaveLength(0)
+    expect(document.querySelectorAll('[data-evidence-body],[data-diff-body]')).toHaveLength(0)
     await act(async () => root.unmount())
   })
 
@@ -353,14 +353,14 @@ describe('WorkBoard', () => {
     await act(async () => { root.render(<WorkBoard locale="en" items={[bumped]} pending={[]} onAccept={vi.fn()} onReject={vi.fn()} onAnswer={vi.fn()} onResume={vi.fn()} onRead={onRead} />); await Promise.resolve() })
     await openDetails()
     expect(document.body.textContent).toContain('Version 2')
-    expect(document.querySelectorAll('[data-evidence-body]')).toHaveLength(0)
+    expect(document.querySelectorAll('[data-evidence-body],[data-diff-body]')).toHaveLength(0)
     expect(calls.filter(wave => wave === 1).length).toBeGreaterThan(0)
     await act(async () => {
       early.splice(0).forEach(resolve => resolve({ source: 'evidence:log-1', body: 'OLD_MARKED_BODY' }))
       await Promise.resolve()
     })
     expect(document.body.textContent).not.toContain('OLD_MARKED_BODY')
-    expect(document.querySelectorAll('[data-evidence-body]')).toHaveLength(0)
+    expect(document.querySelectorAll('[data-evidence-body],[data-diff-body]')).toHaveLength(0)
     await act(async () => root.unmount())
   })
 
@@ -743,6 +743,352 @@ describe('WorkBoard', () => {
     expect(body.hasAttribute('data-collapsed')).toBe(false)
     expect(body.textContent).toContain('读取失败')
     expect(body.textContent).toContain('preview unavailable')
+    await act(async () => root.unmount())
+  })
+
+  it('shows the cost of each run and the total over the change', async () => {
+    const costed: WorkBoardItem = {
+      ...item, id: 'c-11', title: 'Metered', status: 'done', blockers: [], verification: undefined, oversight: undefined, humanAction: undefined,
+      tokens: 128_000, wallMs: 252_000,
+      runs: [
+        { id: 'run-1', kind: 'work', phase: 'completed', cwd: 'H:/repo', usage: { input: 1_000, cacheRead: 126_000, cacheWrite: 0, output: 1_000 }, wallMs: 250_000 },
+        { id: 'run-2', kind: 'work', phase: 'active', cwd: 'H:/repo', startedAt: Date.now() - 180_000 },
+      ],
+    }
+    const root = createRoot(document.getElementById('root')!)
+    await act(async () => root.render(<WorkBoard locale="en" items={[costed]} pending={[]} onAccept={vi.fn()} onReject={vi.fn()} onAnswer={vi.fn()} onResume={vi.fn()} />))
+    await click('Finished · 1')
+    const text = document.body.textContent ?? ''
+    // Change header sums finished runs; the finished run shows its own cost with the breakdown on hover.
+    expect(text).toContain('128K tok · 4m 12s')
+    expect(text).toContain('128K tok · 4m 10s')
+    // The live run shows elapsed time instead.
+    expect(text).toContain('Running 3m 00s')
+    await act(async () => root.unmount())
+  })
+
+  const diffed: WorkBoardItem = {
+    ...item, id: 'c-diff',
+    verification: {
+      id: 'v-3', verdict: 'accept', subjectKey: 'subject-key-long', inputRef: 'in-4', inputRevision: 4,
+      changes: [
+        { path: 'a.ts', kind: 'modified' },
+        { path: 'new.ts', kind: 'added' },
+        { path: 'gone.ts', kind: 'deleted' },
+      ],
+    },
+  }
+  const DIFF_BODIES: Record<string, string> = {
+    'a.ts': '===================================================================\n--- a/a.ts\n+++ b/a.ts\n@@ -1,3 +1,4 @@\n line alpha\n-line beta\n+line beta edited\n line gamma\n+line delta\n',
+    'new.ts': '===================================================================\n--- a/new.ts\n+++ b/new.ts\n@@ -0,0 +1 @@\n+fresh body\n',
+    'gone.ts': '===================================================================\n--- a/gone.ts\n+++ b/gone.ts\n@@ -1 +0,0 @@\n-line gone\n',
+  }
+  const diffRead = (request: WorkReadRequest) => request.view === 'diff'
+    ? Promise.resolve({ source: `diff:${request.ref}`, body: DIFF_BODIES[request.ref] ?? '' })
+    : Promise.resolve({ source: `change:${request.ref}`, body: `FULL_${request.ref}` })
+  const rowToggle = (path: string) => document.querySelector(`a[data-change-path="${path}"]`)?.parentElement?.querySelector('.dsh-dot-work-view')
+
+  it('shows the baseline diff by default and switches a row to the full body', async () => {
+    const root = createRoot(document.getElementById('root')!)
+    await act(async () => {
+      root.render(<WorkBoard locale="en" items={[diffed]} pending={[]} onAccept={vi.fn()} onReject={vi.fn()} onAnswer={vi.fn()} onResume={vi.fn()} onRead={diffRead} />)
+      await Promise.resolve(); await Promise.resolve()
+    })
+    await openDetails()
+    // Default view is the diff; only the expanded row mounts its diff DOM.
+    expect(document.querySelectorAll('[data-diff-body]')).toHaveLength(1)
+    await click('Expand all')
+    expect(document.querySelectorAll('[data-diff-body]')).toHaveLength(3)
+    const rendered = document.querySelector('[data-diff-body="gone.ts"]')
+    expect(rendered?.textContent).toContain('-line gone')
+    const goneToggle = rowToggle('gone.ts')!
+    expect(goneToggle.querySelectorAll('button')[1]!.disabled).toBe(true)
+    const addLine = document.querySelector('[data-diff-body="a.ts"] .dsh-dot-work-diff-line[data-sign="add"]')!
+    expect(addLine.textContent).toContain('line beta edited')
+    expect(addLine.querySelectorAll('.dsh-dot-work-diff-no')[1]!.textContent).toBe('2')
+    expect(document.querySelector('[data-diff-body="a.ts"]')!.textContent).toContain('@@ -1,3 +1,4 @@')
+
+    // Full switches the row to the delivered body.
+    const aToggle = rowToggle('a.ts')!
+    await act(async () => { aToggle.querySelectorAll('button')[1]!.click(); await Promise.resolve(); await Promise.resolve() })
+    expect(document.querySelector('[data-diff-body="a.ts"]')).toBeNull()
+    expect(document.querySelector('[data-evidence-body="change:a.ts"]')?.textContent).toContain('FULL_a.ts')
+    await act(async () => root.unmount())
+  })
+
+  it('falls back to the full view when the diff read refuses', async () => {
+    const onRead = (request: WorkReadRequest) => {
+      if (request.view === 'diff') {
+        const failure = new Error('a.ts is binary or larger than 256 KiB; open the full file') as Error & { code?: string }
+        failure.code = 'dot/invalid'
+        return Promise.reject(failure)
+      }
+      return Promise.resolve({ source: `change:${request.ref}`, body: `FULL_${request.ref}` })
+    }
+    const root = createRoot(document.getElementById('root')!)
+    await act(async () => {
+      root.render(<WorkBoard locale="en" items={[diffed]} pending={[]} onAccept={vi.fn()} onReject={vi.fn()} onAnswer={vi.fn()} onResume={vi.fn()} onRead={onRead} />)
+      await Promise.resolve(); await Promise.resolve(); await Promise.resolve()
+    })
+    await openDetails()
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); await Promise.resolve() })
+    expect(document.querySelectorAll('[data-diff-body]')).toHaveLength(0)
+    expect(document.querySelector('[data-evidence-body="change:a.ts"]')?.textContent).toContain('FULL_a.ts')
+    expect(document.body.textContent).toContain('open the full file')
+    await act(async () => root.unmount())
+  })
+
+  it('quotes a diff line into the send-back note only when a send-back action exists', async () => {
+    const root = createRoot(document.getElementById('root')!)
+    await act(async () => {
+      root.render(<WorkBoard locale="en" items={[diffed]} pending={[]} onAccept={vi.fn()} onReject={vi.fn()} onAnswer={vi.fn()} onResume={vi.fn()} onRead={diffRead} />)
+      await Promise.resolve(); await Promise.resolve()
+    })
+    await openDetails()
+    const quote = document.querySelector<HTMLButtonElement>('[data-diff-body="a.ts"] .dsh-dot-work-diff-line[data-sign="add"] .dsh-dot-work-diff-quote')!
+    await act(async () => { quote.click(); await Promise.resolve() })
+    const input = document.querySelector<HTMLInputElement>('.dsh-dot-work-reject-input input, input.dsh-dot-work-reject-input')!
+    expect(input.value).toBe('a.ts:2 line beta edited')
+
+    const quiet: WorkBoardItem = { ...diffed, id: 'c-quiet', runs: [], humanAction: undefined, oversight: undefined }
+    await act(async () => { root.unmount() })
+    const silent = createRoot(document.getElementById('root')!)
+    await act(async () => {
+      silent.render(<WorkBoard locale="en" items={[quiet]} pending={[]} onAccept={vi.fn()} onReject={vi.fn()} onAnswer={vi.fn()} onResume={vi.fn()} onRead={diffRead} />)
+      await Promise.resolve(); await Promise.resolve()
+    })
+    await openDetails()
+    await click('Expand all')
+    expect(document.querySelectorAll('[data-diff-body]')).toHaveLength(3)
+    expect(document.querySelectorAll('.dsh-dot-work-diff-quote')).toHaveLength(0)
+    await act(async () => silent.unmount())
+  })
+
+  it('renders header-shaped hunk lines as content with correct numbers', async () => {
+    // A removed '-- text' line renders '--- text' and an added '++ text' line
+    // '+++ text'; inside a hunk they are content, not file headers.
+    const tricky: WorkBoardItem = {
+      ...item, id: 'c-tricky',
+      verification: {
+        id: 'v-3', verdict: 'accept', subjectKey: 'subject-key-long', inputRef: 'in-4', inputRevision: 4,
+        changes: [{ path: 'tricky.ts', kind: 'modified' }],
+      },
+    }
+    const body = '===\n--- a/tricky.ts\n+++ b/tricky.ts\n@@ -1,3 +1,3 @@\n context a\n--- content gone\n+++ content new\n context z\n'
+    const onRead = (request: WorkReadRequest) => Promise.resolve({ source: `diff:${request.ref}`, body })
+    const root = createRoot(document.getElementById('root')!)
+    await act(async () => {
+      root.render(<WorkBoard locale="en" items={[tricky]} pending={[]} onAccept={vi.fn()} onReject={vi.fn()} onAnswer={vi.fn()} onResume={vi.fn()} onRead={onRead} />)
+      await Promise.resolve(); await Promise.resolve()
+    })
+    await openDetails()
+    const view = document.querySelector('[data-diff-body="tricky.ts"]')!
+    const del = view.querySelector('.dsh-dot-work-diff-line[data-sign="del"]')!
+    expect(del.textContent).toContain('-- content gone')
+    expect(del.querySelectorAll('.dsh-dot-work-diff-no')[0]!.textContent).toBe('2')
+    const add = view.querySelector('.dsh-dot-work-diff-line[data-sign="add"]')!
+    expect(add.textContent).toContain('++ content new')
+    expect(add.querySelectorAll('.dsh-dot-work-diff-no')[1]!.textContent).toBe('2')
+    const ctx = [...view.querySelectorAll('.dsh-dot-work-diff-line[data-sign="ctx"]')].find(node => node.textContent?.includes('context z'))!
+    expect(ctx.textContent).toContain('context z')
+    expect(ctx.querySelectorAll('.dsh-dot-work-diff-no')[0]!.textContent).toBe('3')
+    expect(ctx.querySelectorAll('.dsh-dot-work-diff-no')[1]!.textContent).toBe('3')
+    await act(async () => root.unmount())
+  })
+
+  it('shows a long diff body in full instead of the preview cap', async () => {
+    const big: WorkBoardItem = {
+      ...item, id: 'c-big',
+      verification: {
+        id: 'v-3', verdict: 'accept', subjectKey: 'subject-key-long', inputRef: 'in-4', inputRevision: 4,
+        changes: [{ path: 'big.ts', kind: 'modified' }],
+      },
+    }
+    const body = `===\n--- a/big.ts\n+++ b/big.ts\n@@ -1,5000 +1,5001 @@\n${' context row\n'.repeat(6000)}+tail marker row\n`
+    expect(body.length).toBeGreaterThan(65_536)
+    const onRead = (request: WorkReadRequest) => Promise.resolve({ source: `diff:${request.ref}`, body })
+    const root = createRoot(document.getElementById('root')!)
+    await act(async () => {
+      root.render(<WorkBoard locale="en" items={[big]} pending={[]} onAccept={vi.fn()} onReject={vi.fn()} onAnswer={vi.fn()} onResume={vi.fn()} onRead={onRead} />)
+      await Promise.resolve(); await Promise.resolve()
+    })
+    await openDetails()
+    const rendered = document.querySelector('[data-diff-body="big.ts"]')!
+    // Past the 2,000-line render cap the tail mounts on demand, not up front.
+    expect(rendered.textContent).not.toContain('tail marker row')
+    // The truncation bar sits outside the scroll area: it must exist even
+    // before any scrolling, with the shown/total counts.
+    const truncBar = document.querySelector('.dsh-dot-work-diff-trunc')!
+    expect(truncBar).toBeTruthy()
+    expect(truncBar.parentElement!.className).not.toBe('dsh-dot-work-diff')
+    // Rendered rows only: hunk header + content lines, no file header lines.
+    expect(truncBar.textContent).toContain('2000')
+    expect(truncBar.textContent).toContain('6002')
+    const showAll = buttonIncluding('Show all')!
+    await act(async () => { showAll.click(); await Promise.resolve() })
+    expect(rendered.textContent).toContain('tail marker row')
+    expect(document.querySelector('.dsh-dot-work-diff-trunc')).toBeNull()
+    await act(async () => root.unmount())
+  })
+
+  it('keeps refused-diff full fallbacks inside the bounded read queue', async () => {
+    const paths = ['f1.ts', 'f2.ts', 'f3.ts', 'f4.ts', 'f5.ts', 'f6.ts', 'f7.ts', 'f8.ts']
+    const many: WorkBoardItem = {
+      ...item, id: 'c-many',
+      verification: {
+        id: 'v-3', verdict: 'accept', subjectKey: 'subject-key-long', inputRef: 'in-4', inputRevision: 4,
+        changes: paths.map(path => ({ path, kind: 'modified' as const })),
+      },
+    }
+    let inFlight = 0
+    let maxInFlight = 0
+    const onRead = (request: WorkReadRequest) => {
+      inFlight += 1
+      maxInFlight = Math.max(maxInFlight, inFlight)
+      return new Promise((resolve, reject) => {
+        setTimeout(() => {
+          inFlight -= 1
+          if (request.view === 'diff') {
+            const failure = new Error('binary or larger than 256 KiB; open the full file') as Error & { code?: string }
+            failure.code = 'dot/invalid'
+            reject(failure)
+          } else {
+            resolve({ source: `change:${request.ref}`, body: `FULL_${request.ref}` })
+          }
+        }, 2)
+      })
+    }
+    const root = createRoot(document.getElementById('root')!)
+    await act(async () => {
+      root.render(<WorkBoard locale="en" items={[many]} pending={[]} onAccept={vi.fn()} onReject={vi.fn()} onAnswer={vi.fn()} onResume={vi.fn()} onRead={onRead} />)
+      await Promise.resolve(); await Promise.resolve()
+    })
+    await openDetails()
+    await act(async () => { await new Promise(done => setTimeout(done, 250)) })
+    expect(maxInFlight).toBeLessThanOrEqual(4)
+    await click('Expand all')
+    for (const path of paths) {
+      expect(document.querySelector(`[data-evidence-body="change:${path}"]`)?.textContent).toContain(`FULL_${path}`)
+    }
+    await act(async () => root.unmount())
+  })
+
+  it('renders at most 2,000 diff lines and expands the rest on demand', async () => {
+    const huge: WorkBoardItem = {
+      ...item, id: 'c-huge',
+      verification: {
+        id: 'v-3', verdict: 'accept', subjectKey: 'subject-key-long', inputRef: 'in-4', inputRevision: 4,
+        changes: [{ path: 'huge.csv', kind: 'added' }],
+      },
+    }
+    const body = `===\n--- a/huge.csv\n+++ b/huge.csv\n@@ -0,0 +1,2500 @@\n${'+row,1\n'.repeat(2500)}`
+    const onRead = (request: WorkReadRequest) => Promise.resolve({ source: `diff:${request.ref}`, body })
+    const root = createRoot(document.getElementById('root')!)
+    await act(async () => {
+      root.render(<WorkBoard locale="en" items={[huge]} pending={[]} onAccept={vi.fn()} onReject={vi.fn()} onAnswer={vi.fn()} onResume={vi.fn()} onRead={onRead} />)
+      await Promise.resolve(); await Promise.resolve()
+    })
+    await openDetails()
+    const lines = () => document.querySelectorAll('.dsh-dot-work-diff-line').length
+    expect(lines()).toBeLessThanOrEqual(2_000)
+    const truncBar = document.querySelector('.dsh-dot-work-diff-trunc')
+    expect(truncBar?.textContent).toContain('2000')
+    expect(truncBar?.textContent).toContain('2501')
+    const showAll = buttonIncluding('Show all')
+    expect(showAll).toBeTruthy()
+    await act(async () => { showAll!.click(); await Promise.resolve() })
+    expect(lines()).toBeGreaterThan(2_000)
+    expect(document.querySelector('[data-diff-body="huge.csv"]')!.textContent).toContain('row,1')
+    await act(async () => root.unmount())
+  })
+
+it('tags an isolated change and offers the three integrate actions after acceptance', async () => {
+    const isolated: WorkBoardItem = {
+      ...item, id: 'c-iso', status: 'done', humanAction: undefined,
+      closeout: { verificationId: 'v-3', source: 'run report' },
+      isolation: { kind: 'worktree', repoRoot: 'H:/repo', worktree: 'H:/home/worktrees/ab12cd', branch: 'dot/task-ab12cd', baseSha: 'sha', state: 'active' },
+    }
+    const onIntegrate = vi.fn(async () => {})
+    const root = createRoot(document.getElementById('root')!)
+    await act(async () => {
+      root.render(<WorkBoard locale="en" items={[isolated]} pending={[]} onAccept={vi.fn()} onReject={vi.fn()} onAnswer={vi.fn()} onResume={vi.fn()} onIntegrate={onIntegrate} />)
+      await Promise.resolve()
+    })
+    await click('Finished · 1')
+    expect(document.body.textContent).toContain('worktree · dot/task-ab12cd')
+    expect(buttonIncluding('Merge into checkout')).toBeTruthy()
+    expect(buttonIncluding('Keep branch')).toBeTruthy()
+    expect(buttonIncluding('Discard')).toBeTruthy()
+
+    // Discard arms before it fires; merge and keep fire straight away.
+    await click('Discard')
+    expect(onIntegrate).not.toHaveBeenCalled()
+    await click('Discard branch?')
+    expect(onIntegrate).toHaveBeenCalledWith({ id: 'c-iso', mode: 'discard' })
+    await click('Merge into checkout')
+    expect(onIntegrate).toHaveBeenCalledWith({ id: 'c-iso', mode: 'merge' })
+    await click('Keep branch')
+    expect(onIntegrate).toHaveBeenCalledWith({ id: 'c-iso', mode: 'keep' })
+    await act(async () => root.unmount())
+  })
+
+  it('shows a refusal inline and hides integrate buttons for settled or plain changes', async () => {
+    const failing = vi.fn(async () => { throw new Error('merge of dot/task-ab12cd conflicted and was aborted: a.ts') })
+    const refused: WorkBoardItem = {
+      ...item, id: 'c-iso', status: 'done', humanAction: undefined,
+      closeout: { verificationId: 'v-3', source: 'run report' },
+      isolation: { kind: 'worktree', repoRoot: 'H:/repo', worktree: 'H:/home/worktrees/ab12cd', branch: 'dot/task-ab12cd', baseSha: 'sha', state: 'active' },
+    }
+    const merged: WorkBoardItem = {
+      ...refused, id: 'c-merged', title: 'Merged',
+      isolation: { ...refused.isolation!, state: 'merged', mergedInto: 'main' },
+    }
+    const running: WorkBoardItem = {
+      ...refused, id: 'c-run', title: 'Running', status: 'running', closeout: undefined,
+    }
+    const root = createRoot(document.getElementById('root')!)
+    await act(async () => {
+      root.render(<WorkBoard locale="en" items={[refused, merged, running]} pending={[]} onAccept={vi.fn()} onReject={vi.fn()} onAnswer={vi.fn()} onResume={vi.fn()} onIntegrate={failing} />)
+      await Promise.resolve()
+    })
+    await click('Finished · 2')
+    // Terminal isolation states are labelled; only the accepted active one has buttons.
+    expect(document.body.textContent).toContain('worktree · dot/task-ab12cd · merged')
+    await click('Merge into checkout')
+    expect(failing).toHaveBeenCalledWith({ id: 'c-iso', mode: 'merge' })
+    await act(async () => { await Promise.resolve() })
+    expect(document.body.textContent).toContain('conflicted and was aborted: a.ts')
+    const mergeButtons = [...document.querySelectorAll('button')].filter(node => (node.textContent ?? '').includes('Merge into checkout'))
+    expect(mergeButtons).toHaveLength(1)
+    await act(async () => root.unmount())
+  })
+})
+
+describe('WorkBoard link chips', () => {
+  it('renders bound targets with the newest event, state tag, and URL', async () => {
+    const linked: WorkBoardItem = {
+      ...item, id: 'c-9', title: 'Linked task', status: 'running', humanAction: undefined,
+      links: [
+        { repo: 'acme/widgets', number: 12, url: 'https://gh/acme/widgets/pull/12', state: 'open', lastEvent: { type: 'workflow_run.completed', title: 'CI failure', summary: 's', at: Date.now() - 180_000, count: 1 } },
+        { repo: 'acme/widgets', number: 13, state: 'merged' },
+      ],
+    }
+    const root = createRoot(document.getElementById('root')!)
+    await act(async () => root.render(<WorkBoard locale="en" items={[linked]} pending={[]} onAccept={vi.fn()} onReject={vi.fn()} onAnswer={vi.fn()} onResume={vi.fn()} />))
+    const text = document.body.textContent ?? ''
+    expect(text).toContain('acme/widgets#12')
+    expect(text).toContain('CI failure')
+    expect(text).toContain('ago')
+    expect(text).toContain('acme/widgets#13')
+    expect(text).toContain('merged')
+    const anchor = [...document.querySelectorAll<HTMLAnchorElement>('a.dsh-dot-work-link')].find(node => node.href === 'https://gh/acme/widgets/pull/12')
+    expect(anchor).toBeTruthy()
+    // A branch link without a URL renders as a span.
+    const branch: WorkBoardItem = { ...linked, id: 'c-10', links: [{ repo: 'acme/widgets', branch: 'feature/x', state: 'closed' }] }
+    await act(async () => root.render(<WorkBoard locale="en" items={[branch]} pending={[]} onAccept={vi.fn()} onReject={vi.fn()} onAnswer={vi.fn()} onResume={vi.fn()} />))
+    expect(document.body.textContent).toContain('acme/widgets@feature/x')
+    expect(document.body.textContent).toContain('closed')
+    expect(document.querySelector('span.dsh-dot-work-link')).toBeTruthy()
     await act(async () => root.unmount())
   })
 })

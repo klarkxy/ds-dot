@@ -135,6 +135,8 @@ export interface ScheduleRecord {
   readonly lastFiredAt?: number
   /** Set when a once reminder was handed off. Later ticks, late catch-up and restarts must not wake again. */
   readonly deliveredAt?: number
+  /** Bound task recipe id: firing dispatches the recipe directly instead of a model turn. */
+  readonly recipe?: string
 }
 
 /** Where a tracked session came from: dot started it, or the human asked dot to watch it. */
@@ -207,6 +209,69 @@ export interface PendingQuestionItem {
 }
 
 /** Board snapshot the client renders. */
+/** A reminder row as the board projects it: the bound recipe's current name resolved at read time. */
+export interface ScheduleView extends ScheduleRecord {
+  readonly recipeName?: string
+}
+
+/**
+ * A human-gated proposal to restore or revise a recipe. `baseRevision` is the
+ * recipe revision the proposal was made against; once the recipe moves past
+ * it, deciding marks the proposal stale instead of applying.
+ */
+export interface RecipeProposal {
+  readonly id: string
+  readonly recipeId: string
+  readonly baseRevision: number
+  readonly kind: 'restore' | 'revise'
+  readonly targetRevision?: number
+  readonly patch?: {
+    readonly goal?: string
+    readonly requirements?: readonly import('./work.ts').Requirement[]
+    readonly constraints?: readonly import('./work.ts').Constraint[]
+    readonly notes?: string
+  }
+  readonly reason: string
+  readonly origin: 'detector' | 'reflection'
+  /** The regression kind a detector proposal was raised under — the dismiss dedupe key. */
+  readonly regression?: 'acceptance' | 'rework' | 'cost'
+  readonly status: 'pending' | 'approved' | 'dismissed' | 'stale'
+  readonly createdAt: number
+  readonly decidedAt?: number
+}
+
+/** A pending proposal as the Recipes view renders it, with the base body for the revise diff. */
+export interface RecipeProposalView {
+  readonly id: string
+  readonly kind: 'restore' | 'revise'
+  readonly origin: 'detector' | 'reflection'
+  readonly baseRevision: number
+  readonly targetRevision?: number
+  readonly patch?: RecipeProposal['patch']
+  /** Snapshot of the revision the proposal was made against, for the merged diff. */
+  readonly base?: {
+    readonly goal: string
+    readonly notes?: string
+    readonly requirementsFromGoal: boolean
+    readonly requirements: readonly import('./work.ts').Requirement[]
+    readonly constraints: readonly import('./work.ts').Constraint[]
+  }
+  readonly reason: string
+  readonly createdAt: number
+}
+
+/** One recipe as the Tasks panel's Recipes filter renders it. */
+export interface RecipeBoardRow {
+  readonly id: string
+  readonly name: string
+  readonly revision: number
+  readonly updatedAt: number
+  readonly stats: readonly import('./recipes.ts').RecipeRevisionStats[]
+  readonly inFlight: readonly { readonly changeId: string; readonly title: string; readonly status: string }[]
+  readonly reminders: readonly { readonly id: string; readonly title: string; readonly nextAt: number }[]
+  readonly proposal?: RecipeProposalView
+}
+
 export interface BoardView {
   readonly dotSessionId?: string
   /** Sessions the human asked dot to watch; task sessions are shown through `work`. */
@@ -217,7 +282,27 @@ export interface BoardView {
   readonly work?: readonly import('./work-board.ts').WorkBoardItem[]
   readonly pending: readonly PendingView[]
   /** dot's reminders, the one due first on top. */
-  readonly schedules: readonly ScheduleRecord[]
+  readonly schedules: readonly ScheduleView[]
+  /** Pending recipe proposals, for the "needs you" attention items. */
+  readonly recipeProposals?: readonly { readonly id: string; readonly recipeId: string; readonly recipeName: string; readonly kind: 'restore' | 'revise'; readonly createdAt: number }[]
+}
+
+/**
+ * One thing waiting on the human, projected for the background badge and
+ * desktop notifications. `id` stays stable while the same unanswered card or
+ * the same decision keeps waiting, and changes when a work item re-enters
+ * needs-human for a new reason.
+ */
+export interface AttentionItem {
+  readonly id: string
+  readonly kind: 'card' | 'work' | 'recipe'
+  readonly title: string
+  readonly since?: number
+}
+
+/** The "needs you" view the browser-side watcher polls while the panel is closed. */
+export interface AttentionView {
+  readonly items: readonly AttentionItem[]
 }
 
 /**
@@ -246,9 +331,12 @@ export const TASK_MODEL_LIST_MAX = 500
  * decides who answers the prompts that still appear.
  * - workspace-write: the task may write inside its workspace and ask for more.
  * - danger-full-access: the task may act anywhere; no sandbox prompt appears.
- * - default: the host's own default permissions, whatever the host has set.
+ * - safe-auto: workspace-write with the Safe Auto plugin's reviewer model
+ *   answering prompts; only offered while that plugin's runtime is available.
+ * - auto: DSH's experimental per-call model review on full access; only
+ *   offered while the host exposes the `auto` permission preset.
  */
-export type TaskPermission = 'workspace-write' | 'danger-full-access' | 'default'
+export type TaskPermission = 'workspace-write' | 'danger-full-access' | 'safe-auto' | 'auto'
 
 /**
  * How dot may use one extra capability selector: off denies it, ask raises a
@@ -278,11 +366,11 @@ export interface CapabilityToolView {
   readonly highRisk?: boolean
 }
 
-/** A grantable group of extra tools: one MCP server, one bundle, one loader entry, an unattributed name prefix, or the unattributed remainder. */
+/** A grantable group of extra tools: one MCP server, one bundle, one loader entry, one host built-in row, an unattributed name prefix, or the unattributed remainder. */
 export interface CapabilityGroupView {
-  /** Selector a grant row addresses: `mcp:<s>`, `plugin:<b>`, `plugin:<b>#<e>`, `prefix:<s>` or `host`. */
+  /** Selector a grant row addresses: `mcp:<s>`, `plugin:<b>`, `plugin:<b>#<e>`, `builtin:<id>`, `prefix:<s>` or `host`. */
   readonly id: string
-  readonly kind: 'mcp' | 'plugin' | 'entry' | 'prefix' | 'host'
+  readonly kind: 'mcp' | 'plugin' | 'entry' | 'builtin' | 'prefix' | 'host'
   readonly label: string
   /** Granted but nothing currently owns the selector. */
   readonly missing?: boolean
@@ -352,10 +440,15 @@ export interface FactoryResetPreview {
   readonly runs: number
   readonly schedules: number
   readonly recipes: number
+  readonly recipeProposals: number
   readonly proposals: number
   readonly cards: number
   /** Pending and delivered external events in the inbox table. */
   readonly inbox: number
+  /** Dot-managed task worktrees removed with the reset (dot/task-* branches keep their commits). */
+  readonly worktrees: number
+  /** Task-to-event links in the links table. */
+  readonly links: number
   readonly ownedSessions: number
   readonly pastSegments: number
   readonly reflections: number
@@ -538,6 +631,10 @@ export interface InboxEventInput {
   /** Short detail, whitespace collapsed. */
   readonly summary: string
   readonly receivedAt: number
+  /** PR head branch carried for link matching; never shown to the model. */
+  readonly headRef?: string
+  /** PR/workflow head repository (owner/repo, lower-cased) for fork-aware link matching. */
+  readonly headRepo?: string
 }
 
 /** A stored inbox row: one pending record per source+sourceId+subject, merged deliveries folded in. */
@@ -554,6 +651,40 @@ export interface InboxRecord extends InboxEventInput {
 }
 
 export type InboxSubmitResult = 'stored' | 'merged' | 'duplicate'
+
+// ---- task links: inbox events bound to the change that owns the PR/branch ----
+
+/** The newest event that reached a link, kept so the board can show it. */
+export interface LinkEvent {
+  readonly type: string
+  readonly title: string
+  readonly summary: string
+  readonly url?: string
+  readonly at: number
+  /** Events folded into the matched inbox record. */
+  readonly count: number
+}
+
+/**
+ * A durable binding between a change and a GitHub target. `number` names a
+ * pull request or issue; `branch` a head branch learned from a PR event or
+ * attached directly. At least one of the two is set.
+ */
+export interface TaskLink {
+  readonly id: string
+  readonly changeId: string
+  /** owner/repo, lower-cased. */
+  readonly repo: string
+  readonly number?: number
+  readonly branch?: string
+  /** Head repository learned with the branch; distinguishes same-named fork branches. */
+  readonly headRepo?: string
+  readonly url?: string
+  readonly origin: 'dot' | 'auto'
+  readonly state: 'open' | 'closed' | 'merged'
+  readonly addedAt: number
+  readonly lastEvent?: LinkEvent
+}
 
 // ---- dot's task recipes --------------------------------------------------
 
@@ -579,6 +710,8 @@ export interface RecipeBody {
   readonly model?: string
   readonly access?: 'read' | 'write'
   readonly humanReview?: boolean
+  /** 'worktree' runs created tasks in a dot-managed git worktree instead of the checkout. */
+  readonly isolation?: 'worktree'
 }
 
 /** One earlier revision of a recipe, with the name and reason it carried. */
@@ -598,6 +731,9 @@ export interface RecipeOutcome {
   readonly revision: number
   readonly result: 'accepted' | 'cancelled'
   readonly failedRounds: number
+  /** Cost summed over the change's runs at the moment the outcome was written. */
+  readonly tokens?: number
+  readonly wallMs?: number
   readonly at: number
 }
 

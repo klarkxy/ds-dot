@@ -645,3 +645,66 @@ describe('work input contract', () => {
     expect(book.inputsFor(change.id)).toHaveLength(1)
   })
 })
+
+describe('run usage', () => {
+  it('records usage once, only on a terminal run, and projects cost on the board view', async () => {
+    const { book, rows } = openBook()
+    const change = await book.createChange({ title: 'A', cwd: 'H:\proj', goal: 'a', at: 1 })
+    const reserved = await book.reserveRun({ changeId: change.id, cwd: 'H:\proj', writeScope: { kind: 'paths', paths: [] }, at: 2 })
+    if (!reserved.ok) throw new Error(reserved.message)
+    const usage = { input: 10, cacheRead: 20, cacheWrite: 2, output: 5 }
+    // A live run cannot record usage.
+    expect(await book.recordRunUsage(reserved.run.id, usage, 4000)).toMatchObject({ ok: false, code: 'invalid' })
+    const prepared = await book.prepareFinish(reserved.run.id, 'completed', 3)
+    if (!prepared.ok) throw new Error(prepared.message)
+    expect((await book.finishSettled(reserved.run.id, prepared.updatedAt, 'completed', { queueCleared: true, agentIdle: true, jobsSettled: true }, 4)).ok).toBe(true)
+    const stored = await book.recordRunUsage(reserved.run.id, usage, 4000)
+    if (!('id' in stored)) throw new Error(stored.message)
+    expect(stored.usage).toEqual(usage)
+    expect(stored.wallMs).toBe(4000)
+    // Write-once: a later capture keeps the committed numbers.
+    const again = await book.recordRunUsage(reserved.run.id, { input: 99, cacheRead: 0, cacheWrite: 0, output: 0 }, 99)
+    expect('id' in again && again.usage).toEqual(usage)
+    // A stored row carrying the fields reopens with them; a legacy row without them stays valid.
+    const { usage: _u, wallMs: _w, ...legacy } = stored
+    const live = { ...legacy, id: 'run-2', requestedSessionId: 'session-run-2', phase: 'active' as const }
+    const restored = WorkBook.restore({
+      changes: [rows.get(`changes:${change.id}`)],
+      inputs: [...rows.values()].filter(value => value && typeof value === 'object' && 'goal' in value),
+      runs: [rows.get(`runs:${reserved.run.id}`), live],
+    }, async () => {}, 'win32')
+    expect(restored.run(reserved.run.id)?.usage).toEqual(usage)
+    const view = restored.workView(change.id)!
+    const finishedRow = view.runs.find(row => row.id === reserved.run.id)!
+    expect(finishedRow.usage).toEqual(usage)
+    expect(finishedRow.wallMs).toBe(4000)
+    expect(finishedRow.startedAt).toBeUndefined()
+    const liveRow = view.runs.find(row => row.id === 'run-2')!
+    expect(liveRow.usage).toBeUndefined()
+    expect(liveRow.startedAt).toBe(reserved.run.createdAt)
+    expect(view.tokens).toBe(37)
+    expect(view.wallMs).toBe(4000)
+  })
+})
+
+describe('run usage revision stability', () => {
+  it('does not move the revision, so a baseline published against the earlier revision still applies', async () => {
+    const { book } = openBook()
+    const change = await book.createChange({ title: 'A', cwd: 'H:/proj', goal: 'a', maxConcurrentRuns: 2, at: 1 })
+    const writer = await book.reserveRun({ changeId: change.id, cwd: 'H:/proj/a', writeScope: { kind: 'paths', paths: [{ path: 'H:/proj/a/x.ts', type: 'file' }] }, at: 2 })
+    if (!writer.ok) throw new Error(writer.message)
+    const finished = await book.reserveRun({ changeId: change.id, cwd: 'H:/proj/b', writeScope: { kind: 'paths', paths: [] }, at: 3 })
+    if (!finished.ok) throw new Error(finished.message)
+    const prepared = await book.prepareFinish(finished.run.id, 'completed', 4)
+    if (!prepared.ok) throw new Error(prepared.message)
+    expect((await book.finishSettled(finished.run.id, prepared.updatedAt, 'completed', { queueCleared: true, agentIdle: true, jobsSettled: true }, 5)).ok).toBe(true)
+    const seen = book.revision
+    const usage = { input: 4, cacheRead: 9, cacheWrite: 0, output: 2 }
+    const stored = await book.recordRunUsage(finished.run.id, usage, 1200)
+    if (!('id' in stored)) throw new Error(stored.message)
+    // Usage is metadata: the optimistic-concurrency token does not move.
+    expect(book.revision).toBe(seen)
+    const published = await book.publishBaseline(writer.run.id, seen, 'artifact-1', 6)
+    expect(published).toMatchObject({ applied: true })
+  })
+})

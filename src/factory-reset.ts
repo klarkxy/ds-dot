@@ -15,6 +15,8 @@ export interface FactoryResetSource {
   work: { listChanges(): readonly unknown[]; listRuns(): readonly unknown[] }
   schedules: readonly unknown[]
   recipes: readonly unknown[]
+  links: readonly unknown[]
+  recipeProposals: readonly unknown[]
   settingProposals: readonly unknown[]
   cards: readonly unknown[]
   pastSegments: readonly { readonly sessionId: string }[]
@@ -25,16 +27,19 @@ export interface FactoryResetSource {
   dotSessionId?: string
 }
 
-export function factoryResetCounts(source: FactoryResetSource, inbox = 0): FactoryResetCounts {
+export function factoryResetCounts(source: FactoryResetSource, inbox = 0, worktrees = 0): FactoryResetCounts {
   return {
     tasks: source.list().length,
     changes: source.work.listChanges().length,
     runs: source.work.listRuns().length,
     schedules: source.schedules.length,
     recipes: source.recipes.length,
+    links: source.links.length,
+    recipeProposals: source.recipeProposals.length,
     proposals: source.settingProposals.length,
     cards: source.cards.length,
     inbox,
+    worktrees,
     ownedSessions: source.ownedSessionIds().length,
     pastSegments: source.pastSegments.length,
     reflections: source.reflections.length,
@@ -89,9 +94,12 @@ export function formatFactoryResetPreview(preview: FactoryResetPreview): string 
     `${preview.runs} run(s)`,
     `${preview.schedules} reminder(s)`,
     `${preview.recipes} task recipe(s)`,
+    `${preview.recipeProposals} recipe proposal(s)`,
     `${preview.proposals} setting proposal(s)`,
     `${preview.cards} card(s)`,
     `${preview.inbox} inbox event(s)`,
+    `${preview.links} task link(s)`,
+    `${preview.worktrees} isolated worktree(s)`,
     `${preview.pastSegments} past segment(s)`,
     `${preview.reflections} reflection run(s)`,
     preview.hasAgreements ? 'agreements will be cleared' : 'no agreements',

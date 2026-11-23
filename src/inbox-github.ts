@@ -190,6 +190,8 @@ function pullRequest(p: Record<string, unknown>, ctx: EventCtx): EventView | und
     if (reviewers.length) parts.push(`review requested from ${[...new Set(reviewers)].join(', ')}`)
   }
   if (action === 'opened') parts.push(str(pr.body))
+  const headRef = str(rec(pr.head)?.ref)
+  const headRepo = str(rec(rec(pr.head)?.repo)?.full_name).toLowerCase()
   return {
     type: `pull_request.${merged ? 'merged' : action}`,
     subject: number !== undefined ? `${ctx.repo}#${number}` : ctx.repo,
@@ -197,6 +199,8 @@ function pullRequest(p: Record<string, unknown>, ctx: EventCtx): EventView | und
     ...actor(undefined, ctx.sender),
     ...link(pr.html_url),
     summary: clip(parts.join(' · '), SUMMARY_MAX),
+    ...(headRef ? { headRef } : {}),
+    ...(headRepo ? { headRepo } : {}),
   }
 }
 
@@ -248,6 +252,8 @@ function reviewComment(p: Record<string, unknown>, ctx: EventCtx): EventView | u
   const path = str(comment.path)
   const line = num(comment.line) ?? num(comment.original_line)
   const where = path ? `${path}${line !== undefined ? `:${line}` : ''} — ` : ''
+  const headRef = str(rec(pr.head)?.ref)
+  const headRepo = str(rec(rec(pr.head)?.repo)?.full_name).toLowerCase()
   return {
     type: 'pull_request_review_comment.created',
     subject: number !== undefined ? `${ctx.repo}#${number}` : ctx.repo,
@@ -255,6 +261,8 @@ function reviewComment(p: Record<string, unknown>, ctx: EventCtx): EventView | u
     ...actor(str(rec(comment.user)?.login), ctx.sender),
     ...link(comment.html_url),
     summary: clip(`${where}${str(comment.body)}`, SUMMARY_MAX),
+    ...(headRef ? { headRef } : {}),
+    ...(headRepo ? { headRepo } : {}),
   }
 }
 
@@ -265,6 +273,8 @@ function pullRequestReview(p: Record<string, unknown>, ctx: EventCtx): EventView
   if (!review || !pr) return undefined
   const number = num(pr.number) ?? num(p.number)
   const state = str(review.state) || 'submitted'
+  const headRef = str(rec(pr.head)?.ref)
+  const headRepo = str(rec(rec(pr.head)?.repo)?.full_name).toLowerCase()
   return {
     type: `pull_request_review.${state}`,
     subject: number !== undefined ? `${ctx.repo}#${number}` : ctx.repo,
@@ -272,6 +282,8 @@ function pullRequestReview(p: Record<string, unknown>, ctx: EventCtx): EventView
     ...actor(str(rec(review.user)?.login), ctx.sender),
     ...link(review.html_url),
     summary: clip(`state ${state}${str(review.body) ? ` — ${str(review.body)}` : ''}`, SUMMARY_MAX),
+    ...(headRef ? { headRef } : {}),
+    ...(headRepo ? { headRepo } : {}),
   }
 }
 
@@ -325,6 +337,7 @@ function workflowRun(p: Record<string, unknown>, ctx: EventCtx): EventView | und
   if (head) parts.push(`head ${head}`)
   const number = num(run.run_number)
   if (number !== undefined) parts.push(`run #${number}`)
+  const headRepo = str(rec(run.head_repository)?.full_name).toLowerCase()
   return {
     type: 'workflow_run.completed',
     subject: `${ctx.repo}:workflow:${name}${branch ? `@${branch}` : ''}`,
@@ -332,6 +345,7 @@ function workflowRun(p: Record<string, unknown>, ctx: EventCtx): EventView | und
     ...actor(str(rec(run.actor)?.login), ctx.sender),
     ...link(run.html_url),
     summary: clip(parts.join(' · '), SUMMARY_MAX),
+    ...(headRepo ? { headRepo } : {}),
   }
 }
 
@@ -346,6 +360,9 @@ function checkSuite(p: Record<string, unknown>, ctx: EventCtx): EventView | unde
   const parts = [`conclusion ${conclusion}`]
   const head = shortSha(suite.head_sha)
   if (head) parts.push(`head ${head}`)
+  // check_suite has no head_repository; the linked PR's head repo is the fork hint.
+  const suitePrs = Array.isArray(suite.pull_requests) ? suite.pull_requests : []
+  const headRepo = str(rec(rec(rec(suitePrs[0])?.head)?.repo)?.full_name).toLowerCase()
   return {
     type: 'check_suite.completed',
     subject: `${ctx.repo}:checks:${app}${branch ? `@${branch}` : ''}`,
@@ -353,6 +370,7 @@ function checkSuite(p: Record<string, unknown>, ctx: EventCtx): EventView | unde
     ...actor(undefined, ctx.sender),
     ...link(suite.html_url ?? suite.url),
     summary: clip(parts.join(' · '), SUMMARY_MAX),
+    ...(headRepo ? { headRepo } : {}),
   }
 }
 

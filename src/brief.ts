@@ -116,12 +116,16 @@ export function renderBrief(input: {
   readonly input: BriefInput
   readonly run: BriefRun
   readonly notes?: string
+  readonly isolation?: { readonly branch: string; readonly baseSha: string }
 }): string {
   const { changeId, title, run } = input
   const material = input.input
   const out: string[] = []
   out.push(`# Work order ${changeId} · ${material.id} (rev ${material.revision}) · ${run.id}`)
   out.push(`Title: ${title}`)
+  if (input.isolation) {
+    out.push(`Isolation: you run in an isolated git worktree on branch ${input.isolation.branch} based on commit ${input.isolation.baseSha.slice(0, 7)}. Uncommitted changes in the original checkout are not present here; install dependencies if needed. Do not commit, push or switch branches — Dorothy integrates the delivery after acceptance.`)
+  }
   out.push('')
   out.push(roleLine(run))
   out.push('dot verifies the delivery independently. Report concrete evidence; do not declare PASS or FAIL on the work order.')

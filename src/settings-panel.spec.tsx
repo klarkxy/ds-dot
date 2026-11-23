@@ -337,7 +337,7 @@ describe('sectioned settings, switches, and help tips', () => {
     expect(document.querySelector('[role="tablist"][aria-label="Model questions"]')).not.toBeNull()
     expect(document.querySelector('[role="tablist"][aria-label="Task permissions"]')).toBeNull()
     expect(document.querySelectorAll('.dsh-ui-help')).toHaveLength(0)
-    expect(document.querySelectorAll('.dsh-dot-help-tip')).toHaveLength(2)
+    expect(document.querySelectorAll('.dsh-dot-help-tip')).toHaveLength(3)
 
     // Dispatch: task permissions, task models (with dynamic empty-allow-list warning inline), routine check.
     await act(async () => root.render(<Harness section="dispatch" />))
@@ -382,7 +382,7 @@ describe('sectioned settings, switches, and help tips', () => {
     await act(async () => root.unmount())
   })
 
-  it('shows the Model questions help tip only when questions is set to dot', async () => {
+  it('shows a Model questions help tip for every option', async () => {
     let current: DotSettings = { ...DEFAULT_SETTINGS, questions: 'dot' }
     const api = {
       models: async () => ({ groups: [] }),
@@ -400,24 +400,99 @@ describe('sectioned settings, switches, and help tips', () => {
     await act(async () => { await Promise.resolve() })
 
     const tip = () => document.querySelector<HTMLButtonElement>('button.dsh-dot-help-tip[aria-label="About Model questions"]')
-    const tabNamed = (label: string) => [...document.querySelectorAll<HTMLButtonElement>('[role="tab"]')].find(el => el.textContent === label)!
+    const tabNamed = (label: string) => [...document.querySelectorAll<HTMLButtonElement>('[role="tablist"][aria-label="Model questions"] [role="tab"]')].find(el => el.textContent === label)!
     expect(tip()).not.toBeNull()
 
-    await act(async () => tabNamed('Ask me').click())
+    await act(async () => tabNamed('Me').click())
     await act(async () => { await Promise.resolve() })
     expect(current.questions).toBe('human')
-    expect(tip()).toBeNull()
+    expect(tip()).not.toBeNull()
 
     await act(async () => tabNamed('Hands off').click())
     await act(async () => { await Promise.resolve() })
     expect(current.questions).toBe('off')
-    expect(tip()).toBeNull()
+    expect(tip()).not.toBeNull()
 
-    await act(async () => tabNamed('She decides').click())
+    await act(async () => tabNamed('Dorothy').click())
     await act(async () => { await Promise.resolve() })
     expect(current.questions).toBe('dot')
     expect(tip()).not.toBeNull()
 
     await act(async () => root.unmount())
+  })
+})
+
+describe('desktop notifications switch', () => {
+  const apiStub = () => ({
+    models: async () => ({ groups: [] }),
+    settings: async () => DEFAULT_SETTINGS,
+    settingProposals: async () => [],
+    decideSetting: async () => 'ok',
+    setSettings: async () => DEFAULT_SETTINGS,
+  })
+  const restoreBaseGlobals = () => {
+    vi.unstubAllGlobals()
+    vi.stubGlobal('window', dom.window)
+    vi.stubGlobal('document', dom.window.document)
+    vi.stubGlobal('navigator', dom.window.navigator)
+  }
+
+  it('asks for permission inside the click and keeps the pref browser-local', async () => {
+    vi.stubGlobal('localStorage', dom.window.localStorage)
+    dom.window.localStorage.clear()
+    const fakeNotification = {
+      permission: 'default' as string,
+      requestPermission: vi.fn(async () => { fakeNotification.permission = 'granted'; return 'granted' as const }),
+    }
+    vi.stubGlobal('Notification', fakeNotification)
+    try {
+      const api = apiStub()
+      const root = createRoot(document.getElementById('root')!)
+      await act(async () => root.render(<SettingsPanel locale="en" section="general" api={api as never} settings={DEFAULT_SETTINGS} onSaved={() => {}} />))
+      await act(async () => { await Promise.resolve() })
+      const toggle = () => document.querySelector<HTMLButtonElement>('button[role="switch"][aria-label="Desktop notifications"]')!
+      expect(toggle().getAttribute('aria-checked')).toBe('false')
+
+      await act(async () => toggle().click())
+      await act(async () => { await Promise.resolve() })
+      expect(fakeNotification.requestPermission).toHaveBeenCalledTimes(1)
+      expect(dom.window.localStorage.getItem('dsh-dot:desktop-notify')).toBe('1')
+      expect(toggle().getAttribute('aria-checked')).toBe('true')
+
+      await act(async () => toggle().click())
+      expect(dom.window.localStorage.getItem('dsh-dot:desktop-notify')).toBeNull()
+      expect(toggle().getAttribute('aria-checked')).toBe('false')
+      await act(async () => root.unmount())
+    } finally {
+      restoreBaseGlobals()
+    }
+  })
+
+  it('stays off with an inline note when the browser refuses or lacks support', async () => {
+    vi.stubGlobal('localStorage', dom.window.localStorage)
+    dom.window.localStorage.clear()
+    vi.stubGlobal('Notification', { permission: 'default', requestPermission: async () => 'denied' as const })
+    try {
+      const api = apiStub()
+      const root = createRoot(document.getElementById('root')!)
+      await act(async () => root.render(<SettingsPanel locale="en" section="general" api={api as never} settings={DEFAULT_SETTINGS} onSaved={() => {}} />))
+      await act(async () => { await Promise.resolve() })
+      const toggle = () => document.querySelector<HTMLButtonElement>('button[role="switch"][aria-label="Desktop notifications"]')!
+
+      await act(async () => toggle().click())
+      await act(async () => { await Promise.resolve() })
+      expect(toggle().getAttribute('aria-checked')).toBe('false')
+      expect(dom.window.localStorage.getItem('dsh-dot:desktop-notify')).toBeNull()
+      expect(document.body.textContent).toContain('Blocked by the browser')
+
+      vi.stubGlobal('Notification', undefined)
+      await act(async () => toggle().click())
+      await act(async () => { await Promise.resolve() })
+      expect(toggle().getAttribute('aria-checked')).toBe('false')
+      expect(document.body.textContent).toContain('Not supported by this browser')
+      await act(async () => root.unmount())
+    } finally {
+      restoreBaseGlobals()
+    }
   })
 })

@@ -22,6 +22,8 @@ const MINUTE_MS = 60_000
 export interface ScheduleInput {
   readonly title: string
   readonly prompt: string
+  /** Bind a saved recipe (id): the reminder dispatches it directly when due; prompt becomes an optional note. */
+  readonly recipe?: string
   readonly afterMinutes?: number
   readonly at?: string
   readonly everyMinutes?: number
@@ -60,12 +62,12 @@ function wholeMinutes(value: number, name: string, min: number, max: number): nu
 }
 
 /** Validate a tool request into the stored parts of a reminder. */
-export function parseSchedule(input: ScheduleInput, now: number): Pick<ScheduleRecord, 'title' | 'prompt' | 'timing' | 'nextAt'> {
+export function parseSchedule(input: ScheduleInput, now: number): Pick<ScheduleRecord, 'title' | 'prompt' | 'timing' | 'nextAt' | 'recipe'> {
   const title = input.title.replace(/\s+/g, ' ').trim()
   const prompt = input.prompt.trim()
   if (!title) throw new ScheduleInputError('title must be non-empty')
   if (title.length > SCHEDULE_TITLE_MAX) throw new ScheduleInputError(`title must be at most ${SCHEDULE_TITLE_MAX} characters`)
-  if (!prompt) throw new ScheduleInputError('prompt must be non-empty')
+  if (!prompt && !input.recipe) throw new ScheduleInputError('prompt must be non-empty')
   if (prompt.length > SCHEDULE_PROMPT_MAX) throw new ScheduleInputError(`prompt must be at most ${SCHEDULE_PROMPT_MAX} characters`)
   const given = [input.afterMinutes, input.at, input.everyMinutes, input.dailyTime].filter(value => value !== undefined).length
   if (given !== 1) throw new ScheduleInputError('give exactly one of after_minutes, at, every_minutes or daily_time')
@@ -89,7 +91,7 @@ export function parseSchedule(input: ScheduleInput, now: number): Pick<ScheduleR
   }
   const nextAt = nextOccurrence(timing, now)
   if (nextAt === undefined) throw new ScheduleInputError('that timing never comes due')
-  return { title, prompt, timing, nextAt }
+  return { title, prompt, timing, nextAt, ...(input.recipe ? { recipe: input.recipe } : {}) }
 }
 
 /** The first time a timing is due after `after`; undefined once it never is again. */
@@ -130,8 +132,9 @@ export function describeTiming(timing: ScheduleTiming): string {
 const entryText = (prompt: string) => prompt.split('\n').map((line, index) => index === 0 ? line : `  ${line}`).join('\n')
 
 /** The message dot receives when reminders come due. */
-export function formatReminders(due: readonly ScheduleRecord[], now: number): string {
+export function formatReminders(due: readonly ScheduleRecord[], now: number, opts?: { readonly refusals?: ReadonlyMap<string, string>; readonly recipeName?: (id: string) => string | undefined }): string {
   const lines = [`${REMINDER_HEAD} Reminders you set for yourself are due:`]
+  const recipeTag = (record: ScheduleRecord) => record.recipe ? ` recipe ${record.recipe} "${opts?.recipeName?.(record.recipe) ?? '?'}"` : ''
   for (const record of due) {
     const next = nextOccurrence(record.timing, now)
     const facts = [
@@ -139,7 +142,14 @@ export function formatReminders(due: readonly ScheduleRecord[], now: number): st
       `due ${stamp(record.nextAt)}${now - record.nextAt > LATE_MS ? ', delivered late' : ''}`,
       next === undefined ? 'now removed' : `next ${stamp(next)}`,
     ]
-    lines.push(`- ${record.id} "${record.title}" (${facts.join('; ')}): ${entryText(record.prompt)}`)
+    const refused = opts?.refusals?.get(record.id)
+    // The refusal rides the bullet in brackets: a prompt can never reach that
+    // position, so a quoted "… refused: …" line can't masquerade as a failure.
+    // It must stay on one line — a newline would split the bullet.
+    const flat = refused?.replace(/[[\]]/g, '').replace(/\s+/g, ' ').trim() ?? ''
+    const refusalTag = flat ? ` [dispatch refused: ${flat.length > 300 ? `${flat.slice(0, 299)}…` : flat}]` : ''
+    const prompt = record.prompt ? `: ${entryText(record.prompt)}` : ''
+    lines.push(`- ${record.id} "${record.title}" (${facts.join('; ')})${recipeTag(record)}${refusalTag}${prompt}`)
   }
   lines.push('Do what each one asks now. The human reads your reply in the chat, so tell them what is worth their attention and nothing about the reminder itself.')
   return lines.join('\n')
@@ -151,12 +161,14 @@ export function onceDelivered(record: ScheduleRecord): boolean {
 }
 
 /** The reminders as dot reads them in the list tool. */
-export function scheduleLines(records: readonly ScheduleRecord[]): string {
+export function scheduleLines(records: readonly ScheduleRecord[], recipeName?: (id: string) => string | undefined): string {
   if (records.length === 0) return `No reminders set. ${TOOL.schedule} (action=add) sets one.`
+  const recipeTag = (record: ScheduleRecord) => record.recipe ? ` recipe ${record.recipe} "${recipeName?.(record.recipe) ?? '?'}"` : ''
+  const prompt = (record: ScheduleRecord) => record.prompt ? `: ${entryText(record.prompt)}` : ''
   return records.map(record => {
     if (onceDelivered(record)) {
-      return `- ${record.id} "${record.title}" (once; delivered ${stamp(record.deliveredAt!)}; will not fire again): ${entryText(record.prompt)}`
+      return `- ${record.id} "${record.title}" (once; delivered ${stamp(record.deliveredAt!)}; will not fire again)${recipeTag(record)}${prompt(record)}`
     }
-    return `- ${record.id} "${record.title}" (${describeTiming(record.timing)}; next ${stamp(record.nextAt)}): ${entryText(record.prompt)}`
+    return `- ${record.id} "${record.title}" (${describeTiming(record.timing)}; next ${stamp(record.nextAt)})${recipeTag(record)}${prompt(record)}`
   }).join('\n')
 }

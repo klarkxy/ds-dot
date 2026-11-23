@@ -520,10 +520,11 @@ export function formatSpawnFailure(res) {
 }
 
 // --dsh-cmd is a single string like `"C:\Program Files\nodejs\node.exe" app.js`.
-// Split on unquoted whitespace only. Quote characters start a quoted run only
-// at a token boundary; mid-token quotes (including apostrophes in bare paths)
-// stay literal. Quote characters are removed, doubled quotes inside a quoted
-// run collapse to one literal quote.
+// Split on unquoted whitespace only. Double quotes may open a quoted run
+// mid-token (e.g. --flag="path with spaces"). Single quotes open a quoted
+// run only at a token boundary so a bare apostrophe in a path stays literal.
+// Quote characters are removed; doubled quotes inside a quoted run collapse
+// to one literal quote.
 export function splitCommandLine(cmdString) {
   const parts = []
   let current = ''
@@ -544,7 +545,7 @@ export function splitCommandLine(cmdString) {
       }
       continue
     }
-    if ((ch === '"' || ch === "'") && !started) {
+    if (ch === '"' || (ch === "'" && !started)) {
       quote = ch
       started = true
     } else if (/\s/.test(ch)) {

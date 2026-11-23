@@ -423,6 +423,10 @@ test('splitCommandLine respects quoting and spaced paths', () => {
     ['/home/user/My Documents/dsh', '--flag'],
   )
   assert.deepEqual(
+    splitCommandLine('node --require="/home/qa tools/preload.cjs" /home/qa/dsh.js'),
+    ['node', '--require=/home/qa tools/preload.cjs', '/home/qa/dsh.js'],
+  )
+  assert.deepEqual(
     splitCommandLine('"say ""hello"" there"'),
     ['say "hello" there'],
   )

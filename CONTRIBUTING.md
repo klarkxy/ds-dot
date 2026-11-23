@@ -1,8 +1,15 @@
 # Contributing to ds-dot
 
+Thanks for helping make Dorothy (`ds-dot`) better! Whether you're fixing a typo, polishing docs, or building a new panel feature, this guide walks through how we develop, test, and land changes cleanly.
+
+> [!TIP]
+> **Quick PR checklist:** Branch from `dev` → run `pnpm typecheck && pnpm test && pnpm build` → sync GitHub Pages (`docs/`) and READMEs if adding/changing a user-facing feature → target `dev` with a [Conventional Commits](https://www.conventionalcommits.org/) PR title → attach a live `dsh web` GIF if your diff touches UI or copy (or write `No frontend changes`).
+
+---
+
 ## Local development
 
-Install dependencies, link your checkout into DeepSeek Harness, and run a watch build while developing:
+Install dependencies, link your local checkout into DeepSeek Harness, and keep a watch build running while you edit:
 
 ```sh
 pnpm install
@@ -10,13 +17,15 @@ dsh plugin --profile web add link:/path/to/ds-dot
 pnpm watch
 ```
 
-The linked checkout exposes `src`, and `pnpm watch` rebuilds `lib` as you edit. If `pnpm` prompts for build permission when linking from source, allow `ds-dot` in that profile's `pnpm-workspace.yaml` and rerun `dsh plugin --profile web add link:/path/to/ds-dot`.
+The linked checkout exposes `src`, and `pnpm watch` rebuilds `lib` automatically on save. If `pnpm` asks for build approval when linking from source, allow `ds-dot` in that profile's `pnpm-workspace.yaml` and re-run `dsh plugin --profile web add link:/path/to/ds-dot`.
 
-Before pushing, run the full CI gate locally:
+Before pushing, run the full local CI gate:
 
 ```sh
 pnpm typecheck && pnpm test && pnpm build
 ```
+
+---
 
 ## Branches and workflow
 
@@ -33,32 +42,58 @@ flowchart LR
   M -->|"sync PR, merge commit"| D
 ```
 
-Feature and fix PRs merge into `dev` with a merge commit so the feature branch history stays intact; the merge commit subject is the pull request title plus the PR number, which becomes the release-notes entry. Because the branch's commits land on `dev` verbatim, tidy them before merging — squashing or rebasing within your own feature branch is welcome and carries none of the shared-history risks of merging `main` and `dev` the same way. Release (`dev` → `main`), hotfix (`hotfix/*` → `main`), and sync (`main` → `dev`) PRs also use merge commits so `main` and `dev` continue sharing history.
+Feature and fix PRs merge into `dev` with a **merge commit** so feature history stays intact; the merge commit subject is the PR title plus the PR number, which becomes the release-notes entry. Because your branch commits land on `dev` verbatim, feel free to tidy, squash, or rebase within your own feature branch before merging (unlike `main` ↔ `dev`, which must always share history via merge commits). Release (`dev` → `main`), hotfix (`hotfix/*` → `main`), and sync (`main` → `dev`) PRs also use merge commits.
 
-1. **Start from an issue.** Open or claim an issue so work is not duplicated (trivial typo or docs fixes may skip this).
-2. **Branch from the latest `dev`** (`feat/<issue>-<slug>`, `fix/<issue>-<slug>`, `refactor/...`, or `docs/...`):
+1. **Start from an issue:** Open or claim an issue so work isn't duplicated (trivial typo or docs fixes can skip this).
+2. **Branch from the latest `dev`:** Use `feat/<issue>-<slug>`, `fix/<issue>-<slug>`, `refactor/...`, or `docs/...`:
    ```sh
    git switch dev && git pull
    git switch -c feat/123-short-name
    ```
-   If `dev` advances while you work, sync with `git merge origin/dev` (or rebase your feature branch).
-3. **Open a pull request targeting `dev`** (GitHub defaults to `main`, so switch the base branch to `dev`):
-   - Use a [Conventional Commits](https://www.conventionalcommits.org/) PR title (`feat(work): render English work orders`). Allowed types: `feat`, `fix`, `perf`, `refactor`, `docs`, `test`, `build`, `ci`, `chore`, `revert`, `release` (append `!` for breaking changes, e.g. `feat(api)!: ...`).
-   - Reference the issue with `Closes #123` in the PR body.
-   - Keep PRs focused; prefer small, reviewable changes over monolithic diffs.
-   - Include a live interaction GIF whenever the PR touches the frontend (see [Frontend changes](#frontend-changes)).
-4. **Pass CI and review.** `CI result` (typecheck, test, build, and pack on Linux and Windows) and `PR title` must pass, all review threads must be resolved, and any required frontend GIF must be embedded in the PR body before merging.
+   If `dev` moves ahead while you're working, sync with `git merge origin/dev` (or rebase your feature branch).
+3. **Open a PR targeting `dev`** (GitHub defaults to `main`, so switch the base branch to `dev`):
+   - Format the PR title as a [Conventional Commit](https://www.conventionalcommits.org/) (e.g., `feat(work): render English work orders`). Allowed types: `feat`, `fix`, `perf`, `refactor`, `docs`, `test`, `build`, `ci`, `chore`, `revert`, `release` (append `!` for breaking changes, e.g., `feat(api)!: ...`).
+   - Reference the issue with `Closes #123` in the PR description.
+   - Keep PRs focused — small, reviewable changes beat monolithic diffs.
+   - Include a live interaction GIF whenever your change affects the UI (see [Frontend changes](#frontend-changes)).
+   - Sync the GitHub Pages showcase (`docs/`) and READMEs whenever your PR adds or changes a user-facing feature (see [GitHub Pages and documentation sync](#github-pages-and-documentation-sync)).
+4. **Pass CI and review:** Both `CI result` (typecheck, test, build, and pack across Linux and Windows) and `PR title` must pass, all review threads must be resolved, any required frontend GIF must be in the PR body, and any user-facing feature must be synced to GitHub Pages before merging.
 5. **Merge with a merge commit**, then delete the feature branch.
+
+---
 
 ## Frontend changes
 
-A pull request counts as a frontend change whenever it alters what a user sees or interacts with in Dorothy's UI inside DeepSeek Harness — including client components (`src/**/*.tsx`, excluding `*.spec.tsx`), user-facing copy (`src/ui-copy.ts`, `src/i18n/locales/*.ts`, `locale/*.json`), and icons (`icon.svg` or inline SVG glyphs). Backend-only, test-only, and docs-only diffs do not count.
+A PR counts as a **frontend change** whenever it alters what a user sees or interacts with in Dorothy's UI inside DeepSeek Harness:
 
-- **When a PR changes the frontend:** Embed a real interaction GIF in the PR body recorded from a live `dsh web` instance running your branch, and state the commit SHA recorded (e.g. `Recorded on commit <sha>`). Show the actual interaction and visual outcome on screen — static screenshots, mockups, synthetic animations, or text claims do not satisfy this requirement. Keep the GIF file off the Git branch.
-- **How to record safely:** Use the bundled `dsh-web-acceptance` skill in `.agents/skills/dsh-web-acceptance/`, which launches an isolated `DSH_HOME` instance, exchanges the startup token for an `HttpOnly` cookie prior to recording, and exports a palette-optimized GIF outside the repository with zero API keys, `?token=` URLs, cookies, or personal data.
-- **When a PR leaves the frontend untouched:** Write `No frontend changes` in the PR body. Do not use that marker on diffs that touch UI components, styles, icons, or user-facing copy, regardless of how small the change is.
+- Client components (`src/**/*.tsx`, excluding `*.spec.tsx`)
+- User-facing copy (`src/ui-copy.ts`, `src/i18n/locales/*.ts`, `locale/*.json`)
+- Icons (`icon.svg` or inline SVG glyphs)
 
-Reviewers verify the PR body against the diff directly (CI does not validate GIF presence).
+Backend-only, test-only, and docs-only diffs (including `README.md`, `CONTRIBUTING.md`, and `docs/` pages) do **not** count.
+
+> [!IMPORTANT]
+> **If your PR changes the frontend:**
+> - Embed a real interaction GIF in the PR body recorded from a live `dsh web` instance running your branch, and state the commit SHA recorded (e.g. `Recorded on commit <sha>`).
+> - Show the actual interaction and on-screen outcome — static screenshots, mockups, synthetic animations, or written claims do not satisfy this rule. Keep the GIF file off the Git branch.
+> - **Record safely with `dsh-web-acceptance`:** Use the bundled skill in [`.agents/skills/dsh-web-acceptance/`](.agents/skills/dsh-web-acceptance/), which launches an isolated `DSH_HOME` instance, exchanges the startup token for an `HttpOnly` cookie before recording, and writes a palette-optimized GIF outside the repo with zero API keys, `?token=` URLs, cookies, or personal data.
+
+- **If your PR leaves the frontend untouched:** Keep `No frontend changes` in the PR body. Never use that marker on diffs that touch UI components, styles, icons, or user-facing copy, regardless of how small the change is.
+
+Reviewers check the PR body against the diff directly (CI does not validate GIF presence).
+
+---
+
+## GitHub Pages and documentation sync
+
+> [!IMPORTANT]
+> **Every user-facing PR maintains Dorothy's blog (`docs/`).** Whenever a pull request adds or changes a **user-facing feature** (new capabilities, panel interactions, safety boundaries, settings, or workflows), follow [`.agents/skills/ds-dot-blog/`](.agents/skills/ds-dot-blog/) in the same PR so the site evolves like a real personal blog alongside the code.
+
+- **Maintain the blog (`docs/` via `.agents/skills/ds-dot-blog/`):** Either add a new trilingual post in `POSTS` inside [`docs/app.js`](docs/app.js) for a distinct capability, or **merge/update** an existing overlapping post (updating `date` to the real PR merge date and re-sorting non-pinned entries newest-first) rather than creating fragmented duplicates. Register any PR demo GIF published on `docs/demo-assets` inside `RECORDINGS` pointing to that `post` slug, and update [`docs/index.html`](docs/index.html) if pinned/sidebar fallbacks change.
+- **Keep READMEs slim & deep specs in `docs/reference.md`:** Reflect major install/highlight changes concisely in [`README.md`](README.md), [`docs/README.zh-CN.md`](docs/README.zh-CN.md), and [`docs/README.ja.md`](docs/README.ja.md), and place detailed config, approval pattern tables, or webhook setups in [`docs/reference.md`](docs/reference.md).
+- **Exemptions:** Pure bug fixes without visible behavior changes, internal refactors, and test-only PRs do not require blog updates (mark that PR checklist item as `N/A`).
+
+---
 
 ## Releases and hotfixes
 

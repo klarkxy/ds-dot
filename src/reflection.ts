@@ -106,7 +106,7 @@ export function buildReflectionInstruction(input: { readonly agreements: readonl
     "[cognition] entries (id · state · last confirmed · text; dormant entries are stored but not in dot's prompt):",
     cognition,
     '',
-    `Call ${REFLECTION_SUBMIT_TOOL} exactly once with ops for the changes the record supports — confirm, update, merge, add, or remove — plus agreementNotes when needed.`,
+    `Call ${REFLECTION_SUBMIT_TOOL} exactly once with ops for the changes the record supports — confirm, update, add, or remove; merge two entries by updating one and removing the other in the same call — plus agreementNotes when needed.`,
     'Check [agreements] for stale or conflicting entries; if you find any, pass a brief note in agreementNotes on the same call so dot can surface it to the human next turn. Never edit [agreements] yourself.',
     'If nothing needs to change, submit ops=[] and omit agreementNotes.',
     ...(input.recipes?.trim() ? [

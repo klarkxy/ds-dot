@@ -9,7 +9,7 @@ import { applyEvent, createTask, ledgerSummary, markSeen, sortTasks, withPending
 import { MAX_PAST_SEGMENTS, type PastSegment, type Segment } from './segments.ts'
 import { parseSettings } from './settings.ts'
 import { isCopyLocale, type CopyLocale } from './i18n/index.ts'
-import { sameCognitionContent, sameEntries } from './memory.ts'
+import { maxEntrySuffix, sameCognitionContent, sameEntries } from './memory.ts'
 import { STATE_KEY, parseRecipeProposal, parseRecipeRecord, parseScheduleRecord, parseSettingProposal, parseState, parseTask, parseTaskLink, type DotState } from './storage.ts'
 import { ownedSessionIds, sessionIsOwned } from './peer.ts'
 import { WorkBook, isUnknownState, type ChangeRecord, type WorkPersist } from './work.ts'
@@ -285,23 +285,45 @@ export class DotStore {
   // ---- agreements and cognition (DotStore is the authority) --------------
 
   get agreementEntries(): readonly AgreementEntry[] { return this.state.agreementEntries ?? [] }
-  get agreementsUndo(): readonly AgreementEntry[] | undefined { return this.state.agreementsUndo }
+  get agreementEntriesUndo(): readonly AgreementEntry[] | undefined { return this.state.agreementEntriesUndo }
   get cognitionEntries(): readonly CognitionEntry[] { return this.state.cognitionEntries ?? [] }
-  get cognitionHistory(): readonly CognitionVersion[] { return this.state.cognitionHistory ?? [] }
+  get cognitionEntryHistory(): readonly CognitionVersion[] { return this.state.cognitionEntryHistory ?? [] }
+
+  /**
+   * The id a new entry gets: the counter only ever moves forward, so a removed
+   * entry's id is never handed out again. The bump rides along into the state
+   * write that stores the entry (or the next one, when no write happens).
+   */
+  nextKnowledgeId(kind: 'a' | 'c'): string {
+    const seq = this.state.knowledgeIdSeq ?? { a: 0, c: 0 }
+    const next = kind === 'a' ? { ...seq, a: seq.a + 1 } : { ...seq, c: seq.c + 1 }
+    this.state = { ...this.state, knowledgeIdSeq: next }
+    return `${kind}${next[kind]}`
+  }
+
+  /** Lift the counter past every id a write stores, so an entry that arrived with the list is never re-issued. */
+  private liftKnowledgeSeq(kind: 'a' | 'c', entries: readonly { readonly id: string }[]): void {
+    const seq = this.state.knowledgeIdSeq ?? { a: 0, c: 0 }
+    const seen = maxEntrySuffix(kind, [entries])
+    if (seen <= seq[kind]) return
+    this.state = { ...this.state, knowledgeIdSeq: kind === 'a' ? { ...seq, a: seen } : { ...seq, c: seen } }
+  }
 
   /** Replace the agreements; the entries before them are what one undo restores. */
   setAgreementEntries(entries: readonly AgreementEntry[]): Promise<void> {
     const before = this.agreementEntries
     if (sameEntries(entries, before)) return Promise.resolve()
-    return this.setDot({ agreementEntries: entries, agreementsUndo: before })
+    this.liftKnowledgeSeq('a', entries)
+    return this.setDot({ agreementEntries: entries, agreementEntriesUndo: before })
   }
 
   /** Swap the agreements with the entries the latest change replaced. @returns false when there is nothing to take back. */
   undoAgreements(): Promise<boolean> {
-    const undo = this.state.agreementsUndo
+    const undo = this.state.agreementEntriesUndo
     if (undo === undefined) return Promise.resolve(false)
     const current = this.agreementEntries
-    return this.setDot({ agreementEntries: undo, agreementsUndo: current }).then(() => true)
+    this.liftKnowledgeSeq('a', undo)
+    return this.setDot({ agreementEntries: undo, agreementEntriesUndo: current }).then(() => true)
   }
 
   /**
@@ -314,17 +336,18 @@ export class DotStore {
     const before = this.cognitionEntries
     if (sameEntries(entries, before)) return Promise.resolve()
     this.cognitionRevision++
-    const history = this.cognitionHistory
+    const history = this.cognitionEntryHistory
     const latest = history[0]?.at ?? 0
     // Strictly increasing timestamps keep every version addressable for restore.
     const at = Math.max(Math.trunc(now), latest + 1)
     const next = sameCognitionContent(entries, before) ? history : [{ entries: before, at }, ...history].slice(0, COGNITION_HISTORY_MAX)
-    return this.setDot({ cognitionEntries: entries, cognitionHistory: next })
+    this.liftKnowledgeSeq('c', entries)
+    return this.setDot({ cognitionEntries: entries, cognitionEntryHistory: next })
   }
 
   /** Put an earlier cognition entry list back; the list it replaces joins the history too. @returns false for an unknown version. */
   restoreCognition(at: number, now = Date.now()): Promise<boolean> {
-    const version = this.cognitionHistory.find(entry => entry.at === at)
+    const version = this.cognitionEntryHistory.find(entry => entry.at === at)
     if (!version) return Promise.resolve(false)
     return this.setCognitionEntries(version.entries, now).then(() => true)
   }

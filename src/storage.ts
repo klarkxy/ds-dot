@@ -8,7 +8,7 @@ import { defineDomain, domainTable } from '@deepseek-ai/dsh-storage-domain'
 import { z } from 'zod'
 import type { ViewNode } from '@klarkxy/dsh-deep-view/contracts'
 import { SETTING_FIELDS, type AgreementEntry, type CognitionEntry, type CognitionVersion, type DotContextUsage, type DotUsageOffset, type InboxRecord, type RecipeProposal, type RecipeRecord, type TaskLink, type ReflectionRun, type ScheduleRecord, type SettingProposal, type TaskRecord } from './contracts.ts'
-import { migrateAgreementEntries, migrateCognitionEntries } from './memory.ts'
+import { maxEntrySuffix, migrateAgreementEntries, migrateCognitionEntries } from './memory.ts'
 import { migrateTaskPermissionBaseline, TASK_PERMISSIONS } from './settings.ts'
 import type { UpdateStatus } from './auto-update.ts'
 import type { PastSegment, Segment } from './segments.ts'
@@ -168,17 +168,21 @@ const stateSchema = z.object({
   settings: z.record(z.string(), z.unknown()).optional(),
   segment: segmentSchema.optional(),
   pastSegments: z.array(pastSegmentSchema).optional(),
-  /** The human's own standing requirements, one entry per rule; the legacy string shape only exists until migration. */
+  /** The human's own standing requirements, one entry per rule. */
   agreementEntries: z.array(agreementEntrySchema).optional(),
-  /** What one undo of the agreements restores; the legacy string shape only exists until migration. */
-  agreementsUndo: z.union([z.string(), z.array(agreementEntrySchema)]).optional(),
-  /** dot's own understanding, one entry per point; the legacy string shape only exists until migration. */
+  /** What one undo of the agreements restores. */
+  agreementEntriesUndo: z.array(agreementEntrySchema).optional(),
+  /** dot's own understanding, one entry per point. */
   cognitionEntries: z.array(cognitionEntrySchema).optional(),
-  /** Earlier cognition entry lists, newest first; legacy {text, at} rows still load for migration. */
-  cognitionHistory: z.array(z.union([cognitionVersionSchema, legacyCognitionVersionSchema])).optional(),
+  /** Earlier cognition entry lists, newest first. */
+  cognitionEntryHistory: z.array(cognitionVersionSchema).optional(),
+  /** Monotonic id counters per prefix so a removed entry's id is never handed out again. */
+  knowledgeIdSeq: z.object({ a: z.number().int().nonnegative(), c: z.number().int().nonnegative() }).optional(),
   /** Legacy pre-entry shapes, still declared so old rows load and migrate, then dropped. */
   agreements: z.string().optional(),
+  agreementsUndo: z.string().optional(),
   cognition: z.string().optional(),
+  cognitionHistory: z.array(legacyCognitionVersionSchema).optional(),
   /** When dot's last successful background reflection finished. */
   lastReflectedAt: z.number().optional(),
   /** When the last background reflection attempt started; drives the failure cooldown. */
@@ -228,11 +232,13 @@ export interface DotState {
   /** The human's own standing requirements, one entry per rule. */
   readonly agreementEntries?: readonly AgreementEntry[]
   /** What one undo of the agreements restores. */
-  readonly agreementsUndo?: readonly AgreementEntry[]
+  readonly agreementEntriesUndo?: readonly AgreementEntry[]
   /** dot's own understanding, one entry per point. */
   readonly cognitionEntries?: readonly CognitionEntry[]
   /** Earlier cognition entry lists, newest first. */
-  readonly cognitionHistory?: readonly CognitionVersion[]
+  readonly cognitionEntryHistory?: readonly CognitionVersion[]
+  /** Monotonic id counters per prefix; a removed entry's id is never handed out again. */
+  readonly knowledgeIdSeq?: { readonly a: number; readonly c: number }
   /** When dot's last successful background reflection finished. */
   readonly lastReflectedAt?: number
   /** When the last background reflection attempt started; drives the failure cooldown. */
@@ -444,33 +450,37 @@ export function parseTask(value: unknown): TaskRecord | undefined {
 }
 
 /** The state row as stored: legacy pre-entry knowledge shapes may still be present. */
-interface StoredState extends Omit<DotState, 'agreementEntries' | 'agreementsUndo' | 'cognitionEntries' | 'cognitionHistory'> {
-  readonly agreementEntries?: readonly AgreementEntry[]
-  readonly agreementsUndo?: readonly AgreementEntry[] | string
-  readonly cognitionEntries?: readonly CognitionEntry[]
-  readonly cognitionHistory?: readonly (CognitionVersion | { readonly text: string; readonly at: number })[]
+interface StoredState extends DotState {
   readonly agreements?: string
+  readonly agreementsUndo?: string
   readonly cognition?: string
+  readonly cognitionHistory?: readonly { readonly text: string; readonly at: number }[]
 }
 
 /**
- * Convert the pre-entry knowledge fields into entry lists. Entries get fresh
- * ids in line order and share `now` as their timestamps; equal seenAt values
- * fall back to stored order when ranked. Legacy keys are dropped so the next
- * write persists only the new shape.
+ * Convert the pre-entry knowledge fields into entry lists and make sure the
+ * id counters exist. Entries get fresh ids in line order from the monotonic
+ * per-prefix counter (seeded above every id the row already carries) and share
+ * `now` as their timestamps; equal seenAt values fall back to stored order
+ * when ranked. The legacy keys are dropped so the next write persists only
+ * the new shape — older plugin versions keep their own keys untouched.
  */
 export function migrateKnowledge(stored: StoredState, now: number): { readonly state: DotState; readonly migrated: boolean } {
-  const legacyUndo = typeof stored.agreementsUndo === 'string'
-  const legacyHistory = (stored.cognitionHistory ?? []).some(version => 'text' in version)
-  if (typeof stored.agreements !== 'string' && typeof stored.cognition !== 'string' && !legacyUndo && !legacyHistory) {
-    return { state: stored as DotState, migrated: false }
-  }
-  const agreementEntries = stored.agreementEntries ?? migrateAgreementEntries(stored.agreements ?? '', now)
-  const agreementsUndo = legacyUndo ? migrateAgreementEntries(stored.agreementsUndo as string, now) : stored.agreementsUndo
-  const cognitionEntries = stored.cognitionEntries ?? migrateCognitionEntries(stored.cognition ?? '', now)
-  const cognitionHistory: CognitionVersion[] = (stored.cognitionHistory ?? []).map(version => 'text' in version ? { at: version.at, entries: migrateCognitionEntries(version.text, now) } : version)
+  const hasLegacy = typeof stored.agreements === 'string' || typeof stored.agreementsUndo === 'string' || typeof stored.cognition === 'string' || (stored.cognitionHistory ?? []).length > 0
+  if (!hasLegacy && stored.knowledgeIdSeq !== undefined) return { state: stored as DotState, migrated: false }
+  let aSeq = stored.knowledgeIdSeq?.a ?? maxEntrySuffix('a', [stored.agreementEntries ?? [], stored.agreementEntriesUndo ?? []])
+  let cSeq = stored.knowledgeIdSeq?.c ?? maxEntrySuffix('c', [stored.cognitionEntries ?? [], ...(stored.cognitionEntryHistory ?? []).map(version => version.entries)])
+  const nextA = () => `a${++aSeq}`
+  const nextC = () => `c${++cSeq}`
+  const agreementEntries = stored.agreementEntries ?? migrateAgreementEntries(stored.agreements ?? '', now, nextA)
+  const agreementEntriesUndo = typeof stored.agreementsUndo === 'string' ? migrateAgreementEntries(stored.agreementsUndo, now, nextA) : stored.agreementEntriesUndo
+  const cognitionEntries = stored.cognitionEntries ?? migrateCognitionEntries(stored.cognition ?? '', now, nextC)
+  const cognitionEntryHistory: CognitionVersion[] = [
+    ...(stored.cognitionEntryHistory ?? []),
+    ...(stored.cognitionHistory ?? []).map(version => ({ at: version.at, entries: migrateCognitionEntries(version.text, now, nextC) })),
+  ].sort((a, b) => b.at - a.at)
   const { agreements: _agreements, agreementsUndo: _undo, cognition: _cognition, cognitionHistory: _history, ...rest } = stored
-  return { state: { ...rest, agreementEntries, agreementsUndo, cognitionEntries, cognitionHistory }, migrated: true }
+  return { state: { ...rest, agreementEntries, agreementEntriesUndo, cognitionEntries, cognitionEntryHistory, knowledgeIdSeq: { a: aSeq, c: cSeq } }, migrated: true }
 }
 
 /** The state row parsed and, when it still carried pre-entry knowledge, migrated to entries. */

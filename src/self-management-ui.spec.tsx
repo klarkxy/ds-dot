@@ -104,6 +104,7 @@ describe('Dorothy self-management controls', () => {
   it('edits, discards and saves the persona, and keeps agreements and cognition apart', async () => {
     let current: DotSettings = { ...DEFAULT_SETTINGS }
     const flagged = (entries: readonly CognitionEntry[]) => cognitionWithActive(entries, 2)
+    let seq = 1
     let knowledge = {
       agreements: { entries: [{ id: 'a1', text: '先给结论', createdAt: 1, updatedAt: 1 }], canUndo: true },
       cognition: {
@@ -134,7 +135,7 @@ describe('Dorothy self-management controls', () => {
         knowledge: async () => knowledge,
         editAgreements: async (edit: KnowledgeEdit) => {
           agreementEdits.push(edit)
-          knowledge = { ...knowledge, agreements: { entries: applyAgreementEdit(knowledge.agreements.entries, edit, 9), canUndo: true } }
+          knowledge = { ...knowledge, agreements: { entries: applyAgreementEdit(knowledge.agreements.entries, edit, 9, () => `a${++seq}`), canUndo: true } }
           return knowledge
         },
         undoAgreements: async () => {
@@ -143,7 +144,7 @@ describe('Dorothy self-management controls', () => {
         },
         editCognition: async (edit: KnowledgeEdit) => {
           cognitionEdits.push(edit)
-          knowledge = { ...knowledge, cognition: { ...knowledge.cognition, entries: flagged(applyCognitionEdit(knowledge.cognition.entries, edit, 9)) } }
+          knowledge = { ...knowledge, cognition: { ...knowledge.cognition, entries: flagged(applyCognitionEdit(knowledge.cognition.entries, edit, 9, () => `c${++seq}`)) } }
           return knowledge
         },
         restoreCognition: async (at: number) => {

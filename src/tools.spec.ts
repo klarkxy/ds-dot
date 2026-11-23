@@ -28,14 +28,17 @@ const catalog = {
   ],
 }
 
+/** An id allocator standing in for the persisted counter. */
+const ids = (prefix: 'a' | 'c') => { let n = 0; return () => `${prefix}${++n}` }
+
 /** Load the preset row against a recording host: every definition must compile. */
 function load(settings: { current: DotSettings; segment?: Seg; notes?: string; cognition?: string } = { current: DEFAULT_SETTINGS }) {
   const registered: Array<Record<string, unknown>> = []
   const sections: Array<{ name: string; order: number; text: (context?: { agent?: { session?: { id?: string } } }) => string }> = []
   const store = new DotStore(undefined)
   const view = async () => ({
-    agreements: { entries: agreementEntriesFromText(settings.notes ?? '', [], 0), canUndo: false },
-    cognition: { entries: cognitionEntriesFromText(settings.cognition ?? '', [], 0).map(entry => ({ ...entry, active: true })), history: [] },
+    agreements: { entries: agreementEntriesFromText(settings.notes ?? '', [], 0, ids('a')), canUndo: false },
+    cognition: { entries: cognitionEntriesFromText(settings.cognition ?? '', [], 0, ids('c')).map(entry => ({ ...entry, active: true })), history: [] },
   })
   // A real SelfSettings backed by a real DotStore so the locks guard works.
   const service = {

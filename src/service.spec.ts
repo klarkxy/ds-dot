@@ -1039,6 +1039,50 @@ describe('DotService knowledge', () => {
     await Promise.all([h.service.agreementAdd('one'), h.service.agreementAdd('two'), h.service.agreementAdd('three')])
     expect(h.store.agreementEntries.map(entry => entry.text)).toEqual(['one', 'two', 'three'])
   })
+
+  it('never reuses a removed entry id: a stale panel remove hits nothing new', async () => {
+    const h = setup()
+    await h.service.ensureDot()
+    await h.service.cognitionAdd('one')
+    await h.service.cognitionAdd('two')
+    await h.service.cognitionAdd('three')
+    const applyOps = h.service as unknown as { applyCognitionOps(ops: string, baseVersion: number): Promise<void> }
+    // A reflection batch removes the highest id and adds in the same call.
+    await applyOps.applyCognitionOps('[{"op":"remove","id":"c3"},{"op":"add","text":"four"}]', h.store.cognitionVersion)
+    expect(h.store.cognitionEntries.map(entry => entry.id)).toEqual(['c1', 'c2', 'c4'])
+    // A panel view from before the batch still names c3; its remove must not hit the new entry.
+    await expect(h.service.editCognition({ op: 'remove', id: 'c3' })).rejects.toMatchObject({ code: 'dot/unknown-entry' })
+    expect(h.store.cognitionEntries.map(entry => entry.id)).toEqual(['c1', 'c2', 'c4'])
+  })
+
+  it('leaves the seen snapshot alone when dot\'s change promotes a dormant entry', async () => {
+    const h = setup(undefined, undefined, undefined, { cognitionPromptEntries: 1 })
+    await h.service.cognitionAdd('A active')
+    await h.service.cognitionAdd('B dormant')
+    const dot = await h.service.ensureDot()
+    h.events.set(dot, [human('hi', 10), reply('hello', 20)])
+    expect(h.store.segment!.cognitionSeen).toBeUndefined()
+    // Removing the active entry promotes B: the prompt changes at the next message.
+    await h.service.cognitionRemove('A active')
+    expect(h.store.segment!.cognitionSeen).toBeUndefined()
+    await h.service.say('next')
+    expect(h.store.dotSessionId).not.toBe(dot)
+    expect(h.store.segment).toMatchObject({ reason: 'prompt-changed' })
+    expect(h.store.segment!.cognition).toContain('B dormant')
+  })
+
+  it('notes the seen snapshot when dot\'s own add takes an active slot', async () => {
+    const h = setup(undefined, undefined, undefined, { cognitionPromptEntries: 1 })
+    await h.service.cognitionAdd('A active')
+    const dot = await h.service.ensureDot()
+    h.events.set(dot, [human('hi', 10), reply('hello', 20)])
+    // The new entry dot just created becomes the active one; A demotes. No promotion dot did not touch.
+    h.advance(500)
+    await h.service.cognitionAdd('C fresh')
+    expect(h.store.segment!.cognitionSeen).toContain('C fresh')
+    await h.service.say('next')
+    expect(h.store.dotSessionId).toBe(dot)
+  })
 })
 
 

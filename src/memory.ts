@@ -33,7 +33,7 @@ export function normalizeEntry(text: string): string {
 export function splitEntryText(text: string, dropHeadings = false): string[] {
   return text.split(/\r?\n/)
     .filter(line => !dropHeadings || !HEADING.test(line))
-    .map(line => line.replace(BULLET, '').trim())
+    .map(line => normalizeEntry(line))
     .filter(Boolean)
 }
 
@@ -54,14 +54,20 @@ export function sameCognitionContent(a: readonly CognitionEntry[], b: readonly C
   })
 }
 
-/** The id a new entry gets: prefix plus one above the largest numeric suffix already in the list. */
-export function nextEntryId(prefix: 'a' | 'c', entries: readonly { readonly id: string }[]): string {
+/** Hands out fresh entry ids; the service backs it with the persisted counter so ids are never reused. */
+export type NextEntryId = () => string
+
+/** The largest numeric suffix any entry in `lists` carries for `prefix`; seeds a missing counter on load. */
+export function maxEntrySuffix(prefix: 'a' | 'c', lists: readonly (readonly { readonly id: string }[])[]): number {
+  const pattern = new RegExp(`^${prefix}(\\d+)$`)
   let max = 0
-  for (const entry of entries) {
-    const match = new RegExp(`^${prefix}(\\d+)$`).exec(entry.id)
-    if (match) max = Math.max(max, Number(match[1]))
+  for (const entries of lists) {
+    for (const entry of entries) {
+      const match = pattern.exec(entry.id)
+      if (match) max = Math.max(max, Number(match[1]))
+    }
   }
-  return `${prefix}${max + 1}`
+  return max
 }
 
 /**
@@ -69,43 +75,44 @@ export function nextEntryId(prefix: 'a' | 'c', entries: readonly { readonly id: 
  * its id and timestamps; new lines get fresh ids. Used wherever stored text
  * becomes entries — migration, proposal approval, bulk sets.
  */
-export function agreementEntriesFromText(text: string, existing: readonly AgreementEntry[], now: number): AgreementEntry[] {
+export function agreementEntriesFromText(text: string, existing: readonly AgreementEntry[], now: number, nextId: NextEntryId): AgreementEntry[] {
   const pool = [...existing]
   const next: AgreementEntry[] = []
   for (const line of splitEntryText(text)) {
     const index = pool.findIndex(entry => entry.text === line)
-    next.push(index >= 0 ? pool.splice(index, 1)[0]! : { id: nextEntryId('a', [...next, ...pool]), text: line, createdAt: now, updatedAt: now })
+    next.push(index >= 0 ? pool.splice(index, 1)[0]! : { id: nextId(), text: line, createdAt: now, updatedAt: now })
   }
   return next
 }
 
 /** Cognition bulk text converted to entries under the same reuse rule, headings dropped. */
-export function cognitionEntriesFromText(text: string, existing: readonly CognitionEntry[], now: number): CognitionEntry[] {
+export function cognitionEntriesFromText(text: string, existing: readonly CognitionEntry[], now: number, nextId: NextEntryId): CognitionEntry[] {
   const pool = [...existing]
   const next: CognitionEntry[] = []
   for (const line of splitEntryText(text, true)) {
     const index = pool.findIndex(entry => entry.text === line)
-    next.push(index >= 0 ? pool.splice(index, 1)[0]! : { id: nextEntryId('c', [...next, ...pool]), text: line, createdAt: now, updatedAt: now, seenAt: now })
+    next.push(index >= 0 ? pool.splice(index, 1)[0]! : { id: nextId(), text: line, createdAt: now, updatedAt: now, seenAt: now })
   }
   return next
 }
 
 /** Legacy agreements text converted to entries; every non-empty line is kept. */
-export function migrateAgreementEntries(text: string, now: number): AgreementEntry[] {
-  return agreementEntriesFromText(text, [], now)
+export function migrateAgreementEntries(text: string, now: number, nextId: NextEntryId): AgreementEntry[] {
+  return agreementEntriesFromText(text, [], now, nextId)
 }
 
 /** Legacy cognition text converted to entries; markdown headings are dropped. */
-export function migrateCognitionEntries(text: string, now: number): CognitionEntry[] {
-  return cognitionEntriesFromText(text, [], now)
+export function migrateCognitionEntries(text: string, now: number, nextId: NextEntryId): CognitionEntry[] {
+  return cognitionEntriesFromText(text, [], now, nextId)
 }
 
 /** The single entry `needle` names, by exact text or a unique substring. */
 export function matchEntry<T extends { readonly id: string; readonly text: string }>(entries: readonly T[], needle: string, kind: 'agreement' | 'cognition'): T {
   const wanted = normalizeEntry(needle).toLowerCase()
   if (!wanted) throw new KnowledgeError('dot/invalid', 'text must be non-empty')
-  const exact = entries.filter(entry => entry.text.toLowerCase() === wanted)
-  const matches = exact.length > 0 ? exact : entries.filter(entry => entry.text.toLowerCase().includes(wanted))
+  const key = (entry: T) => normalizeEntry(entry.text).toLowerCase()
+  const exact = entries.filter(entry => key(entry) === wanted)
+  const matches = exact.length > 0 ? exact : entries.filter(entry => key(entry).includes(wanted))
   const label = kind === 'agreement' ? 'agreement' : 'cognition entry'
   const unknown = kind === 'agreement' ? 'dot/unknown-agreement' : 'dot/unknown-entry'
   const ambiguous = kind === 'agreement' ? 'dot/ambiguous-agreement' : 'dot/ambiguous-entry'
@@ -126,13 +133,13 @@ function byId<T extends { readonly id: string }>(entries: readonly T[], id: stri
 }
 
 /** The human panel's single agreements edit applied to the entry list. */
-export function applyAgreementEdit(entries: readonly AgreementEntry[], edit: KnowledgeEdit, now: number): AgreementEntry[] {
+export function applyAgreementEdit(entries: readonly AgreementEntry[], edit: KnowledgeEdit, now: number, nextId: NextEntryId): AgreementEntry[] {
   switch (edit.op) {
     case 'add': {
       const note = normalizeEntry(edit.text)
       if (!note) throw new KnowledgeError('dot/invalid', 'text must be non-empty')
       if (entries.some(entry => entry.text === note)) return [...entries]
-      return [...entries, { id: nextEntryId('a', entries), text: note, createdAt: now, updatedAt: now }]
+      return [...entries, { id: nextId(), text: note, createdAt: now, updatedAt: now }]
     }
     case 'edit': {
       const note = normalizeEntry(edit.text)
@@ -149,13 +156,13 @@ export function applyAgreementEdit(entries: readonly AgreementEntry[], edit: Kno
 }
 
 /** The human panel's single cognition edit applied to the entry list; pin only toggles the flag. */
-export function applyCognitionEdit(entries: readonly CognitionEntry[], edit: KnowledgeEdit, now: number): CognitionEntry[] {
+export function applyCognitionEdit(entries: readonly CognitionEntry[], edit: KnowledgeEdit, now: number, nextId: NextEntryId): CognitionEntry[] {
   switch (edit.op) {
     case 'add': {
       const note = normalizeEntry(edit.text)
       if (!note) throw new KnowledgeError('dot/invalid', 'text must be non-empty')
       if (entries.some(entry => entry.text === note)) return [...entries]
-      return [...entries, { id: nextEntryId('c', entries), text: note, createdAt: now, updatedAt: now, seenAt: now }]
+      return [...entries, { id: nextId(), text: note, createdAt: now, updatedAt: now, seenAt: now }]
     }
     case 'edit': {
       const note = normalizeEntry(edit.text)
@@ -237,7 +244,7 @@ export function parseCognitionOps(raw: string): CognitionOp[] {
 }
 
 /** The ops applied to the stored entries; validation runs first so a bad op drops the whole set. */
-export function applyCognitionOps(entries: readonly CognitionEntry[], ops: readonly CognitionOp[], now: number): CognitionEntry[] {
+export function applyCognitionOps(entries: readonly CognitionEntry[], ops: readonly CognitionOp[], now: number, nextId: NextEntryId): CognitionEntry[] {
   for (const op of ops) {
     if (op.op === 'add') continue
     const hit = byId(entries, op.id)
@@ -247,7 +254,7 @@ export function applyCognitionOps(entries: readonly CognitionEntry[], ops: reado
   }
   return ops.reduce<CognitionEntry[]>((list, op) => {
     switch (op.op) {
-      case 'add': return [...list, { id: nextEntryId('c', list), text: op.text, createdAt: now, updatedAt: now, seenAt: now }]
+      case 'add': return [...list, { id: nextId(), text: op.text, createdAt: now, updatedAt: now, seenAt: now }]
       case 'update': return list.map(entry => entry.id === op.id ? { ...entry, text: op.text, updatedAt: now, seenAt: now } : entry)
       case 'remove': return list.filter(entry => entry.id !== op.id)
       case 'confirm': return list.map(entry => entry.id === op.id ? { ...entry, seenAt: now } : entry)

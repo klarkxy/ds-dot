@@ -3,7 +3,7 @@ import { SETTING_FIELDS, TOOL, type DotSettings, type SettingField, type Setting
 import { type CopyLocale } from './i18n/index.ts'
 import { lockedField, patchSettings } from './settings.ts'
 import { defaultAddress, defaultPersona } from './persona.ts'
-import { agreementsText, normalizeAgreements } from './memory.ts'
+import { agreementsText, normalizeAgreements, splitEntryText } from './memory.ts'
 
 /** A proposal for the agreements field rewrites the stored agreements text. */
 function valueOf(settings: DotSettings, field: SettingField, agreementsText: string, locale: CopyLocale = 'zh'): unknown {
@@ -99,8 +99,11 @@ export class SelfSettings {
     }
     const locale = this.dot.locale ?? 'zh'
     const knowledge = await this.dot.knowledgeView()
-    const current = field === 'agreements' ? agreementsText(knowledge.agreements.entries) || null : valueOf(this.dot.store.settings, field, '', locale)
-    if (!equal(current, proposal.before)) throw new DotError('dot/proposal-stale', `${field} changed after this proposal. Decline it and ask Dorothy to propose the change again from the current value.`)
+    // Agreements compare as normalized entry lists on both sides: a proposal
+    // saved while the agreements were still one raw text block stays valid.
+    const current = field === 'agreements' ? splitEntryText(agreementsText(knowledge.agreements.entries)) : valueOf(this.dot.store.settings, field, '', locale)
+    const baseline = field === 'agreements' ? (proposal.before === null || proposal.before === undefined ? [] : splitEntryText(String(proposal.before))) : proposal.before
+    if (!equal(current, baseline)) throw new DotError('dot/proposal-stale', `${field} changed after this proposal. Decline it and ask Dorothy to propose the change again from the current value.`)
     try {
       if (field === 'agreements') await this.dot.setAgreements(proposal.after === null ? '' : String(proposal.after), 'human')
       else await this.dot.store.setSettings(patchSettings(this.dot.store.settings, { [field]: proposal.after }, locale))

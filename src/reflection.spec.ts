@@ -95,7 +95,7 @@ function makeRunner(store: DotStore, host: DotHost, at: () => number) {
     store,
     homeDir: '/dot',
     now: at,
-    applyCognition: async (ops: string) => { await store.setCognitionEntries(applyCognitionOps(store.cognitionEntries, parseCognitionOps(ops), at())) },
+    applyCognition: async (ops: string) => { await store.setCognitionEntries(applyCognitionOps(store.cognitionEntries, parseCognitionOps(ops), at(), () => store.nextKnowledgeId('c'))) },
     isDotIdle: () => true,
     timeoutMs: 60_000,
   })

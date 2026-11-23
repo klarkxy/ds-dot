@@ -2262,10 +2262,10 @@ export class DotService {
   private get cognitionPromptEntries(): number { return this.options.cognitionPromptEntries ?? COGNITION_PROMPT_ENTRIES_DEFAULT }
 
   async knowledgeView(): Promise<KnowledgeView> {
-    const undo = this.store.agreementsUndo
+    const undo = this.store.agreementEntriesUndo
     return {
       agreements: { entries: this.store.agreementEntries, canUndo: undo !== undefined && !sameEntries(undo, this.store.agreementEntries) },
-      cognition: { entries: cognitionWithActive(this.store.cognitionEntries, this.cognitionPromptEntries), history: this.store.cognitionHistory },
+      cognition: { entries: cognitionWithActive(this.store.cognitionEntries, this.cognitionPromptEntries), history: this.store.cognitionEntryHistory },
     }
   }
 
@@ -2280,7 +2280,7 @@ export class DotService {
       if (this.store.settings.locks?.agreements) throw new DotError('dot/setting-locked', 'agreements are locked by the human; use dot_settings (action=propose) for the change you want')
       const before = this.store.agreementEntries
       let after: readonly AgreementEntry[]
-      try { after = applyAgreementEdit(before, { op: 'add', text }, this.now()) } catch (error) {
+      try { after = applyAgreementEdit(before, { op: 'add', text }, this.now(), () => this.store.nextKnowledgeId('a')) } catch (error) {
         throw this.knowledgeError(error)
       }
       if (sameEntries(after, before)) return 'That is already one of your agreements.'
@@ -2311,12 +2311,13 @@ export class DotService {
     return this.withKnowledge(async () => {
       const before = this.store.cognitionEntries
       let after: readonly CognitionEntry[]
-      try { after = applyCognitionEdit(before, { op: 'add', text }, this.now()) } catch (error) {
+      try { after = applyCognitionEdit(before, { op: 'add', text }, this.now(), () => this.store.nextKnowledgeId('c')) } catch (error) {
         throw this.knowledgeError(error)
       }
       if (sameEntries(after, before)) return 'That is already in your cognition.'
+      const added = after.find(entry => !before.some(earlier => earlier.id === entry.id))
       await this.store.setCognitionEntries(after, this.now())
-      await this.afterCognitionChange(before, after, 'dot')
+      await this.afterCognitionChange(before, after, 'dot', added?.id)
       return 'Recorded in your cognition. The [cognition] block of this session still shows what it showed when it started; your next session shows the new one.'
     })
   }
@@ -2331,11 +2332,11 @@ export class DotService {
       }
       if (target.pinned === true) throw new DotError('dot/pinned', `"${target.text}" is pinned by the human; only the human can change it`)
       let after: readonly CognitionEntry[]
-      try { after = applyCognitionEdit(before, { op: 'edit', id: target.id, text }, this.now()) } catch (error) {
+      try { after = applyCognitionEdit(before, { op: 'edit', id: target.id, text }, this.now(), () => this.store.nextKnowledgeId('c')) } catch (error) {
         throw this.knowledgeError(error)
       }
       await this.store.setCognitionEntries(after, this.now())
-      await this.afterCognitionChange(before, after, 'dot')
+      await this.afterCognitionChange(before, after, 'dot', target.id)
       return 'Updated that cognition entry. The [cognition] block of this session still shows what it showed when it started; your next session shows the new one.'
     })
   }
@@ -2360,7 +2361,7 @@ export class DotService {
   async setAgreements(text: string, by: 'human' | 'dot' = 'human'): Promise<KnowledgeView> {
     return this.withKnowledge(async () => {
       const before = this.store.agreementEntries
-      const after = agreementEntriesFromText(text, before, this.now())
+      const after = agreementEntriesFromText(text, before, this.now(), () => this.store.nextKnowledgeId('a'))
       if (!sameEntries(after, before)) {
         await this.store.setAgreementEntries(after)
         await this.afterAgreementsChange(before, after, by)
@@ -2374,7 +2375,7 @@ export class DotService {
     return this.withKnowledge(async () => {
       const before = this.store.agreementEntries
       let after: readonly AgreementEntry[]
-      try { after = applyAgreementEdit(before, edit, this.now()) } catch (error) {
+      try { after = applyAgreementEdit(before, edit, this.now(), () => this.store.nextKnowledgeId('a')) } catch (error) {
         throw this.knowledgeError(error)
       }
       if (!sameEntries(after, before)) {
@@ -2400,7 +2401,7 @@ export class DotService {
     return this.withKnowledge(async () => {
       const before = this.store.cognitionEntries
       let after: readonly CognitionEntry[]
-      try { after = applyCognitionEdit(before, edit, this.now()) } catch (error) {
+      try { after = applyCognitionEdit(before, edit, this.now(), () => this.store.nextKnowledgeId('c')) } catch (error) {
         throw this.knowledgeError(error)
       }
       if (!sameEntries(after, before)) {
@@ -2420,7 +2421,7 @@ export class DotService {
       let after: readonly CognitionEntry[]
       try {
         ops = parseCognitionOps(raw)
-        after = applyCognitionOps(before, ops, this.now())
+        after = applyCognitionOps(before, ops, this.now(), () => this.store.nextKnowledgeId('c'))
       } catch (error) {
         throw this.knowledgeError(error)
       }
@@ -2468,11 +2469,17 @@ export class DotService {
     if ((segment.agreementsSeen ?? segment.agreements ?? '') === agreementsSection(before)) await this.store.noteAgreementsSeen(agreementsSection(after))
   }
 
-  private async afterCognitionChange(before: readonly CognitionEntry[], after: readonly CognitionEntry[], by: 'human' | 'dot' | 'reflection'): Promise<void> {
+  private async afterCognitionChange(before: readonly CognitionEntry[], after: readonly CognitionEntry[], by: 'human' | 'dot' | 'reflection', touchedId?: string): Promise<void> {
     if (by !== 'dot') return
     const segment = this.store.segment
     if (!segment) return
-    if ((segment.cognitionSeen ?? segment.cognition ?? '') === cognitionSection(before, this.cognitionPromptEntries)) await this.store.noteCognitionSeen(cognitionSection(after, this.cognitionPromptEntries))
+    if ((segment.cognitionSeen ?? segment.cognition ?? '') !== cognitionSection(before, this.cognitionPromptEntries)) return
+    // A change dot made in step is invisible to the prompt… unless it promoted
+    // a dormant entry dot did not touch. That promotion lands at the next
+    // message through the normal prompt-changed rollover instead.
+    const wasActive = new Set(cognitionWithActive(before, this.cognitionPromptEntries).filter(entry => entry.active).map(entry => entry.id))
+    if (cognitionWithActive(after, this.cognitionPromptEntries).some(entry => entry.active && !wasActive.has(entry.id) && entry.id !== touchedId)) return
+    await this.store.noteCognitionSeen(cognitionSection(after, this.cognitionPromptEntries))
   }
 
   // ---- host events -----------------------------------------------------

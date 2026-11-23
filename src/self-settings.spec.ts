@@ -7,7 +7,7 @@ import { DotStore } from './store.ts'
 
 function setup() {
   const store = new DotStore(undefined)
-  const state = { entries: [] as AgreementEntry[], writes: [] as string[] }
+  const state = { entries: [] as AgreementEntry[], writes: [] as string[], nextId: 0 }
   const view = async () => ({
     agreements: { entries: state.entries, canUndo: false },
     cognition: { entries: [] as unknown[], history: [] },
@@ -15,7 +15,7 @@ function setup() {
   const service = {
     store,
     knowledgeView: view,
-    setAgreements: async (text: string) => { state.entries = agreementEntriesFromText(text, state.entries, 1); state.writes.push(text); return view() },
+    setAgreements: async (text: string) => { state.entries = agreementEntriesFromText(text, state.entries, 1, () => `a${++state.nextId}`); state.writes.push(text); return view() },
     settingsChanged: async () => {},
     serialSettings: async <T>(work: () => Promise<T>) => work(),
   }
@@ -83,12 +83,34 @@ describe('Dorothy self settings', () => {
 
   it('reuses entry ids for unchanged lines and accepts a proposal of any size', async () => {
     const h = setup()
-    h.state.entries = agreementEntriesFromText('- keep me\n- drop me\n', [], 1)
+    h.state.entries = agreementEntriesFromText('- keep me\n- drop me\n', [], 1, () => `a${++h.state.nextId}`)
     const long = 'x'.repeat(5000)
     await h.self.propose({ field: 'agreements', value: `- keep me\n- ${long}`, reason: 'remember' })
     await h.self.decide(h.store.settingProposals[0]!.id, true)
     expect(h.state.entries.map(entry => entry.id)).toEqual(['a1', 'a3'])
     expect(h.state.entries[1]!.text).toBe(long)
+  })
+
+  it('approves an agreements proposal saved before the entry-list migration', async () => {
+    const h = setup()
+    // A proposal from the string era stores its baseline as raw text; the
+    // current entries compare as normalized lines, so it is not stale.
+    h.state.entries = agreementEntriesFromText('- 先给结论\n', [], 1, () => `a${++h.state.nextId}`)
+    await h.store.putSettingProposal({
+      id: 'setting-legacy', field: 'agreements', before: '* 先给结论\n', after: '- 先给结论\n- 改完先跑测试\n', reason: 'add a rule', createdAt: 1,
+    })
+    expect(await h.self.decide('setting-legacy', true)).toContain('Approved')
+    expect(h.state.entries.map(entry => entry.text)).toEqual(['先给结论', '改完先跑测试'])
+  })
+
+  it('still refuses an agreements proposal when the entries moved meanwhile', async () => {
+    const h = setup()
+    h.state.entries = agreementEntriesFromText('- 先给结论\n- 新规矩\n', [], 1, () => `a${++h.state.nextId}`)
+    await h.store.putSettingProposal({
+      id: 'setting-legacy', field: 'agreements', before: '* 先给结论\n', after: '- 先给结论\n- 改完先跑测试\n', reason: 'add a rule', createdAt: 1,
+    })
+    await expect(h.self.decide('setting-legacy', true)).rejects.toMatchObject({ code: 'dot/proposal-stale' })
+    expect(h.state.entries.map(entry => entry.text)).toEqual(['先给结论', '新规矩'])
   })
 
   it('refuses an old proposal after the human locks it, including the agreements field', async () => {

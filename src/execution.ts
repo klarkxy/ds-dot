@@ -482,6 +482,7 @@ export function bindRunSession(host: DotHost, writablePreset: TaskPermission = '
           for (const preset of WRITABLE_PRESETS) {
             try { if (await host.verifyTaskPermission(sessionId, 'write', preset)) return 'ok' } catch { /* try the next preset */ }
           }
+          try { if (await host.verifyCurrentWriteAccess?.(sessionId)) return 'ok' } catch { /* still rejected */ }
           return 'rejected'
         }
         if (!host.setWritable) return 'unknown'

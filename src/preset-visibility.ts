@@ -43,12 +43,38 @@ export function visiblePresets<T extends { readonly id: string }>(rows: readonly
   return rows.filter(row => !isInternalPreset(row.id))
 }
 
-/** The preset an ordinary new session should show and use when no id was requested. */
-export function publicDefaultId(rows: readonly ListedPreset[]): string | undefined {
+function hostDefaultIdOf(registry: { readonly defaultId?: string } | undefined): string | undefined {
+  const id = registry?.defaultId
+  return typeof id === 'string' && id ? id : undefined
+}
+
+/**
+ * The preset an ordinary new session should show and use when no id was requested.
+ *
+ * Host `list()` does not mark `isDefault`; `remoteExportList()` does, from
+ * `defaultId`. An unmarked roster must not treat the first visible row as the
+ * default when the host already selected a public one.
+ */
+export function publicDefaultId(rows: readonly ListedPreset[], hostDefaultId?: string): string | undefined {
   const visible = visiblePresets(rows)
   const marked = visible.find(row => row.isDefault === true && row.broken === undefined) ?? visible.find(row => row.isDefault === true)
   if (marked) return marked.id
+  if (hostDefaultId && !isInternalPreset(hostDefaultId)) {
+    const selected = visible.find(row => row.id === hostDefaultId)
+    if (selected) return selected.id
+  }
   return (visible.find(row => row.broken === undefined) ?? visible[0])?.id
+}
+
+/** Public default for a new ordinary session, from the live registry. */
+export async function publicTaskPreset(registry: PresetVisibilityRegistry | undefined): Promise<string | undefined> {
+  if (!registry || typeof registry.list !== 'function') return undefined
+  const hostDefault = hostDefaultIdOf(registry)
+  if (typeof registry.remoteExportList === 'function') {
+    const roster = await registry.remoteExportList()
+    return publicDefaultId(roster.presets, hostDefault)
+  }
+  return publicDefaultId(await registry.list(), hostDefault)
 }
 
 /**
@@ -103,9 +129,14 @@ export function installPresetVisibility(registry: PresetVisibilityRegistry | und
   const composed = typeof previousComposed === 'function'
     ? (previousComposed as (...args: never[]) => unknown).bind(raw)
     : undefined
-  let publicId = typeof raw.defaultId === 'string' && !isInternalPreset(raw.defaultId) ? raw.defaultId : undefined
+  const hostDefault = () => hostDefaultIdOf(raw)
+  const choosePublic = (rows: readonly ListedPreset[]) => publicDefaultId(rows, hostDefault())
+  let publicId = (() => {
+    const live = hostDefault()
+    return live && !isInternalPreset(live) ? live : undefined
+  })()
   const remember = (rows: readonly ListedPreset[]): readonly ListedPreset[] => {
-    publicId = publicDefaultId(rows) ?? publicId
+    publicId = choosePublic(rows) ?? publicId
     return rows
   }
   const wrappedList = async () => remember(visiblePresets(await list()))
@@ -113,14 +144,14 @@ export function installPresetVisibility(registry: PresetVisibilityRegistry | und
   const wrappedRemote = remoteExportList
     ? async () => {
       const rows = remember(visiblePresets(await readRoster()))
-      const chosen = publicDefaultId(rows)
+      const chosen = choosePublic(rows)
       return { presets: rows.map(row => ({ ...row, isDefault: chosen !== undefined && row.id === chosen })) }
     }
     : undefined
   const wrappedResolve = resolve
     ? async (id?: string) => {
       if (id !== undefined) return resolve(id)
-      const chosen = publicDefaultId(remember(visiblePresets(await readRoster())))
+      const chosen = choosePublic(remember(visiblePresets(await readRoster())))
       const current = await resolve(undefined)
       if (chosen === undefined) {
         if (!isInternalPreset(current.id)) return current
@@ -133,6 +164,8 @@ export function installPresetVisibility(registry: PresetVisibilityRegistry | und
     ? (...args: never[]) => {
       const id = composed(...args)
       if (typeof id !== 'string' || !isInternalPreset(id)) return id
+      const live = hostDefault()
+      if (live && !isInternalPreset(live)) return live
       return publicId
     }
     : undefined

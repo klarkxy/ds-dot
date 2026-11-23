@@ -217,4 +217,49 @@ describe('pinned task permission vs live default', () => {
     expect(permits).toEqual(['workspace-write'])
     expect(current).toBe('workspace-write')
   })
+
+  it('legacy write sessions on a custom writable preset still accept supplement', async () => {
+    const book = openBook()
+    const change = await book.createChange({ title: 'Ship', cwd: '/repo', goal: 'land it', at: 1 })
+    const held = await book.reserveRun({
+      changeId: change.id, cwd: '/repo', root: { workspaceRoot: '/repo' }, writeScope, at: 2,
+    })
+    if (!held.ok) throw new Error(held.message)
+    expect(held.run.taskPermission).toBeUndefined()
+    expect((await book.publishBaseline(held.run.id, book.revision, 'base-1', 3)).applied).toBe(true)
+
+    const permits: string[] = []
+    let current = 'workspace-write'
+    const events: unknown[] = []
+    const fake = {
+      async findSession() { return { cwd: '/repo' } },
+      async createSession() { throw new Error('exists') },
+      async setWritable(_id: string, permission: string) { permits.push(permission); current = permission; return true },
+      async verifyTaskPermission(_id: string, _access: string, permission: string) { return current === permission },
+      async verifyCurrentWriteAccess() {
+        return current === 'project-write' || current === 'workspace-write' || current === 'danger-full-access' || current === 'safe-auto' || current === 'auto'
+      },
+      async prompt() {},
+      async readEvents() { return events },
+      async relay(_session: string, sender: string, text: string, deliveryId?: string) {
+        events.push({
+          type: 'agent/inbox/spliced',
+          data: { inserted: [{ id: 'm', source: { kind: 'agent-message', form: 'relay', senderSessionId: sender, deliveryId }, content: [{ type: 'text', text }] }] },
+        })
+      },
+    }
+    expect((await launchReservedRun(book, bindRunSession(fake, 'workspace-write'), held.run.id, 'start')).ok).toBe(true)
+    expect(permits).toEqual(['workspace-write'])
+    current = 'project-write'
+
+    const live = bindRunSession(fake, 'danger-full-access', { verifyOnly: true })
+    expect((await supplementRun(book, live, held.run.id, 'more', 'dot', 6)).ok).toBe(true)
+    expect(permits).toEqual(['workspace-write'])
+    expect(current).toBe('project-write')
+
+    current = 'read-only'
+    fake.verifyCurrentWriteAccess = async () => false
+    expect((await supplementRun(book, live, held.run.id, 'stay read-only', 'dot', 7)).ok).toBe(false)
+    expect(permits).toEqual(['workspace-write'])
+  })
 })

@@ -79,6 +79,12 @@ export interface DotHost {
   setWritable?(sessionId: string, preset: string): Promise<boolean>
   /** Verify effective permissions without changing a running session. */
   verifyTaskPermission?(sessionId: string, access: 'read' | 'write', preset: string): Promise<boolean>
+  /**
+   * True when the session already holds a writable native preset or a live
+   * Safe Auto overlay. Used to confirm a legacy unpinned write run without
+   * enumerating Dorothy's four built-in permission names.
+   */
+  verifyCurrentWriteAccess?(sessionId: string): Promise<boolean>
   /** Set a read-only sandbox with deterministic rejection of escalation requests. */
   setReadOnly?(sessionId: string): Promise<boolean>
   /** Which optional task-permission values are live right now. */
@@ -525,6 +531,18 @@ export function bindHost(get: Get, log?: (message: string) => void, modelOf?: ()
         if (!permissions?.resolve || !permissions.current) return false
         const sandbox = permissions.resolve(preset).sandbox
         return (sandbox === 'workspace-write' || sandbox === 'danger-full-access') && permissions.current(session) === preset
+      } catch { return false }
+    },
+    async verifyCurrentWriteAccess(sessionId) {
+      try {
+        if (safeAuto()?.sessionActive?.(sessionId) === true) return true
+        const session = (await liveAgent(sessionId)).session
+        const permissions = get('permissionPresets') as Permissions | undefined
+        if (!permissions?.resolve || !permissions.current) return false
+        const current = permissions.current(session)
+        if (typeof current !== 'string' || !current) return false
+        const sandbox = permissions.resolve(current).sandbox
+        return sandbox === 'workspace-write' || sandbox === 'danger-full-access'
       } catch { return false }
     },
     async setWritable(sessionId, preset) {

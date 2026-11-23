@@ -22,7 +22,23 @@ describe('running task permissions and relay', () => {
     expect(await host.verifyTaskPermission!('s', 'write', 'workspace-write')).toBe(true)
     current = 'custom'
     expect(await host.verifyTaskPermission!('s', 'write', 'workspace-write')).toBe(false)
+    expect(await host.verifyCurrentWriteAccess!('s')).toBe(false)
     expect(calls).toEqual([])
+  })
+  it('treats a custom writable native preset as already writable', async () => {
+    const session = {}
+    let current = 'project-write'
+    const host = bindHost(name => name === 'agents' ? { get: () => ({ session }) }
+      : name === 'permissionPresets' ? {
+        resolve: (preset: string) => ({ sandbox: preset === 'project-write' ? 'workspace-write' : preset }),
+        current: () => current,
+        set: () => {},
+      }
+      : undefined)
+    expect(await host.verifyTaskPermission!('s', 'write', 'workspace-write')).toBe(false)
+    expect(await host.verifyCurrentWriteAccess!('s')).toBe(true)
+    current = 'read-only'
+    expect(await host.verifyCurrentWriteAccess!('s')).toBe(false)
   })
   it('relays through followup without steering or cancelling', async () => {
     const calls: string[] = []
@@ -69,6 +85,15 @@ describe('writable task policy', () => {
     expect(await host.verifyTaskPermission!('s', 'write', 'workspace-write')).toBe(false)
     overlay = false
     expect(await host.verifyTaskPermission!('s', 'write', 'workspace-write')).toBe(true)
+  })
+  it('treats a live Safe Auto overlay as current write access', async () => {
+    const session = { append() {} }
+    const host = bindHost(name => name === 'agents' ? { get: () => ({ session }) }
+      : name === 'permissionPresets' ? { resolve: () => ({ sandbox: 'workspace-write' }), current: () => 'workspace-write', set: () => {} }
+      : name === 'safeAutoRuntime' ? { sessionActive: () => true, selectSession: async () => true }
+      : undefined)
+    expect(await host.verifyTaskPermission!('s', 'write', 'workspace-write')).toBe(false)
+    expect(await host.verifyCurrentWriteAccess!('s')).toBe(true)
   })
   it('rejects missing, read-only and failed presets', async () => {
     const session = {}

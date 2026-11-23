@@ -22,7 +22,7 @@ import { registerHostRpc, type HostRpcContext } from '@klarkxy/dsh-plugin-kit/ho
 import { installPluginLogger } from '@klarkxy/dsh-plugin-kit/logger'
 import { approvalAuditId, raceApproval } from './approval-relay.ts'
 import type { RawEvent } from './chat.ts'
-import { COMPACTION_POLICY, PLUGIN_NAME, PRESET_ID, RPC_CHANNEL, SERVICE_NAME, type PendingQuestionItem, type TaskPermission, type TaskRecord } from './contracts.ts'
+import { COGNITION_PROMPT_ENTRIES_DEFAULT, COMPACTION_POLICY, PLUGIN_NAME, PRESET_ID, RPC_CHANNEL, SERVICE_NAME, type KnowledgeEdit, type PendingQuestionItem, type TaskPermission, type TaskRecord } from './contracts.ts'
 import { CHAT_SAY_BODY_BYTES, checkChatImages } from './chat-images.ts'
 import { ChatFeed } from './feed.ts'
 import { DotCapabilities, type CapabilityPluginManager, type CapabilityTools } from './capabilities.ts'
@@ -64,11 +64,13 @@ const CALL_SCAN = 400
 export interface Config {
   homeDir?: string
   approvalGraceMs?: number
+  cognitionPromptEntries?: number
 }
 
 export const Config: Schema<Config> = Schema.object({
   homeDir: Schema.string().default(''),
   approvalGraceMs: Schema.number().min(0).max(60_000).default(APPROVAL_GRACE_MS),
+  cognitionPromptEntries: Schema.natural().default(COGNITION_PROMPT_ENTRIES_DEFAULT),
 }).i18n(configI18n())
 
 interface SessionLike {
@@ -128,6 +130,7 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
     log,
     trace: logger,
     approvalGraceMs: Number.isFinite(config.approvalGraceMs) ? Math.max(0, Math.min(60_000, config.approvalGraceMs!)) : APPROVAL_GRACE_MS,
+    cognitionPromptEntries: Number.isFinite(config.cognitionPromptEntries) ? Math.max(0, Math.trunc(config.cognitionPromptEntries!)) : COGNITION_PROMPT_ENTRIES_DEFAULT,
     pluginManager: () => ctx.get('pluginManager' as never),
   })
   sealOwned = agent => service.sealAgent(agent)
@@ -587,14 +590,14 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
         case 'knowledge': return { ok: true, value: await service.knowledgeView() }
         // Panel edits of the agreements/cognition do not switch segments at once: the change is
         // picked up before the next message (prompt-changed), or folded in while the segment is untouched.
-        case 'agreements.set': {
-          const text = field(payload, 'text')
-          return { ok: true, value: await service.setAgreements(typeof text === 'string' ? text : '') }
+        case 'agreements.edit': {
+          const edit = field(payload, 'edit')
+          return { ok: true, value: await service.editAgreements(edit as KnowledgeEdit) }
         }
         case 'agreements.undo': return { ok: true, value: await service.undoAgreements() }
-        case 'cognition.set': {
-          const text = field(payload, 'text')
-          return { ok: true, value: await service.setCognition(typeof text === 'string' ? text : '') }
+        case 'cognition.edit': {
+          const edit = field(payload, 'edit')
+          return { ok: true, value: await service.editCognition(edit as KnowledgeEdit) }
         }
         case 'cognition.restore': {
           const at = field(payload, 'at')

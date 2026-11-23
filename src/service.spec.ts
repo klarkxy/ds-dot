@@ -173,7 +173,7 @@ function fakeHost() {
   }
 }
 
-function setup(settings?: Partial<DotSettings>, trace?: { info: (event: string, message: string, context?: Record<string, unknown>) => boolean; debug: (event: string, message: string, context?: Record<string, unknown>) => boolean; warn: (event: string, message: string, error?: unknown, context?: Record<string, unknown>) => boolean }, homeDir = join(tmpdir(), 'dsh-dot-spec'), extra: { pluginManager?: () => unknown; git?: typeof runGit; capabilities?: unknown } = {}) {
+function setup(settings?: Partial<DotSettings>, trace?: { info: (event: string, message: string, context?: Record<string, unknown>) => boolean; debug: (event: string, message: string, context?: Record<string, unknown>) => boolean; warn: (event: string, message: string, error?: unknown, context?: Record<string, unknown>) => boolean }, homeDir = join(tmpdir(), 'dsh-dot-spec'), extra: { pluginManager?: () => unknown; git?: typeof runGit; capabilities?: unknown; cognitionPromptEntries?: number } = {}) {
   const fake = fakeHost()
   const clock = manualTimer()
   const store = new DotStore(undefined)
@@ -184,7 +184,7 @@ function setup(settings?: Partial<DotSettings>, trace?: { info: (event: string, 
   // A fresh install defaults to tracked; see DEFAULT_SETTINGS.
   void store.setSettings({ ...DEFAULT_SETTINGS, reflection: false, idleCheckMinutes: 0, autoUpdate: false, scope: 'all', ...settings })
   let at = 1000
-  const service = new DotService({ host: fake.host, store, homeDir, approvalGraceMs: 0, timer: clock.timer, now: () => at, ...(trace ? { trace } : {}), ...(extra.pluginManager ? { pluginManager: extra.pluginManager } : {}), ...(extra.git ? { git: extra.git } : {}), ...(extra.capabilities !== undefined ? { capabilities: extra.capabilities as never } : {}) })
+  const service = new DotService({ host: fake.host, store, homeDir, approvalGraceMs: 0, timer: clock.timer, now: () => at, ...(trace ? { trace } : {}), ...(extra.pluginManager ? { pluginManager: extra.pluginManager } : {}), ...(extra.git ? { git: extra.git } : {}), ...(extra.capabilities !== undefined ? { capabilities: extra.capabilities as never } : {}), ...(extra.cognitionPromptEntries !== undefined ? { cognitionPromptEntries: extra.cognitionPromptEntries } : {}) })
   return { ...fake, ...clock, store, service, advance: (ms: number) => { at += ms } }
 }
 
@@ -855,9 +855,9 @@ describe('DotService knowledge', () => {
     let release!: () => void
     const started = new Promise<void>(resolve => { entered = resolve })
     const gate = new Promise<void>(resolve => { release = resolve })
-    const write = h.store.setCognition.bind(h.store)
-    h.store.setCognition = async (...args: Parameters<typeof write>) => { entered(); await gate; return write(...args) }
-    const active = h.service.setCognition('accepted before shutdown')
+    const write = h.store.setCognitionEntries.bind(h.store)
+    h.store.setCognitionEntries = async (...args: Parameters<typeof write>) => { entered(); await gate; return write(...args) }
+    const active = h.service.editCognition({ op: 'add', text: 'accepted before shutdown' })
     await started
     const queued = h.service.agreementAdd('queued before shutdown')
     const queuedResult = expect(queued).rejects.toMatchObject({ code: 'dot/disposed' })
@@ -870,19 +870,19 @@ describe('DotService knowledge', () => {
     await active
     await queuedResult
     await disposing
-    expect(h.store.cognition).toContain('accepted before shutdown')
-    expect(h.store.agreements).not.toContain('queued before shutdown')
-    const cognition = h.store.cognition
-    const agreements = h.store.agreements
-    await expect(h.service.setCognition('written after disposal')).rejects.toMatchObject({ code: 'dot/disposed' })
+    expect(h.store.cognitionEntries.map(entry => entry.text)).toContain('accepted before shutdown')
+    expect(h.store.agreementEntries.map(entry => entry.text)).not.toContain('queued before shutdown')
+    const cognition = h.store.cognitionEntries
+    const agreements = h.store.agreementEntries
+    await expect(h.service.editCognition({ op: 'add', text: 'written after disposal' })).rejects.toMatchObject({ code: 'dot/disposed' })
     await expect(h.service.agreementAdd('after disposal')).rejects.toMatchObject({ code: 'dot/disposed' })
-    expect(h.store.cognition).toBe(cognition)
-    expect(h.store.agreements).toBe(agreements)
+    expect(h.store.cognitionEntries).toEqual(cognition)
+    expect(h.store.agreementEntries).toEqual(agreements)
   })
   it('freezes agreements and cognition into the segment and keeps it when dot changes them itself', async () => {
     const h = setup()
-    await h.service.setAgreements('- use the standard preset\n')
-    await h.service.setCognition('I notice you prefer short answers.')
+    await h.service.editAgreements({ op: 'add', text: 'use the standard preset' })
+    await h.service.editCognition({ op: 'add', text: 'I notice you prefer short answers.' })
     const dot = await h.service.ensureDot()
     expect(h.store.segment!.agreements).toContain('[agreements]')
     expect(h.store.segment!.agreements).toContain('standard preset')
@@ -891,9 +891,9 @@ describe('DotService knowledge', () => {
     h.events.set(dot, [human('hi', 10), reply('hello', 20)])
 
     expect(await h.service.agreementAdd('never push to main')).toContain('Recorded as an agreement')
-    expect(h.store.agreements).toContain('never push to main')
-    expect(await h.service.cognitionRewrite('I notice you like detail.')).toContain('updated')
-    expect(h.store.cognition).toBe('I notice you like detail.')
+    expect(h.store.agreementEntries.map(entry => entry.text)).toContain('never push to main')
+    expect(await h.service.cognitionUpdate('prefer short answers', 'I notice you like detail.')).toContain('Updated')
+    expect(h.store.cognitionEntries.map(entry => entry.text)).toEqual(['I notice you like detail.'])
     // The frozen prompt of the running segment stays as it was built; dot's own change only moves the seen snapshot.
     expect(h.store.segment!.agreements).not.toContain('never push to main')
     expect(h.store.segment!.agreementsSeen).toContain('never push to main')
@@ -916,7 +916,7 @@ describe('DotService knowledge', () => {
     const h = setup()
     const dot = await h.service.ensureDot()
     expect(h.store.segment!.agreements).toBe('')
-    expect((await h.service.setAgreements('- call me Captain\r\n\r\n')).agreements.text).toBe('- call me Captain\n')
+    expect((await h.service.editAgreements({ op: 'add', text: 'call me Captain' })).agreements.entries.map(entry => entry.text)).toEqual(['call me Captain'])
     // A panel edit does not switch right away.
     expect(h.store.dotSessionId).toBe(dot)
     expect(h.store.segment!.agreements).toBe('')
@@ -926,7 +926,7 @@ describe('DotService knowledge', () => {
     expect(h.store.segment!.agreements).toContain('- call me Captain')
 
     h.events.set(dot, [human('hi', 10), reply('hello', 20)])
-    await h.service.setAgreements('- call me Admiral')
+    await h.service.editAgreements({ op: 'edit', id: 'a1', text: 'call me Admiral' })
     await h.service.say('ahoy')
     const next = h.store.dotSessionId!
     expect(next).not.toBe(dot)
@@ -939,9 +939,9 @@ describe('DotService knowledge', () => {
     const h = setup()
     const dot = await h.service.ensureDot()
     h.events.set(dot, [human('hi', 10), reply('hello', 20)])
-    // The human edits the agreements in the panel; dot rewrites its cognition in the same segment.
-    await h.service.setAgreements('- be terse')
-    await h.service.cognitionRewrite('I feel you like detail.')
+    // The human edits the agreements in the panel; dot changes its cognition in the same segment.
+    await h.service.editAgreements({ op: 'add', text: 'be terse' })
+    await h.service.cognitionAdd('I feel you like detail.')
     // The agreements seen snapshot is still the pre-edit block, so the next message still moves.
     await h.service.say('continue')
     expect(h.store.dotSessionId).not.toBe(dot)
@@ -953,38 +953,91 @@ describe('DotService knowledge', () => {
   it('takes the latest agreements change back once, whoever made it', async () => {
     const h = setup()
     await h.service.ensureDot()
-    expect((await h.service.knowledgeView()).agreements).toEqual({ text: '', maxChars: 4000, canUndo: false })
+    expect((await h.service.knowledgeView()).agreements).toEqual({ entries: [], canUndo: false })
     await expect(h.service.undoAgreements()).rejects.toMatchObject({ code: 'dot/nothing-to-undo' })
-    await h.service.setAgreements('- call me Captain')
+    await h.service.editAgreements({ op: 'add', text: 'call me Captain' })
     await h.service.agreementAdd('likes tea')
-    expect((await h.service.knowledgeView()).agreements).toMatchObject({ text: '- call me Captain\n- likes tea\n', canUndo: true })
-    expect((await h.service.undoAgreements()).agreements).toMatchObject({ text: '- call me Captain\n', canUndo: true })
+    expect((await h.service.knowledgeView()).agreements).toMatchObject({ canUndo: true })
+    expect((await h.service.knowledgeView()).agreements.entries.map(entry => entry.text)).toEqual(['call me Captain', 'likes tea'])
+    expect((await h.service.undoAgreements()).agreements.entries.map(entry => entry.text)).toEqual(['call me Captain'])
     // One step is kept: taking back again restores what was just taken back.
-    expect((await h.service.undoAgreements()).agreements.text).toBe('- call me Captain\n- likes tea\n')
-    await expect(h.service.setAgreements('x'.repeat(4001))).rejects.toMatchObject({ code: 'dot/invalid' })
+    expect((await h.service.undoAgreements()).agreements.entries.map(entry => entry.text)).toEqual(['call me Captain', 'likes tea'])
   })
 
-  it('rewrites cognition whole, keeps versions, rolls back, and lets the empty version return', async () => {
+  it('accepts entries of any size through every write path', async () => {
     const h = setup()
     await h.service.ensureDot()
-    await h.service.cognitionRewrite('first')
-    await h.service.cognitionRewrite('second')
+    // No per-entry or total limit: the dot tool, the panel edit and the proposal path all accept them.
+    await h.service.setAgreements(`- ${'z'.repeat(4500)}\n`)
+    expect(await h.service.agreementAdd('x'.repeat(500))).toContain('Recorded as an agreement')
+    await h.service.editAgreements({ op: 'add', text: 'y'.repeat(4200) })
+    await h.service.cognitionAdd('q'.repeat(4500))
+    const texts = h.store.agreementEntries.map(entry => entry.text)
+    expect(texts).toEqual(['z'.repeat(4500), 'x'.repeat(500), 'y'.repeat(4200)])
+    expect(h.store.cognitionEntries.map(entry => entry.text)).toContain('q'.repeat(4500))
+  })
+
+  it('matches cognition entries by text or unique substring, dormant ones too, and refuses pinned ones', async () => {
+    const h = setup(undefined, undefined, undefined, { cognitionPromptEntries: 1 })
+    await h.service.ensureDot()
+    await h.service.cognitionAdd('first fact')
+    await h.service.cognitionAdd('second fact')
+    // With one prompt slot the second entry is dormant; dot still reaches it by match.
+    const view = await h.service.knowledgeView()
+    expect(view.cognition.entries.find(entry => entry.text === 'first fact')?.active).toBe(true)
+    expect(view.cognition.entries.find(entry => entry.text === 'second fact')?.active).toBe(false)
+    expect(await h.service.cognitionUpdate('second fact', 'second fact revised')).toContain('Updated')
+    expect(await h.service.cognitionRemove('second fact revised')).toContain('Removed this cognition entry')
+    // Ambiguous and unknown matches report the entries dot sees.
+    await h.service.cognitionAdd('short answers')
+    await h.service.cognitionAdd('short meetings')
+    await expect(h.service.cognitionUpdate('short', 'x')).rejects.toMatchObject({ code: 'dot/ambiguous-entry' })
+    await expect(h.service.cognitionRemove('tall')).rejects.toMatchObject({ code: 'dot/unknown-entry' })
+    // Pinned entries are the human's: update and remove both refuse.
+    await h.service.editCognition({ op: 'pin', id: 'c1', pinned: true })
+    await expect(h.service.cognitionUpdate('first fact', 'x')).rejects.toMatchObject({ code: 'dot/pinned' })
+    await expect(h.service.cognitionRemove('first fact')).rejects.toMatchObject({ code: 'dot/pinned' })
+  })
+
+  it('keeps cognition versions, rolls back, and lets the empty version return', async () => {
+    const h = setup()
+    await h.service.ensureDot()
+    await h.service.cognitionAdd('first')
+    await h.service.cognitionUpdate('first', 'second')
     let view = await h.service.knowledgeView()
-    expect(view.cognition.text).toBe('second')
-    expect(view.cognition.history.map(version => version.text)).toEqual(['first', ''])
-    const empty = view.cognition.history.find(version => version.text === '')!
+    expect(view.cognition.entries.map(entry => entry.text)).toEqual(['second'])
+    expect(view.cognition.history.map(version => version.entries.map(entry => entry.text))).toEqual([['first'], []])
+    const empty = view.cognition.history.find(version => version.entries.length === 0)!
     view = await h.service.restoreCognition(empty.at)
-    expect(view.cognition.text).toBe('')
-    // Restoring pushes the replaced text back onto the history too.
-    expect(view.cognition.history[0]!.text).toBe('second')
+    expect(view.cognition.entries).toEqual([])
+    // Restoring pushes the replaced list back onto the history too.
+    expect(view.cognition.history[0]!.entries.map(entry => entry.text)).toEqual(['second'])
     await expect(h.service.restoreCognition(-1)).rejects.toMatchObject({ code: 'dot/unknown-version' })
+  })
+
+  it('spends a history version on content changes only, never on confirms', async () => {
+    const h = setup()
+    await h.service.ensureDot()
+    await h.service.cognitionAdd('first')
+    const versions = (await h.service.knowledgeView()).cognition.history.length
+    // A reflection pass that only confirms writes seenAt but pushes no version.
+    h.advance(500)
+    await (h.service as unknown as { applyCognitionOps(ops: string, baseVersion: number): Promise<void> }).applyCognitionOps('[{"op":"confirm","id":"c1"}]', h.store.cognitionVersion)
+    expect(h.store.cognitionEntries[0]!.seenAt).toBe(1500)
+    expect((await h.service.knowledgeView()).cognition.history).toHaveLength(versions)
+    // One update is exactly one new version.
+    await (h.service as unknown as { applyCognitionOps(ops: string, baseVersion: number): Promise<void> }).applyCognitionOps('[{"op":"update","id":"c1","text":"second"}]', h.store.cognitionVersion)
+    expect((await h.service.knowledgeView()).cognition.history).toHaveLength(versions + 1)
+    // A panel pin toggle is a content change and pushes one version too.
+    await h.service.editCognition({ op: 'pin', id: 'c1', pinned: true })
+    expect((await h.service.knowledgeView()).cognition.history).toHaveLength(versions + 2)
   })
 
   it('runs agreements changes one after another, so none is lost', async () => {
     const h = setup()
     await h.service.ensureDot()
     await Promise.all([h.service.agreementAdd('one'), h.service.agreementAdd('two'), h.service.agreementAdd('three')])
-    expect(h.store.agreements).toBe('- one\n- two\n- three\n')
+    expect(h.store.agreementEntries.map(entry => entry.text)).toEqual(['one', 'two', 'three'])
   })
 })
 
@@ -1006,7 +1059,7 @@ describe('DotService background reflection delivery', () => {
     const h = setup()
     const first = await h.service.ensureDot()
     h.events.set(first, [human('hi', 10), reply('hello', 20)])
-    await h.service.setCognition('a fresh understanding', 'reflection')
+    await (h.service as unknown as { applyCognitionOps(ops: string, baseVersion: number): Promise<void> }).applyCognitionOps('[{"op":"add","text":"a fresh understanding"}]', h.store.cognitionVersion)
     await h.service.say('next')
     expect(h.store.dotSessionId).not.toBe(first)
     expect(h.store.segment!.cognition).toContain('a fresh understanding')
@@ -1026,13 +1079,13 @@ describe('DotService background reflection delivery', () => {
     h.host.say = async (...args: Parameters<typeof realSay>) => { enteredSay(); await gate; return realSay(...args) }
     // The runner itself is exercised in reflection.spec; here we only need its
     // write to observe the message lane, so stub the submission write.
-    h.service.reflection.submit = async (_cognition: string, notes: string | undefined) => {
+    h.service.reflection.submit = async (_ops: string, notes: string | undefined) => {
       await h.store.setAgreementNotes(notes ?? '')
       return 'saved'
     }
     const saying = h.service.say('hello')
     await entered
-    const submitting = h.service.reflectionSubmit('new cognition', 'new note', 'ref-1')
+    const submitting = h.service.reflectionSubmit('[{"op":"add","text":"new cognition"}]', 'new note', 'ref-1')
     // The submission waits behind the in-flight message; nothing is written yet.
     expect(h.store.agreementNotes).toBe('old note')
     releaseSay()
@@ -1583,11 +1636,11 @@ describe('DotService.relayRequest', () => {
   it("keeps the human's rules in the agreements rather than repeating them in notices", async () => {
     const h = setup()
     await h.service.ensureDot()
-    await h.store.setAgreements('- pushing to my own repos is fine')
+    await h.store.setAgreementEntries([{ id: 'a1', text: 'pushing to my own repos is fine', createdAt: 1, updatedAt: 1 }])
     h.service.relayRequest({ kind: 'approval', sessionId: 's9', subject: 'bash' })
     await h.service.flushNotices()
     expect(h.relayed[0]!.text).not.toContain('pushing to my own repos is fine')
-    expect(h.store.agreements).toContain('pushing to my own repos is fine')
+    expect(h.store.agreementEntries.map(entry => entry.text)).toContain('pushing to my own repos is fine')
   })
 
   it('archiving a task dot started declines its waiting requests', async () => {
@@ -2138,7 +2191,7 @@ describe('factory reset', () => {
     await h.store.beginSegment({ sessionId: current, startedAt: 3, persona: '' })
     await h.store.addReflectionRun({ sessionId: 'reflection-released', startedAt: 1, endedAt: 2, ok: true })
     await h.store.track({ sessionId: 'human-watched', origin: 'watched', title: 'human', goal: 'work', cwd: home, at: 1 })
-    await h.store.setAgreements('old agreement')
+    await h.store.setAgreementEntries([{ id: 'a1', text: 'old agreement', createdAt: 1, updatedAt: 1 }])
     const resolveAgent = vi.fn(async () => ({ error: { message: 'session is owned by subagent routing' } }))
     const adapter = bindHost(name => {
       if (name === 'agents') return { get: () => undefined }
@@ -2159,7 +2212,7 @@ describe('factory reset', () => {
       expect(result.archived).toEqual(expect.arrayContaining([current, 'dot-released', 'reflection-released']))
       expect(result.archived).not.toContain('human-watched')
       expect(resolveAgent).not.toHaveBeenCalled()
-      expect(h.store.agreements).toBe('')
+      expect(h.store.agreementEntries).toEqual([])
       expect(h.store.dotSessionId).not.toBe(current)
     } finally {
       await h.service.dispose()
@@ -2173,8 +2226,8 @@ describe('factory reset', () => {
     const dot = await h.service.ensureDot()
     await h.store.track({ sessionId: 'user-1', origin: 'watched', title: 'mine', goal: 'g', cwd: '/u', at: 1 })
     await h.store.track({ sessionId: 'owned-1', origin: 'started', title: 'job', goal: 'g', cwd: '/p', at: 1 })
-    await h.store.setAgreements('keep secrets')
-    await h.store.setCognition('old habits')
+    await h.store.setAgreementEntries([{ id: 'a1', text: 'keep secrets', createdAt: 1, updatedAt: 1 }])
+    await h.store.setCognitionEntries([{ id: 'c1', text: 'old habits', createdAt: 1, updatedAt: 1, seenAt: 1 }])
     await h.store.setSettings({ ...DEFAULT_SETTINGS, scope: 'all', reflection: false, idleCheckMinutes: 0 })
     const preview = h.service.previewFactoryReset()
     expect(preview.hasAgreements).toBe(true)
@@ -2187,8 +2240,8 @@ describe('factory reset', () => {
     expect(result.archived).toEqual(expect.arrayContaining([dot, 'owned-1']))
     expect(h.calls.filter(call => call.startsWith('archive ')).sort()).toEqual(expect.arrayContaining([`archive ${dot}`, 'archive owned-1']))
     expect(h.calls).not.toContain('archive user-1')
-    expect(h.store.agreements).toBe('')
-    expect(h.store.cognition).toBe('')
+    expect(h.store.agreementEntries).toEqual([])
+    expect(h.store.cognitionEntries).toEqual([])
     expect(h.store.list()).toEqual([])
     expect(h.store.settings.scope).toBe(DEFAULT_SETTINGS.scope)
     expect(h.store.settings.approvals).toBe(DEFAULT_SETTINGS.approvals)
@@ -2268,15 +2321,15 @@ describe('factory reset', () => {
     const h = setup(undefined, undefined, home)
     await h.service.ensureDot()
     await h.store.track({ sessionId: 'owned-retry', origin: 'started', title: 'job', goal: 'g', cwd: home, at: 1 })
-    await h.store.setAgreements('retained until cleanup succeeds')
+    await h.store.setAgreementEntries([{ id: 'a1', text: 'retained until cleanup succeeds', createdAt: 1, updatedAt: 1 }])
     const archive = vi.spyOn(h.host, 'archive').mockRejectedValueOnce(new Error('archive offline'))
     try {
       await expect(h.service.confirmFactoryReset(h.service.previewFactoryReset().token)).rejects.toMatchObject({ code: 'dot/reset-incomplete', message: expect.stringContaining('records and settings are retained') })
       expect(h.store.ownsSession('owned-retry')).toBe(true)
-      expect(h.store.agreements).toBe('retained until cleanup succeeds')
+      expect(h.store.agreementEntries.map(entry => entry.text)).toEqual(['retained until cleanup succeeds'])
       archive.mockRestore()
       await expect(h.service.confirmFactoryReset(h.service.previewFactoryReset().token)).resolves.toMatchObject({ archiveFailed: [] })
-      expect(h.store.agreements).toBe('')
+      expect(h.store.agreementEntries).toEqual([])
       expect(h.store.list()).toEqual([])
     } finally {
       archive.mockRestore()
@@ -2289,15 +2342,15 @@ describe('factory reset', () => {
     const home = mkdtempSync(join(tmpdir(), 'dsh-dot-reset-artifact-retry-'))
     const h = setup(undefined, undefined, home)
     await h.service.ensureDot()
-    await h.store.setAgreements('still recorded')
+    await h.store.setAgreementEntries([{ id: 'a1', text: 'still recorded', createdAt: 1, updatedAt: 1 }])
     const wipe = vi.spyOn(artifacts, 'wipeArtifacts').mockImplementationOnce(() => { throw new Error('artifact folder is busy') })
     try {
       await expect(h.service.confirmFactoryReset(h.service.previewFactoryReset().token)).rejects.toMatchObject({ code: 'dot/reset-incomplete', message: expect.stringContaining('Some files may already have been removed') })
-      expect(h.store.agreements).toBe('still recorded')
+      expect(h.store.agreementEntries.map(entry => entry.text)).toEqual(['still recorded'])
       expect(h.store.lastFactoryResetAt).toBeUndefined()
       wipe.mockRestore()
       await expect(h.service.confirmFactoryReset(h.service.previewFactoryReset().token)).resolves.toMatchObject({ archiveFailed: [] })
-      expect(h.store.agreements).toBe('')
+      expect(h.store.agreementEntries).toEqual([])
       expect(h.store.lastFactoryResetAt).toBeDefined()
     } finally {
       wipe.mockRestore()
@@ -2310,11 +2363,11 @@ describe('factory reset', () => {
     const home = mkdtempSync(join(tmpdir(), 'dsh-dot-reset-start-retry-'))
     const h = setup(undefined, undefined, home)
     await h.service.ensureDot()
-    await h.store.setAgreements('clear me')
+    await h.store.setAgreementEntries([{ id: 'a1', text: 'clear me', createdAt: 1, updatedAt: 1 }])
     h.failCreate(true)
     try {
       await expect(h.service.confirmFactoryReset(h.service.previewFactoryReset().token)).rejects.toMatchObject({ code: 'dot/reset-incomplete', message: expect.stringContaining('data and settings were reset') })
-      expect(h.store.agreements).toBe('')
+      expect(h.store.agreementEntries).toEqual([])
       expect(h.store.lastFactoryResetAt).toBeDefined()
       h.failCreate(false)
       await expect(h.service.confirmFactoryReset(h.service.previewFactoryReset().token)).resolves.toMatchObject({ sessionId: expect.any(String) })

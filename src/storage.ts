@@ -7,7 +7,8 @@
 import { defineDomain, domainTable } from '@deepseek-ai/dsh-storage-domain'
 import { z } from 'zod'
 import type { ViewNode } from '@klarkxy/dsh-deep-view/contracts'
-import { SETTING_FIELDS, type CognitionVersion, type DotContextUsage, type DotUsageOffset, type InboxRecord, type RecipeProposal, type RecipeRecord, type TaskLink, type ReflectionRun, type ScheduleRecord, type SettingProposal, type TaskRecord } from './contracts.ts'
+import { SETTING_FIELDS, type AgreementEntry, type CognitionEntry, type CognitionVersion, type DotContextUsage, type DotUsageOffset, type InboxRecord, type RecipeProposal, type RecipeRecord, type TaskLink, type ReflectionRun, type ScheduleRecord, type SettingProposal, type TaskRecord } from './contracts.ts'
+import { migrateAgreementEntries, migrateCognitionEntries } from './memory.ts'
 import { migrateTaskPermissionBaseline, TASK_PERMISSIONS } from './settings.ts'
 import type { UpdateStatus } from './auto-update.ts'
 import type { PastSegment, Segment } from './segments.ts'
@@ -101,7 +102,29 @@ const usageOffsetSchema = usageSchema.extend({
   sessionId: z.string().min(1),
 })
 
+const agreementEntrySchema = z.object({
+  id: z.string().min(1),
+  text: z.string(),
+  createdAt: z.number(),
+  updatedAt: z.number(),
+})
+
+const cognitionEntrySchema = z.object({
+  id: z.string().min(1),
+  text: z.string(),
+  createdAt: z.number(),
+  updatedAt: z.number(),
+  seenAt: z.number(),
+  pinned: z.literal(true).optional(),
+})
+
 const cognitionVersionSchema = z.object({
+  at: z.number(),
+  entries: z.array(cognitionEntrySchema),
+})
+
+/** Pre-entry cognition history rows, still declared so old rows load and migrate. */
+const legacyCognitionVersionSchema = z.object({
   text: z.string(),
   at: z.number(),
 })
@@ -145,14 +168,17 @@ const stateSchema = z.object({
   settings: z.record(z.string(), z.unknown()).optional(),
   segment: segmentSchema.optional(),
   pastSegments: z.array(pastSegmentSchema).optional(),
-  /** The human's own standing requirements, verbatim. */
+  /** The human's own standing requirements, one entry per rule; the legacy string shape only exists until migration. */
+  agreementEntries: z.array(agreementEntrySchema).optional(),
+  /** What one undo of the agreements restores; the legacy string shape only exists until migration. */
+  agreementsUndo: z.union([z.string(), z.array(agreementEntrySchema)]).optional(),
+  /** dot's own understanding, one entry per point; the legacy string shape only exists until migration. */
+  cognitionEntries: z.array(cognitionEntrySchema).optional(),
+  /** Earlier cognition entry lists, newest first; legacy {text, at} rows still load for migration. */
+  cognitionHistory: z.array(z.union([cognitionVersionSchema, legacyCognitionVersionSchema])).optional(),
+  /** Legacy pre-entry shapes, still declared so old rows load and migrate, then dropped. */
   agreements: z.string().optional(),
-  /** What one undo of the agreements restores. */
-  agreementsUndo: z.string().optional(),
-  /** dot's own understanding, rewritten whole. */
   cognition: z.string().optional(),
-  /** Earlier cognition texts, newest first; used for rollback. */
-  cognitionHistory: z.array(cognitionVersionSchema).optional(),
   /** When dot's last successful background reflection finished. */
   lastReflectedAt: z.number().optional(),
   /** When the last background reflection attempt started; drives the failure cooldown. */
@@ -199,13 +225,13 @@ export interface DotState {
   readonly segment?: Segment
   /** Ended segments, oldest first. */
   readonly pastSegments?: readonly PastSegment[]
-  /** The human's own standing requirements, verbatim. */
-  readonly agreements?: string
+  /** The human's own standing requirements, one entry per rule. */
+  readonly agreementEntries?: readonly AgreementEntry[]
   /** What one undo of the agreements restores. */
-  readonly agreementsUndo?: string
-  /** dot's own understanding, rewritten whole. */
-  readonly cognition?: string
-  /** Earlier cognition texts, newest first. */
+  readonly agreementsUndo?: readonly AgreementEntry[]
+  /** dot's own understanding, one entry per point. */
+  readonly cognitionEntries?: readonly CognitionEntry[]
+  /** Earlier cognition entry lists, newest first. */
   readonly cognitionHistory?: readonly CognitionVersion[]
   /** When dot's last successful background reflection finished. */
   readonly lastReflectedAt?: number
@@ -382,7 +408,8 @@ export const dotDomain = defineDomain({
   version: 10,
   compatibleVersions: [1, 2, 3, 4, 5, 6, 7, 8, 9],
   tables: {
-    state: domainTable<string, DotState>(stateSchema),
+    // Stored rows may still carry the pre-entry knowledge shape; parseState migrates them.
+    state: domainTable<string, StoredState>(stateSchema as z.ZodType<StoredState>),
     tasks: domainTable<string, StoredTaskRecord>(storedTaskSchema),
     schedules: domainTable<string, ScheduleRecord>(scheduleSchema),
     proposals: domainTable<string, unknown>(proposalSchema),
@@ -416,7 +443,39 @@ export function parseTask(value: unknown): TaskRecord | undefined {
   } as TaskRecord
 }
 
-export function parseState(value: unknown): DotState {
+/** The state row as stored: legacy pre-entry knowledge shapes may still be present. */
+interface StoredState extends Omit<DotState, 'agreementEntries' | 'agreementsUndo' | 'cognitionEntries' | 'cognitionHistory'> {
+  readonly agreementEntries?: readonly AgreementEntry[]
+  readonly agreementsUndo?: readonly AgreementEntry[] | string
+  readonly cognitionEntries?: readonly CognitionEntry[]
+  readonly cognitionHistory?: readonly (CognitionVersion | { readonly text: string; readonly at: number })[]
+  readonly agreements?: string
+  readonly cognition?: string
+}
+
+/**
+ * Convert the pre-entry knowledge fields into entry lists. Entries get fresh
+ * ids in line order and share `now` as their timestamps; equal seenAt values
+ * fall back to stored order when ranked. Legacy keys are dropped so the next
+ * write persists only the new shape.
+ */
+export function migrateKnowledge(stored: StoredState, now: number): { readonly state: DotState; readonly migrated: boolean } {
+  const legacyUndo = typeof stored.agreementsUndo === 'string'
+  const legacyHistory = (stored.cognitionHistory ?? []).some(version => 'text' in version)
+  if (typeof stored.agreements !== 'string' && typeof stored.cognition !== 'string' && !legacyUndo && !legacyHistory) {
+    return { state: stored as DotState, migrated: false }
+  }
+  const agreementEntries = stored.agreementEntries ?? migrateAgreementEntries(stored.agreements ?? '', now)
+  const agreementsUndo = legacyUndo ? migrateAgreementEntries(stored.agreementsUndo as string, now) : stored.agreementsUndo
+  const cognitionEntries = stored.cognitionEntries ?? migrateCognitionEntries(stored.cognition ?? '', now)
+  const cognitionHistory: CognitionVersion[] = (stored.cognitionHistory ?? []).map(version => 'text' in version ? { at: version.at, entries: migrateCognitionEntries(version.text, now) } : version)
+  const { agreements: _agreements, agreementsUndo: _undo, cognition: _cognition, cognitionHistory: _history, ...rest } = stored
+  return { state: { ...rest, agreementEntries, agreementsUndo, cognitionEntries, cognitionHistory }, migrated: true }
+}
+
+/** The state row parsed and, when it still carried pre-entry knowledge, migrated to entries. */
+export function parseState(value: unknown, now = Date.now()): { readonly state: DotState; readonly migrated: boolean } {
   const parsed = stateSchema.safeParse(value)
-  return parsed.success ? parsed.data as DotState : {}
+  if (!parsed.success) return { state: {}, migrated: false }
+  return migrateKnowledge(parsed.data as StoredState, now)
 }

@@ -486,7 +486,7 @@ export function apply(ctx: Context): void {
     description: "Manage the human's standing rules in [agreements], preserved in their own words. action=add: call only when the human explicitly states a standing rule or asks you to remember one; record a single concise line verbatim without paraphrasing. action=remove: remove an entry the human asked to drop by quoting enough of it to match uniquely. Updates take effect in the prompt prefix on the next segment.",
     parameters: {
       action: { type: 'string', enum: ['add', 'remove'], required: true, description: 'Operation: add or remove.' },
-      text: { type: 'string', required: true, description: "add: single-line rule in the human's exact words (max 400 characters). remove: exact rule text or a unique substring." },
+      text: { type: 'string', required: true, description: "add: single-line rule in the human's exact words. remove: exact rule text or a unique substring." },
     },
     execute: async (args) => str(args, 'action') === 'remove' ? dot().agreementRemove(str(args, 'text') ?? '') : dot().agreementAdd(str(args, 'text') ?? ''),
     title: 'Agreement',
@@ -495,11 +495,18 @@ export function apply(ctx: Context): void {
   // ── dot_cognition ─────────────────────────────────────────────────────────
   tool(defineToolInput({
     name: TOOL.cognition,
-    description: 'Rewrite your [cognition] block: your concise, durable understanding of the human (workflow preferences, habits) and of yourself (formed preferences, shared jokes, accomplishments together). Always pass the complete replacement text (empty string clears it); never include transient task status, and remember [agreements] always take precedence. Updates take effect in the prompt prefix on the next segment.',
+    description: 'Change one entry of your [cognition]: your durable understanding of the human (workflow preferences, habits) and of yourself (formed preferences, shared jokes, accomplishments together). action=add records a new entry; action=update replaces the entry that match identifies; action=remove deletes it. Keep each entry to one self-contained point, update an existing entry instead of adding a near-duplicate, never record transient task status, and remember [agreements] always take precedence. Pinned entries belong to the human: you cannot update or remove them. Updates take effect in the prompt prefix on the next segment.',
     parameters: {
-      text: { type: 'string', required: true, description: 'Complete replacement [cognition] text (max 4000 characters; empty clears it).' },
+      action: { type: 'string', enum: ['add', 'update', 'remove'], required: true, description: 'Operation: add, update, or remove.' },
+      text: { type: 'string', description: 'add/update: the entry text, one self-contained point.' },
+      match: { type: 'string', description: 'update/remove: the exact entry text or a unique substring of it.' },
     },
-    execute: async (args) => dot().cognitionRewrite(str(args, 'text') ?? ''),
+    execute: async (args) => {
+      const action = str(args, 'action')
+      if (action === 'update') return dot().cognitionUpdate(str(args, 'match') ?? '', str(args, 'text') ?? '')
+      if (action === 'remove') return dot().cognitionRemove(str(args, 'match') ?? '')
+      return dot().cognitionAdd(str(args, 'text') ?? '')
+    },
     title: 'Cognition',
   }))
 

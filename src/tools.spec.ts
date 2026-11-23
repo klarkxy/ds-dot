@@ -10,6 +10,7 @@ import { formatTaskModels } from './task-models.ts'
 import { apply as applyReflection, REFLECTION_PROPOSE_TOOL, REFLECTION_SUBMIT_TOOL } from './reflection.ts'
 import { DEFAULT_SETTINGS, TOOL, type DotSettings } from './contracts.ts'
 import { DEFAULT_PERSONA } from './persona.ts'
+import { agreementEntriesFromText, cognitionEntriesFromText } from './memory.ts'
 import { settingsSnapshotBlock, SelfSettings } from './self-settings.ts'
 import { DotStore } from './store.ts'
 
@@ -33,15 +34,16 @@ function load(settings: { current: DotSettings; segment?: Seg; notes?: string; c
   const sections: Array<{ name: string; order: number; text: (context?: { agent?: { session?: { id?: string } } }) => string }> = []
   const store = new DotStore(undefined)
   const view = async () => ({
-    agreements: { text: settings.notes ?? '', maxChars: 4000, canUndo: false },
-    cognition: { text: settings.cognition ?? '', maxChars: 4000, history: [] },
+    agreements: { entries: agreementEntriesFromText(settings.notes ?? '', [], 0), canUndo: false },
+    cognition: { entries: cognitionEntriesFromText(settings.cognition ?? '', [], 0).map(entry => ({ ...entry, active: true })), history: [] },
   })
   // A real SelfSettings backed by a real DotStore so the locks guard works.
   const service = {
     store,
     knowledgeView: view,
     setAgreements: view,
-    setCognition: view,
+    editAgreements: view,
+    editCognition: view,
     undoAgreements: view,
     restoreCognition: view,
     settingsChanged: async () => {},
@@ -330,9 +332,9 @@ describe('dot tools', () => {
     expect(agreement.action).toMatchObject({ type: 'string', enum: ['add', 'remove'] })
     expect(agreement.text).toMatchObject({ type: 'string' })
     const cognition = propsOf(byName.get(TOOL.cognition)!)
-    // No action on cognition: it always rewrites the whole text.
-    expect(Object.keys(cognition)).toEqual(['text'])
+    expect(cognition.action).toMatchObject({ type: 'string', enum: ['add', 'update', 'remove'] })
     expect(cognition.text).toMatchObject({ type: 'string' })
+    expect(cognition.match).toMatchObject({ type: 'string' })
   })
 
   it('exposes exactly the high-level task operations and rejects removed actions', async () => {

@@ -1,9 +1,9 @@
 import { DotError, messageOf, type DotService } from './service.ts'
-import { AGREEMENTS_MAX_CHARS, SETTING_FIELDS, TOOL, type DotSettings, type SettingField, type SettingProposal } from './contracts.ts'
+import { SETTING_FIELDS, TOOL, type DotSettings, type SettingField, type SettingProposal } from './contracts.ts'
 import { type CopyLocale } from './i18n/index.ts'
 import { lockedField, patchSettings } from './settings.ts'
 import { defaultAddress, defaultPersona } from './persona.ts'
-import { normalizeAgreements } from './memory.ts'
+import { agreementsText, normalizeAgreements } from './memory.ts'
 
 /** A proposal for the agreements field rewrites the stored agreements text. */
 function valueOf(settings: DotSettings, field: SettingField, agreementsText: string, locale: CopyLocale = 'zh'): unknown {
@@ -48,7 +48,7 @@ export class SelfSettings {
     const knowledge = await this.dot.knowledgeView()
     const locale = this.dot.locale ?? 'zh'
     const locks = this.dot.store.settings.locks ?? {}
-    const fields = SETTING_FIELDS.map(field => `${field}${locks[field] ? ' [locked by the human]' : ''}: ${textOf(valueOf(this.dot.store.settings, field, knowledge.agreements.text, locale))}`)
+    const fields = SETTING_FIELDS.map(field => `${field}${locks[field] ? ' [locked by the human]' : ''}: ${textOf(valueOf(this.dot.store.settings, field, agreementsText(knowledge.agreements.entries), locale))}`)
     const pending = this.dot.store.settingProposals.map(proposal => `${proposal.id} · ${proposal.field}: ${proposal.reason}`).join('\n')
     return `${fields.join('\n')}\n\nOnly propose an unlocked field with ${TOOL.settings} (action=propose); the human must approve it. Locks and homeDir are human-only.${pending ? `\n\nWaiting proposals:\n${pending}` : ''}`
   }
@@ -66,9 +66,8 @@ export class SelfSettings {
     if (field === 'agreements') {
       if (input.value !== null && typeof input.value !== 'string') throw new DotError('dot/invalid', 'agreements must be text or null')
       const knowledge = await this.dot.knowledgeView()
-      before = normalizeAgreements(knowledge.agreements.text) || null
+      before = agreementsText(knowledge.agreements.entries) || null
       const normalized = input.value === null ? '' : normalizeAgreements(String(input.value))
-      if (normalized.trim().length > AGREEMENTS_MAX_CHARS) throw new DotError('dot/invalid', `the agreements are at most ${AGREEMENTS_MAX_CHARS} characters`)
       after = normalized || null
     } else {
       const patch = { [field]: input.value }
@@ -100,7 +99,7 @@ export class SelfSettings {
     }
     const locale = this.dot.locale ?? 'zh'
     const knowledge = await this.dot.knowledgeView()
-    const current = field === 'agreements' ? normalizeAgreements(knowledge.agreements.text) || null : valueOf(this.dot.store.settings, field, '', locale)
+    const current = field === 'agreements' ? agreementsText(knowledge.agreements.entries) || null : valueOf(this.dot.store.settings, field, '', locale)
     if (!equal(current, proposal.before)) throw new DotError('dot/proposal-stale', `${field} changed after this proposal. Decline it and ask Dorothy to propose the change again from the current value.`)
     try {
       if (field === 'agreements') await this.dot.setAgreements(proposal.after === null ? '' : String(proposal.after), 'human')
@@ -109,7 +108,7 @@ export class SelfSettings {
       throw new DotError('dot/proposal-failed', messageOf(error))
     }
     await this.dot.store.deleteSettingProposal(id)
-    const now = field === 'agreements' ? (await this.dot.knowledgeView()).agreements.text || null : valueOf(this.dot.store.settings, field, '', locale)
+    const now = field === 'agreements' ? agreementsText((await this.dot.knowledgeView()).agreements.entries) || null : valueOf(this.dot.store.settings, field, '', locale)
     // Agreements already reach dot before the next message; other fields apply through settingsChanged.
     return { message: `Approved ${id}; ${field} is now ${textOf(now)}.`, changed: field !== 'agreements' }
   }

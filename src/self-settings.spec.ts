@@ -1,20 +1,21 @@
 import { describe, expect, it } from 'vitest'
-import { DEFAULT_SETTINGS } from './contracts.ts'
+import { DEFAULT_SETTINGS, type AgreementEntry } from './contracts.ts'
 import { SelfSettings } from './self-settings.ts'
+import { agreementEntriesFromText } from './memory.ts'
 import { parseSettingProposal } from './storage.ts'
 import { DotStore } from './store.ts'
 
 function setup() {
   const store = new DotStore(undefined)
-  const state = { agreements: '', writes: [] as string[] }
+  const state = { entries: [] as AgreementEntry[], writes: [] as string[] }
   const view = async () => ({
-    agreements: { text: state.agreements, maxChars: 4000, canUndo: false },
-    cognition: { text: '', maxChars: 4000, history: [] as Array<{ text: string; at: number }> },
+    agreements: { entries: state.entries, canUndo: false },
+    cognition: { entries: [] as unknown[], history: [] },
   })
   const service = {
     store,
     knowledgeView: view,
-    setAgreements: async (text: string) => { state.agreements = text; state.writes.push(text); return view() },
+    setAgreements: async (text: string) => { state.entries = agreementEntriesFromText(text, state.entries, 1); state.writes.push(text); return view() },
     settingsChanged: async () => {},
     serialSettings: async <T>(work: () => Promise<T>) => work(),
   }
@@ -77,6 +78,17 @@ describe('Dorothy self settings', () => {
     expect(h.state.writes).toEqual([])
     await h.self.decide(h.store.settingProposals[0]!.id, true)
     expect(h.state.writes).toEqual(['- likes tea\n'])
+    expect(h.state.entries.map(entry => entry.text)).toEqual(['likes tea'])
+  })
+
+  it('reuses entry ids for unchanged lines and accepts a proposal of any size', async () => {
+    const h = setup()
+    h.state.entries = agreementEntriesFromText('- keep me\n- drop me\n', [], 1)
+    const long = 'x'.repeat(5000)
+    await h.self.propose({ field: 'agreements', value: `- keep me\n- ${long}`, reason: 'remember' })
+    await h.self.decide(h.store.settingProposals[0]!.id, true)
+    expect(h.state.entries.map(entry => entry.id)).toEqual(['a1', 'a3'])
+    expect(h.state.entries[1]!.text).toBe(long)
   })
 
   it('refuses an old proposal after the human locks it, including the agreements field', async () => {

@@ -5,75 +5,152 @@
  */
 import { Button, Input, Tag } from '@deepseek-ai/dsh-client-ui-primitives'
 import { useCallback, useEffect, useState } from 'react'
-import type { DotSettings, KnowledgeView, SettingField } from './contracts.ts'
+import type { CognitionEntry, DotSettings, KnowledgeEdit, KnowledgeView, SettingField } from './contracts.ts'
 import { ADDRESS_MAX_CHARS, PERSONA_MAX_CHARS, defaultAddress, defaultPersona } from './persona.ts'
 import { HelpTip, LockToggle, PaneSkeleton, type SaveNotice, type SettingsApi, type SettingsPatch } from './settings-panel.tsx'
 import { formatWhen, t, type CopyLocale } from './ui-copy.ts'
 
 export interface KnowledgeApi {
   knowledge(signal: AbortSignal): Promise<KnowledgeView>
-  setAgreements(text: string): Promise<KnowledgeView>
+  editAgreements(edit: KnowledgeEdit): Promise<KnowledgeView>
   undoAgreements(): Promise<KnowledgeView>
-  setCognition(text: string): Promise<KnowledgeView>
+  editCognition(edit: KnowledgeEdit): Promise<KnowledgeView>
   /** The `at` of the version to return to; taken from a history entry. */
   restoreCognition(at: number): Promise<KnowledgeView>
 }
 
-/** One editable text block with its own save and discard. */
-function TextBlock({
+/** One knowledge entry: text, inline edit and delete; cognition rows also carry pin state and a dormant tag. */
+function EntryRow({
   locale,
-  label,
-  placeholder,
-  value,
-  maxChars,
-  rows,
-  empty,
-  discardSignal,
-  onChanged,
-  onSave,
-  onUndo,
+  entry,
+  dormant,
+  canPin,
+  editing,
+  onStartEdit,
+  onDoneEdit,
+  onEdit,
+  onRemove,
+  onPin,
 }: {
   locale: CopyLocale
-  label: string
-  placeholder: string
-  value: string
-  maxChars: number
-  rows: number
-  empty?: string
-  discardSignal?: number
-  onChanged?: (changed: boolean) => void
-  onSave: (text: string) => void
-  onUndo?: (() => void) | undefined
+  entry: { readonly id: string; readonly text: string; readonly pinned?: true }
+  dormant?: boolean
+  canPin?: boolean
+  editing: boolean
+  onStartEdit: () => void
+  onDoneEdit: () => void
+  onEdit: (id: string, text: string) => Promise<boolean>
+  onRemove: (id: string) => void
+  onPin?: (id: string, pinned: boolean) => void
 }) {
-  const [draft, setDraft] = useState(value)
-  useEffect(() => { setDraft(value) }, [value, discardSignal])
-  const changed = draft !== value
-  useEffect(() => { onChanged?.(changed) }, [changed, onChanged])
-  useEffect(() => () => { onChanged?.(false) }, [onChanged])
-  const over = draft.trim().length > maxChars
+  const [draft, setDraft] = useState(entry.text)
+  useEffect(() => { if (editing) setDraft(entry.text) }, [editing, entry.text])
+  if (editing) {
+    return (
+      <div className="dsh-dot-entry">
+        <textarea
+          className="dsh-ui-textarea dsh-dot-entry-editor"
+          aria-label={t(locale, 'pEntryEdit')}
+          rows={2}
+          value={draft}
+          onChange={event => setDraft(event.target.value)}
+        />
+        <div className="dsh-ui-actions">
+          <Button variant="primary" size="sm" disabled={!draft.trim() || draft.trim() === entry.text}
+            onClick={() => { void onEdit(entry.id, draft.trim()).then(saved => { if (saved) onDoneEdit() }) }}>
+            {t(locale, 'pSave')}
+          </Button>
+          <Button variant="ghost" size="sm" onClick={onDoneEdit}>{t(locale, 'pDiscard')}</Button>
+        </div>
+      </div>
+    )
+  }
   return (
-    <>
-      <textarea
-        className="dsh-ui-textarea dsh-dot-persona-text"
-        aria-label={label}
-        rows={rows}
-        maxLength={maxChars}
-        placeholder={placeholder}
-        value={draft}
-        onChange={event => setDraft(event.target.value)}
-      />
-      <div className="dsh-dot-memory-bar">
-        <span className="dsh-ui-hint dsh-dot-memory-meta" data-over={over ? '' : undefined}>
-          {t(locale, 'pCharCount').replace('{n}', String(draft.trim().length)).replace('{max}', String(maxChars))}
+    <div className="dsh-dot-entry" {...dormant ? { 'data-dormant': '' } : {}}>
+      <div className="dsh-dot-entry-row">
+        <span className="dsh-dot-entry-text">{entry.text}</span>
+        {entry.pinned === true ? <Tag tone="quiet">{t(locale, 'pPinned')}</Tag> : null}
+        {dormant ? <Tag tone="quiet">{t(locale, 'pDormant')}</Tag> : null}
+        <span className="dsh-dot-entry-tools">
+          {canPin && onPin
+            ? <Button variant="ghost" size="sm" onClick={() => onPin(entry.id, entry.pinned !== true)}>{entry.pinned === true ? t(locale, 'pUnpin') : t(locale, 'pPin')}</Button>
+            : null}
+          <Button variant="ghost" size="sm" onClick={onStartEdit}>{t(locale, 'pEntryEdit')}</Button>
+          <Button variant="ghost" size="sm" onClick={() => onRemove(entry.id)}>{t(locale, 'pEntryDelete')}</Button>
         </span>
       </div>
-      <div className="dsh-ui-actions">
-        <Button variant="primary" size="sm" disabled={!changed || over} onClick={() => onSave(draft)}>{t(locale, 'pSave')}</Button>
-        <Button variant="ghost" size="sm" disabled={!changed} onClick={() => setDraft(value)}>{t(locale, 'pDiscard')}</Button>
-        <span className="dsh-ui-spacer" />
-        {onUndo ? <Button variant="outline" size="sm" onClick={onUndo}>{t(locale, 'pAgreementsUndo')}</Button> : null}
+    </div>
+  )
+}
+
+/** One knowledge list with an add input at the bottom; drafts keep the drawer dirty until saved or discarded. */
+function EntryList({
+  locale,
+  entries,
+  placeholder,
+  empty,
+  dormantHint,
+  canPin,
+  discardSignal,
+  onChanged,
+  onEdit,
+}: {
+  locale: CopyLocale
+  entries: readonly { readonly id: string; readonly text: string; readonly pinned?: true; readonly active?: boolean }[]
+  placeholder: string
+  empty: string
+  dormantHint?: string
+  canPin?: boolean
+  discardSignal?: number
+  onChanged?: (changed: boolean) => void
+  onEdit: (edit: KnowledgeEdit) => Promise<boolean>
+}) {
+  const [addDraft, setAddDraft] = useState('')
+  const [editingId, setEditingId] = useState<string>()
+  useEffect(() => { setAddDraft(''); setEditingId(undefined) }, [discardSignal])
+  // A save may drop the row under edit (a proposal reload, an undo); the draft is stale then.
+  useEffect(() => { if (editingId !== undefined && !entries.some(entry => entry.id === editingId)) setEditingId(undefined) }, [entries, editingId])
+  const dirty = addDraft.trim() !== '' || editingId !== undefined
+  useEffect(() => { onChanged?.(dirty) }, [dirty, onChanged])
+  useEffect(() => () => { onChanged?.(false) }, [onChanged])
+  const submit = () => {
+    const text = addDraft.trim()
+    if (!text) return
+    void onEdit({ op: 'add', text }).then(saved => { if (saved) setAddDraft('') })
+  }
+  const hasDormant = entries.some(entry => entry.active === false)
+  return (
+    <>
+      {entries.length === 0 ? <span className="dsh-ui-help">{empty}</span> : (
+        <div className="dsh-dot-entries">
+          {entries.map(entry => (
+            <EntryRow
+              key={entry.id}
+              locale={locale}
+              entry={entry}
+              dormant={entry.active === false}
+              canPin={canPin}
+              editing={editingId === entry.id}
+              onStartEdit={() => setEditingId(entry.id)}
+              onDoneEdit={() => setEditingId(undefined)}
+              onEdit={(id, text) => onEdit({ op: 'edit', id, text })}
+              onRemove={id => void onEdit({ op: 'remove', id })}
+              {...canPin ? { onPin: (id, pinned) => void onEdit({ op: 'pin', id, pinned }) } : {}}
+            />
+          ))}
+        </div>
+      )}
+      {hasDormant && dormantHint ? <span className="dsh-ui-help">{dormantHint}</span> : null}
+      <div className="dsh-dot-entry-add">
+        <Input
+          aria-label={t(locale, 'pEntryAdd')}
+          placeholder={placeholder}
+          value={addDraft}
+          onChange={event => setAddDraft(event.target.value)}
+          onKeyDown={event => { if (event.key === 'Enter' && !event.nativeEvent.isComposing) submit() }}
+        />
+        <Button variant="outline" size="sm" disabled={!addDraft.trim()} onClick={submit}>{t(locale, 'pEntryAdd')}</Button>
       </div>
-      {empty && !value.trim() ? <span className="dsh-ui-help">{empty}</span> : null}
     </>
   )
 }
@@ -99,7 +176,9 @@ function CognitionHistory({ locale, knowledge, onRestore }: {
               {t(locale, 'pCognitionRestore')}
             </Button>
           </div>
-          <p className="dsh-dot-version-text">{version.text.trim() || t(locale, 'ctxSectionEmpty')}</p>
+          <p className="dsh-dot-version-text">
+            {version.entries.length > 0 ? version.entries.map((entry: CognitionEntry) => `- ${entry.text}`).join('\n') : t(locale, 'ctxSectionEmpty')}
+          </p>
         </div>
       ))}
     </div>
@@ -133,11 +212,11 @@ function KnowledgeSection({ locale, api, onStatus, locked, onLock, discardSignal
     )
     return () => lifetime.abort()
   }, [api])
-  const run = (work: Promise<KnowledgeView>) => {
+  const run = (work: Promise<KnowledgeView>): Promise<boolean> => {
     onStatus(undefined)
-    work.then(
-      next => { setKnowledge(next); setFailed(undefined); onStatus({ kind: 'saved' }) },
-      failure => onStatus({ kind: 'error', message: failure instanceof Error ? failure.message : String(failure) }),
+    return work.then(
+      next => { setKnowledge(next); setFailed(undefined); onStatus({ kind: 'saved' }); return true },
+      failure => { onStatus({ kind: 'error', message: failure instanceof Error ? failure.message : String(failure) }); return false },
     )
   }
   if (knowledge === undefined) {
@@ -166,21 +245,18 @@ function KnowledgeSection({ locale, api, onStatus, locked, onLock, discardSignal
                 <HelpTip locale={locale} fieldLabel={t(locale, 'pAgreements')} text={t(locale, 'pAgreementsHint')} />
               </span>
               <div className="dsh-dot-setting-tools">
+                {agreements.canUndo ? <Button variant="outline" size="sm" onClick={() => void run(api.undoAgreements())}>{t(locale, 'pAgreementsUndo')}</Button> : null}
                 <LockToggle locale={locale} label={t(locale, 'pAgreements')} locked={locked} onLock={next => onLock('agreements', next)} />
               </div>
             </div>
-            <TextBlock
+            <EntryList
               locale={locale}
-              label={t(locale, 'pAgreements')}
+              entries={agreements.entries}
               placeholder={t(locale, 'pAgreementsPlaceholder')}
-              value={agreements.text}
-              maxChars={agreements.maxChars}
-              rows={7}
               empty={t(locale, 'pAgreementsEmpty')}
               {...discardSignal === undefined ? {} : { discardSignal }}
               onChanged={setAgreementsDirty}
-              onSave={text => run(api.setAgreements(text))}
-              {...agreements.canUndo ? { onUndo: () => run(api.undoAgreements()) } : {}}
+              onEdit={edit => run(api.editAgreements(edit))}
             />
           </div>
         </div>
@@ -194,17 +270,16 @@ function KnowledgeSection({ locale, api, onStatus, locked, onLock, discardSignal
                 <HelpTip locale={locale} fieldLabel={t(locale, 'pCognition')} text={t(locale, 'pCognitionHint')} />
               </span>
             </div>
-            <TextBlock
+            <EntryList
               locale={locale}
-              label={t(locale, 'pCognition')}
+              entries={cognition.entries}
               placeholder={t(locale, 'pCognitionPlaceholder')}
-              value={cognition.text}
-              maxChars={cognition.maxChars}
-              rows={7}
               empty={t(locale, 'pCognitionEmpty')}
+              dormantHint={t(locale, 'pDormantHint')}
+              canPin
               {...discardSignal === undefined ? {} : { discardSignal }}
               onChanged={setCognitionDirty}
-              onSave={text => run(api.setCognition(text))}
+              onEdit={edit => run(api.editCognition(edit))}
             />
             <div className="dsh-dot-setting-head dsh-dot-versions-head">
               <span className="dsh-ui-label">{t(locale, 'pCognitionHistory')}</span>
@@ -329,9 +404,15 @@ export const personaCss = `
 .dsh-dot-chat .dsh-dot-persona-row > :first-child { flex: 1 1 160px; min-width: 0; max-width: 260px; }
 .dsh-dot-chat .dsh-dot-persona-row > button { flex-shrink: 0; white-space: nowrap; }
 .dsh-dot-chat .dsh-dot-persona-text { min-height: 180px; font-family: inherit; font-size: 13px; line-height: 1.6; }
-.dsh-dot-chat .dsh-dot-memory-bar { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-width: 0; }
-.dsh-dot-chat .dsh-dot-memory-meta { flex: none; font-variant-numeric: tabular-nums; }
-.dsh-dot-chat .dsh-dot-memory-meta[data-over] { color: var(--dsw-alias-state-error-primary); }
+.dsh-dot-chat .dsh-dot-entries { display: flex; flex-direction: column; gap: 6px; }
+.dsh-dot-chat .dsh-dot-entry { display: flex; flex-direction: column; gap: 6px; padding: 8px 10px; border-radius: var(--dsw-radius-sm); background: var(--dsw-alias-bg-layer-1); }
+.dsh-dot-chat .dsh-dot-entry-row { display: flex; align-items: flex-start; gap: 8px; }
+.dsh-dot-chat .dsh-dot-entry-text { flex: 1 1 auto; min-width: 0; font-size: 13px; line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; }
+.dsh-dot-chat .dsh-dot-entry[data-dormant] .dsh-dot-entry-text { color: var(--dsw-alias-label-tertiary); }
+.dsh-dot-chat .dsh-dot-entry-tools { display: flex; flex: none; align-items: center; gap: 4px; }
+.dsh-dot-chat .dsh-dot-entry-editor { min-height: 44px; font-family: inherit; font-size: 13px; line-height: 1.6; }
+.dsh-dot-chat .dsh-dot-entry-add { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
+.dsh-dot-chat .dsh-dot-entry-add > :first-child { flex: 1 1 auto; min-width: 0; }
 .dsh-dot-chat .dsh-dot-versions-head { margin-top: 14px; }
 .dsh-dot-chat .dsh-dot-versions { display: flex; flex-direction: column; gap: 8px; margin-top: 6px; }
 .dsh-dot-chat .dsh-dot-version { display: flex; flex-direction: column; gap: 4px; padding: 8px 10px; border-radius: var(--dsw-radius-sm); background: var(--dsw-alias-bg-layer-1); }

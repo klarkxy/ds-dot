@@ -378,12 +378,12 @@ export class DotService {
         if (existing === undefined) {
           await mkdir(this.options.homeDir, { recursive: true })
           const sessionId = await this.host.createDot(this.options.homeDir, PRESET_ID)
-          await this.store.beginSegment({ sessionId, startedAt: this.now(), ...await this.frozen() })
+          await this.store.beginSegment({ sessionId, startedAt: this.now(), ...await this.frozen(sessionId) })
           return this.openedDot(sessionId)
         }
         if (await this.host.resumeDot(existing, PRESET_ID)) {
           // A session from before segments existed gets its record on first use.
-          if (!this.store.segment) await this.store.beginSegment({ sessionId: existing, startedAt: this.now(), ...await this.frozen() })
+          if (!this.store.segment) await this.store.beginSegment({ sessionId: existing, startedAt: this.now(), ...await this.frozen(existing) })
           return this.openedDot(existing)
         }
         await mkdir(this.options.homeDir, { recursive: true })
@@ -4117,9 +4117,12 @@ export class DotService {
   }
 
   /** Persona, model, agreements, cognition and capability grants as a segment starting now would freeze them. */
-  private async frozen(): Promise<Pick<Segment, 'persona' | 'model' | 'agreements' | 'cognition' | 'capabilities'>> {
+  private async frozen(sessionId?: string): Promise<Pick<Segment, 'persona' | 'model' | 'agreements' | 'cognition' | 'capabilities'>> {
     const model = this.host.modelKey()
-    const capabilities = this.options.capabilities?.signature()
+    // The record freezes the grants the apply actually resolved: a grant saved
+    // while the apply awaited the bundle scan must surface as a mismatch later.
+    const capabilities = this.options.capabilities?.appliedSignature(sessionId)
+      ?? this.options.capabilities?.signature()
     return {
       persona: personaSection(this.store.settings, this.locale),
       ...model ? { model } : {},
@@ -4157,7 +4160,7 @@ export class DotService {
     const wanted = await this.frozen()
     const capChanged = (segment.capabilities ?? EMPTY_CAPABILITIES_SIGNATURE) !== (wanted.capabilities ?? EMPTY_CAPABILITIES_SIGNATURE)
     if (capChanged) await this.host.reapplyCapabilities?.(dot)
-    if (segment.persona !== wanted.persona || capChanged) await this.store.refreezeSegment(wanted)
+    if (segment.persona !== wanted.persona || capChanged) await this.store.refreezeSegment(await this.frozen(dot))
   }
 
   /**
@@ -4181,7 +4184,7 @@ export class DotService {
       if (segment.persona !== wanted.persona || segment.model !== wanted.model
         || (wanted.agreements ?? '') !== (segment.agreements ?? '')
         || (wanted.cognition ?? '') !== (segment.cognition ?? '')
-        || capChanged) await this.store.refreezeSegment(wanted)
+        || capChanged) await this.store.refreezeSegment(await this.frozen(dot))
       return undefined
     }
     const view = await this.host.dotContext(dot)
@@ -4246,7 +4249,7 @@ export class DotService {
     await this.store.beginSegment({
       sessionId,
       startedAt: at,
-      ...await this.frozen(),
+      ...await this.frozen(sessionId),
       opening,
       ...handoff ? { handoff } : {},
       reason,

@@ -649,6 +649,32 @@ describe('capability application', () => {
     expect(resolved.get('report_tool')?.chain).toEqual(['tool:report_tool', 'plugin:dsh-reports'])
   })
 
+  it('resolves a grant saved while the plugin scan was in flight and records its signature', async () => {
+    const tools = fakeTools(['extra_tool', 'report_tool'])
+    const settings = { current: settingsWith({ 'plugin:p': 'auto' }) }
+    let release: () => void = () => {}
+    const gate = new Promise<void>(done => { release = done })
+    const caps = new DotCapabilities({
+      tools: () => tools,
+      mcpManager: () => undefined,
+      pluginManager: () => ({ listBundles: async () => { await gate; return [{ name: 'p', rows: [{ entryId: 'e1' }] }] } }),
+      settings: () => settings.current,
+      locked: LOCKED,
+    })
+    caps.owners.set('extra_tool', {})
+    caps.owners.set('report_tool', { entryId: 'e1' })
+    const env = agentCtx(tools)
+    const pending = caps.applyToAgent(env.ctx as never, { session: { id: 'dot-1' } } as never)
+    await new Promise(done => setTimeout(done, 0))
+    // The human saves another grant while the apply still waits on the scan.
+    settings.current = settingsWith({ 'plugin:p': 'auto', 'tool:extra_tool': 'auto' })
+    release()
+    const applied = await pending
+    // The post-scan snapshot is what applied and what the signature freezes.
+    expect([...applied.keys()].sort()).toEqual(['extra_tool', 'report_tool'])
+    expect(caps.appliedSignature('dot-1')).toBe(capabilitiesSignature(settings.current))
+  })
+
   it('reaches the raw register through the cordis.original symbol', async () => {
     const raw = { register(this: unknown, def: { name: string }) { return () => {} } }
     const proxy = { [Symbol.for('cordis.original')]: raw, register: raw.register }

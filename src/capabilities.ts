@@ -440,6 +440,8 @@ export function buildCatalog(input: CatalogInput): { readonly locked: readonly s
 
 interface AppliedState {
   readonly applied: ReadonlyMap<string, ResolvedGrant>
+  /** Signature of the grants snapshot this apply resolved against; a segment record freezes it. */
+  readonly signature: string
   readonly release: () => void
 }
 
@@ -550,7 +552,7 @@ export class DotCapabilities {
   signature(): string { return capabilitiesSignature(this.deps.settings()) }
 
   /** The catalog the settings view and the dot_capabilities tool draw. */
-  async catalog(options?: { readonly awaitBundles?: boolean }): Promise<{ readonly locked: readonly string[]; readonly groups: readonly CapabilityGroupView[] }> {
+  async catalog(options?: { readonly awaitBundles?: boolean; readonly grants?: Readonly<Record<string, CapabilityGrant>> }): Promise<{ readonly locked: readonly string[]; readonly groups: readonly CapabilityGroupView[] }> {
     const tools = this.deps.tools()
     const defs = tools?.definitions() ?? []
     let servers: string[] = []
@@ -560,7 +562,7 @@ export class DotCapabilities {
       owners: this.owners,
       servers,
       bundles: [...await this.bundleRows(options)],
-      grants: this.deps.settings().capabilities?.grants ?? {},
+      grants: options?.grants ?? this.deps.settings().capabilities?.grants ?? {},
       locked: new Set(this.deps.locked),
       conditional: name => tools !== undefined && tools.get(name) !== undefined && tools.executable(name) === undefined,
       builtinDescriptions: this.schemaDescriptions,
@@ -570,15 +572,25 @@ export class DotCapabilities {
 
   /** Live grant resolution over the present catalog; only enabled tools are returned. */
   async resolve(): Promise<Map<string, ResolvedGrant>> {
-    const grants = this.deps.settings().capabilities?.grants ?? {}
+    return (await this.resolveSnapshot()).resolved
+  }
+
+  /** resolve() plus the exact grants object it resolved against, for the applied-state record. */
+  private async resolveSnapshot(): Promise<{ resolved: Map<string, ResolvedGrant>; grants: Record<string, CapabilityGrant> }> {
+    let grants = this.deps.settings().capabilities?.grants ?? {}
     // Only `plugin:` selectors consume bundle rows, so without a live plugin
     // grant a segment start must not block on a listBundles scan: the catalog
     // answers from cache (or empty) while the deferred refresh runs. With one,
     // apply still awaits the live bundle map after an explicit invalidate.
     const pluginGranted = Object.keys(grants).some(key => key.startsWith(SELECTOR.plugin) && grants[key] !== 'off')
-    if (pluginGranted && (this.bundlesCache === undefined || this.bundlesCache.at === 0)) await this.refreshBundles()
-    const { groups } = await this.catalog({ awaitBundles: pluginGranted })
-    return resolveGrants(grants, groups)
+    if (pluginGranted && (this.bundlesCache === undefined || this.bundlesCache.at === 0)) {
+      await this.refreshBundles()
+      // A grant saved while the scan ran never reached the agent; resolving the
+      // pre-scan snapshot would let the frozen signature claim it applied.
+      grants = this.deps.settings().capabilities?.grants ?? {}
+    }
+    const { groups } = await this.catalog({ awaitBundles: pluginGranted, grants })
+    return { resolved: resolveGrants(grants, groups), grants }
   }
 
   /** The live grant over one applied tool's stored selector chain; 'off' and absent both mean denied. */
@@ -589,6 +601,11 @@ export class DotCapabilities {
   /** Grants applied for one dot segment session at its start. */
   appliedFor(sessionId: string | undefined): ReadonlyMap<string, ResolvedGrant> | undefined {
     return sessionId === undefined ? undefined : this.agents.get(sessionId)?.applied
+  }
+
+  /** Signature of the grants snapshot the session's last apply actually resolved against. */
+  appliedSignature(sessionId: string | undefined): string | undefined {
+    return sessionId === undefined ? undefined : this.agents.get(sessionId)?.signature
   }
 
   /** Forget the applied state of a released agent; ctx disposal already lifted its restrict and copies. */
@@ -625,7 +642,8 @@ export class DotCapabilities {
       if (sessionId !== undefined) this.releaseAgent(sessionId)
       return applied
     }
-    const grants = await this.resolve()
+    const { resolved: grants, grants: snapshot } = await this.resolveSnapshot()
+    const signature = capabilitiesSignature({ capabilities: { grants: snapshot } })
     try {
       // The previous apply of this session releases first, synchronously:
       // its restrict masks the new allow list while it lives, and its scoped
@@ -689,11 +707,15 @@ export class DotCapabilities {
       // drop whatever was acquired and fall back to the locked-only mask.
       finish()
       try { releases.push(restrictInheritedTools(agentCtx, [...this.deps.locked], agent)) } catch { /* the scope is gone entirely */ }
-      const failed: AppliedState = { applied: new Map(), release: finish }
+      const failed: AppliedState = {
+        applied: new Map(),
+        signature: capabilitiesSignature({ capabilities: { grants: {} } }),
+        release: finish,
+      }
       this.agents.set(sessionId, failed)
       return failed.applied
     }
-    const state: AppliedState = { applied, release: finish }
+    const state: AppliedState = { applied, signature, release: finish }
     this.agents.set(sessionId, state)
     return applied
   }

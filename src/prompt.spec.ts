@@ -63,6 +63,12 @@ describe('coordinator prompt contract', () => {
     for (const phrase of ['is in English', 'verbatim', 'original language', 'deliverable_language', "in the human's language"]) expect(language).toContain(phrase)
     expect(DOT_INSTRUCTIONS).toContain('user_request')
   })
+  it('draws the line between her own session and a task run', () => {
+    expect(DOT_INSTRUCTIONS).toContain('What you do yourself and what goes to a run:')
+    expect(DOT_INSTRUCTIONS).toContain('You never edit files or run commands yourself, even if a tool for it appears; those tools belong to runs.')
+    expect(DOT_INSTRUCTIONS).toContain(`reading a delivered file or two with ${TOOL.workspace} action=read`)
+    expect(DOT_INSTRUCTIONS).toContain('Choose task presets by fit: "ptc" for scripted batch work, "cordis" for DSH plugin development.')
+  })
   it('carries no leftover vocabulary from the removed regimes', () => {
     for (const stale of ['approvalNotice', 'assessApprovalRisk', 'EPERM', 'call action=list', 'dot_start_task', 'check_only', 'Every reply to the human ends with', 'every reply goes inside a card', 'end with one show_view']) {
       expect(DOT_INSTRUCTIONS, stale).not.toContain(stale)

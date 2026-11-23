@@ -72,12 +72,12 @@ export function hostScheduleTargetsDot(args: unknown, sessionIds: ReadonlySet<st
 }
 
 /**
- * Host tools whose rc5 self-escalation short-circuits under dot's
- * danger-full-access session: they run unsandboxed with no host approval, so
- * dot's own grant is the only control. Catalog rows and the grant UI flag
- * them, and `auto` asks the human to confirm once more.
+ * Tools that belong to task runs only: they mutate files or run commands in
+ * the caller's own session, which for dot is danger-full-access and would
+ * bypass work orders, write scopes, baselines, locks and verification. They
+ * are never applied to dot's agent, whatever the grant says.
  */
-export const HIGH_RISK_TOOLS: ReadonlySet<string> = new Set(['plugin_manager', 'bash', 'pwsh', 'write', 'edit', 'apply_patch'])
+export const TASK_ONLY_TOOLS: ReadonlySet<string> = new Set(['plugin_manager', 'bash', 'pwsh', 'write', 'edit', 'apply_patch'])
 
 /** DeepSeek function-name contract shared with the MCP public-name derivation. */
 const MCP_INVALID_CHARS = /[^A-Za-z0-9_-]/g
@@ -199,6 +199,9 @@ export function resolveGrants(grants: Readonly<Record<string, CapabilityGrant>>,
     const chain = group.kind === 'host' || group.id === BUILTIN_PARENT ? parents : [group.id, ...parents]
     for (const tool of group.tools) {
       if (tool.missing === true) continue
+      // Task-only names never resolve for dot's own session, whatever selector
+      // chain granted them: a stored grant stays stored but harmless.
+      if (TASK_ONLY_TOOLS.has(tool.name)) continue
       const toolChain = [toolSelector(tool.name), ...chain]
       const grant = grantOnChain(grants, toolChain)
       if (grant === 'ask' || grant === 'auto') out.set(tool.name, { grant, chain: toolChain })
@@ -229,14 +232,13 @@ interface CatalogInput {
   readonly builtinVisible?: ReadonlySet<string>
 }
 
-interface MutableTool extends CapabilityToolView { description?: string; missing?: boolean; conditional: boolean; highRisk?: boolean }
+interface MutableTool extends CapabilityToolView { description?: string; missing?: boolean; conditional: boolean; taskOnly?: boolean }
 /** The catalog as buildCatalog assembles it; arrays freeze into the readonly view contract on return. */
 interface MutableGroup {
   id: string
   kind: 'mcp' | 'plugin' | 'entry' | 'builtin' | 'prefix' | 'host'
   label: string
   missing?: boolean
-  highRisk?: boolean
   tools: CapabilityToolView[]
   children?: MutableGroup[]
 }
@@ -248,8 +250,8 @@ function nameSegment(name: string): string | undefined {
   return segment === '' ? undefined : segment
 }
 
-const riskRow = (tool: MutableTool): MutableTool => {
-  if (HIGH_RISK_TOOLS.has(tool.name)) tool.highRisk = true
+const taskOnlyRow = (tool: MutableTool): MutableTool => {
+  if (TASK_ONLY_TOOLS.has(tool.name)) tool.taskOnly = true
   return tool
 }
 
@@ -261,7 +263,7 @@ const riskRow = (tool: MutableTool): MutableTool => {
 export function buildCatalog(input: CatalogInput): { readonly locked: readonly string[]; readonly groups: readonly CapabilityGroupView[] } {
   type G = MutableGroup
   const row = (def: CapabilityToolDef): MutableTool => {
-    const tool = riskRow({ name: def.name, conditional: input.conditional(def.name) })
+    const tool = taskOnlyRow({ name: def.name, conditional: input.conditional(def.name) })
     const description = firstLine(def.description)
     if (description !== undefined) tool.description = description
     return tool
@@ -372,7 +374,7 @@ export function buildCatalog(input: CatalogInput): { readonly locked: readonly s
     id: BUILTIN_PARENT, kind: 'builtin', label: 'builtin', tools: [],
     children: BUILTIN_GROUPS.map(entry => {
       const tools = entry.tools.map(name => {
-        const tool = riskRow({ name, conditional: false })
+        const tool = taskOnlyRow({ name, conditional: false })
         const description = input.builtinDescriptions?.get(name)
         if (description !== undefined) tool.description = description
         if (input.builtinVisible !== undefined && !input.builtinVisible.has(name)) tool.missing = true
@@ -415,7 +417,7 @@ export function buildCatalog(input: CatalogInput): { readonly locked: readonly s
       if (!name || input.locked.has(name)) continue
       const present = allGroups(groups).some(group => group.tools.some(tool => tool.name === name))
       if (present) continue
-      const missing = riskRow({ name, conditional: false, missing: true })
+      const missing = taskOnlyRow({ name, conditional: false, missing: true })
       const server = mcpGuess(name)
       const owner = server !== undefined ? groups.find(group => group.id === mcpSelector(server)) : undefined
       if (owner !== undefined) owner.tools.push(missing)
@@ -426,14 +428,6 @@ export function buildCatalog(input: CatalogInput): { readonly locked: readonly s
       }
     }
   }
-
-  // A group is high-risk when any tool inside it (however nested) is.
-  const markRisk = (group: MutableGroup): boolean => {
-    const risky = group.tools.some(tool => tool.highRisk === true) || (group.children ?? []).map(markRisk).some(Boolean)
-    if (risky) group.highRisk = true
-    return risky
-  }
-  for (const group of groups) markRisk(group)
 
   return { locked: [...input.locked].sort(), groups }
 }

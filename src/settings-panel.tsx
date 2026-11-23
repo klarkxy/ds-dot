@@ -346,8 +346,6 @@ function Capabilities({ locale, api, grants, onPick }: {
   const [view, setView] = useState<CapabilityCatalogView>()
   const [error, setError] = useState('')
   const [capFilter, setCapFilter] = useState('')
-  // Choosing `auto` on a self-escalating row takes one more explicit confirm.
-  const [confirmAuto, setConfirmAuto] = useState<{ selector: string; label: string } | undefined>()
   useEffect(() => {
     if (api.capabilities === undefined) return
     const life = new AbortController()
@@ -380,10 +378,6 @@ function Capabilities({ locale, api, grants, onPick }: {
     : group.kind === 'builtin' ? t(locale, 'sCapKind_builtin')
     : group.kind === 'plugin' || group.kind === 'entry' ? t(locale, 'sCapKind_plugin')
     : t(locale, 'sCapKind_unknown')
-  const pick = (selector: string, grant: CapabilityGrant | undefined, label: string, highRisk: boolean) => {
-    if (grant === 'auto' && highRisk) { setConfirmAuto({ selector, label }); return }
-    onPick(selector, grant)
-  }
   const effectiveFor = (chain: readonly string[]): CapabilityGrant => {
     for (const selector of chain) { const grant = grants[selector]; if (grant !== undefined) return grant }
     return 'off'
@@ -403,11 +397,10 @@ function Capabilities({ locale, api, grants, onPick }: {
         <summary className="dsh-dot-cap-head">
           <span className="dsh-dot-cap-name" title={group.id}>{label}{group.kind === 'builtin' && group.id !== 'builtin' ? null : <span className="dsh-dot-cap-tag">{kindLabel(group)}</span>}<span className="dsh-dot-cap-count">{t(locale, 'sCapToolCount').replace('{n}', String(countTools(group)))}</span></span>
           {group.missing === true ? <span className="dsh-dot-cap-badge">{t(locale, 'sCapMissing')}</span> : null}
-          {group.highRisk === true ? <span className="dsh-dot-cap-badge dsh-dot-cap-badge--warn">{t(locale, 'sCapHighRisk')}</span> : null}
           {changed ? <span className="dsh-dot-cap-badge">{t(locale, 'sCapNext')}</span> : null}
           {group.kind === 'host' || group.id === 'builtin' ? null : (
             <span className="dsh-dot-cap-control" onClick={event => event.preventDefault()}>
-              <GrantPicker locale={locale} label={label} chain={chain} grants={grants} applied={undefined} onPick={(selector, grant) => pick(selector, grant, label, group.highRisk === true)} />
+              <GrantPicker locale={locale} label={label} chain={chain} grants={grants} applied={undefined} onPick={onPick} />
             </span>
           )}
         </summary>
@@ -427,8 +420,8 @@ function Capabilities({ locale, api, grants, onPick }: {
                 </span>
                 {tool.missing === true ? <span className="dsh-dot-cap-badge">{t(locale, 'sCapMissing')}</span> : null}
                 {tool.conditional ? <span className="dsh-dot-cap-badge">{t(locale, 'sCapConditional')}</span> : null}
-                {tool.highRisk === true ? <span className="dsh-dot-cap-badge dsh-dot-cap-badge--warn">{t(locale, 'sCapHighRisk')}</span> : null}
-                {soloNoOwnGrant ? null : <GrantPicker locale={locale} label={tool.name} chain={toolChain} grants={grants} applied={tool.missing === true ? undefined : (applied[tool.name] ?? 'off')} onPick={(selector, grant) => pick(selector, grant, tool.name, tool.highRisk === true)} />}
+                {tool.taskOnly === true ? <span className="dsh-dot-cap-badge dsh-dot-cap-badge--warn" title={t(locale, 'sCapTaskOnlyHint')}>{t(locale, 'sCapTaskOnly')}</span> : null}
+                {soloNoOwnGrant || tool.taskOnly === true ? null : <GrantPicker locale={locale} label={tool.name} chain={toolChain} grants={grants} applied={tool.missing === true ? undefined : (applied[tool.name] ?? 'off')} onPick={onPick} />}
               </div>
             )
           })}
@@ -450,13 +443,6 @@ function Capabilities({ locale, api, grants, onPick }: {
         onChange={event => setCapFilter(event.target.value)}
       />
       {error ? <div className="dsh-ui-error" role="alert">{error}</div> : null}
-      {confirmAuto !== undefined ? (
-        <div className="dsh-dot-cap-confirm" role="alert">
-          <span className="dsh-dot-cap-confirm-text">{confirmAuto.label} — {t(locale, 'sCapConfirmAuto')}</span>
-          <Button variant="primary" size="sm" onClick={() => { onPick(confirmAuto.selector, 'auto'); setConfirmAuto(undefined) }}>{t(locale, 'sApprove')}</Button>
-          <Button variant="ghost" size="sm" onClick={() => setConfirmAuto(undefined)}>{t(locale, 'sDecline')}</Button>
-        </div>
-      ) : null}
       {view === undefined ? null : (
         <>
           <details className="dsh-dot-cap-group dsh-dot-cap-group--locked">
@@ -1129,8 +1115,6 @@ export const settingsCss = `
 }
 .dsh-dot-chat .dsh-dot-cap-badge--on { color: var(--dsw-alias-state-success-primary); }
 .dsh-dot-chat .dsh-dot-cap-badge--warn { color: var(--dsw-alias-state-warn-primary); }
-.dsh-dot-chat .dsh-dot-cap-confirm { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding: 8px 12px; border-radius: var(--dsw-radius-md); background: var(--dsw-alias-bg-layer-1); box-shadow: var(--dsw-elevation-stroke); }
-.dsh-dot-chat .dsh-dot-cap-confirm-text { flex: 1 1 240px; font-size: 12px; line-height: 18px; color: var(--dsw-alias-state-warn-primary); }
 .dsh-dot-chat .dsh-dot-cap-clear { flex-shrink: 0; }
 .dsh-dot-chat .dsh-dot-cap-locked { flex-direction: row; flex-wrap: wrap; gap: 4px; }
 .dsh-dot-chat .dsh-dot-cap-locked-name { padding: 1px 6px; border-radius: var(--dsw-radius-sm); background: var(--dsw-alias-bg-layer-2); font-size: 11px; font-family: var(--ds-font-family-code); color: var(--dsw-alias-label-secondary); }

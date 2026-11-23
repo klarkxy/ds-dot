@@ -4,6 +4,7 @@
  * patches from the panel are checked strictly and refused as a whole.
  */
 import { z } from 'zod'
+import { TASK_ONLY_TOOLS } from './capabilities.ts'
 import { DEFAULT_SETTINGS, SETTING_FIELDS, TASK_MODEL_LIST_MAX, type DotSettings, type SettingField, type TaskPermission } from './contracts.ts'
 import { type CopyLocale } from './i18n/index.ts'
 import { CACHE_TTL_MAX_ENTRIES, CACHE_TTL_MAX_MINUTES } from './keepalive.ts'
@@ -96,6 +97,17 @@ export function patchSettings(current: DotSettings, patch: unknown, locale: Copy
     if (CLEARABLE.has(key) && value === null) { delete next[key]; continue }
     const parsed = FIELDS[key as Field].safeParse(value)
     if (!parsed.success) throw new SettingsError(`invalid value for ${key}`)
+    // Task-run tools are never granted to dot; a grant row on one is a dead
+    // write. A patch carrying a stored row unchanged is a carry-along, not a
+    // new grant, and deleting the row stays allowed.
+    if (key === 'capabilities') {
+      const stored = current.capabilities?.grants ?? {}
+      for (const [sel, grant] of Object.entries((parsed.data as { grants: Record<string, 'off' | 'ask' | 'auto'> }).grants)) {
+        if (sel.startsWith('tool:') && TASK_ONLY_TOOLS.has(sel.slice(5)) && stored[sel] !== grant) {
+          throw new SettingsError(`${sel.slice(5)} belongs to task runs and cannot be granted to Dorothy; remove the selector instead`)
+        }
+      }
+    }
     if (key in defaults && (parsed.data as string).trim() === defaults[key]!.trim()) { delete next[key]; continue }
     next[key] = parsed.data
   }

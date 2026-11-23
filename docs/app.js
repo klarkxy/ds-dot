@@ -351,14 +351,17 @@
         zh: [
           '查文件、列目录或者跑一轮平常的本地测试，照你平时的设置顺手放行就好，省得写正顺手时老被打断。就算只读任务期间借用了外部插件的工具，我也会卡住写操作，只让真正查资料的动作过去。',
           '只要遇到删东西、往外推送、碰本地敏感凭据，或者超出了你原来交代的范围，动作会马上停下。面板会递上一张写清前因后果和建议的确认卡；你在别处处理了或者卡片过期了，它自己会收好。平时就算面板折起来了，有需要拍板的事侧栏红点和桌面提示都会轻声喊你。',
+          '后来又把一条线划死了：凡是改文件、跑命令这类真动手的工具，我自己一律不碰——就算你顺手给了授权，它们也只归派出去的任务用。我呢，写备忘、递提案、查查资料就好；真要动手就写工单派任务，反正那边有范围有留档，出了岔子也查得回来。',
         ],
         en: [
           'Read-only checks, directory listings, and safe local tests go right through under your house defaults so nobody breaks your focus. Even when a read-only step borrows external plugin tools, anything that looks like a write stays blocked.',
           'Deletes, outward pushes, secret access, or gray areas freeze immediately. You get one clean card stating what is waiting and what I recommend (settled or expired cards clean themselves up), and even with my panel closed, a sidebar badge and optional desktop alert call you in.',
+          'One line is now set in stone: any tool that edits files or runs commands stays out of my hands — even if you grant it to me, it only works inside a dispatched run. I stick to notes, proposals, and quick lookups; when something needs doing for real, I write a work order and send a task, which comes with a scope and a paper trail.',
         ],
         ja: [
           'ファイルの中身を見たりローカルテストを動かしたりといった日常の確認は、作業を止めないよう普段の基準どおり静かに通します。読み取り専用の作業中に外部ツールを使う場合も、参照系以外は通さないよう抑えています。',
           '一方で、削除や外部へのプッシュ、機密ファイルへのアクセス、判断に迷う場面ではその場で止まります。理由と提案つきの確認カードを出して待ち（解決や期限切れで自動クローズ）、パネルを閉じていてもバッジやデスクトップ通知でお知らせします。',
+          'もう一つ、線をはっきり引きました。ファイルを書き換えたりコマンドを実行したりするツールは、私自身の手では一切使いません。許可をいただいても、そういう作業は派遣したタスクだけのものです。私はメモや提案、簡単な調べ物にとどめて、本当に手を動かす必要があれば作業指示を書いてタスクに任せます。範囲も記録も残るので安心です。',
         ],
       },
     },

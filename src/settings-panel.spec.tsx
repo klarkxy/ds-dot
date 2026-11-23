@@ -367,6 +367,45 @@ describe('sectioned settings, switches, and help tips', () => {
     await act(async () => root.unmount())
   })
 
+  it('marks a task-only tool with a badge and no picker, and no auto-confirm exists', async () => {
+    let current: DotSettings = { ...DEFAULT_SETTINGS }
+    const api = {
+      models: async () => ({ groups: [] }),
+      settings: async () => current,
+      settingProposals: async () => [],
+      decideSetting: async () => 'ok',
+      capabilities: async () => ({
+        locked: [],
+        groups: [{
+          id: 'host', kind: 'host', label: 'Unattributed',
+          tools: [
+            { name: 'bash', conditional: false, taskOnly: true },
+            { name: 'extra_tool', conditional: false },
+          ],
+        }],
+        applied: {},
+      }),
+      setSettings: async (patch: Partial<DotSettings>) => { current = { ...current, ...patch } as DotSettings; return current },
+    }
+    function Harness() {
+      const [settings, setSettings] = useState<DotSettings>(current)
+      return <SettingsPanel locale="en" api={api as never} section="capabilities" settings={settings} onSaved={setSettings} />
+    }
+    const root = createRoot(document.getElementById('root')!)
+    await act(async () => root.render(<Harness />))
+    await act(async () => { await Promise.resolve() })
+    const rows = [...document.querySelectorAll('.dsh-dot-cap-row')]
+    const bash = rows.find(row => row.textContent?.includes('bash'))!
+    const badge = bash.querySelector('.dsh-dot-cap-badge--warn')!
+    expect(badge.textContent).toBe('Tasks only')
+    expect(badge.getAttribute('title')).toContain('dispatches a task')
+    expect(bash.querySelector('[role="tablist"]')).toBeNull()
+    const extra = rows.find(row => row.textContent?.includes('extra_tool'))!
+    expect(extra.querySelector('[role="tablist"]')).not.toBeNull()
+    expect(document.querySelector('.dsh-dot-cap-confirm')).toBeNull()
+    await act(async () => root.unmount())
+  })
+
   it('keeps model-load failure warnings inline instead of hiding them in tooltips', async () => {
     const api = {
       models: async () => { throw new Error('offline') },

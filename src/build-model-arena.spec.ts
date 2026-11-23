@@ -6,9 +6,13 @@ import { describe, it } from 'vitest'
 const root = join(dirname(fileURLToPath(import.meta.url)), '..')
 
 function pythonBin(): string {
-  for (const bin of ['python3', 'python']) {
+  const bins = process.platform === 'win32' ? ['python', 'python3'] : ['python3', 'python']
+  for (const bin of bins) {
     try {
-      execFileSync(bin, ['-c', 'import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)'], { stdio: 'ignore' })
+      execFileSync(bin, ['-c', 'import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)'], {
+        stdio: 'ignore',
+        timeout: 8_000,
+      })
       return bin
     } catch {
       continue
@@ -18,7 +22,11 @@ function pythonBin(): string {
 }
 
 describe('Arena builder script', () => {
-  it('keeps dated identities, isolates the download cache, and avoids pandas', () => {
-    execFileSync(pythonBin(), [join(root, 'scripts/test_build_model_arena.py')], { cwd: root, encoding: 'utf8' })
+  it('keeps dated identities, isolates the download cache, and avoids pandas', { timeout: 30_000 }, () => {
+    execFileSync(pythonBin(), [join(root, 'scripts/test_build_model_arena.py')], {
+      cwd: root,
+      encoding: 'utf8',
+      timeout: 30_000,
+    })
   })
 })

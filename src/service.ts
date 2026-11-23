@@ -69,7 +69,7 @@ import { formatDuration, formatTokens } from './ui-copy.ts'
 import type { RawEvent } from './chat.ts'
 import { SelfSettings } from './self-settings.ts'
 import { approvalCardCopy, copyLocale, t, type CopyLocale } from './i18n/index.ts'
-import { HIGH_RISK_TOOLS, resolveGrants, type DotCapabilities } from './capabilities.ts'
+import { HIGH_RISK_TOOLS, HOST_SCHEDULE_MUTATORS, hostScheduleTargetsDot, resolveGrants, type DotCapabilities } from './capabilities.ts'
 import type { CapabilityCatalogView, CapabilityGrant, CapabilityGroupView } from './contracts.ts'
 import type { GateVerdict } from './tool-scope.ts'
 
@@ -379,12 +379,12 @@ export class DotService {
         if (existing === undefined) {
           await mkdir(this.options.homeDir, { recursive: true })
           const sessionId = await this.host.createDot(this.options.homeDir, PRESET_ID)
-          await this.store.beginSegment({ sessionId, startedAt: this.now(), ...await this.frozen() })
+          await this.store.beginSegment({ sessionId, startedAt: this.now(), ...await this.frozen(sessionId) })
           return this.openedDot(sessionId)
         }
         if (await this.host.resumeDot(existing, PRESET_ID)) {
           // A session from before segments existed gets its record on first use.
-          if (!this.store.segment) await this.store.beginSegment({ sessionId: existing, startedAt: this.now(), ...await this.frozen() })
+          if (!this.store.segment) await this.store.beginSegment({ sessionId: existing, startedAt: this.now(), ...await this.frozen(existing) })
           return this.openedDot(existing)
         }
         await mkdir(this.options.homeDir, { recursive: true })
@@ -455,6 +455,8 @@ export class DotService {
     if (!entry) return { kind: 'deny', reason: `The extra capability ${exec.name} was not applied to this segment.` }
     const live = caps.liveGrant(entry.chain)
     if (live !== 'ask' && live !== 'auto') return { kind: 'deny', reason: `The extra capability ${exec.name} is off.` }
+    const scheduled = this.hostScheduleGate(exec)
+    if (scheduled !== 'next') return scheduled
     if (live === 'auto') return 'next'
     const allowed = await this.askCapabilityApproval(exec, entry.chain)
     if (!allowed) return { kind: 'deny', reason: `The human declined ${exec.name}.` }
@@ -465,7 +467,23 @@ export class DotService {
     if (!reapplied) return { kind: 'deny', reason: `The extra capability ${exec.name} was not applied to this segment.` }
     const still = caps.liveGrant(reapplied.chain)
     if (still !== 'ask' && still !== 'auto') return { kind: 'deny', reason: `The extra capability ${exec.name} is off.` }
-    return 'next'
+    return this.hostScheduleGate(exec)
+  }
+
+  /**
+   * Host schedule_create/edit with target this_session (or a Dorothy segment
+   * id) cannot be delivered: the controller refuses subagent-origin sessions,
+   * and a later segment no longer uses that id. Reminders for Dorothy herself
+   * go through `dot_schedule`.
+   */
+  private hostScheduleGate(exec: { readonly name: string; readonly arguments?: unknown }): GateVerdict {
+    if (!HOST_SCHEDULE_MUTATORS.has(exec.name)) return 'next'
+    const ids = new Set<string>()
+    if (this.store.dotSessionId) ids.add(this.store.dotSessionId)
+    if (this.store.segment?.sessionId) ids.add(this.store.segment.sessionId)
+    for (const past of this.store.pastSegments) ids.add(past.sessionId)
+    if (!hostScheduleTargetsDot(exec.arguments, ids)) return 'next'
+    return { kind: 'deny', reason: `Host schedule tools cannot deliver to Dorothy's hidden session (this_session or a Dorothy segment id). Use ${TOOL.schedule} so the reminder follows the current conversation segment.` }
   }
 
   /**
@@ -529,10 +547,10 @@ export class DotService {
     if (groups.length === 0) lines.push('No extra capabilities are currently installed.')
     const row = (group: CapabilityGroupView, parents: readonly string[], indent: string) => {
       const grant = grants[group.id]
-      // The host group is display-only: unattributed tools answer to per-tool grants.
-      const selector = group.kind === 'host' ? '(per-tool grants only)' : `[${group.id}] grant=${grant ?? 'inherited'}`
+      // The host and builtin groups are display-only: their tools answer to the child/per-tool grants.
+      const selector = group.kind === 'host' || group.id === 'builtin' ? '(per-tool grants only)' : `[${group.id}] grant=${grant ?? 'inherited'}`
       lines.push(`${indent}${group.label} ${selector}${group.missing === true ? ' UNAVAILABLE' : ''}`)
-      const chain = group.kind === 'host' ? parents : [group.id, ...parents]
+      const chain = group.kind === 'host' || group.id === 'builtin' ? parents : [group.id, ...parents]
       for (const tool of group.tools) {
         if (tool.missing === true) { lines.push(`${indent}  ${tool.name} — UNAVAILABLE (grant kept)`); continue }
         let effective: string | undefined
@@ -556,8 +574,8 @@ export class DotService {
     const caps = this.options.capabilities
     if (!caps) throw new DotError('dot/invalid', 'no capability catalog exists on this host')
     const selector = input.selector.trim()
-    if (selector === 'host') throw new DotError('dot/invalid', 'unattributed tools are granted one by one with tool:<name> or prefix:<segment>; there is no host-wide grant')
-    if (!/^(tool|mcp|plugin|prefix):/.test(selector)) throw new DotError('dot/invalid', 'selector must be tool:<name>, mcp:<server>, plugin:<bundle>[#<entry>], or prefix:<segment>')
+    if (selector === 'host' || selector === 'builtin') throw new DotError('dot/invalid', 'unattributed tools are granted one by one with tool:<name> or prefix:<segment>; there is no host-wide grant')
+    if (!/^(tool|mcp|plugin|prefix|builtin):/.test(selector)) throw new DotError('dot/invalid', 'selector must be tool:<name>, mcp:<server>, plugin:<bundle>[#<entry>], builtin:<id>, or prefix:<segment>')
     if (selector.startsWith('tool:') && caps.locked.includes(selector.slice(5))) throw new DotError('dot/invalid', `${selector.slice(5)} is a locked dot tool; it is always on and cannot be granted`)
     if (!['off', 'ask', 'auto'].includes(input.grant)) throw new DotError('dot/invalid', 'grant must be off, ask, or auto')
     const grants = { ...this.store.settings.capabilities?.grants, [selector]: input.grant }
@@ -4105,9 +4123,12 @@ export class DotService {
   }
 
   /** Persona, model, agreements, cognition and capability grants as a segment starting now would freeze them. */
-  private async frozen(): Promise<Pick<Segment, 'persona' | 'model' | 'agreements' | 'cognition' | 'capabilities'>> {
+  private async frozen(sessionId?: string): Promise<Pick<Segment, 'persona' | 'model' | 'agreements' | 'cognition' | 'capabilities'>> {
     const model = this.host.modelKey()
-    const capabilities = this.options.capabilities?.signature()
+    // The record freezes the grants the apply actually resolved: a grant saved
+    // while the apply awaited the bundle scan must surface as a mismatch later.
+    const capabilities = this.options.capabilities?.appliedSignature(sessionId)
+      ?? this.options.capabilities?.signature()
     return {
       persona: personaSection(this.store.settings, this.locale),
       ...model ? { model } : {},
@@ -4145,7 +4166,7 @@ export class DotService {
     const wanted = await this.frozen()
     const capChanged = (segment.capabilities ?? EMPTY_CAPABILITIES_SIGNATURE) !== (wanted.capabilities ?? EMPTY_CAPABILITIES_SIGNATURE)
     if (capChanged) await this.host.reapplyCapabilities?.(dot)
-    if (segment.persona !== wanted.persona || capChanged) await this.store.refreezeSegment(wanted)
+    if (segment.persona !== wanted.persona || capChanged) await this.store.refreezeSegment(await this.frozen(dot))
   }
 
   /**
@@ -4169,7 +4190,7 @@ export class DotService {
       if (segment.persona !== wanted.persona || segment.model !== wanted.model
         || (wanted.agreements ?? '') !== (segment.agreements ?? '')
         || (wanted.cognition ?? '') !== (segment.cognition ?? '')
-        || capChanged) await this.store.refreezeSegment(wanted)
+        || capChanged) await this.store.refreezeSegment(await this.frozen(dot))
       return undefined
     }
     const view = await this.host.dotContext(dot)
@@ -4234,7 +4255,7 @@ export class DotService {
     await this.store.beginSegment({
       sessionId,
       startedAt: at,
-      ...await this.frozen(),
+      ...await this.frozen(sessionId),
       opening,
       ...handoff ? { handoff } : {},
       reason,

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { DEFAULT_SETTINGS } from './contracts.ts'
 import { reasonBeforeDelivery } from './segments.ts'
+import { parseSettingProposal, STATE_KEY } from './storage.ts'
 import { DotStore, type DotDomainHandle } from './store.ts'
 
 function fakeDomain(seed: Record<string, Record<string, unknown>> = {}) {
@@ -372,6 +373,26 @@ describe('DotStore settings proposals', () => {
     expect(new DotStore(domain).settingProposals).toEqual([proposal])
     await store.deleteSettingProposal(proposal.id)
     expect(tables.proposals!.size).toBe(0)
+  })
+
+  it('migrates a follow-host task-permission proposal baseline on load', () => {
+    expect(parseSettingProposal({
+      id: 'keep', field: 'taskPermission', before: 'default', after: 'danger-full-access', reason: 'faster', createdAt: 1,
+    })).toMatchObject({ before: 'workspace-write', after: 'danger-full-access' })
+    expect(parseSettingProposal({
+      id: 'drop', field: 'taskPermission', before: 'workspace-write', after: 'default', reason: 'follow host', createdAt: 2,
+    })).toBeUndefined()
+    const { domain } = fakeDomain({
+      state: { [STATE_KEY]: { settings: { taskPermission: 'default' } } },
+      proposals: {
+        keep: { id: 'keep', field: 'taskPermission', before: 'default', after: 'danger-full-access', reason: 'faster', createdAt: 1 },
+        drop: { id: 'drop', field: 'taskPermission', before: 'workspace-write', after: 'default', reason: 'follow host', createdAt: 2 },
+      },
+    })
+    const store = new DotStore(domain)
+    expect(store.settings.taskPermission).toBe('workspace-write')
+    expect(store.settingProposals.map(row => row.id)).toEqual(['keep'])
+    expect(store.settingProposals[0]).toMatchObject({ before: 'workspace-write', after: 'danger-full-access' })
   })
 })
 

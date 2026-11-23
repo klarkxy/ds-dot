@@ -15,13 +15,13 @@ describe('running task permissions and relay', () => {
       : name === 'approval' ? { overrideOf: () => policy }
       : name === 'permissionPresets' ? { defaultPreset: 'workspace-write', resolve: (preset: string) => ({ sandbox: preset }), current: () => current, set: () => calls.push('set') }
       : undefined)
-    expect(await host.verifyTaskPermission!('s', 'read', 'default')).toBe(true)
+    expect(await host.verifyTaskPermission!('s', 'read', 'workspace-write')).toBe(true)
     policy = 'ask'
-    expect(await host.verifyTaskPermission!('s', 'read', 'default')).toBe(false)
+    expect(await host.verifyTaskPermission!('s', 'read', 'workspace-write')).toBe(false)
     mode = 'workspace-write'
-    expect(await host.verifyTaskPermission!('s', 'write', 'default')).toBe(true)
+    expect(await host.verifyTaskPermission!('s', 'write', 'workspace-write')).toBe(true)
     current = 'custom'
-    expect(await host.verifyTaskPermission!('s', 'write', 'default')).toBe(false)
+    expect(await host.verifyTaskPermission!('s', 'write', 'workspace-write')).toBe(false)
     expect(calls).toEqual([])
   })
   it('relays through followup without steering or cancelling', async () => {
@@ -51,22 +51,22 @@ describe('running task permissions and relay', () => {
 })
 
 describe('writable task policy', () => {
-  it('resolves the host default and reapplies its writable preset', async () => {
+  it('reapplies the configured writable preset', async () => {
     const calls: string[] = []
     const session = {}
     const permissions = { defaultPreset: 'workspace-write', resolve: (name: string) => ({ sandbox: name }), set: (_session: unknown, name: string) => { calls.push(name) } }
     const host = bindHost(name => name === 'agents' ? { get: () => ({ session }) } : name === 'permissionPresets' ? permissions : undefined)
-    expect(await host.setWritable!('s', 'default')).toBe(true)
+    expect(await host.setWritable!('s', 'workspace-write')).toBe(true)
     expect(calls).toEqual(['workspace-write'])
   })
   it('rejects missing, read-only and failed presets', async () => {
     const session = {}
     const permissions = { defaultPreset: 'read-only', resolve: (name: string) => ({ sandbox: name }), set: () => { throw new Error('failed') } }
     const host = bindHost(name => name === 'agents' ? { get: () => ({ session }) } : name === 'permissionPresets' ? permissions : undefined)
-    expect(await host.setWritable!('s', 'default')).toBe(false)
+    expect(await host.setWritable!('s', 'workspace-write')).toBe(false)
     expect(await host.setWritable!('s', 'workspace-write')).toBe(false)
     const absent = bindHost(name => name === 'agents' ? { get: () => ({ session }) } : undefined)
-    expect(await absent.setWritable!('s', 'default')).toBe(false)
+    expect(await absent.setWritable!('s', 'workspace-write')).toBe(false)
   })
 })
 

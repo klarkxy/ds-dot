@@ -173,7 +173,7 @@ function fakeHost() {
   }
 }
 
-function setup(settings?: Partial<DotSettings>, trace?: { info: (event: string, message: string, context?: Record<string, unknown>) => boolean; debug: (event: string, message: string, context?: Record<string, unknown>) => boolean; warn: (event: string, message: string, error?: unknown, context?: Record<string, unknown>) => boolean }, homeDir = join(tmpdir(), 'dsh-dot-spec'), extra: { pluginManager?: () => unknown; git?: typeof runGit } = {}) {
+function setup(settings?: Partial<DotSettings>, trace?: { info: (event: string, message: string, context?: Record<string, unknown>) => boolean; debug: (event: string, message: string, context?: Record<string, unknown>) => boolean; warn: (event: string, message: string, error?: unknown, context?: Record<string, unknown>) => boolean }, homeDir = join(tmpdir(), 'dsh-dot-spec'), extra: { pluginManager?: () => unknown; git?: typeof runGit; capabilities?: unknown } = {}) {
   const fake = fakeHost()
   const clock = manualTimer()
   const store = new DotStore(undefined)
@@ -184,7 +184,7 @@ function setup(settings?: Partial<DotSettings>, trace?: { info: (event: string, 
   // A fresh install defaults to tracked; see DEFAULT_SETTINGS.
   void store.setSettings({ ...DEFAULT_SETTINGS, reflection: false, idleCheckMinutes: 0, autoUpdate: false, scope: 'all', ...settings })
   let at = 1000
-  const service = new DotService({ host: fake.host, store, homeDir, approvalGraceMs: 0, timer: clock.timer, now: () => at, ...(trace ? { trace } : {}), ...(extra.pluginManager ? { pluginManager: extra.pluginManager } : {}), ...(extra.git ? { git: extra.git } : {}) })
+  const service = new DotService({ host: fake.host, store, homeDir, approvalGraceMs: 0, timer: clock.timer, now: () => at, ...(trace ? { trace } : {}), ...(extra.pluginManager ? { pluginManager: extra.pluginManager } : {}), ...(extra.git ? { git: extra.git } : {}), ...(extra.capabilities !== undefined ? { capabilities: extra.capabilities as never } : {}) })
   return { ...fake, ...clock, store, service, advance: (ms: number) => { at += ms } }
 }
 
@@ -293,6 +293,45 @@ describe('DotService segments', () => {
     expect(h.store.segment!.persona).toContain('桃乐丝')
     expect(h.store.segment!.opening).toBeUndefined()
     expect(h.store.pastSegments).toEqual([])
+  })
+
+  it('records the grants the apply actually resolved and re-applies on the next check', async () => {
+    // A grant saved while createDot's apply awaited the bundle scan: the live
+    // signature is the new grants but the agent only received the older snapshot.
+    let appliedSig = 'sig-old'
+    const caps = {
+      signature: () => 'sig-new',
+      appliedSignature: (id: string | undefined) => id === undefined ? undefined : appliedSig,
+      liveGrant: () => undefined,
+      pluginManager: () => undefined,
+    }
+    const h = setup(undefined, undefined, join(tmpdir(), 'dsh-dot-spec-applied'), { capabilities: caps })
+    const dot = await h.service.ensureDot()
+    // The segment freezes the applied snapshot, not the grants that never reached the agent.
+    expect(h.store.segment).toMatchObject({ sessionId: dot, capabilities: 'sig-old' })
+    const reapplied: string[] = []
+    let release: () => void = () => {}
+    const gate = new Promise<void>(done => { release = done })
+    ;(h.host as unknown as { reapplyCapabilities?: (id: string) => Promise<void> }).reapplyCapabilities = async id => {
+      reapplied.push(id)
+      // A successful re-apply moves the applied signature forward with the record.
+      await gate
+      appliedSig = 'sig-new'
+    }
+    let settled = false
+    const changed = h.service.settingsChanged().then(() => { settled = true })
+    await new Promise(done => setTimeout(done, 0))
+    // The mismatch triggered the re-apply, and while it is still gated the
+    // check has not settled and the record holds the applied signature.
+    expect(reapplied).toEqual([dot])
+    expect(settled).toBe(false)
+    expect(h.store.segment!.capabilities).toBe('sig-old')
+    release()
+    await changed
+    expect(reapplied).toEqual([dot])
+    expect(h.store.segment!.capabilities).toBe('sig-new')
+    await h.service.settingsChanged()
+    expect(reapplied).toEqual([dot])
   })
 
   it('carries the stored conversation into a new segment when the session is lost', async () => {

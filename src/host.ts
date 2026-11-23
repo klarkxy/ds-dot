@@ -81,6 +81,12 @@ export interface DotHost {
   verifyTaskPermission?(sessionId: string, access: 'read' | 'write', preset: string): Promise<boolean>
   /** Set a read-only sandbox with deterministic rejection of escalation requests. */
   setReadOnly?(sessionId: string): Promise<boolean>
+  /** Which optional task-permission values are live right now. */
+  taskPermissionOptions?(): { safeAuto: boolean; auto: boolean }
+  /** The permission a new task actually gets; unavailable values degrade to workspace-write. */
+  effectiveTaskPermission?(preset: string): string
+  /** Whether Safe Auto currently approves this session's calls. */
+  safeAutoActive?(sessionId: string): boolean
   /** Deliver as the human's own prompt. `requestId` is reused when a receipt was lost. */
   prompt(sessionId: string, text: string, mode: 'queue' | 'steer', signal: AbortSignal, requestId?: string): Promise<void>
   /** Deliver as an agent-attributed message and wake the target. `deliveryId` is the business record, not a host request id. `confirm` runs after the agent is resolved and before followup. */
@@ -203,7 +209,8 @@ interface Query {
   readTitleSnapshots?(ids: readonly string[], signal?: AbortSignal): Promise<readonly ({ status: 'fulfilled'; value: { title?: { title?: string } } } | { status: 'rejected' })[]>
 }
 
-interface Permissions { set(session: unknown, name: string): void; resolve?(name: string): { sandbox?: string }; current?(session: unknown): string; readonly defaultPreset?: string }
+interface Permissions { set(session: unknown, name: string): void; resolve?(name: string): { sandbox?: string }; current?(session: unknown): string; catalog?(): { options?: readonly { value?: unknown }[] } }
+interface SafeAutoRuntime { selectSession?(sessionId: string, signal?: AbortSignal): Promise<unknown>; sessionActive?(sessionId: string): boolean; available?(): boolean }
 
 interface Projections { snapshot(session: unknown, keys?: readonly string[]): { values: ProjectionValues } }
 interface Llm {
@@ -327,6 +334,7 @@ export function bindHost(get: Get, log?: (message: string) => void, modelOf?: ()
       },
     }
   }
+  const safeAuto = (): SafeAutoRuntime | undefined => get('safeAutoRuntime') as SafeAutoRuntime | undefined
   const permit = (session: unknown, preset: string): boolean => {
     const permissions = get('permissionPresets') as Permissions | undefined
     if (!permissions || session === undefined) return false
@@ -477,25 +485,51 @@ export function bindHost(get: Get, log?: (message: string) => void, modelOf?: ()
           const approval = get('approval') as { overrideOf(session: unknown): string | undefined } | undefined
           return sandbox?.resolve({ session }).mode === 'read-only' && approval?.overrideOf(session) === 'never'
         }
+        if (preset === 'safe-auto') return safeAuto()?.sessionActive?.(sessionId) === true
         const permissions = get('permissionPresets') as Permissions | undefined
-        const selected = preset === 'default' ? permissions?.defaultPreset : preset
-        if (!selected || !permissions?.resolve || !permissions.current) return false
-        const sandbox = permissions.resolve(selected).sandbox
-        return (sandbox === 'workspace-write' || sandbox === 'danger-full-access') && permissions.current(session) === selected
+        if (!permissions?.resolve || !permissions.current) return false
+        const sandbox = permissions.resolve(preset).sandbox
+        return (sandbox === 'workspace-write' || sandbox === 'danger-full-access') && permissions.current(session) === preset
       } catch { return false }
     },
     async setWritable(sessionId, preset) {
       try {
+        if (preset === 'safe-auto') {
+          // Safe Auto's own select pins the workspace-write preset underneath.
+          const rt = safeAuto()
+          if (typeof rt?.selectSession !== 'function') return false
+          return Boolean(await rt.selectSession(sessionId))
+        }
         const permissions = get('permissionPresets') as Permissions | undefined
-        const selected = preset === 'default' ? permissions?.defaultPreset : preset
-        if (!selected || !permissions?.resolve) return false
-        const sandbox = permissions.resolve(selected).sandbox
+        if (!permissions?.resolve) return false
+        const sandbox = permissions.resolve(preset).sandbox
         if (sandbox !== 'workspace-write' && sandbox !== 'danger-full-access') return false
-        return permit((await liveAgent(sessionId)).session, selected)
+        return permit((await liveAgent(sessionId)).session, preset)
       } catch (error) {
         log?.(`dsh-dot: writable permission not applied: ${String(error)}`)
         return false
       }
+    },
+    safeAutoActive(sessionId) {
+      try { return safeAuto()?.sessionActive?.(sessionId) === true } catch { return false }
+    },
+    taskPermissionOptions() {
+      const rt = safeAuto()
+      const safeAutoOn = typeof rt?.selectSession === 'function' && rt.available?.() === true
+      let auto = false
+      try {
+        const permissions = get('permissionPresets') as Permissions | undefined
+        auto = permissions?.catalog?.().options?.some(o => o?.value === 'auto') === true
+      } catch { auto = false }
+      return { safeAuto: safeAutoOn, auto }
+    },
+    effectiveTaskPermission(preset) {
+      if (preset !== 'safe-auto' && preset !== 'auto') return preset
+      const options = this.taskPermissionOptions?.() ?? { safeAuto: false, auto: false }
+      const missing = preset === 'safe-auto' ? !options.safeAuto : !options.auto
+      if (!missing) return preset
+      log?.(`dsh-dot: task permission ${preset} unavailable; running tasks on workspace-write`)
+      return 'workspace-write'
     },
     async setReadOnly(sessionId) {
       try {

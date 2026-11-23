@@ -331,9 +331,12 @@ export const TASK_MODEL_LIST_MAX = 500
  * decides who answers the prompts that still appear.
  * - workspace-write: the task may write inside its workspace and ask for more.
  * - danger-full-access: the task may act anywhere; no sandbox prompt appears.
- * - default: the host's own default permissions, whatever the host has set.
+ * - safe-auto: workspace-write with the Safe Auto plugin's reviewer model
+ *   answering prompts; only offered while that plugin's runtime is available.
+ * - auto: DSH's experimental per-call model review on full access; only
+ *   offered while the host exposes the `auto` permission preset.
  */
-export type TaskPermission = 'workspace-write' | 'danger-full-access' | 'default'
+export type TaskPermission = 'workspace-write' | 'danger-full-access' | 'safe-auto' | 'auto'
 
 /**
  * How dot may use one extra capability selector: off denies it, ask raises a
@@ -363,11 +366,11 @@ export interface CapabilityToolView {
   readonly highRisk?: boolean
 }
 
-/** A grantable group of extra tools: one MCP server, one bundle, one loader entry, an unattributed name prefix, or the unattributed remainder. */
+/** A grantable group of extra tools: one MCP server, one bundle, one loader entry, one host built-in row, an unattributed name prefix, or the unattributed remainder. */
 export interface CapabilityGroupView {
-  /** Selector a grant row addresses: `mcp:<s>`, `plugin:<b>`, `plugin:<b>#<e>`, `prefix:<s>` or `host`. */
+  /** Selector a grant row addresses: `mcp:<s>`, `plugin:<b>`, `plugin:<b>#<e>`, `builtin:<id>`, `prefix:<s>` or `host`. */
   readonly id: string
-  readonly kind: 'mcp' | 'plugin' | 'entry' | 'prefix' | 'host'
+  readonly kind: 'mcp' | 'plugin' | 'entry' | 'builtin' | 'prefix' | 'host'
   readonly label: string
   /** Granted but nothing currently owns the selector. */
   readonly missing?: boolean

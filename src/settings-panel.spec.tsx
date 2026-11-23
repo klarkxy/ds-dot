@@ -337,7 +337,7 @@ describe('sectioned settings, switches, and help tips', () => {
     expect(document.querySelector('[role="tablist"][aria-label="Model questions"]')).not.toBeNull()
     expect(document.querySelector('[role="tablist"][aria-label="Task permissions"]')).toBeNull()
     expect(document.querySelectorAll('.dsh-ui-help')).toHaveLength(0)
-    expect(document.querySelectorAll('.dsh-dot-help-tip')).toHaveLength(2)
+    expect(document.querySelectorAll('.dsh-dot-help-tip')).toHaveLength(3)
 
     // Dispatch: task permissions, task models (with dynamic empty-allow-list warning inline), routine check.
     await act(async () => root.render(<Harness section="dispatch" />))
@@ -382,7 +382,7 @@ describe('sectioned settings, switches, and help tips', () => {
     await act(async () => root.unmount())
   })
 
-  it('shows the Model questions help tip only when questions is set to dot', async () => {
+  it('shows a Model questions help tip for every option', async () => {
     let current: DotSettings = { ...DEFAULT_SETTINGS, questions: 'dot' }
     const api = {
       models: async () => ({ groups: [] }),
@@ -400,20 +400,20 @@ describe('sectioned settings, switches, and help tips', () => {
     await act(async () => { await Promise.resolve() })
 
     const tip = () => document.querySelector<HTMLButtonElement>('button.dsh-dot-help-tip[aria-label="About Model questions"]')
-    const tabNamed = (label: string) => [...document.querySelectorAll<HTMLButtonElement>('[role="tab"]')].find(el => el.textContent === label)!
+    const tabNamed = (label: string) => [...document.querySelectorAll<HTMLButtonElement>('[role="tablist"][aria-label="Model questions"] [role="tab"]')].find(el => el.textContent === label)!
     expect(tip()).not.toBeNull()
 
-    await act(async () => tabNamed('Ask me').click())
+    await act(async () => tabNamed('Me').click())
     await act(async () => { await Promise.resolve() })
     expect(current.questions).toBe('human')
-    expect(tip()).toBeNull()
+    expect(tip()).not.toBeNull()
 
     await act(async () => tabNamed('Hands off').click())
     await act(async () => { await Promise.resolve() })
     expect(current.questions).toBe('off')
-    expect(tip()).toBeNull()
+    expect(tip()).not.toBeNull()
 
-    await act(async () => tabNamed('She decides').click())
+    await act(async () => tabNamed('Dorothy').click())
     await act(async () => { await Promise.resolve() })
     expect(current.questions).toBe('dot')
     expect(tip()).not.toBeNull()

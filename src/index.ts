@@ -22,7 +22,7 @@ import { registerHostRpc, type HostRpcContext } from '@klarkxy/dsh-plugin-kit/ho
 import { installPluginLogger } from '@klarkxy/dsh-plugin-kit/logger'
 import { approvalAuditId, raceApproval } from './approval-relay.ts'
 import type { RawEvent } from './chat.ts'
-import { COMPACTION_POLICY, PLUGIN_NAME, PRESET_ID, RPC_CHANNEL, SERVICE_NAME, type PendingQuestionItem, type TaskRecord } from './contracts.ts'
+import { COMPACTION_POLICY, PLUGIN_NAME, PRESET_ID, RPC_CHANNEL, SERVICE_NAME, type PendingQuestionItem, type TaskPermission, type TaskRecord } from './contracts.ts'
 import { CHAT_SAY_BODY_BYTES, checkChatImages } from './chat-images.ts'
 import { ChatFeed } from './feed.ts'
 import { DotCapabilities, type CapabilityPluginManager, type CapabilityTools } from './capabilities.ts'
@@ -116,6 +116,7 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
     settings: () => store.settings,
     locked: DOT_INHERITED_ALLOW,
   })
+  capabilities.prewarm()
   const host = bindHost(name => ctx.get(name as never), log, () => store.settings.model, agent => { sealOwned?.(agent) }, capabilities)
   const service = new DotService({
     host,
@@ -206,6 +207,11 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
           ],
         },
         { id: 'dot-tools', name: 'ds-dot/tools' },
+        // Global-nature host built-ins, grantable through Extra capabilities;
+        // the agent-scope restrict masks them until granted.
+        { id: 'tool-skill', name: '@deepseek-ai/dsh-tool-skill' },
+        { id: 'tool-schedule', name: '@deepseek-ai/dsh-tool-schedule' },
+        { id: 'tool-plugin-manager', name: '@deepseek-ai/dsh-plugin-manager/tools', disabled: { __jsExpr: "!ctx.get('profileContext')" } },
       ] as never,
     }).then((dispose: () => Promise<void>) => {
       if (disposed) { void dispose(); return }
@@ -329,6 +335,9 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
   ctx.effect(() => ctx.on('approval/request', async (req, next): Promise<ApprovalOutcome> => {
     const origin = topLevelOf(req.agent as AgentLike)
     if (!origin) return next()
+    // A task session running under Safe Auto is reviewed by that plugin, not relayed here.
+    const requesting = (req.agent as AgentLike).session
+    if (requesting?.id && host.safeAutoActive?.(requesting.id)) return next()
     const args = callArguments(req.agent as AgentLike, req.callId)
     const routed = service.relayRequest({
       kind: 'approval',
@@ -456,6 +465,13 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
         case 'stop': { await service.stop(); return { ok: true, value: true } }
         case 'settings': return { ok: true, value: store.settings }
         case 'settings.proposals': return { ok: true, value: store.settingProposals }
+        case 'settings.taskpermissions': {
+          const live = host.taskPermissionOptions?.() ?? { safeAuto: false, auto: false }
+          const options: TaskPermission[] = ['workspace-write', 'danger-full-access']
+          if (live.safeAuto) options.push('safe-auto')
+          if (live.auto) options.push('auto')
+          return { ok: true, value: { options } }
+        }
         case 'capabilities.catalog': return { ok: true, value: await service.capabilitiesView() }
         case 'settings.decide': {
           const id = field(payload, 'id')

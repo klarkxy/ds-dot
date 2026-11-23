@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { DEFAULT_SETTINGS } from './contracts.ts'
 import { SelfSettings } from './self-settings.ts'
+import { parseSettingProposal } from './storage.ts'
 import { DotStore } from './store.ts'
 
 function setup() {
@@ -50,6 +51,18 @@ describe('Dorothy self settings', () => {
     expect(h.store.settings.taskPermission).toBe('default')
     expect(h.store.settingProposals).toHaveLength(1)
     expect(await h.self.decide(id, false)).toContain('no settings changed')
+  })
+
+  it('approves a follow-host baseline proposal after the upgrade migration', async () => {
+    const h = setup()
+    const proposal = parseSettingProposal({
+      id: 'setting-upgrade', field: 'taskPermission', before: 'default', after: 'danger-full-access', reason: 'faster', createdAt: 1,
+    })
+    expect(proposal?.before).toBe('workspace-write')
+    await h.store.putSettingProposal(proposal!)
+    expect(await h.self.decide(proposal!.id, true)).toContain('danger-full-access')
+    expect(h.store.settings.taskPermission).toBe('danger-full-access')
+    expect(h.store.settingProposals).toEqual([])
   })
 
   it('refuses to propose anything but a real setting field', async () => {

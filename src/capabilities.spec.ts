@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { DEFAULT_SETTINGS, type CapabilityGroupView, type DotSettings } from './contracts.ts'
 import { parseSettings, patchSettings, CAPABILITY_GRANTS_MAX } from './settings.ts'
-import { buildCatalog, capabilitiesSignature, DotCapabilities, HIGH_RISK_TOOLS, installToolAttribution, mcpServerOf, resolveGrants, SCOPED_COPY, type CapabilityPluginManager, type CapabilityTools, type CapabilityToolDef } from './capabilities.ts'
+import { buildCatalog, capabilitiesSignature, DotCapabilities, HIGH_RISK_TOOLS, hostScheduleTargetsDot, installToolAttribution, mcpServerOf, resolveGrants, SCOPED_COPY, type CapabilityPluginManager, type CapabilityTools, type CapabilityToolDef } from './capabilities.ts'
 import { sharedAttribution } from './attribution.ts'
 import { reasonBeforeDelivery } from './segments.ts'
 import { gateToolExecution } from './tool-scope.ts'
@@ -179,6 +179,22 @@ describe('capability catalog', () => {
     const view = buildCatalog(catalogInput({ defs: fakeTools(['web_search', 'extra']).defs }))
     expect(view.groups.every(group => group.tools.every(tool => tool.name !== 'web_search'))).toBe(true)
     expect(view.locked).toContain('web_search')
+  })
+})
+
+describe('host schedule delivery target', () => {
+  it('treats this_session and Dorothy session ids as self-delivery', () => {
+    const ids = new Set(['dot-1', 'dot-old'])
+    expect(hostScheduleTargetsDot({ target: 'this_session' }, ids)).toBe(true)
+    expect(hostScheduleTargetsDot({ target: '  this_session  ' }, ids)).toBe(true)
+    expect(hostScheduleTargetsDot({ target: 'dot-1' }, ids)).toBe(true)
+    expect(hostScheduleTargetsDot({ target: 'dot-old' }, ids)).toBe(true)
+    expect(hostScheduleTargetsDot(JSON.stringify({ target: 'this_session' }), ids)).toBe(true)
+    expect(hostScheduleTargetsDot({ target: 'new_once' }, ids)).toBe(false)
+    expect(hostScheduleTargetsDot({ target: 'new' }, ids)).toBe(false)
+    expect(hostScheduleTargetsDot({ target: 'session-other' }, ids)).toBe(false)
+    expect(hostScheduleTargetsDot({ title: 't' }, ids)).toBe(false)
+    expect(hostScheduleTargetsDot(undefined, ids)).toBe(false)
   })
 })
 
@@ -504,7 +520,159 @@ describe('capability application', () => {
     expect(calls).toBe(1)
     caps.invalidateBundles()
     await caps.catalog()
+    await new Promise(resolve => setTimeout(resolve, 0))
     expect(calls).toBe(2)
+  })
+
+  it('applies a plugin:<bundle> grant after invalidate before the background tick when entryId differs', async () => {
+    const tools = fakeTools(['report_tool'])
+    let rows: { name: string; rows: { entryId?: string }[] }[] = [{ name: 'dsh-reports', rows: [{ entryId: 'include:reports' }] }]
+    const make = () => new DotCapabilities({
+      tools: () => tools,
+      mcpManager: () => undefined,
+      pluginManager: () => ({ listBundles: async () => rows }),
+      settings: () => settingsWith({ 'plugin:dsh-reports': 'auto' }),
+      locked: LOCKED,
+    })
+    const apply = async (caps: DotCapabilities) => {
+      const env = agentCtx(tools)
+      const applied = await caps.applyToAgent(env.ctx as never, { session: { id: 'dot' } } as never)
+      caps.releaseAll()
+      return applied
+    }
+
+    // Empty cache: apply awaits the first scan even when owners use a different entryId.
+    const empty = make()
+    empty.owners.set('report_tool', { entryId: 'include:reports' })
+    const fromEmpty = await apply(empty)
+    expect(fromEmpty.get('report_tool')?.grant).toBe('auto')
+    expect(fromEmpty.get('report_tool')?.chain).toEqual(['tool:report_tool', 'plugin:dsh-reports'])
+
+    // Stale cache after invalidate: catalog would SWR the empty mapping and miss
+    // plugin:dsh-reports; applyToAgent must await the refresh instead of the tick.
+    rows = []
+    const stale = make()
+    stale.owners.set('report_tool', { entryId: 'include:reports' })
+    await stale.catalog()
+    rows = [{ name: 'dsh-reports', rows: [{ entryId: 'include:reports' }] }]
+    stale.invalidateBundles()
+    const fromStale = await apply(stale)
+    expect(fromStale.get('report_tool')?.grant).toBe('auto')
+    expect(fromStale.get('report_tool')?.chain).toEqual(['tool:report_tool', 'plugin:dsh-reports'])
+  })
+
+  it('applies tool/mcp/builtin grants without awaiting a never-loaded bundle scan', async () => {
+    const tools = fakeTools(['mcp__s__a', 'extra_tool'])
+    let calls = 0
+    const caps = new DotCapabilities({
+      tools: () => tools,
+      mcpManager: () => ({ list: () => [{ name: 's' }] }),
+      // A scan that never finishes: awaiting it would hang the segment start.
+      pluginManager: () => ({ listBundles: () => { calls += 1; return new Promise<never>(() => {}) } }),
+      settings: () => settingsWith({ 'mcp:s': 'auto', 'tool:extra_tool': 'auto', 'builtin:skill': 'auto' }),
+      locked: LOCKED,
+    })
+    const env = agentCtx(tools)
+    const applied = await caps.applyToAgent(env.ctx as never, { session: { id: 'dot-1' } } as never)
+    // 'skill' is preset-scope and invisible to this scope, so it stays unapplied.
+    expect([...applied.entries()].map(([name, row]) => [name, row.grant]).sort())
+      .toEqual([['extra_tool', 'auto'], ['mcp__s__a', 'auto']])
+    expect(calls).toBe(0)
+    // The deferred scan still kicks for the next catalog read.
+    await new Promise(resolve => setTimeout(resolve, 0))
+    expect(calls).toBe(1)
+    caps.releaseAll()
+  })
+
+  it('resolves without awaiting a pending or invalidated bundle scan when no plugin grant exists', async () => {
+    const tools = fakeTools(['mcp__s__a', 'extra_tool'])
+    let calls = 0
+    const caps = new DotCapabilities({
+      tools: () => tools,
+      mcpManager: () => ({ list: () => [{ name: 's' }] }),
+      pluginManager: () => ({ listBundles: () => { calls += 1; return new Promise<never>(() => {}) } }),
+      settings: () => settingsWith({ 'mcp:s': 'auto', 'tool:extra_tool': 'auto', 'builtin:skill': 'auto' }),
+      locked: LOCKED,
+    })
+    // A scan already in flight must not block resolution either.
+    caps.prewarm()
+    expect(calls).toBe(1)
+    const fromPending = await caps.resolve()
+    expect([...fromPending.keys()].sort()).toEqual(['extra_tool', 'mcp__s__a', 'skill'])
+    expect(calls).toBe(1)
+
+    // An invalidated (at === 0) cache answers stale and leaves the scan deferred.
+    const quick = new DotCapabilities({
+      tools: () => tools,
+      mcpManager: () => ({ list: () => [{ name: 's' }] }),
+      pluginManager: () => ({ listBundles: async () => { calls += 1; return [] } }),
+      settings: () => settingsWith({ 'mcp:s': 'auto', 'tool:extra_tool': 'auto' }),
+      locked: LOCKED,
+    })
+    await quick.catalog()
+    expect(calls).toBe(2)
+    quick.invalidateBundles()
+    const fromStale = await quick.resolve()
+    expect([...fromStale.keys()].sort()).toEqual(['extra_tool', 'mcp__s__a'])
+    expect(calls).toBe(2)
+    await new Promise(resolve => setTimeout(resolve, 0))
+    expect(calls).toBe(3)
+  })
+
+  it('still awaits the bundle scan during resolve when a plugin grant is enabled', async () => {
+    const tools = fakeTools(['report_tool'])
+    let rows: { name: string; rows: { entryId?: string }[] }[] = []
+    let calls = 0
+    let release: () => void = () => {}
+    let gate: Promise<void> = Promise.resolve()
+    const caps = new DotCapabilities({
+      tools: () => tools,
+      mcpManager: () => undefined,
+      pluginManager: () => ({ listBundles: async () => { calls += 1; await gate; return rows } }),
+      settings: () => settingsWith({ 'plugin:dsh-reports': 'auto' }),
+      locked: LOCKED,
+    })
+    caps.owners.set('report_tool', { entryId: 'include:reports' })
+    await caps.catalog()
+    expect(calls).toBe(1)
+    rows = [{ name: 'dsh-reports', rows: [{ entryId: 'include:reports' }] }]
+    gate = new Promise<void>(resolve => { release = resolve })
+    caps.invalidateBundles()
+    let settled = false
+    const pending = caps.resolve().then(result => { settled = true; return result })
+    await Promise.resolve()
+    // The scan was invoked synchronously and resolve waits for it.
+    expect(calls).toBe(2)
+    expect(settled).toBe(false)
+    release()
+    const resolved = await pending
+    expect(resolved.get('report_tool')?.chain).toEqual(['tool:report_tool', 'plugin:dsh-reports'])
+  })
+
+  it('resolves a grant saved while the plugin scan was in flight and records its signature', async () => {
+    const tools = fakeTools(['extra_tool', 'report_tool'])
+    const settings = { current: settingsWith({ 'plugin:p': 'auto' }) }
+    let release: () => void = () => {}
+    const gate = new Promise<void>(done => { release = done })
+    const caps = new DotCapabilities({
+      tools: () => tools,
+      mcpManager: () => undefined,
+      pluginManager: () => ({ listBundles: async () => { await gate; return [{ name: 'p', rows: [{ entryId: 'e1' }] }] } }),
+      settings: () => settings.current,
+      locked: LOCKED,
+    })
+    caps.owners.set('extra_tool', {})
+    caps.owners.set('report_tool', { entryId: 'e1' })
+    const env = agentCtx(tools)
+    const pending = caps.applyToAgent(env.ctx as never, { session: { id: 'dot-1' } } as never)
+    await new Promise(done => setTimeout(done, 0))
+    // The human saves another grant while the apply still waits on the scan.
+    settings.current = settingsWith({ 'plugin:p': 'auto', 'tool:extra_tool': 'auto' })
+    release()
+    const applied = await pending
+    // The post-scan snapshot is what applied and what the signature freezes.
+    expect([...applied.keys()].sort()).toEqual(['extra_tool', 'report_tool'])
+    expect(caps.appliedSignature('dot-1')).toBe(capabilitiesSignature(settings.current))
   })
 
   it('reaches the raw register through the cordis.original symbol', async () => {
@@ -588,6 +756,23 @@ describe('service-level capability gate', () => {
     await store.setSettings(settingsWith({ 'plugin:p': 'auto', 'tool:extra_tool': 'off' }))
     expect(await service.capabilityGate({ name: 'extra_tool' })).toMatchObject({ kind: 'deny' })
     expect(bundleCalls).toBe(before)
+  })
+
+  it('denies host schedule delivery to Dorothy herself and passes other targets', async () => {
+    const { store, service, apply } = serviceHarness({ 'tool:schedule_create': 'auto', 'tool:schedule_edit': 'auto' }, undefined, ['schedule_create', 'schedule_edit'])
+    await store.beginSegment({ sessionId: 'dot-1', startedAt: 1, persona: '' })
+    await apply()
+    await expect(service.capabilityGate({ name: 'schedule_create', arguments: { target: 'this_session', title: 't', prompt: 'p' } }))
+      .resolves.toMatchObject({ kind: 'deny', reason: expect.stringContaining('dot_schedule') })
+    await expect(service.capabilityGate({ name: 'schedule_create', arguments: { target: 'dot-1', title: 't', prompt: 'p' } }))
+      .resolves.toMatchObject({ kind: 'deny' })
+    await expect(service.capabilityGate({ name: 'schedule_create', arguments: JSON.stringify({ target: 'this_session' }) }))
+      .resolves.toMatchObject({ kind: 'deny' })
+    await expect(service.capabilityGate({ name: 'schedule_edit', arguments: { target: 'this_session' } }))
+      .resolves.toMatchObject({ kind: 'deny' })
+    await expect(service.capabilityGate({ name: 'schedule_create', arguments: { target: 'new_once', title: 't', prompt: 'p' } })).resolves.toBe('next')
+    await expect(service.capabilityGate({ name: 'schedule_create', arguments: { target: 'new', title: 't', prompt: 'p' } })).resolves.toBe('next')
+    await expect(service.capabilityGate({ name: 'schedule_create', arguments: { target: 'session-other' } })).resolves.toBe('next')
   })
 
   it('denies ungranted and unapplied extras, passes auto, and denies after a live revoke', async () => {

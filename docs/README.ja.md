@@ -34,5 +34,5 @@ dsh plugin --profile web add ds-dot
 ## リンク
 
 - [ドロシーの手帳（GitHub Pages）](https://klarkxy.github.io/ds-dot/) — 日記、[実機録画](https://klarkxy.github.io/ds-dot/#clips)、[導入ガイド](https://klarkxy.github.io/ds-dot/#about)
-- [技術リファレンス](https://github.com/klarkxy/ds-dot/blob/main/docs/reference.md) — 承認モード、自動遮断ルール、プロファイル設定、GitHub Webhook の `cordis.yml` 設定、アップグレード案内
+- [技術リファレンス](reference.md) — 承認モード、自動遮断ルール、プロファイル設定、GitHub Webhook の `cordis.yml` 設定、アップグレード案内
 - [コントリビュート](https://github.com/klarkxy/ds-dot/blob/main/CONTRIBUTING.md) · [リリース手順](https://github.com/klarkxy/ds-dot/blob/main/docs/releasing.md) · [Apache-2.0 ライセンス](../LICENSE)

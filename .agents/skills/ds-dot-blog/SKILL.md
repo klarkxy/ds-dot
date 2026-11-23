@@ -78,7 +78,7 @@ npm pack --dry-run --ignore-scripts
 
 - 确认 `node --check docs/app.js` 零语法报错。
 - 在桌面（`1440×900`）与移动端（`390×844`）本地静态预览确认：控制台 0 报错、所有插画与外部 PR GIF 正常加载、三语切换及灯箱正常、`scrollWidth <= innerWidth` 无横向溢出。
-- 从 `npm pack --dry-run --ignore-scripts` 输出确认 `.agents/`、`docs/app.js`、`docs/index.html`、`docs/styles.css`、`docs/reference.md` 与 `docs/images/chibi-*.jpg` 均未混入 npm 打包清单。
+- 从 `npm pack --dry-run --ignore-scripts` 输出确认 `.agents/`、`docs/app.js`、`docs/index.html`、`docs/styles.css` 与 `docs/images/chibi-*.jpg` 均未混入 npm 打包清单。
 
 ## 数据结构速查（`docs/app.js`）
 

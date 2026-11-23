@@ -34,5 +34,5 @@ Remind me every weekday at 9:00 AM to check overnight builds.
 ## More
 
 - [Dorothy’s Notebook (GitHub Pages)](https://klarkxy.github.io/ds-dot/) — illustrated blog notes, [live clips](https://klarkxy.github.io/ds-dot/#clips), and [setup prompts](https://klarkxy.github.io/ds-dot/#about)
-- [Technical Reference](https://github.com/klarkxy/ds-dot/blob/main/docs/reference.md) — approval rules, hard-stop patterns, profile options, GitHub webhook `cordis.yml`, and upgrade notes
+- [Technical Reference](docs/reference.md) — approval rules, hard-stop patterns, profile options, GitHub webhook `cordis.yml`, and upgrade notes
 - [Contributing](https://github.com/klarkxy/ds-dot/blob/main/CONTRIBUTING.md) · [Releasing](https://github.com/klarkxy/ds-dot/blob/main/docs/releasing.md) · [Apache-2.0 License](LICENSE)

@@ -33,7 +33,8 @@ import { clip } from './ledger.ts'
 import { detachNative } from './native.ts'
 import { PeerLedger } from './peer.ts'
 import { DOT_INSTRUCTIONS } from './prompt.ts'
-import { installPresetVisibility } from './preset-visibility.ts'
+import { installInternalPresetCreateGuard, installPresetVisibility, publicDefaultId } from './preset-visibility.ts'
+import { shouldDeferApprovalToSafeAuto } from './approval-safe-auto.ts'
 import { REFLECTION_INSTRUCTIONS, REFLECTION_PRESET_ID } from './reflection.ts'
 import { APPROVAL_GRACE_MS, DotError, DotService, messageOf } from './service.ts'
 import { configI18n } from './i18n/index.ts'
@@ -182,7 +183,17 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
     return done.finally(() => { if (retiring === done) retiring = undefined })
   }, 'dot.lifecycle')
 
-  ctx.effect(() => installPresetVisibility(ctx.agentPresets), 'dot.preset-visibility')
+  ctx.effect(() => {
+    const release = installPresetVisibility(ctx.agentPresets)
+    // Warm the public-default cache so schedule `new` / `new_once` can rewrite
+    // `composedPreset` before the first roster read.
+    void ctx.agentPresets.list().catch(() => {})
+    return release
+  }, 'dot.preset-visibility')
+  ctx.effect(() => installInternalPresetCreateGuard(ctx.get('sessionController' as never), async () => {
+    const rows = await ctx.agentPresets.list()
+    return publicDefaultId(rows)
+  }), 'dot.public-session-create')
 
   // The dot preset: conversation, dot's tools, and in-place compaction for the
   // one turn that outgrows the window before a segment change. Choices go through
@@ -335,9 +346,14 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
   ctx.effect(() => ctx.on('approval/request', async (req, next): Promise<ApprovalOutcome> => {
     const origin = topLevelOf(req.agent as AgentLike)
     if (!origin) return next()
-    // A task session running under Safe Auto is reviewed by that plugin, not relayed here.
+    // Safe Auto reviews sessions that are intended to run under it. Residual
+    // overlay after Dorothy re-pins a task away from `safe-auto` must not skip
+    // `approvals=deny`.
     const requesting = (req.agent as AgentLike).session
-    if (requesting?.id && host.safeAutoActive?.(requesting.id)) return next()
+    if (requesting?.id && shouldDeferApprovalToSafeAuto({
+      overlayActive: host.safeAutoActive?.(requesting.id) === true,
+      intendedPermission: service.runTaskPermission(requesting.id),
+    })) return next()
     const args = callArguments(req.agent as AgentLike, req.callId)
     const routed = service.relayRequest({
       kind: 'approval',

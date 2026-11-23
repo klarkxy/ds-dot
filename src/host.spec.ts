@@ -59,6 +59,17 @@ describe('writable task policy', () => {
     expect(await host.setWritable!('s', 'workspace-write')).toBe(true)
     expect(calls).toEqual(['workspace-write'])
   })
+  it('does not verify a native writable preset while Safe Auto overlay is still active', async () => {
+    const session = { append() {} }
+    let overlay = true
+    const host = bindHost(name => name === 'agents' ? { get: () => ({ session }) }
+      : name === 'permissionPresets' ? { resolve: () => ({ sandbox: 'workspace-write' }), current: () => 'workspace-write', set: () => {} }
+      : name === 'safeAutoRuntime' ? { sessionActive: () => overlay, selectSession: async () => true }
+      : undefined)
+    expect(await host.verifyTaskPermission!('s', 'write', 'workspace-write')).toBe(false)
+    overlay = false
+    expect(await host.verifyTaskPermission!('s', 'write', 'workspace-write')).toBe(true)
+  })
   it('rejects missing, read-only and failed presets', async () => {
     const session = {}
     const permissions = { defaultPreset: 'read-only', resolve: (name: string) => ({ sandbox: name }), set: () => { throw new Error('failed') } }

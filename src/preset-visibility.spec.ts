@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { Context, symbols } from '@deepseek-ai/cordis'
 import { AgentPresetRegistry } from '@deepseek-ai/dsh-agent-preset-registry'
-import { installPresetVisibility, isInternalPreset, publicDefaultId, visiblePresets, type ListedPreset } from './preset-visibility.ts'
+import { installInternalPresetCreateGuard, installPresetVisibility, isInternalPreset, publicCreatePreset, publicDefaultId, visiblePresets, type ListedPreset } from './preset-visibility.ts'
 
 const ROWS: ListedPreset[] = [
   { id: 'standard', name: 'Standard' },
@@ -140,5 +140,100 @@ describe('preset visibility on a Cordis registry', () => {
     const roster = await api.remoteExportList()
     expect(roster.presets.map(row => row.id)).toEqual(['replaced'])
     expect(roster.presets[0]?.isDefault).toBe(false)
+  })
+})
+
+describe('public create preset', () => {
+  it('rewrites Dorothy internals to the public default and leaves ordinary ids', () => {
+    expect(publicCreatePreset('dot', 'standard')).toBe('standard')
+    expect(publicCreatePreset('dot-reflection', 'standard')).toBe('standard')
+    expect(publicCreatePreset('ptc', 'standard')).toBe('ptc')
+    expect(publicCreatePreset(undefined, 'standard')).toBeUndefined()
+    expect(publicCreatePreset('dot', undefined)).toBeUndefined()
+  })
+})
+
+describe('composedPreset does not leak the coordinator id', () => {
+  it('returns a public preset when the live mount is internal', async () => {
+    const rows: ListedPreset[] = [
+      { id: 'standard', name: 'Standard' },
+      { id: 'dot', name: 'Dorothy' },
+    ]
+    const api = {
+      defaultId: 'dot',
+      composedPreset: () => 'dot',
+      async list() { return rows },
+      async resolve(id?: string) {
+        const wanted = id ?? 'dot'
+        const found = rows.find(row => row.id === wanted)
+        if (!found) throw new Error(`missing ${wanted}`)
+        return { ...found }
+      },
+    }
+    const release = installPresetVisibility(api)
+    try {
+      expect((await api.list()).map(row => row.id)).toEqual(['standard'])
+      expect(api.composedPreset()).toBe('standard')
+      const targetFor = (composed: string | undefined, target: 'new' | 'new_once') => ({
+        kind: target,
+        create: { ...(composed === undefined ? {} : { agentPreset: composed }) },
+      })
+      expect(targetFor(api.composedPreset(), 'new').create).toEqual({ agentPreset: 'standard' })
+      expect(targetFor(api.composedPreset(), 'new_once').create).toEqual({ agentPreset: 'standard' })
+    } finally {
+      release()
+    }
+    expect(api.composedPreset()).toBe('dot')
+  })
+
+  it('uses a public defaultId before the first roster read', () => {
+    const api = {
+      defaultId: 'standard',
+      composedPreset: () => 'dot',
+      async list() { return [{ id: 'standard' }, { id: 'dot' }] },
+    }
+    const release = installPresetVisibility(api)
+    try {
+      expect(api.composedPreset()).toBe('standard')
+    } finally {
+      release()
+    }
+  })
+})
+
+describe('session create guard', () => {
+  it('rewrites new-session creates that would inherit the coordinator preset', async () => {
+    const created: Record<string, unknown>[] = []
+    const controller = {
+      async create(request: Record<string, unknown>) {
+        created.push(request)
+        return { sessionId: 's1' }
+      },
+    }
+    const release = installInternalPresetCreateGuard(controller, async () => 'standard')
+    try {
+      await expect(controller.create({ cwd: '/w', agentPreset: 'dot' })).resolves.toEqual({ sessionId: 's1' })
+      await expect(controller.create({ cwd: '/w', agentPreset: 'dot-reflection' })).resolves.toEqual({ sessionId: 's1' })
+      await expect(controller.create({ cwd: '/w', agentPreset: 'ptc' })).resolves.toEqual({ sessionId: 's1' })
+      await expect(controller.create({ cwd: '/w' })).resolves.toEqual({ sessionId: 's1' })
+    } finally {
+      release()
+    }
+    expect(created).toEqual([
+      { cwd: '/w', agentPreset: 'standard' },
+      { cwd: '/w', agentPreset: 'standard' },
+      { cwd: '/w', agentPreset: 'ptc' },
+      { cwd: '/w' },
+    ])
+  })
+
+  it('refuses an internal create when no public task preset exists', async () => {
+    const controller = { async create() { return { sessionId: 's1' } } }
+    const release = installInternalPresetCreateGuard(controller, async () => undefined)
+    try {
+      await expect(controller.create({ agentPreset: 'dot' })).rejects.toThrow(/no public task preset/)
+    } finally {
+      release()
+    }
   })
 })

@@ -32,7 +32,7 @@ import { approvalDisplay, parseNotice } from './chat-format.ts'
 import { cardText } from './cards.ts'
 import { NoticeBatcher, formatNotices, formatNoticeDisplay, realTimer, type Notice, type Timer } from './batcher.ts'
 import { ZERO_USAGE, addUsage, combineUsage, netSegmentUsage, totalUsage, usageFromEvents } from './context.ts'
-import { PRESET_ID, TOOL, type AttentionView, type BoardView, type DotContextSections, type DotContextUsage, type DotContextView, type FactoryResetPreview, type FactoryResetResult, type InboxEventInput, type InboxRecord, type InboxSubmitResult, type KeepaliveInfo, type KnowledgeView, type ModelChoice, type PendingKind, type PendingQuestionItem, type RecipeBody, type RecipeProposal, type RecipeProposalView, type RecipeRecord, type ReflectionRun, type RolloverReason, type RuleConfig, type TrajectoryView } from './contracts.ts'
+import { PRESET_ID, TOOL, type AttentionView, type BoardView, type DotContextSections, type DotContextUsage, type DotContextView, type FactoryResetPreview, type FactoryResetResult, type InboxEventInput, type InboxRecord, type InboxSubmitResult, type KeepaliveInfo, type KnowledgeView, type ModelChoice, type PendingKind, type PendingQuestionItem, type RecipeBody, type RecipeProposal, type RecipeProposalView, type RecipeRecord, type ReflectionRun, type RolloverReason, type RuleConfig, type TaskPermission, type TrajectoryView } from './contracts.ts'
 import { SUMMARY_INSTRUCTION, SUMMARY_MAX_TOKENS, buildHandoff, type Handoff } from './handoff.ts'
 import { READ_ROWS_DEFAULT, READ_ROWS_MAX, SEARCH_LIMIT_DEFAULT, SEARCH_LIMIT_MAX, SEARCH_SESSIONS_MAX, formatRead, formatSearch, historyRows, queryTerms, searchRows, windowRows, type SessionHits } from './history.ts'
 import { InboxLedger, fenceUntrusted, inboxNotice, memoryInboxTable } from './inbox.ts'
@@ -2718,14 +2718,31 @@ export class DotService {
    * commit; a lost receipt or a stop that is still settling does not block
    * unrelated changes.
    */
-  private runHost() { return bindRunSession(this.host, this.store.settings.taskPermission) }
+  private runHost(runId?: string, mode: 'mutate' | 'verify' = 'mutate') {
+    const run = runId ? this.store.work.run(runId) : undefined
+    if (run?.taskPermission) return bindRunSession(this.host, run.taskPermission)
+    if (mode === 'verify') return bindRunSession(this.host, this.store.settings.taskPermission, { verifyOnly: true })
+    return bindRunSession(this.host, this.store.settings.taskPermission)
+  }
+
+  /** Writable permission Dorothy pinned on this session's run, if any. */
+  runTaskPermission(sessionId: string): TaskPermission | undefined {
+    return this.store.work.sessionRun(sessionId)?.taskPermission
+  }
 
   launchWorkRun(runId: string, text: string, preset?: string, model?: { readonly provider: string; readonly model: string }) {
     return this.launchAndRemember(runId, text, preset, model)
   }
 
+  private async pinWritePermission(runId: string): Promise<void> {
+    const run = this.store.work.run(runId)
+    if (!run || run.access !== 'write' || run.taskPermission) return
+    await this.store.work.pinTaskPermission(runId, this.store.settings.taskPermission)
+  }
+
   private async launchAndRemember(runId: string, text: string, preset?: string, model?: { readonly provider: string; readonly model: string }) {
-    const launched = await launchReservedRun(this.store.work, this.runHost(), runId, text, preset, model, async () => { await this.rememberRun(runId) })
+    await this.pinWritePermission(runId)
+    const launched = await launchReservedRun(this.store.work, this.runHost(runId), runId, text, preset, model, async () => { await this.rememberRun(runId) })
     if (launched.ok) await this.rememberRun(runId)
     return launched
   }
@@ -2744,7 +2761,7 @@ export class DotService {
     })
   }
   supplementWorkRun(runId: string, text: string, senderId: string, expected: { readonly inputRef: string; readonly inputRevision: number }) {
-    return supplementRun(this.store.work, this.runHost(), runId, text, senderId, this.now(), expected)
+    return supplementRun(this.store.work, this.runHost(runId, 'verify'), runId, text, senderId, this.now(), expected)
   }
 
   /** One context delivery on the named run. The work book keeps the input, the sender and any unconfirmed delivery. */
@@ -3441,6 +3458,7 @@ export class DotService {
       writeScope: role === 'review'
         ? { kind: 'workspace-exclusive' }
         : { kind: 'paths', paths: paths ?? (write ? [{ path: change.cwd, type: 'directory' as const }] : []) },
+      ...(role !== 'review' && write ? { taskPermission: this.store.settings.taskPermission } : {}),
       at: this.now(),
     })
     if (!reserved.ok) throw new DotError('dot/invalid', reserved.message)

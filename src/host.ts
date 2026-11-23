@@ -210,7 +210,41 @@ interface Query {
 }
 
 interface Permissions { set(session: unknown, name: string): void; resolve?(name: string): { sandbox?: string }; current?(session: unknown): string; catalog?(): { options?: readonly { value?: unknown }[] } }
-interface SafeAutoRuntime { selectSession?(sessionId: string, signal?: AbortSignal): Promise<unknown>; sessionActive?(sessionId: string): boolean; available?(): boolean }
+/**
+ * Public `@klarkxy/dsh-safe-auto` runtime (0.5.12): `selectSession` /
+ * `sessionActive` / `available`. There is no public deselect; overlay drops
+ * when a `permission/preset` (or sandbox/approval) event lands after select,
+ * or when the native preset is no longer workspace-write + ask.
+ */
+interface SafeAutoRuntime {
+  selectSession?(sessionId: string, signal?: AbortSignal): Promise<unknown>
+  sessionActive?(sessionId: string): boolean
+  available?(): boolean
+  deselectSession?(sessionId: string, signal?: AbortSignal): Promise<unknown>
+}
+
+function sessionEventSink(session: unknown): { append: (type: string, data?: unknown) => void } | undefined {
+  if (!session || typeof session !== 'object') return undefined
+  const append = Reflect.get(session, 'append')
+  if (typeof append !== 'function') return undefined
+  return { append: (type, data) => { append.call(session, type, data) } }
+}
+
+/** Drop a residual Safe Auto overlay after Dorothy pins a native writable preset. */
+async function clearSafeAutoOverlay(rt: SafeAutoRuntime | undefined, sessionId: string, session: unknown): Promise<boolean> {
+  if (rt?.sessionActive?.(sessionId) !== true) return true
+  if (typeof rt.deselectSession === 'function') {
+    try { await rt.deselectSession(sessionId) } catch { return false }
+    return rt.sessionActive(sessionId) !== true
+  }
+  const sink = sessionEventSink(session)
+  if (!sink) return false
+  // Real plugin `active()` treats permission/preset after `fromSeq` as a
+  // native switch. `permissionPresets.set` of the same workspace-write value
+  // that Safe Auto already pinned is a no-op and does not emit.
+  sink.append('permission/preset', { preset: 'workspace-write' })
+  return rt.sessionActive?.(sessionId) !== true
+}
 
 interface Projections { snapshot(session: unknown, keys?: readonly string[]): { values: ProjectionValues } }
 interface Llm {
@@ -486,6 +520,7 @@ export function bindHost(get: Get, log?: (message: string) => void, modelOf?: ()
           return sandbox?.resolve({ session }).mode === 'read-only' && approval?.overrideOf(session) === 'never'
         }
         if (preset === 'safe-auto') return safeAuto()?.sessionActive?.(sessionId) === true
+        if (safeAuto()?.sessionActive?.(sessionId) === true) return false
         const permissions = get('permissionPresets') as Permissions | undefined
         if (!permissions?.resolve || !permissions.current) return false
         const sandbox = permissions.resolve(preset).sandbox
@@ -504,7 +539,10 @@ export function bindHost(get: Get, log?: (message: string) => void, modelOf?: ()
         if (!permissions?.resolve) return false
         const sandbox = permissions.resolve(preset).sandbox
         if (sandbox !== 'workspace-write' && sandbox !== 'danger-full-access') return false
-        return permit((await liveAgent(sessionId)).session, preset)
+        const session = (await liveAgent(sessionId)).session
+        if (!permit(session, preset)) return false
+        if (!await clearSafeAutoOverlay(safeAuto(), sessionId, session)) return false
+        return true
       } catch (error) {
         log?.(`dsh-dot: writable permission not applied: ${String(error)}`)
         return false

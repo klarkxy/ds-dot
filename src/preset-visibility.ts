@@ -6,6 +6,11 @@
  * so dot and the reflection pass still start. An omitted id follows the host
  * default unless that default is one of these presets: a saved internal
  * default is not rewritten, and the next public preset is used instead.
+ *
+ * Host `schedule_create` / `schedule_edit` with target `new` / `new_once`
+ * copy `composedPreset` into the child session. That would inherit `dot`
+ * (no file or shell). `composedPreset` and `sessionController.create` both
+ * rewrite an internal id to a public task preset so those jobs stay ordinary.
  */
 import { PRESET_ID } from './contracts.ts'
 import { REFLECTION_PRESET_ID } from './reflection.ts'
@@ -23,6 +28,11 @@ export interface PresetVisibilityRegistry {
   list: () => Promise<readonly ListedPreset[]>
   remoteExportList?: () => Promise<{ presets: readonly ListedPreset[] }>
   resolve?: (id?: string) => Promise<ListedPreset>
+  readonly defaultId?: string
+}
+
+export interface SessionCreateController {
+  create(request: Record<string, unknown>): Promise<{ sessionId: string }>
 }
 
 export function isInternalPreset(id: string): boolean {
@@ -41,20 +51,36 @@ export function publicDefaultId(rows: readonly ListedPreset[]): string | undefin
   return (visible.find(row => row.broken === undefined) ?? visible[0])?.id
 }
 
+/**
+ * Preset a host session create may use. Internal Dorothy ids become the public
+ * default. `undefined` means "omit and follow the host default".
+ */
+export function publicCreatePreset(requested: unknown, publicDefault: string | undefined): string | undefined {
+  if (typeof requested !== 'string') return typeof requested === 'undefined' ? undefined : publicDefault
+  const id = requested.trim()
+  if (!id) return publicDefault
+  if (!isInternalPreset(id)) return id
+  return publicDefault
+}
+
 /** Cordis `symbols.original`. A service proxy mints a new function on every read. */
 const CORDIS_ORIGINAL = Symbol.for('cordis.original')
 
 function serviceTarget<T extends object>(registry: T): T {
-  const original = (registry as Record<symbol, unknown>)[CORDIS_ORIGINAL]
+  const original = Reflect.get(registry, CORDIS_ORIGINAL)
   return original && typeof original === 'object' ? original as T : registry
 }
 
-function restoreMethod(raw: object, key: 'list' | 'remoteExportList' | 'resolve', previous: unknown, installed: unknown, wasOwn: boolean): void {
+function restoreMethod(raw: object, key: string, previous: unknown, installed: unknown, wasOwn: boolean): void {
   const record = raw as Record<string, unknown>
   // Compare on the raw service. The proxy's method reads are never ===.
   if (record[key] !== installed) return
   if (wasOwn) record[key] = previous
   else delete record[key]
+}
+
+function ownFlag(raw: object, key: string): boolean {
+  return Object.prototype.hasOwnProperty.call(raw, key)
 }
 
 /** Hide the internal presets from roster reads. Returns the disposer. */
@@ -64,19 +90,29 @@ export function installPresetVisibility(registry: PresetVisibilityRegistry | und
   const previousList = raw.list
   const previousRemote = raw.remoteExportList
   const previousResolve = raw.resolve
+  const previousComposed = Reflect.get(raw, 'composedPreset')
   const wasOwn = {
-    list: Object.prototype.hasOwnProperty.call(raw, 'list'),
-    remoteExportList: Object.prototype.hasOwnProperty.call(raw, 'remoteExportList'),
-    resolve: Object.prototype.hasOwnProperty.call(raw, 'resolve'),
+    list: ownFlag(raw, 'list'),
+    remoteExportList: ownFlag(raw, 'remoteExportList'),
+    resolve: ownFlag(raw, 'resolve'),
+    composedPreset: ownFlag(raw, 'composedPreset'),
   }
   const list = previousList.bind(raw)
   const remoteExportList = typeof previousRemote === 'function' ? previousRemote.bind(raw) : undefined
   const resolve = typeof previousResolve === 'function' ? previousResolve.bind(raw) : undefined
-  const wrappedList = async () => visiblePresets(await list())
+  const composed = typeof previousComposed === 'function'
+    ? (previousComposed as (...args: never[]) => unknown).bind(raw)
+    : undefined
+  let publicId = typeof raw.defaultId === 'string' && !isInternalPreset(raw.defaultId) ? raw.defaultId : undefined
+  const remember = (rows: readonly ListedPreset[]): readonly ListedPreset[] => {
+    publicId = publicDefaultId(rows) ?? publicId
+    return rows
+  }
+  const wrappedList = async () => remember(visiblePresets(await list()))
   const readRoster = async (): Promise<readonly ListedPreset[]> => remoteExportList ? (await remoteExportList()).presets : await list()
   const wrappedRemote = remoteExportList
     ? async () => {
-      const rows = visiblePresets(await readRoster())
+      const rows = remember(visiblePresets(await readRoster()))
       const chosen = publicDefaultId(rows)
       return { presets: rows.map(row => ({ ...row, isDefault: chosen !== undefined && row.id === chosen })) }
     }
@@ -84,7 +120,7 @@ export function installPresetVisibility(registry: PresetVisibilityRegistry | und
   const wrappedResolve = resolve
     ? async (id?: string) => {
       if (id !== undefined) return resolve(id)
-      const chosen = publicDefaultId(await readRoster())
+      const chosen = publicDefaultId(remember(visiblePresets(await readRoster())))
       const current = await resolve(undefined)
       if (chosen === undefined) {
         if (!isInternalPreset(current.id)) return current
@@ -93,12 +129,53 @@ export function installPresetVisibility(registry: PresetVisibilityRegistry | und
       return current.id === chosen ? current : resolve(chosen)
     }
     : undefined
+  const wrappedComposed = composed
+    ? (...args: never[]) => {
+      const id = composed(...args)
+      if (typeof id !== 'string' || !isInternalPreset(id)) return id
+      return publicId
+    }
+    : undefined
   raw.list = wrappedList
   if (wrappedRemote && remoteExportList) raw.remoteExportList = wrappedRemote
   if (wrappedResolve && resolve) raw.resolve = wrappedResolve
+  if (wrappedComposed) Reflect.set(raw, 'composedPreset', wrappedComposed)
   return () => {
     restoreMethod(raw, 'list', previousList, wrappedList, wasOwn.list)
     if (wrappedRemote) restoreMethod(raw, 'remoteExportList', previousRemote, wrappedRemote, wasOwn.remoteExportList)
     if (wrappedResolve) restoreMethod(raw, 'resolve', previousResolve, wrappedResolve, wasOwn.resolve)
+    if (wrappedComposed) restoreMethod(raw, 'composedPreset', previousComposed, wrappedComposed, wasOwn.composedPreset)
   }
+}
+
+/**
+ * Host session creates that name Dorothy's internal preset (schedule `new` /
+ * `new_once` inherit `composedPreset`) are rewritten to a public task preset.
+ * `createDot` / `createInternal` go through `agents.create`, not this path.
+ */
+function isSessionCreateController(value: unknown): value is SessionCreateController {
+  return !!value && typeof value === 'object' && typeof Reflect.get(value, 'create') === 'function'
+}
+
+export function installInternalPresetCreateGuard(
+  controller: unknown,
+  publicPreset: () => Promise<string | undefined>,
+): () => void {
+  if (!isSessionCreateController(controller)) return () => {}
+  const raw = serviceTarget(controller)
+  const previous = raw.create
+  const wasOwn = ownFlag(raw, 'create')
+  const create = previous.bind(raw)
+  const wrapped = async (request: Record<string, unknown>) => {
+    const body = request && typeof request === 'object' && !Array.isArray(request) ? request : {}
+    const current = body.agentPreset
+    if (typeof current !== 'string' || !isInternalPreset(current.trim())) return create(request)
+    const next = publicCreatePreset(current, await publicPreset())
+    if (next === undefined) {
+      throw new Error('Host schedule cannot create a session with Dorothy\'s internal preset, and no public task preset is available.')
+    }
+    return create({ ...body, agentPreset: next })
+  }
+  raw.create = wrapped
+  return () => restoreMethod(raw, 'create', previous, wrapped, wasOwn)
 }

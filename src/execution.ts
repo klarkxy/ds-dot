@@ -447,8 +447,19 @@ function countMessages(events: readonly RelayEvent[], accept: (row: Record<strin
   return seen.size + anonymous
 }
 
+const WRITABLE_PRESETS: readonly TaskPermission[] = ['safe-auto', 'workspace-write', 'danger-full-access', 'auto']
+
+export interface BindRunSessionOptions {
+  /**
+   * Confirm the session is still writable without calling `setWritable`.
+   * Used for legacy runs that only stored `read` | `write`, so a later global
+   * default cannot widen them.
+   */
+  readonly verifyOnly?: boolean
+}
+
 /** Adapt the public host. Relay acceptance still has to be proved from the log. */
-export function bindRunSession(host: DotHost, writablePreset: TaskPermission = 'workspace-write'): RunSessionHost {
+export function bindRunSession(host: DotHost, writablePreset: TaskPermission = 'workspace-write', options: BindRunSessionOptions = {}): RunSessionHost {
   return {
     async findSession(sessionId) {
       if (!host.findSession) throw new Error('session lookup is unavailable')
@@ -466,7 +477,14 @@ export function bindRunSession(host: DotHost, writablePreset: TaskPermission = '
           if (!await host.setReadOnly(sessionId)) return 'rejected'
           return await host.verifyTaskPermission(sessionId, 'read', 'read-only') ? 'ok' : 'rejected'
         }
-        if (!host.setWritable || !host.verifyTaskPermission) return 'unknown'
+        if (!host.verifyTaskPermission) return 'unknown'
+        if (options.verifyOnly) {
+          for (const preset of WRITABLE_PRESETS) {
+            try { if (await host.verifyTaskPermission(sessionId, 'write', preset)) return 'ok' } catch { /* try the next preset */ }
+          }
+          return 'rejected'
+        }
+        if (!host.setWritable) return 'unknown'
         const effective = host.effectiveTaskPermission?.(writablePreset) ?? writablePreset
         if (!await host.setWritable(sessionId, effective)) return 'rejected'
         return await host.verifyTaskPermission(sessionId, 'write', effective) ? 'ok' : 'rejected'

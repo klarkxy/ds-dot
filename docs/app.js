@@ -17,6 +17,23 @@
 
   const RECORDINGS = [
     {
+      id: 'task-only-tools',
+      pr: 77,
+      date: '2026.11.23',
+      post: 'boundaries',
+      file: 'dot-task-only-tools-718b5b44.gif',
+      title: {
+        zh: '动手的工具只归任务',
+        en: 'Hands-on tools stay with tasks',
+        ja: '手を動かすツールはタスク専用',
+      },
+      desc: {
+        zh: '改文件、跑命令、装插件这类工具在设置里标着“仅限任务”，我自己用不了，需要时就派任务去做。',
+        en: 'Tools that edit files, run commands, or manage plugins are marked “Tasks only”—I never use them myself and send a task instead.',
+        ja: 'ファイル編集やコマンド実行、プラグイン管理のツールは「タスク専用」。私自身は使わず、必要ならタスクに任せます。',
+      },
+    },
+    {
       id: 'worktree',
       pr: 58,
       date: '2026.11.22',

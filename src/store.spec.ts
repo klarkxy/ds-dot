@@ -485,8 +485,8 @@ describe('DotStore agreements and cognition', () => {
         [STATE_KEY]: {
           agreements: '# 规矩\n- do not push\nfree prose\n\n- keep this',
           agreementsUndo: '- earlier rule',
-          cognition: '## 对人类的理解\n- human 1\n- human 2\n## 对自己的理解\n- self 1',
-          cognitionHistory: [{ text: '- old idea\n# heading\n- older idea', at: 7 }],
+          cognition: '## 对人类的理解\n- human 1\n- human 2\n- 只归档文件「Release  Notes.md」\n- 缩进\t靠 tab\n## 对自己的理解\n- self 1',
+          cognitionHistory: [{ text: '- old idea\n# heading\n- older idea\n- 旧条目  双空格', at: 7 }],
         },
       },
     })
@@ -494,10 +494,14 @@ describe('DotStore agreements and cognition', () => {
     expect(store.agreementEntries.map(entry => entry.text)).toEqual(['# 规矩', 'do not push', 'free prose', 'keep this'])
     expect(store.agreementEntries.map(entry => entry.id)).toEqual(['a1', 'a2', 'a3', 'a4'])
     expect(store.agreementEntriesUndo?.map(entry => entry.text)).toEqual(['earlier rule'])
-    expect(store.cognitionEntries.map(entry => entry.text)).toEqual(['human 1', 'human 2', 'self 1'])
+    expect(store.cognitionEntries.map(entry => entry.text)).toEqual(['human 1', 'human 2', '只归档文件「Release  Notes.md」', '缩进\t靠 tab', 'self 1'])
     expect(store.cognitionEntries.every(entry => entry.seenAt === entry.createdAt && entry.createdAt === entry.updatedAt)).toBe(true)
-    expect(store.cognitionEntryHistory[0]!.entries.map(entry => entry.text)).toEqual(['old idea', 'older idea'])
+    // Converted history snapshots keep their text verbatim too, and restoring
+    // the version brings the exact spacing back.
+    expect(store.cognitionEntryHistory[0]!.entries.map(entry => entry.text)).toEqual(['old idea', 'older idea', '旧条目  双空格'])
     expect(store.cognitionEntryHistory[0]!.at).toBe(7)
+    await store.restoreCognition(7)
+    expect(store.cognitionEntries.map(entry => entry.text)).toEqual(['old idea', 'older idea', '旧条目  双空格'])
     // The migrated shape is queued to the durable row: legacy keys do not come back.
     await new Promise(resolve => setTimeout(resolve, 0))
     const row = tables.state!.get(STATE_KEY) as Record<string, unknown>
@@ -507,10 +511,10 @@ describe('DotStore agreements and cognition', () => {
     expect(row.cognitionHistory).toBeUndefined()
     expect((row.agreementEntries as { id: string }[]).map(entry => entry.id)).toEqual(['a1', 'a2', 'a3', 'a4'])
     expect((row.agreementEntriesUndo as { id: string }[]).map(entry => entry.id)).toEqual(['a5'])
-    expect(row.cognitionEntryHistory).toHaveLength(1)
+    expect(row.cognitionEntryHistory).toHaveLength(2)
     // Migration seeds the id counters above every entry it handed out.
-    expect(row.knowledgeIdSeq).toEqual({ a: 5, c: 5 })
-    expect(new DotStore(domain).cognitionEntries.map(entry => entry.text)).toEqual(['human 1', 'human 2', 'self 1'])
+    expect(row.knowledgeIdSeq).toEqual({ a: 5, c: 8 })
+    expect(new DotStore(domain).cognitionEntries.map(entry => entry.text)).toEqual(['old idea', 'older idea', '旧条目  双空格'])
   })
 
   it('stays readable to an older plugin whose schema only knows the legacy keys', async () => {

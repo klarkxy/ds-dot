@@ -17,18 +17,24 @@ import { TOOL, type AgreementEntry, type CognitionEntry, type KnowledgeEdit } fr
 export class KnowledgeError extends Error {
   constructor(readonly code: 'dot/invalid' | 'dot/unknown-agreement' | 'dot/ambiguous-agreement' | 'dot/unknown-entry' | 'dot/ambiguous-entry' | 'dot/pinned', message: string) { super(message); this.name = 'KnowledgeError' }
 }
-const BULLET = /^\s*[-*]\s+/
+const BULLET = /^[-*]\s+/
 const HEADING = /^\s*#{1,6}\s/
 
-/** One entry as a single line, without a list marker. */
+/** One entry as a single line, without a list marker; internal spacing stays verbatim. */
 export function normalizeEntry(text: string): string {
-  return text.replace(/\s+/g, ' ').trim().replace(BULLET, '').trim()
+  return text.replace(/\s*\r?\n\s*/g, ' ').trim().replace(BULLET, '').trim()
+}
+
+/** Whitespace- and case-insensitive comparison key for matching; never stored. */
+export function entryKey(text: string): string {
+  return text.replace(/\s+/g, ' ').trim().toLowerCase()
 }
 
 /**
  * Bulk or legacy text split into entry texts: every non-empty line is one
- * entry with a leading `- `/`* ` marker stripped. `dropHeadings` additionally
- * skips markdown heading lines (cognition); agreements keep them verbatim.
+ * entry with a leading `- `/`* ` marker stripped; spacing inside a line is
+ * kept verbatim. `dropHeadings` additionally skips markdown heading lines
+ * (cognition); agreements keep them verbatim.
  */
 export function splitEntryText(text: string, dropHeadings = false): string[] {
   return text.split(/\r?\n/)
@@ -106,13 +112,12 @@ export function migrateCognitionEntries(text: string, now: number, nextId: NextE
   return cognitionEntriesFromText(text, [], now, nextId)
 }
 
-/** The single entry `needle` names, by exact text or a unique substring. */
+/** The single entry `needle` names, by exact key or a unique substring; stored text is compared as it stands. */
 export function matchEntry<T extends { readonly id: string; readonly text: string }>(entries: readonly T[], needle: string, kind: 'agreement' | 'cognition'): T {
-  const wanted = normalizeEntry(needle).toLowerCase()
+  const wanted = entryKey(normalizeEntry(needle))
   if (!wanted) throw new KnowledgeError('dot/invalid', 'text must be non-empty')
-  const key = (entry: T) => normalizeEntry(entry.text).toLowerCase()
-  const exact = entries.filter(entry => key(entry) === wanted)
-  const matches = exact.length > 0 ? exact : entries.filter(entry => key(entry).includes(wanted))
+  const exact = entries.filter(entry => entryKey(entry.text) === wanted)
+  const matches = exact.length > 0 ? exact : entries.filter(entry => entryKey(entry.text).includes(wanted))
   const label = kind === 'agreement' ? 'agreement' : 'cognition entry'
   const unknown = kind === 'agreement' ? 'dot/unknown-agreement' : 'dot/unknown-entry'
   const ambiguous = kind === 'agreement' ? 'dot/ambiguous-agreement' : 'dot/ambiguous-entry'

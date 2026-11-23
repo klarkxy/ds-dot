@@ -999,6 +999,36 @@ describe('DotService knowledge', () => {
     await expect(h.service.cognitionRemove('first fact')).rejects.toMatchObject({ code: 'dot/pinned' })
   })
 
+  it('refuses a match that lands on a literal-bullet entry and a normal one alike', async () => {
+    const h = setup()
+    // Stored verbatim — e.g. a legacy '- - staging' line becomes '- staging'.
+    await h.store.setAgreementEntries([
+      { id: 'a1', text: '- staging', createdAt: 1, updatedAt: 1 },
+      { id: 'a2', text: '不要部署到 staging', createdAt: 2, updatedAt: 2 },
+    ])
+    await h.store.setCognitionEntries([
+      { id: 'c1', text: '- staging', createdAt: 1, updatedAt: 1, seenAt: 1 },
+      { id: 'c2', text: '不要部署到 staging', createdAt: 2, updatedAt: 2, seenAt: 2 },
+    ], 10)
+    await expect(h.service.agreementRemove('staging')).rejects.toMatchObject({ code: 'dot/ambiguous-agreement' })
+    await expect(h.service.cognitionUpdate('staging', 'x')).rejects.toMatchObject({ code: 'dot/ambiguous-entry' })
+    await expect(h.service.cognitionRemove('staging')).rejects.toMatchObject({ code: 'dot/ambiguous-entry' })
+    // Nothing changed on either list.
+    expect(h.store.agreementEntries.map(entry => entry.text)).toEqual(['- staging', '不要部署到 staging'])
+    expect(h.store.cognitionEntries.map(entry => entry.text)).toEqual(['- staging', '不要部署到 staging'])
+    // Quoting the dash too reaches the bullet entry exactly.
+    expect(await h.service.agreementRemove('- - staging')).toContain('Removed')
+    expect(h.store.agreementEntries.map(entry => entry.text)).toEqual(['不要部署到 staging'])
+  })
+
+  it('stores a multi-line add as one entry, inner spacing kept verbatim', async () => {
+    const h = setup()
+    await h.service.cognitionAdd('line one\nline  two')
+    expect(h.store.cognitionEntries.map(entry => entry.text)).toEqual(['line one line  two'])
+    await h.service.editAgreements({ op: 'add', text: 'rule one\nrule  two' })
+    expect(h.store.agreementEntries.map(entry => entry.text)).toEqual(['rule one rule  two'])
+  })
+
   it('keeps cognition versions, rolls back, and lets the empty version return', async () => {
     const h = setup()
     await h.service.ensureDot()

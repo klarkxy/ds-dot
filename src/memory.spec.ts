@@ -12,10 +12,10 @@ const cognition = (id: string, text: string, at = 0, seenAt = at, pinned?: true)
 const ids = (prefix: 'a' | 'c', start = 0) => { let n = start; return () => `${prefix}${++n}` }
 
 describe('entry text splitting', () => {
-  it('splits non-empty lines, strips bullets, collapses whitespace and keeps headings only for agreements', () => {
+  it('splits non-empty lines, strips bullets, keeps inner spacing verbatim and keeps headings only for agreements', () => {
     const text = '# About the human\n\n- calls me Dot\n* prefers short answers\nfree prose\n-not an item\n- two  spaces\tinside\n'
-    expect(splitEntryText(text)).toEqual(['# About the human', 'calls me Dot', 'prefers short answers', 'free prose', '-not an item', 'two spaces inside'])
-    expect(splitEntryText(text, true)).toEqual(['calls me Dot', 'prefers short answers', 'free prose', '-not an item', 'two spaces inside'])
+    expect(splitEntryText(text)).toEqual(['# About the human', 'calls me Dot', 'prefers short answers', 'free prose', '-not an item', 'two  spaces\tinside'])
+    expect(splitEntryText(text, true)).toEqual(['calls me Dot', 'prefers short answers', 'free prose', '-not an item', 'two  spaces\tinside'])
     expect(normalizeEntry('  -  likes\n  tea ')).toBe('likes tea')
   })
 
@@ -40,11 +40,17 @@ describe('entry text splitting', () => {
     expect(entries.map(entry => entry.id)).toEqual(['a1', 'a2', 'a3', 'a4'])
   })
 
-  it('migrates near-duplicate lines without deduping, and matching them is ambiguous', () => {
-    // Whitespace collapses to the same entry text; both stay stored.
+  it('migrates near-duplicate lines verbatim without deduping, and matching by key is ambiguous', () => {
+    // Inner spacing is stored as written; the comparison key still equates them.
     const entries = migrateAgreementEntries('- A  B\n- A B\n', 5, ids('a'))
-    expect(entries.map(entry => entry.text)).toEqual(['A B', 'A B'])
+    expect(entries.map(entry => entry.text)).toEqual(['A  B', 'A B'])
     expect(() => matchEntry(entries, 'A B', 'agreement')).toThrowError(expect.objectContaining({ code: 'dot/ambiguous-agreement' }))
+  })
+
+  it('keeps double spaces and tabs verbatim through agreement and cognition migration', () => {
+    const text = '- 只归档文件「Release  Notes.md」\n- 缩进\t靠 tab\n'
+    expect(migrateAgreementEntries(text, 5, ids('a')).map(entry => entry.text)).toEqual(['只归档文件「Release  Notes.md」', '缩进\t靠 tab'])
+    expect(migrateCognitionEntries(`## 认知\n${text}`, 5, ids('c')).map(entry => entry.text)).toEqual(['只归档文件「Release  Notes.md」', '缩进\t靠 tab'])
   })
 
   it('reuses ids and timestamps for identical lines when text becomes entries', () => {
@@ -100,6 +106,13 @@ describe('knowledge edits', () => {
     expect(matchEntry([agreement('a1', 'A B')], 'A   B', 'agreement').id).toBe('a1')
     // The whole entry wins over entries that merely contain it.
     expect(matchEntry([agreement('a1', 'tea'), agreement('a2', 'green tea')], 'tea', 'agreement').id).toBe('a1')
+    // Case and spacing differences still find the stored text.
+    expect(matchEntry([agreement('a1', '只归档文件「Release  Notes.md」')], 'release notes.md', 'agreement').id).toBe('a1')
+    // A stored bullet keeps its literal text: '- staging' stays a distinct
+    // entry, only reached by quoting the dash too ('staging' alone is ambiguous).
+    const bullet = [agreement('a1', '- staging'), agreement('a2', '不要部署到 staging')]
+    expect(matchEntry(bullet, '- - staging', 'agreement').id).toBe('a1')
+    expect(() => matchEntry(bullet, 'staging', 'agreement')).toThrowError(expect.objectContaining({ code: 'dot/ambiguous-agreement' }))
     expect(() => matchEntry(list, 'likes', 'agreement')).toThrowError(expect.objectContaining({ code: 'dot/ambiguous-agreement' }))
     expect(() => matchEntry(list, 'coffee', 'agreement')).toThrowError(expect.objectContaining({ code: 'dot/unknown-agreement' }))
     expect(() => matchEntry([cognition('c1', 'x')], 'y', 'cognition')).toThrowError(expect.objectContaining({ code: 'dot/unknown-entry' }))

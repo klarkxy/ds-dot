@@ -113,6 +113,22 @@ describe('Dorothy self settings', () => {
     expect(h.state.entries.map(entry => entry.text)).toEqual(['先给结论', '新规矩'])
   })
 
+  it('treats an inside-spacing difference as a real change, not a formatting one', async () => {
+    const h = setup()
+    h.state.entries = agreementEntriesFromText('- 先给 结论\n', [], 1, () => `a${++h.state.nextId}`)
+    await h.store.putSettingProposal({
+      id: 'setting-legacy', field: 'agreements', before: '- 先给  结论\n', after: '- 先给  结论\n- 新规矩\n', reason: 'add a rule', createdAt: 1,
+    })
+    await expect(h.self.decide('setting-legacy', true)).rejects.toMatchObject({ code: 'dot/proposal-stale' })
+  })
+
+  it('keeps internal whitespace verbatim when a bulk proposal is approved', async () => {
+    const h = setup()
+    await h.self.propose({ field: 'agreements', value: '- keep  me\n- tab\tline\n', reason: 'remember' })
+    await h.self.decide(h.store.settingProposals[0]!.id, true)
+    expect(h.state.entries.map(entry => entry.text)).toEqual(['keep  me', 'tab\tline'])
+  })
+
   it('refuses an old proposal after the human locks it, including the agreements field', async () => {
     const h = setup()
     await h.self.propose({ field: 'agreements', value: '- old', reason: 'old' })

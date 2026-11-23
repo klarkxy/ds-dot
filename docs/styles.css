@@ -1134,30 +1134,28 @@ button {
 }
 
 /* ---------- Lightbox ---------- */
-.lightbox[hidden] {
+.lightbox {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  width: min(940px, calc(100vw - 40px));
+  max-width: none;
+  max-height: 90vh;
+  margin: auto;
+  overflow: visible;
+}
+
+.lightbox:not([open]) {
   display: none;
 }
 
-.lightbox {
-  position: fixed;
-  inset: 0;
-  z-index: 60;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 20px;
-}
-
-.lightbox-backdrop {
-  position: absolute;
-  inset: 0;
+.lightbox::backdrop {
   background: var(--backdrop);
 }
 
 .lightbox-panel {
-  position: relative;
-  z-index: 1;
-  width: min(940px, 100%);
+  width: 100%;
   max-height: 90vh;
   overflow-y: auto;
   background: var(--surface);

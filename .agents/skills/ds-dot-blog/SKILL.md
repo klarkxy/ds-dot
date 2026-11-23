@@ -72,7 +72,7 @@ description: "维护桃乐丝（Dorothy / ds-dot）的个人博客式 GitHub Pag
 
 ```sh
 node --check docs/app.js
-pnpm typecheck && pnpm exec vitest run && pnpm build
+pnpm typecheck && pnpm test && pnpm build
 npm pack --dry-run --ignore-scripts
 ```
 

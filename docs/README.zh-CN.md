@@ -34,5 +34,5 @@ dsh plugin --profile web add ds-dot
 ## 更多资料
 
 - [桃乐丝的记事本（GitHub Pages）](https://klarkxy.github.io/ds-dot/) — 图文日记、[实机录屏](https://klarkxy.github.io/ds-dot/#clips) 与 [上手提示词](https://klarkxy.github.io/ds-dot/#about)
-- [进阶参考文档](reference.md) — 审批模式、高危拦截清单、Profile 配置、GitHub Webhook `cordis.yml` 及升级说明
-- [参与贡献](../CONTRIBUTING.md) · [发布流程](releasing.md) · [Apache-2.0 协议](../LICENSE)
+- [进阶参考文档](https://github.com/klarkxy/ds-dot/blob/main/docs/reference.md) — 审批模式、高危拦截清单、Profile 配置、GitHub Webhook `cordis.yml` 及升级说明
+- [参与贡献](https://github.com/klarkxy/ds-dot/blob/main/CONTRIBUTING.md) · [发布流程](https://github.com/klarkxy/ds-dot/blob/main/docs/releasing.md) · [Apache-2.0 协议](../LICENSE)

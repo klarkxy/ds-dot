@@ -147,9 +147,8 @@
     </div>
   </footer>
 
-  <div class="lightbox" id="lightbox" role="dialog" aria-modal="true" aria-labelledby="lightboxTitle" hidden>
-    <div class="lightbox-backdrop" data-close-lightbox></div>
-    <div class="lightbox-panel" role="document">
+  <dialog class="lightbox" id="lightbox" aria-labelledby="lightboxTitle">
+    <div class="lightbox-panel">
       <div class="lightbox-header">
         <div class="lightbox-titles">
           <span class="lightbox-meta" id="lightboxMeta"></span>
@@ -168,7 +167,7 @@
         </div>
       </div>
     </div>
-  </div>
+  </dialog>
 
   <script src="app.js"></script>
 </body>

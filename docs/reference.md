@@ -10,7 +10,7 @@ This page collects the deeper configuration, security guardrail, GitHub webhook,
 
 | Setting | Default | Options |
 |---|---|---|
-| **Scope** | All / Her tasks | Watch all top-level DSH sessions or only tasks dispatched by Dorothy. |
+| **Scope** | **Her tasks** | **Her tasks** (only tasks dispatched by Dorothy) · **All** (watch all top-level DSH sessions) |
 | **Permission approvals** | **Dorothy** | **Dorothy** (auto-handles routine reversible calls; escalates risky/truncated ones) · **Me** (relays every card) · **Deny all** |
 | **Model questions** | **She decides** | **She decides** (picks routine reversible defaults within goal) · **Ask me** · **Hands off** (leaves in originating session) |
 

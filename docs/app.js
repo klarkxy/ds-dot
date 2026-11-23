@@ -637,6 +637,7 @@
     category: 'all',
     route: parseRoute(),
     lastFocus: null,
+    restoreLightboxFocus: true,
   };
 
   const viewRoot = document.getElementById('viewRoot');
@@ -1149,7 +1150,9 @@
   }
 
   function openLightbox({ src, alt, meta, title, desc, postSlug, prNumber }) {
-    state.lastFocus = document.activeElement;
+    if (!lightbox.open) {
+      state.lastFocus = document.activeElement;
+    }
     lightboxImg.src = src;
     lightboxImg.alt = alt || title;
     lightboxMeta.textContent = meta || '';
@@ -1173,19 +1176,17 @@
     }
 
     lightboxClose.setAttribute('aria-label', ui('closeLabel'));
-    lightbox.hidden = false;
     document.body.style.overflow = 'hidden';
+    if (!lightbox.open) {
+      lightbox.showModal();
+    }
     lightboxClose.focus();
   }
 
-  function closeLightbox() {
-    if (lightbox.hidden) return;
-    lightbox.hidden = true;
-    lightboxImg.src = '';
-    document.body.style.overflow = '';
-    if (state.lastFocus && typeof state.lastFocus.focus === 'function') {
-      state.lastFocus.focus();
-    }
+  function closeLightbox(restoreFocus = true) {
+    if (!lightbox || !lightbox.open) return;
+    state.restoreLightboxFocus = restoreFocus;
+    lightbox.close();
   }
 
   document.addEventListener('click', (event) => {
@@ -1256,15 +1257,33 @@
       return;
     }
 
-    if (event.target.closest('[data-close-lightbox]') || event.target === lightboxClose) {
-      closeLightbox();
+    if (event.target === lightboxClose) {
+      closeLightbox(true);
       return;
     }
 
     if (event.target.closest('#lightboxPostLink')) {
-      closeLightbox();
+      closeLightbox(false);
     }
   });
+
+  if (lightbox) {
+    lightbox.addEventListener('click', (event) => {
+      if (event.target === lightbox) {
+        closeLightbox(true);
+      }
+    });
+
+    lightbox.addEventListener('close', () => {
+      const shouldRestore = state.restoreLightboxFocus;
+      state.restoreLightboxFocus = true;
+      lightboxImg.src = '';
+      document.body.style.overflow = '';
+      if (shouldRestore && state.lastFocus && state.lastFocus.isConnected && typeof state.lastFocus.focus === 'function') {
+        state.lastFocus.focus();
+      }
+    });
+  }
 
   if (themeToggle) {
     themeToggle.addEventListener('click', () => {
@@ -1273,15 +1292,10 @@
   }
 
   window.addEventListener('hashchange', () => {
+    closeLightbox(false);
     state.route = parseRoute();
     renderCurrentView();
     window.scrollTo({ top: 0, behavior: 'auto' });
-  });
-
-  document.addEventListener('keydown', (event) => {
-    if (event.key === 'Escape' && !lightbox.hidden) {
-      closeLightbox();
-    }
   });
 
   // Expose catalog references cleanly on window for verification and maintenance checks.

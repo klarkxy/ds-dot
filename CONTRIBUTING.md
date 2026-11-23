@@ -3,7 +3,7 @@
 Thanks for helping make Dorothy (`ds-dot`) better! Whether you're fixing a typo, polishing docs, or building a new panel feature, this guide walks through how we develop, test, and land changes cleanly.
 
 > [!TIP]
-> **Quick PR checklist:** Branch from `dev` → run `pnpm typecheck && pnpm test && pnpm build` → sync GitHub Pages (`docs/`) and READMEs if adding/changing a user-facing feature → target `dev` with a [Conventional Commits](https://www.conventionalcommits.org/) PR title → attach a live `dsh web` GIF if your diff touches UI or copy (or write `No frontend changes`).
+> **Quick PR checklist:** Branch from `dev` → run `pnpm typecheck && pnpm test && pnpm build` → sync GitHub Pages (`docs/`) and READMEs if adding/changing a user-facing feature → target `dev` with a [Conventional Commits](https://www.conventionalcommits.org/) PR title → attach a live `dsh web` GIF if users will see the change in the panel during normal use (or write `No frontend changes`).
 
 ---
 
@@ -57,7 +57,7 @@ Feature and fix PRs merge into `dev` with a **merge commit** so feature history 
    - Format the PR title as a [Conventional Commit](https://www.conventionalcommits.org/) (e.g., `feat(work): render English work orders`). Allowed types: `feat`, `fix`, `perf`, `refactor`, `docs`, `test`, `build`, `ci`, `chore`, `revert`, `release` (append `!` for breaking changes, e.g., `feat(api)!: ...`).
    - Reference the issue with `Closes #123` in the PR description.
    - Keep PRs focused — small, reviewable changes beat monolithic diffs.
-   - Include a live interaction GIF whenever your change affects the UI (see [Frontend changes](#frontend-changes)).
+   - Include a live interaction GIF whenever users will see the change in the panel during normal use (see [Frontend changes](#frontend-changes)).
    - Sync the GitHub Pages showcase (`docs/`) and READMEs whenever your PR adds or changes a user-facing feature (see [GitHub Pages and documentation sync](#github-pages-and-documentation-sync)).
 4. **Pass CI and review:** Both `CI result` (typecheck, test, build, and pack across Linux and Windows) and `PR title` must pass, all review threads must be resolved, any required frontend GIF must be in the PR body, and any user-facing feature must be synced to GitHub Pages before merging.
 5. **Merge with a merge commit**, then delete the feature branch.
@@ -66,11 +66,7 @@ Feature and fix PRs merge into `dev` with a **merge commit** so feature history 
 
 ## Frontend changes
 
-A PR counts as a **frontend change** whenever it alters what a user sees or interacts with in Dorothy's UI inside DeepSeek Harness:
-
-- Client components (`src/**/*.tsx`, excluding `*.spec.tsx`)
-- User-facing copy (`src/ui-copy.ts`, `src/i18n/locales/*.ts`, `locale/*.json`)
-- Icons (`icon.svg` or inline SVG glyphs)
+A PR counts as a **frontend change** when it changes what a user sees or does in Dorothy's panel in normal use: a layout, control, interaction, style, icon, or copy that a reviewer can reach in a live `dsh web` instance by using the panel. What counts is the visible result, not the files touched — a diff in `src/**/*.tsx` or the locale files that changes nothing on screen in normal use is not a frontend change.
 
 Backend-only, test-only, and docs-only diffs (including `README.md`, `CONTRIBUTING.md`, and `docs/` pages) do **not** count.
 
@@ -80,7 +76,8 @@ Backend-only, test-only, and docs-only diffs (including `README.md`, `CONTRIBUTI
 > - Show the actual interaction and on-screen outcome — static screenshots, mockups, synthetic animations, or written claims do not satisfy this rule. Keep the GIF file off the Git branch.
 > - **Record safely with `dsh-web-acceptance`:** Use the bundled skill in [`.agents/skills/dsh-web-acceptance/`](.agents/skills/dsh-web-acceptance/), which launches an isolated `DSH_HOME` instance, exchanges the startup token for an `HttpOnly` cookie before recording, and writes a palette-optimized GIF outside the repo with zero API keys, `?token=` URLs, cookies, or personal data.
 
-- **If your PR leaves the frontend untouched:** Keep `No frontend changes` in the PR body. Never use that marker on diffs that touch UI components, styles, icons, or user-facing copy, regardless of how small the change is.
+- **If the only visible change is a failure state:** Text or banners that appear only when something is broken — the backend is not loaded, the panel and backend versions differ, a host call fails — cannot be brought up on demand in a live instance. Skip the GIF, name the state in the PR body, and point to the component tests that render it.
+- **If nothing visible changes:** Keep `No frontend changes` in the PR body.
 
 Reviewers check the PR body against the diff directly (CI does not validate GIF presence).
 

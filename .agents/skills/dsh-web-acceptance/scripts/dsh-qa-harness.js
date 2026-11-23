@@ -442,7 +442,11 @@ export function buildIsolatedEnv(tempHome, allowEnv = [], source = process.env) 
   return env
 }
 
-export function quoteWindowsCmdArg(arg) {
+function isWindowsNativeImage(bin) {
+  return /\.(?:exe|com)$/i.test(String(bin))
+}
+
+function quoteWindowsArg(arg, nativeArgv) {
   const value = String(arg)
   if (/[\0\r\n]/.test(value)) {
     throw new Error('Windows command arguments cannot contain newlines or NUL.')
@@ -452,7 +456,21 @@ export function quoteWindowsCmdArg(arg) {
   // when the line is handed to cmd.exe /c. % is doubled because cmd expands
   // %VAR% even inside quotes.
   if (!/[\s"%&|<>^()!]/.test(value)) return value
-  return `"${value.replace(/%/g, '%%').replace(/"/g, '""')}"`
+  let inner = value.replace(/%/g, '%%').replace(/"/g, '""')
+  // Native images are parsed by CommandLineToArgvW / the CRT: a single
+  // trailing \ before the closer escapes that quote. Double those slashes
+  // so the closer stays a closer. cmd.exe and .cmd/.bat do not treat \ as
+  // an escape, so leave them alone for batch launchers.
+  if (nativeArgv) inner = inner.replace(/\\+$/, slashes => slashes + slashes)
+  return `"${inner}"`
+}
+
+export function quoteWindowsCmdArg(arg) {
+  return quoteWindowsArg(arg, false)
+}
+
+function quoteWindowsNativeArg(arg) {
+  return quoteWindowsArg(arg, true)
 }
 
 function comSpecFrom(env) {
@@ -469,7 +487,8 @@ function comSpecFrom(env) {
 // argument instead, with each argv element already quoted.
 export function windowsCmdInvocation(bin, args, env = process.env) {
   const argv = [bin, ...args].map(part => String(part))
-  const inner = argv.map(quoteWindowsCmdArg).join(' ')
+  const quote = isWindowsNativeImage(argv[0]) ? quoteWindowsNativeArg : quoteWindowsCmdArg
+  const inner = argv.map(quote).join(' ')
   return {
     file: comSpecFrom(env),
     args: ['/d', '/v:off', '/s', '/c', `"${inner}"`],
@@ -501,8 +520,10 @@ export function formatSpawnFailure(res) {
 }
 
 // --dsh-cmd is a single string like `"C:\Program Files\nodejs\node.exe" app.js`.
-// Split on unquoted whitespace only; quote characters are removed, doubled
-// quotes inside a quoted run collapse to one literal quote.
+// Split on unquoted whitespace only. Quote characters start a quoted run only
+// at a token boundary; mid-token quotes (including apostrophes in bare paths)
+// stay literal. Quote characters are removed, doubled quotes inside a quoted
+// run collapse to one literal quote.
 export function splitCommandLine(cmdString) {
   const parts = []
   let current = ''
@@ -523,7 +544,7 @@ export function splitCommandLine(cmdString) {
       }
       continue
     }
-    if (ch === '"' || ch === "'") {
+    if ((ch === '"' || ch === "'") && !started) {
       quote = ch
       started = true
     } else if (/\s/.test(ch)) {

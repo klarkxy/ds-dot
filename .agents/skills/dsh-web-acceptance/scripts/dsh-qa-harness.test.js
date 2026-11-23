@@ -390,6 +390,7 @@ test('quoteWindowsCmdArg quotes cmd metacharacters', () => {
   assert.equal(quoteWindowsCmdArg('dsh'), 'dsh')
   assert.equal(quoteWindowsCmdArg(''), '""')
   assert.equal(quoteWindowsCmdArg('C:\\Program Files\\plugin'), '"C:\\Program Files\\plugin"')
+  assert.equal(quoteWindowsCmdArg('C:\\QA Tools\\preload\\'), '"C:\\QA Tools\\preload\\"')
   assert.equal(quoteWindowsCmdArg('a&b'), '"a&b"')
   assert.equal(quoteWindowsCmdArg('%PATH%'), '"%%PATH%%"')
   assert.equal(quoteWindowsCmdArg('calc()'), '"calc()"')
@@ -412,6 +413,22 @@ test('splitCommandLine respects quoting and spaced paths', () => {
   assert.deepEqual(
     splitCommandLine('"C:\\a\\b.exe" "arg with space" tail'),
     ['C:\\a\\b.exe', 'arg with space', 'tail'],
+  )
+  assert.deepEqual(
+    splitCommandLine("/home/o'connor/bin/dsh --web"),
+    ["/home/o'connor/bin/dsh", '--web'],
+  )
+  assert.deepEqual(
+    splitCommandLine("'/home/user/My Documents/dsh' --flag"),
+    ['/home/user/My Documents/dsh', '--flag'],
+  )
+  assert.deepEqual(
+    splitCommandLine('"say ""hello"" there"'),
+    ['say "hello" there'],
+  )
+  assert.deepEqual(
+    splitCommandLine("'it''s quoted'"),
+    ["it's quoted"],
   )
   assert.throws(() => splitCommandLine('"unterminated'), /Unterminated quote/)
 })
@@ -436,6 +453,46 @@ test('windows command invocation quotes argv and does not enable shell', () => {
     '"npm pack "a&whoami" "%%TEMP%%" "say ""hi""" "C:\\Program Files (x86)\\plugin""',
   )
   assert.throws(() => windowsCmdInvocation('npm', ['pack', 'line1\nline2']), /newlines or NUL/)
+})
+
+test('windows native argv quoting doubles trailing backslashes before the closer', () => {
+  const native = windowsCmdInvocation(
+    'C:\\Program Files\\nodejs\\node.exe',
+    ['--require', 'C:\\QA Tools\\preload\\', 'C:\\qa\\dsh.js'],
+    { COMSPEC: 'C:\\Windows\\System32\\cmd.exe' },
+  )
+  const nativeInner = '"C:\\Program Files\\nodejs\\node.exe" --require "C:\\QA Tools\\preload\\\\" C:\\qa\\dsh.js'
+  assert.equal(native.args[4], `"${nativeInner}"`)
+
+  const batch = windowsCmdInvocation(
+    'npm.cmd',
+    ['pack', 'C:\\QA Tools\\preload\\'],
+    { COMSPEC: 'C:\\Windows\\System32\\cmd.exe' },
+  )
+  const batchInner = 'npm.cmd pack "C:\\QA Tools\\preload\\"'
+  assert.equal(batch.args[4], `"${batchInner}"`)
+})
+
+test('windows native spawn keeps a trailing-backslash directory as one argv', {
+  skip: process.platform !== 'win32' ? 'Windows-only CommandLineToArgvW argv encoding' : false,
+}, async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'dsh qa argv '))
+  try {
+    const dir = `${path.join(root, 'preload')}\\`
+    await fs.mkdir(path.join(root, 'preload'))
+    const printer = path.join(root, 'print-argv.js')
+    await fs.writeFile(printer, 'process.stdout.write(JSON.stringify(process.argv.slice(2)))\n')
+    const spec = windowsCmdInvocation(process.execPath, [printer, dir, 'NEXT'], process.env)
+    const res = spawnSync(spec.file, spec.args, {
+      encoding: 'utf8',
+      windowsVerbatimArguments: true,
+      windowsHide: true,
+    })
+    assert.equal(res.status, 0, `${res.stderr}${res.stdout}`)
+    assert.deepEqual(JSON.parse(res.stdout), [dir, 'NEXT'])
+  } finally {
+    await fs.rm(root, { recursive: true, force: true })
+  }
 })
 
 test('commandSpawnInvocation leaves posix commands unwrapped', () => {
@@ -516,7 +573,8 @@ test('checkout guard uses the git toplevel', async () => {
 })
 
 test('startup timeout kills the child and removes the temporary home', async () => {
-  const out = await fs.mkdtemp(path.join(os.tmpdir(), 'dsh-qa-out-'))
+  const out = await fs.mkdtemp(path.join(os.tmpdir(), 'dsh qa out '))
+  assert.match(out, / /)
   const script = path.join(out, 'fake-dsh.mjs')
   await fs.writeFile(script, "console.log('token=supersecret')\nsetInterval(() => {}, 1000)\n")
   const before = new Set((await fs.readdir(os.tmpdir())).filter(name => name.startsWith('dsh-qa-home-')))
@@ -525,7 +583,7 @@ test('startup timeout kills the child and removes the temporary home', async () 
       '--cwd', out,
       '--out-dir', out,
       '--boot-timeout-ms', '500',
-      '--dsh-cmd', `"${process.execPath}" ${script}`,
+      '--dsh-cmd', `"${process.execPath}" "${script}"`,
     ])
     await assert.rejects(() => runIsolatedAcceptance(opts), err => {
       assert.match(err.message, /timed out|launch URL/i)

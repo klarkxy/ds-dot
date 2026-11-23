@@ -11,6 +11,7 @@ Closes #
 - [ ] `pnpm test`
 - [ ] `pnpm build`
 - [ ] Tried it in DeepSeek Harness (describe below, or explain why not needed)
+- [ ] Updated Dorothy's blog (`docs/` via `.agents/skills/ds-dot-blog/`, merging overlapping posts or adding new ones with real PR dates & `RECORDINGS`) and READMEs/`docs/reference.md` for user-facing changes (or N/A)
 
 ## Frontend demo
 

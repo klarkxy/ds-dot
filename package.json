@@ -54,6 +54,7 @@
     "README.md",
     "docs/README.zh-CN.md",
     "docs/README.ja.md",
+    "docs/reference.md",
     "docs/images/dot-arrival.png",
     "LICENSE",
     "NOTICE.md"
@@ -237,7 +238,7 @@
     "type": "git",
     "url": "git+https://github.com/klarkxy/ds-dot.git"
   },
-  "homepage": "https://github.com/klarkxy/ds-dot",
+  "homepage": "https://klarkxy.github.io/ds-dot/",
   "bugs": {
     "url": "https://github.com/klarkxy/ds-dot/issues"
   }

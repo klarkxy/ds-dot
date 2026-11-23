@@ -298,9 +298,10 @@ describe('DotService segments', () => {
   it('records the grants the apply actually resolved and re-applies on the next check', async () => {
     // A grant saved while createDot's apply awaited the bundle scan: the live
     // signature is the new grants but the agent only received the older snapshot.
+    let appliedSig = 'sig-old'
     const caps = {
       signature: () => 'sig-new',
-      appliedSignature: (id: string | undefined) => id === undefined ? undefined : 'sig-old',
+      appliedSignature: (id: string | undefined) => id === undefined ? undefined : appliedSig,
       liveGrant: () => undefined,
       pluginManager: () => undefined,
     }
@@ -309,11 +310,17 @@ describe('DotService segments', () => {
     // The segment freezes the applied snapshot, not the grants that never reached the agent.
     expect(h.store.segment).toMatchObject({ sessionId: dot, capabilities: 'sig-old' })
     const reapplied: string[] = []
-    ;(h.host as unknown as { reapplyCapabilities?: (id: string) => void }).reapplyCapabilities = id => { reapplied.push(id) }
+    ;(h.host as unknown as { reapplyCapabilities?: (id: string) => void }).reapplyCapabilities = id => {
+      reapplied.push(id)
+      // A successful re-apply moves the applied signature forward with the record.
+      appliedSig = 'sig-new'
+    }
     await h.service.settingsChanged()
     // The stored signature mismatches the live one, so the existing path re-applies it.
     expect(reapplied).toEqual([dot])
-    expect(h.store.segment!.capabilities).toBe('sig-old')
+    expect(h.store.segment!.capabilities).toBe('sig-new')
+    await h.service.settingsChanged()
+    expect(reapplied).toEqual([dot])
   })
 
   it('carries the stored conversation into a new segment when the session is lost', async () => {

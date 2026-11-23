@@ -29,6 +29,7 @@ import {
   resolveArtifactPath,
   runIsolatedAcceptance,
   selectLaunchUrl,
+  splitCommandLine,
   terminateProcessTree,
   urlHasLaunchToken,
   waitForDshReady,
@@ -397,6 +398,24 @@ test('quoteWindowsCmdArg quotes cmd metacharacters', () => {
   assert.throws(() => quoteWindowsCmdArg('a\0b'), /newlines or NUL/)
 })
 
+test('splitCommandLine respects quoting and spaced paths', () => {
+  assert.deepEqual(splitCommandLine('dsh'), ['dsh'])
+  assert.deepEqual(splitCommandLine('pnpm dsh'), ['pnpm', 'dsh'])
+  assert.deepEqual(
+    splitCommandLine('"C:\\Program Files\\nodejs\\node.exe" C:\\tmp\\fake.mjs'),
+    ['C:\\Program Files\\nodejs\\node.exe', 'C:\\tmp\\fake.mjs'],
+  )
+  assert.deepEqual(
+    splitCommandLine('\'C:\\Program Files\\nodejs\\node.exe\' --flag'),
+    ['C:\\Program Files\\nodejs\\node.exe', '--flag'],
+  )
+  assert.deepEqual(
+    splitCommandLine('"C:\\a\\b.exe" "arg with space" tail'),
+    ['C:\\a\\b.exe', 'arg with space', 'tail'],
+  )
+  assert.throws(() => splitCommandLine('"unterminated'), /Unterminated quote/)
+})
+
 test('windows command invocation quotes argv and does not enable shell', () => {
   const packArgs = ['pack', '--dry-run', '--ignore-scripts', '--json']
   const pack = windowsCmdInvocation('npm', packArgs, { COMSPEC: 'C:\\Windows\\System32\\cmd.exe' })
@@ -506,7 +525,7 @@ test('startup timeout kills the child and removes the temporary home', async () 
       '--cwd', out,
       '--out-dir', out,
       '--boot-timeout-ms', '500',
-      '--dsh-cmd', `${process.execPath} ${script}`,
+      '--dsh-cmd', `"${process.execPath}" ${script}`,
     ])
     await assert.rejects(() => runIsolatedAcceptance(opts), err => {
       assert.match(err.message, /timed out|launch URL/i)

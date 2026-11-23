@@ -500,8 +500,50 @@ export function formatSpawnFailure(res) {
   return lines.join('\n')
 }
 
+// --dsh-cmd is a single string like `"C:\Program Files\nodejs\node.exe" app.js`.
+// Split on unquoted whitespace only; quote characters are removed, doubled
+// quotes inside a quoted run collapse to one literal quote.
+export function splitCommandLine(cmdString) {
+  const parts = []
+  let current = ''
+  let started = false
+  let quote = null
+  for (let i = 0; i < cmdString.length; i += 1) {
+    const ch = cmdString[i]
+    if (quote) {
+      if (ch === quote) {
+        if (cmdString[i + 1] === quote) {
+          current += ch
+          i += 1
+        } else {
+          quote = null
+        }
+      } else {
+        current += ch
+      }
+      continue
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch
+      started = true
+    } else if (/\s/.test(ch)) {
+      if (started || current.length > 0) {
+        parts.push(current)
+        current = ''
+        started = false
+      }
+    } else {
+      current += ch
+      started = true
+    }
+  }
+  if (quote) throw new Error(`Unterminated quote in command: ${cmdString}`)
+  if (started || current.length > 0) parts.push(current)
+  return parts
+}
+
 function splitCommand(cmdString) {
-  const parts = cmdString.trim().split(/\s+/).filter(Boolean)
+  const parts = splitCommandLine(cmdString)
   if (!parts[0]) throw new Error('Invalid --dsh-cmd value.')
   return { bin: parts[0], prefixArgs: parts.slice(1) }
 }

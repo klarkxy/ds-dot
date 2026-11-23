@@ -373,6 +373,13 @@ function Capabilities({ locale, api, grants, onPick }: {
     groupSelfHits(group) || group.tools.some(matchesTool) || (group.children ?? []).some(groupHits)
   const countTools = (group: CapabilityGroupView): number =>
     group.tools.length + (group.children ?? []).reduce((sum, child) => sum + countTools(child), 0)
+  const countTaskOnly = (group: CapabilityGroupView): number =>
+    group.tools.filter(tool => tool.taskOnly === true).length
+      + (group.children ?? []).reduce((sum, child) => sum + countTaskOnly(child), 0)
+  // A group grant can never apply to task-only tools, so a group whose tools
+  // are all task-only has nothing for the picker to do. Empty groups keep it.
+  const groupAllTaskOnly = (group: CapabilityGroupView): boolean =>
+    countTools(group) > 0 && countTaskOnly(group) === countTools(group)
   const kindLabel = (group: CapabilityGroupView): string =>
     group.kind === 'mcp' ? t(locale, 'sCapKind_mcp')
     : group.kind === 'builtin' ? t(locale, 'sCapKind_builtin')
@@ -398,7 +405,7 @@ function Capabilities({ locale, api, grants, onPick }: {
           <span className="dsh-dot-cap-name" title={group.id}>{label}{group.kind === 'builtin' && group.id !== 'builtin' ? null : <span className="dsh-dot-cap-tag">{kindLabel(group)}</span>}<span className="dsh-dot-cap-count">{t(locale, 'sCapToolCount').replace('{n}', String(countTools(group)))}</span></span>
           {group.missing === true ? <span className="dsh-dot-cap-badge">{t(locale, 'sCapMissing')}</span> : null}
           {changed ? <span className="dsh-dot-cap-badge">{t(locale, 'sCapNext')}</span> : null}
-          {group.kind === 'host' || group.id === 'builtin' ? null : (
+          {group.kind === 'host' || group.id === 'builtin' || groupAllTaskOnly(group) ? null : (
             <span className="dsh-dot-cap-control" onClick={event => event.preventDefault()}>
               <GrantPicker locale={locale} label={label} chain={chain} grants={grants} applied={undefined} onPick={onPick} />
             </span>

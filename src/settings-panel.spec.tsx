@@ -406,6 +406,47 @@ describe('sectioned settings, switches, and help tips', () => {
     await act(async () => root.unmount())
   })
 
+  it('hides the group picker when every tool in the group is task-only, but keeps it for mixed groups', async () => {
+    let current: DotSettings = { ...DEFAULT_SETTINGS }
+    const api = {
+      models: async () => ({ groups: [] }),
+      settings: async () => current,
+      settingProposals: async () => [],
+      decideSetting: async () => 'ok',
+      capabilities: async () => ({
+        locked: [],
+        groups: [
+          {
+            id: 'plugin:manage', kind: 'plugin', label: 'Manage',
+            tools: [{ name: 'plugin_manager', conditional: false, taskOnly: true }],
+          },
+          {
+            id: 'plugin:mixed', kind: 'plugin', label: 'Mixed',
+            tools: [
+              { name: 'bash', conditional: false, taskOnly: true },
+              { name: 'extra_tool', conditional: false },
+            ],
+          },
+        ],
+        applied: {},
+      }),
+      setSettings: async (patch: Partial<DotSettings>) => { current = { ...current, ...patch } as DotSettings; return current },
+    }
+    function Harness() {
+      const [settings, setSettings] = useState<DotSettings>(current)
+      return <SettingsPanel locale="en" api={api as never} section="capabilities" settings={settings} onSaved={setSettings} />
+    }
+    const root = createRoot(document.getElementById('root')!)
+    await act(async () => root.render(<Harness />))
+    await act(async () => { await Promise.resolve() })
+    const groups = [...document.querySelectorAll('.dsh-dot-cap-group')]
+    const manage = groups.find(group => group.textContent?.includes('plugin_manager'))!
+    expect(manage.querySelector(':scope > summary [role="tablist"]')).toBeNull()
+    const mixed = groups.find(group => group.textContent?.includes('extra_tool'))!
+    expect(mixed.querySelector(':scope > summary [role="tablist"]')).not.toBeNull()
+    await act(async () => root.unmount())
+  })
+
   it('keeps model-load failure warnings inline instead of hiding them in tooltips', async () => {
     const api = {
       models: async () => { throw new Error('offline') },

@@ -817,6 +817,25 @@ describe('DotService history', () => {
   })
 })
 
+describe('DotService listModels', () => {
+  it('returns the eligible catalog and default in raw mode', async () => {
+    const h = setup()
+    const raw = await h.service.listModels({ mode: 'raw' })
+    expect(raw).toContain('runs on p/base, the default')
+    expect(raw).toContain('- p/base')
+    expect(raw).toContain('- p/big')
+    expect(raw).toContain('- q/small')
+    expect(raw).not.toContain('Recommendation only')
+  })
+
+  it('defaults to a bounded recommendation and rejects unknown tags', async () => {
+    const h = setup()
+    const recommended = await h.service.listModels({ tags: 'coding' })
+    expect(recommended).toContain('Recommendation only')
+    await expect(h.service.listModels({ tags: 'telepathy' })).rejects.toMatchObject({ code: 'dot/invalid-model-query' })
+  })
+})
+
 describe('DotService knowledge', () => {
   it('drains the active knowledge write, rejects queued work and closes the admission gate', async () => {
     const h = setup()

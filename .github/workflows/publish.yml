@@ -61,6 +61,9 @@ jobs:
           NODE
       - run: pnpm install --frozen-lockfile --ignore-scripts
       - run: pnpm typecheck
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.12'
       - run: pnpm test
       - run: pnpm build
       - name: Check package contents

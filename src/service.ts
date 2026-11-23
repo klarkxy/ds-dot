@@ -61,7 +61,8 @@ import type { DotStore } from './store.ts'
 import { factoryResetArchiveIds, factoryResetCounts, factoryResetStopGap, factoryResetTokenError, issueFactoryResetToken, type FactoryResetStopEvidence } from './factory-reset.ts'
 import { formatWorkspaceFiles, listWorkspaceFiles as listWorkspaceTree, readWorkspaceText, WORKSPACE_LIST_MAX } from './workspace-inspect.ts'
 import { eventTier } from './tiers.ts'
-import { TaskModelError, formatTaskModels, pickTaskModel, type TaskModelCatalog } from './task-models.ts'
+import { ArenaQueryError } from './arena-models.ts'
+import { TaskModelError, formatTaskModels, pickTaskModel, type TaskModelCatalog, type TaskModelQuery } from './task-models.ts'
 import { TaskPresetError, pickTaskPreset, type TaskPresetCatalog, type TaskPresetChoice } from './task-presets.ts'
 import { stamp, transcriptRows, type TranscriptRow } from './transcript.ts'
 import { formatDuration, formatTokens } from './ui-copy.ts'
@@ -1359,8 +1360,13 @@ export class DotService {
   }
 
   /** The models a task may run on, for dot to choose from. */
-  async listModels(): Promise<string> {
-    return formatTaskModels(this.store.settings.taskModels, await this.catalog())
+  async listModels(query: TaskModelQuery = {}): Promise<string> {
+    try {
+      return formatTaskModels(this.store.settings.taskModels, await this.catalog(), query)
+    } catch (error) {
+      if (error instanceof ArenaQueryError) throw new DotError('dot/invalid-model-query', error.message)
+      throw error
+    }
   }
 
   private async catalog(): Promise<TaskModelCatalog> {

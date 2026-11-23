@@ -18,6 +18,8 @@ Before pushing, run the full CI gate locally:
 pnpm typecheck && pnpm test && pnpm build
 ```
 
+`pnpm test` also runs the Arena builder's stdlib tests, which need Python 3.10+ on PATH as `python3` or `python` (duckdb is not required).
+
 ## Branches and workflow
 
 `dev` is the integration branch for ongoing work; `main` holds only published releases and hotfixes. Direct pushes to both branches are blocked by repository rulesets.

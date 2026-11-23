@@ -4,6 +4,7 @@
  * decisions, and the service applies them before a task's first prompt.
  */
 import { TOOL, type ModelChoice, type TaskModelRule } from './contracts.ts'
+import { formatArenaRecommendation, type ArenaModelQuery } from './arena-models.ts'
 
 export interface CatalogModel { readonly provider: string; readonly model: string; readonly name: string }
 
@@ -14,7 +15,9 @@ export interface TaskModelCatalog {
   readonly models: readonly CatalogModel[]
 }
 
-/** Models listed in one tool answer. */
+export interface TaskModelQuery extends ArenaModelQuery { readonly mode?: 'recommend' | 'raw' }
+
+/** Models listed in one raw tool answer. */
 export const LISTED_MODELS_MAX = 80
 
 export class TaskModelError extends Error {
@@ -36,7 +39,7 @@ export function permitted(rule: TaskModelRule, catalog: TaskModelCatalog): Catal
 
 const keys = (models: readonly CatalogModel[]): string => {
   const shown = models.slice(0, 12).map(modelKey).join(', ')
-  return models.length > 12 ? `${shown}, and ${models.length - 12} more (${TOOL.listModels} lists them)` : shown
+  return models.length > 12 ? `${shown}, and ${models.length - 12} more (${TOOL.listModels} mode=raw lists them)` : shown
 }
 
 /**
@@ -70,8 +73,9 @@ export function pickTaskModel(rule: TaskModelRule, catalog: TaskModelCatalog, re
 }
 
 /** Model-facing answer of the list tool. */
-export function formatTaskModels(rule: TaskModelRule, catalog: TaskModelCatalog): string {
+export function formatTaskModels(rule: TaskModelRule, catalog: TaskModelCatalog, query: TaskModelQuery = {}): string {
   const allowed = permitted(rule, catalog)
+  if (query.mode !== 'raw') return formatArenaRecommendation(allowed, query)
   if (allowed.length === 0) return "The human's task model list leaves no model for tasks, so you cannot start one. Tell them; they change it in your settings."
   const lines: string[] = []
   if (rule.mode === 'all') lines.push('A task may run on any model below.')

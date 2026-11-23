@@ -4,6 +4,9 @@ import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 import { SHOW_VIEW_MIXED_SUMMARY, showViewSharesStep } from './card-step.ts'
 import { apply, TASK_ACTIONS } from './tools.ts'
+import { ArenaQueryError } from './arena-models.ts'
+import { DotError } from './service.ts'
+import { formatTaskModels } from './task-models.ts'
 import { apply as applyReflection, REFLECTION_PROPOSE_TOOL, REFLECTION_SUBMIT_TOOL } from './reflection.ts'
 import { DEFAULT_SETTINGS, TOOL, type DotSettings } from './contracts.ts'
 import { DEFAULT_PERSONA } from './persona.ts'
@@ -11,6 +14,18 @@ import { settingsSnapshotBlock, SelfSettings } from './self-settings.ts'
 import { DotStore } from './store.ts'
 
 interface Seg { sessionId: string; persona: string; opening?: string; agreements?: string; cognition?: string }
+
+const catalog = {
+  fallback: { provider: 'openai', model: 'gpt-6.2-sol' },
+  models: [
+    { provider: 'anthropic', model: 'claude-fable-5-2', name: 'Claude Fable 5.2' },
+    { provider: 'openai', model: 'gpt-6.2-sol', name: 'GPT-6.2 Sol' },
+    { provider: 'p', model: 'extra-1', name: 'Extra 1' },
+    { provider: 'p', model: 'extra-2', name: 'Extra 2' },
+    { provider: 'p', model: 'extra-3', name: 'Extra 3' },
+    { provider: 'p', model: 'extra-4', name: 'Extra 4' },
+  ],
+}
 
 /** Load the preset row against a recording host: every definition must compile. */
 function load(settings: { current: DotSettings; segment?: Seg; notes?: string; cognition?: string } = { current: DEFAULT_SETTINGS }) {
@@ -44,6 +59,17 @@ function load(settings: { current: DotSettings; segment?: Seg; notes?: string; c
     systemPrompt: { section(section: (typeof sections)[number]) { sections.push(section); return () => {} } },
     dot: {
       store: { get settings() { return settings.current }, get segment() { return settings.segment } },
+      host: {
+        listModels: async () => catalog,
+      },
+      listModels: async (query?: { mode?: 'recommend' | 'raw'; tags?: string; limit?: number }) => {
+        try {
+          return formatTaskModels(settings.current.taskModels, catalog, query ?? {})
+        } catch (error) {
+          if (error instanceof ArenaQueryError) throw new DotError('dot/invalid-model-query', error.message)
+          throw error
+        }
+      },
       currentAgreementsBlock: () => settings.notes ?? '',
       currentCognitionBlock: () => settings.cognition ?? '',
       selfSettings: realSelf,
@@ -112,6 +138,30 @@ describe('dot tools', () => {
     for (const old of ['dot_list_workspaces', 'dot_create_workspace', 'dot_schedule_add', 'dot_schedule_list', 'dot_schedule_remove', 'dot_read_settings', 'dot_propose_settings', 'dot_remember', 'dot_forget']) {
       expect(names).not.toContain(old)
     }
+  })
+
+  it('exposes Arena recommendation tags and a raw compatibility mode', () => {
+    type Tool = { description: string; parameters: { properties: Record<string, { description?: string; enum?: string[] }> } }
+    const models = load().find(row => row.name === TOOL.listModels) as Tool
+    expect(models.parameters.properties.mode?.enum).toEqual(['recommend', 'raw'])
+    expect(models.parameters.properties.tags?.description).toContain('coding,review')
+    expect(models.description).toContain('never selects a model or changes a route')
+    expect(models.description).toContain('never replace a model the human named')
+  })
+
+  it('executes recommendations without a dispatch and preserves raw discovery and query errors', async () => {
+    type Tool = { execute(args: unknown): Promise<string> }
+    const models = load().find(row => row.name === TOOL.listModels) as Tool
+    const recommended = await models.execute({ tags: 'coding', limit: 1 })
+    expect(recommended).toContain('Recommendation only')
+    expect(recommended).toContain('anthropic/claude-fable-5-2')
+    expect(recommended).not.toContain('p/extra-4')
+    const raw = await models.execute({ mode: 'raw' })
+    expect(raw).toContain('runs on openai/gpt-6.2-sol, the default')
+    expect(raw).toContain('- anthropic/claude-fable-5-2')
+    expect(raw).toContain('- p/extra-4')
+    expect(raw).not.toContain('Recommendation only')
+    await expect(models.execute({ tags: 'telepathy' })).rejects.toMatchObject({ code: 'dot/invalid-model-query' })
   })
 
   it('lists inspect/files on workspaces and names the Deep View rich nodes', () => {

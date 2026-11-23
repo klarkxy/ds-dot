@@ -72,10 +72,10 @@ class RevisionTests(unittest.TestCase):
     def test_latest_downloads_into_the_resolved_sha_cache(self) -> None:
         sha = 'd' * 40
         sentinel = RuntimeError('stop after the first download')
-        calls: list[str] = []
+        calls: list[tuple[str, Path]] = []
 
         def fail_first(url: str, path: Path) -> None:
-            calls.append(url)
+            calls.append((url, path))
             raise sentinel
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -83,7 +83,10 @@ class RevisionTests(unittest.TestCase):
                 self.run_latest(tmp, sha, calls, fail_first)
             self.assertIs(caught.exception, sentinel)
             self.assertEqual(len(calls), 1)
-            self.assertIn(f'/resolve/{sha}/', calls[0])
+            url, path = calls[0]
+            self.assertIn(f'/resolve/{sha}/', url)
+            self.assertEqual(Path(path).parent, Path(tmp) / 'cache' / sha)
+            self.assertEqual(Path(path).name, f'{next(iter(BUILD.ARENAS))}.parquet')
             self.assertTrue((Path(tmp) / 'cache' / sha).is_dir())
 
 

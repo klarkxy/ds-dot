@@ -17,6 +17,14 @@ describe('coordinator prompt contract', () => {
     expect(DOT_INSTRUCTIONS).toContain(TOOL.workspace)
     expect(DOT_INSTRUCTIONS).not.toContain('${TOOL.')
   })
+  it('keeps model recommendations subordinate to explicit human and dot choices', () => {
+    expect(DOT_INSTRUCTIONS).toContain('when the human names a model or route, pass it exactly and never substitute another')
+    expect(DOT_INSTRUCTIONS).toContain("A recipe's saved model is the default for that recipe")
+    expect(DOT_INSTRUCTIONS).toContain('keep it unless the human names a different one for this task')
+    expect(DOT_INSTRUCTIONS).toContain('never overrides a recipe model')
+    expect(DOT_INSTRUCTIONS).toContain('any different model requires a new explicit dispatch by you')
+    expect(DOT_INSTRUCTIONS).toContain('a human-pinned model requires their approval first')
+  })
   it('teaches the evidence grammar and the workspace read', () => {
     expect(DOT_INSTRUCTIONS).toContain('run:<runId>#<scenarioRef>')
     expect(DOT_INSTRUCTIONS).toContain('run:<runId>')

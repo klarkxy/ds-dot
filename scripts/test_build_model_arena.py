@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 import importlib.util
+import json
+import sys
+import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
@@ -32,6 +36,20 @@ class SourceDirTests(unittest.TestCase):
 
 
 class RevisionTests(unittest.TestCase):
+    def run_latest(self, tmp: str, sha: str, calls: list[str], download=None) -> None:
+        """Run main() --revision latest against a tmp cache; nothing may land in the repo."""
+        argv = [
+            'build-model-arena.py', '--revision', 'latest',
+            '--source-dir', str(Path(tmp) / 'cache'), '--output', str(Path(tmp) / 'out.json'),
+        ]
+        metadata = json.dumps({'sha': sha, 'lastModified': '2026-01-02T00:00:00.000Z'})
+        if download is None:
+            download = lambda url, path: calls.append(url)
+        with mock.patch.object(sys, 'argv', argv), \
+                mock.patch.object(BUILD, 'download_json', return_value=metadata), \
+                mock.patch.object(BUILD, 'download', side_effect=download):
+            BUILD.main()
+
     def test_rejects_non_hex_and_path_like_sha(self) -> None:
         with self.assertRaises(ValueError):
             BUILD.require_full_revision('/tmp/abs')
@@ -41,8 +59,32 @@ class RevisionTests(unittest.TestCase):
             BUILD.require_full_revision('not-a-commit')
         revision = 'c' * 40
         self.assertEqual(BUILD.require_full_revision(revision), revision)
-        source = (ROOT / 'build-model-arena.py').read_text(encoding='utf-8')
-        self.assertIn("require_full_revision(metadata['sha'])", source)
+
+    def test_latest_rejects_bad_sha_before_caching_or_downloading(self) -> None:
+        for sha in ('/tmp/abs', '../../tmp/evil', 'not-a-commit'):
+            with self.subTest(sha=sha), tempfile.TemporaryDirectory() as tmp:
+                calls: list[str] = []
+                with self.assertRaises(ValueError):
+                    self.run_latest(tmp, sha, calls)
+                self.assertEqual(calls, [])
+                self.assertFalse((Path(tmp) / 'cache').exists())
+
+    def test_latest_downloads_into_the_resolved_sha_cache(self) -> None:
+        sha = 'd' * 40
+        sentinel = RuntimeError('stop after the first download')
+        calls: list[str] = []
+
+        def fail_first(url: str, path: Path) -> None:
+            calls.append(url)
+            raise sentinel
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(RuntimeError) as caught:
+                self.run_latest(tmp, sha, calls, fail_first)
+            self.assertIs(caught.exception, sentinel)
+            self.assertEqual(len(calls), 1)
+            self.assertIn(f'/resolve/{sha}/', calls[0])
+            self.assertTrue((Path(tmp) / 'cache' / sha).is_dir())
 
 
 class LastModifiedTests(unittest.TestCase):

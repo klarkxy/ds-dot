@@ -36,6 +36,7 @@ import { DOT_INSTRUCTIONS } from './prompt.ts'
 import { installPresetVisibility } from './preset-visibility.ts'
 import { REFLECTION_INSTRUCTIONS, REFLECTION_PRESET_ID } from './reflection.ts'
 import { APPROVAL_GRACE_MS, DotError, DotService, messageOf } from './service.ts'
+import { detectSelfInstall } from './self-root.ts'
 import { configI18n } from './i18n/index.ts'
 import { patchSettings } from './settings.ts'
 import { dotDomain, parseInboxRecord, parsePeerDelivery, parseTask } from './storage.ts'
@@ -129,6 +130,7 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
     trace: logger,
     approvalGraceMs: Number.isFinite(config.approvalGraceMs) ? Math.max(0, Math.min(60_000, config.approvalGraceMs!)) : APPROVAL_GRACE_MS,
     pluginManager: () => ctx.get('pluginManager' as never),
+    selfInstall: detectSelfInstall(),
   })
   sealOwned = agent => service.sealAgent(agent)
   void service.sealExisting()
@@ -416,7 +418,7 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
   const str = (payload: unknown, key: string): string => { const value = field(payload, key); return typeof value === 'string' ? value : '' }
   // The kit's 64 KiB default answers 413 before `say` runs. A PNG of about
   // 51 KB does not fit after base64; the cap below fits the advertised images.
-  const PASSIVE_ENDPOINTS = new Set(['wait', 'board', 'attention', 'work.list', 'work.read', 'card.pending', 'card.detail', 'recipes'])
+  const PASSIVE_ENDPOINTS = new Set(['wait', 'board', 'attention', 'work.list', 'work.read', 'card.pending', 'card.detail', 'recipes', 'self.status'])
   ctx.effect(() => registerHostRpc(ctx as unknown as HostRpcContext, RPC_CHANNEL, async (endpoint, payload, signal) => {
     try {
       const reqLocale = field(payload, 'uiLocale')
@@ -480,6 +482,7 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
         case 'segment.new': return { ok: true, value: await service.newSegment() }
         case 'update.status': return { ok: true, value: service.updateStatus() ?? null }
         case 'update.check': return { ok: true, value: await service.checkUpdates() }
+        case 'self.status': return { ok: true, value: service.selfStatus() }
         case 'keepalive': {
           return { ok: true, value: service.keepaliveInfo() }
         }

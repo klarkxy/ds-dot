@@ -10,6 +10,7 @@ import type { ViewNode } from '@klarkxy/dsh-deep-view/contracts'
 import { SETTING_FIELDS, type CognitionVersion, type DotContextUsage, type DotUsageOffset, type InboxRecord, type RecipeProposal, type RecipeRecord, type TaskLink, type ReflectionRun, type ScheduleRecord, type SettingProposal, type TaskRecord } from './contracts.ts'
 import { migrateTaskPermissionBaseline, TASK_PERMISSIONS } from './settings.ts'
 import type { UpdateStatus } from './auto-update.ts'
+import type { SelfBackup, SelfUpgradeMarker } from './self-root.ts'
 import type { PastSegment, Segment } from './segments.ts'
 import { changeSchema, constraintSchema, inputSchema, requirementSchema, runSchema, storedVerificationSchema } from './work.ts'
 
@@ -168,6 +169,10 @@ const stateSchema = z.object({
   /** When the human last restored factory settings. Survives the wipe as the audit. */
   lastFactoryResetAt: z.number().optional(),
   update: updateStatusSchema.optional(),
+  /** A linked-checkout self-upgrade that built successfully; resolved on the next start. */
+  selfUpgrade: z.object({ at: z.number(), commitSha: z.string(), backupDir: z.string(), libHash: z.string() }).optional(),
+  /** The newest kept pre-upgrade lib backup; shown by self.status until superseded. */
+  selfBackup: z.object({ dir: z.string(), lib: z.string() }).optional(),
 })
 
 const proposalValueSchema = z.union([z.string(), z.number(), z.boolean(), z.null(), z.record(z.string(), z.unknown()), z.array(z.unknown())])
@@ -225,6 +230,10 @@ export interface DotState {
   readonly lastFactoryResetAt?: number
   /** Self-update bookkeeping: last check, its outcome, an apply still in flight. */
   readonly update?: UpdateStatus
+  /** A linked-checkout self-upgrade that built successfully; resolved on the next start. */
+  readonly selfUpgrade?: SelfUpgradeMarker
+  /** The newest kept pre-upgrade lib backup. */
+  readonly selfBackup?: SelfBackup
 }
 
 export function parseSettingProposal(value: unknown): SettingProposal | undefined {

@@ -7,6 +7,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { officialUiCss } from '@klarkxy/dsh-plugin-kit/official-ui'
 import { installClientPluginLogger } from '@klarkxy/dsh-plugin-kit/client-logger'
 import type { RenderFactorySlot } from '@klarkxy/dsh-plugin-kit/model-picker'
+import { noteBackendError } from './backend-state.ts'
 import { createDotCards } from './card-client.tsx'
 export { createDotCards } from './card-client.tsx'
 import { useMemo, useSyncExternalStore } from 'react'
@@ -16,7 +17,7 @@ import { createAttentionWatcher, DESKTOP_NOTIFY_KEY, type AttentionWatcher } fro
 import { contextCss } from './context-panel.tsx'
 import { personaCss } from './persona-panel.tsx'
 import { trajectoryCss } from './trajectory-panel.tsx'
-import { PLUGIN_NAME, RPC_CHANNEL, type AttentionView, type BoardView, type RecipeBoardRow, type CapabilityCatalogView, type ChatSnapshot, type DotContextView, type DotSettings, type FactoryResetPreview, type FactoryResetResult, type KeepaliveInfo, type KnowledgeView, type ReflectionRun, type SettingProposal, type TrajectoryView, type TaskPermission } from './contracts.ts'
+import { PLUGIN_NAME, RPC_CHANNEL, type AttentionView, type BoardView, type RecipeBoardRow, type CapabilityCatalogView, type ChatSnapshot, type DotContextView, type DotSettings, type FactoryResetPreview, type FactoryResetResult, type KeepaliveInfo, type KnowledgeView, type ReflectionRun, type SelfStatusView, type SettingProposal, type TrajectoryView, type TaskPermission } from './contracts.ts'
 import type { UpdateStatus } from './auto-update.ts'
 import { copyLocale, t, type CopyLocale } from './ui-copy.ts'
 import { DotIcon } from './whale.tsx'
@@ -59,8 +60,11 @@ export function apply(ctx: Context): void {
     try {
       const reply = await rpc.call(RPC_CHANNEL, endpoint, body, signal) as RpcReply<T>
       if (!reply || reply.ok !== true) {
-        const error = new Error(reply?.ok === false ? reply.error.message : 'rpc failed') as Error & { code?: string }
-        if (reply?.ok === false) error.code = (reply.error as { readonly code?: string }).code
+        const code = reply?.ok === false ? (reply.error as { readonly code?: string }).code : undefined
+        const message = reply?.ok === false ? reply.error.message : 'rpc failed'
+        noteBackendError(code, message)
+        const error = new Error(message) as Error & { code?: string }
+        if (code !== undefined) error.code = code
         throw error
       }
       return reply.value
@@ -95,6 +99,7 @@ export function apply(ctx: Context): void {
     newSegment: () => call<string>('segment.new'),
     updateStatus: signal => call<UpdateStatus | null>('update.status', {}, signal),
     updateCheck: () => call<UpdateStatus>('update.check'),
+    selfStatus: signal => call<SelfStatusView>('self.status', {}, signal),
     keepalive: signal => call<KeepaliveInfo | undefined>('keepalive', {}, signal),
     knowledge: signal => call<KnowledgeView>('knowledge', {}, signal),
     setAgreements: text => call<KnowledgeView>('agreements.set', { text }),

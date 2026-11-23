@@ -10,6 +10,13 @@ export const SERVICE_NAME = 'dot'
 export const PRESET_ID = 'dot'
 export const RPC_CHANNEL = '/dsh-dot'
 
+/** What self.status reports about this install and its newest kept pre-upgrade backup. */
+export interface SelfStatusView {
+  readonly mode: 'linked' | 'installed' | 'unknown'
+  readonly root: string | null
+  readonly lastBackup?: { readonly dir: string; readonly lib: string }
+}
+
 export const TOOL = {
   overview: 'dot_overview',
   read: 'dot_read',

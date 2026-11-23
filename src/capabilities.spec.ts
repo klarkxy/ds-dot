@@ -561,6 +561,94 @@ describe('capability application', () => {
     expect(fromStale.get('report_tool')?.chain).toEqual(['tool:report_tool', 'plugin:dsh-reports'])
   })
 
+  it('applies tool/mcp/builtin grants without awaiting a never-loaded bundle scan', async () => {
+    const tools = fakeTools(['mcp__s__a', 'extra_tool'])
+    let calls = 0
+    const caps = new DotCapabilities({
+      tools: () => tools,
+      mcpManager: () => ({ list: () => [{ name: 's' }] }),
+      // A scan that never finishes: awaiting it would hang the segment start.
+      pluginManager: () => ({ listBundles: () => { calls += 1; return new Promise<never>(() => {}) } }),
+      settings: () => settingsWith({ 'mcp:s': 'auto', 'tool:extra_tool': 'auto', 'builtin:skill': 'auto' }),
+      locked: LOCKED,
+    })
+    const env = agentCtx(tools)
+    const applied = await caps.applyToAgent(env.ctx as never, { session: { id: 'dot-1' } } as never)
+    // 'skill' is preset-scope and invisible to this scope, so it stays unapplied.
+    expect([...applied.entries()].map(([name, row]) => [name, row.grant]).sort())
+      .toEqual([['extra_tool', 'auto'], ['mcp__s__a', 'auto']])
+    expect(calls).toBe(0)
+    // The deferred scan still kicks for the next catalog read.
+    await new Promise(resolve => setTimeout(resolve, 0))
+    expect(calls).toBe(1)
+    caps.releaseAll()
+  })
+
+  it('resolves without awaiting a pending or invalidated bundle scan when no plugin grant exists', async () => {
+    const tools = fakeTools(['mcp__s__a', 'extra_tool'])
+    let calls = 0
+    const caps = new DotCapabilities({
+      tools: () => tools,
+      mcpManager: () => ({ list: () => [{ name: 's' }] }),
+      pluginManager: () => ({ listBundles: () => { calls += 1; return new Promise<never>(() => {}) } }),
+      settings: () => settingsWith({ 'mcp:s': 'auto', 'tool:extra_tool': 'auto', 'builtin:skill': 'auto' }),
+      locked: LOCKED,
+    })
+    // A scan already in flight must not block resolution either.
+    caps.prewarm()
+    expect(calls).toBe(1)
+    const fromPending = await caps.resolve()
+    expect([...fromPending.keys()].sort()).toEqual(['extra_tool', 'mcp__s__a', 'skill'])
+    expect(calls).toBe(1)
+
+    // An invalidated (at === 0) cache answers stale and leaves the scan deferred.
+    const quick = new DotCapabilities({
+      tools: () => tools,
+      mcpManager: () => ({ list: () => [{ name: 's' }] }),
+      pluginManager: () => ({ listBundles: async () => { calls += 1; return [] } }),
+      settings: () => settingsWith({ 'mcp:s': 'auto', 'tool:extra_tool': 'auto' }),
+      locked: LOCKED,
+    })
+    await quick.catalog()
+    expect(calls).toBe(2)
+    quick.invalidateBundles()
+    const fromStale = await quick.resolve()
+    expect([...fromStale.keys()].sort()).toEqual(['extra_tool', 'mcp__s__a'])
+    expect(calls).toBe(2)
+    await new Promise(resolve => setTimeout(resolve, 0))
+    expect(calls).toBe(3)
+  })
+
+  it('still awaits the bundle scan during resolve when a plugin grant is enabled', async () => {
+    const tools = fakeTools(['report_tool'])
+    let rows: { name: string; rows: { entryId?: string }[] }[] = []
+    let calls = 0
+    let release: () => void = () => {}
+    let gate: Promise<void> = Promise.resolve()
+    const caps = new DotCapabilities({
+      tools: () => tools,
+      mcpManager: () => undefined,
+      pluginManager: () => ({ listBundles: async () => { calls += 1; await gate; return rows } }),
+      settings: () => settingsWith({ 'plugin:dsh-reports': 'auto' }),
+      locked: LOCKED,
+    })
+    caps.owners.set('report_tool', { entryId: 'include:reports' })
+    await caps.catalog()
+    expect(calls).toBe(1)
+    rows = [{ name: 'dsh-reports', rows: [{ entryId: 'include:reports' }] }]
+    gate = new Promise<void>(resolve => { release = resolve })
+    caps.invalidateBundles()
+    let settled = false
+    const pending = caps.resolve().then(result => { settled = true; return result })
+    await Promise.resolve()
+    // The scan was invoked synchronously and resolve waits for it.
+    expect(calls).toBe(2)
+    expect(settled).toBe(false)
+    release()
+    const resolved = await pending
+    expect(resolved.get('report_tool')?.chain).toEqual(['tool:report_tool', 'plugin:dsh-reports'])
+  })
+
   it('reaches the raw register through the cordis.original symbol', async () => {
     const raw = { register(this: unknown, def: { name: string }) { return () => {} } }
     const proxy = { [Symbol.for('cordis.original')]: raw, register: raw.register }

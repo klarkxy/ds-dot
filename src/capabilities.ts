@@ -511,11 +511,16 @@ export class DotCapabilities {
   /**
    * Bundle rows for attribution, stale-while-revalidate: a cached answer is
    * returned whatever its age while a coalesced refresh runs behind it; only
-   * the very first load has nothing to show and awaits.
+   * the very first load has nothing to show and awaits — with
+   * `awaitBundles: false` that load also just defers the scan and answers empty.
    */
-  private async bundleRows(): Promise<readonly CapabilityBundle[]> {
+  private async bundleRows(options?: { readonly awaitBundles?: boolean }): Promise<readonly CapabilityBundle[]> {
     const cache = this.bundlesCache
-    if (cache === undefined) { await this.refreshBundles(); return this.bundlesCache?.rows ?? [] }
+    if (cache === undefined) {
+      if (options?.awaitBundles === false) { this.deferBundlesRefresh(); return [] }
+      await this.refreshBundles()
+      return this.bundlesCache?.rows ?? []
+    }
     if (Date.now() - cache.at >= BUNDLE_CACHE_MS) this.deferBundlesRefresh()
     return cache.rows
   }
@@ -545,7 +550,7 @@ export class DotCapabilities {
   signature(): string { return capabilitiesSignature(this.deps.settings()) }
 
   /** The catalog the settings view and the dot_capabilities tool draw. */
-  async catalog(): Promise<{ readonly locked: readonly string[]; readonly groups: readonly CapabilityGroupView[] }> {
+  async catalog(options?: { readonly awaitBundles?: boolean }): Promise<{ readonly locked: readonly string[]; readonly groups: readonly CapabilityGroupView[] }> {
     const tools = this.deps.tools()
     const defs = tools?.definitions() ?? []
     let servers: string[] = []
@@ -554,7 +559,7 @@ export class DotCapabilities {
       defs,
       owners: this.owners,
       servers,
-      bundles: [...await this.bundleRows()],
+      bundles: [...await this.bundleRows(options)],
       grants: this.deps.settings().capabilities?.grants ?? {},
       locked: new Set(this.deps.locked),
       conditional: name => tools !== undefined && tools.get(name) !== undefined && tools.executable(name) === undefined,
@@ -565,10 +570,15 @@ export class DotCapabilities {
 
   /** Live grant resolution over the present catalog; only enabled tools are returned. */
   async resolve(): Promise<Map<string, ResolvedGrant>> {
-    // Catalog is SWR; apply needs the live bundle map after an explicit invalidate (`at === 0`).
-    if (this.bundlesCache === undefined || this.bundlesCache.at === 0) await this.refreshBundles()
-    const { groups } = await this.catalog()
-    return resolveGrants(this.deps.settings().capabilities?.grants ?? {}, groups)
+    const grants = this.deps.settings().capabilities?.grants ?? {}
+    // Only `plugin:` selectors consume bundle rows, so without a live plugin
+    // grant a segment start must not block on a listBundles scan: the catalog
+    // answers from cache (or empty) while the deferred refresh runs. With one,
+    // apply still awaits the live bundle map after an explicit invalidate.
+    const pluginGranted = Object.keys(grants).some(key => key.startsWith(SELECTOR.plugin) && grants[key] !== 'off')
+    if (pluginGranted && (this.bundlesCache === undefined || this.bundlesCache.at === 0)) await this.refreshBundles()
+    const { groups } = await this.catalog({ awaitBundles: pluginGranted })
+    return resolveGrants(grants, groups)
   }
 
   /** The live grant over one applied tool's stored selector chain; 'off' and absent both mean denied. */

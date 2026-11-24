@@ -277,6 +277,47 @@
       },
     },
     {
+      slug: 'parallel-and-diff',
+      date: '2026.11.24',
+      category: 'work',
+      image: 'images/chibi-dispatch.jpg',
+      aspect: 'square',
+      imageAlt: {
+        zh: '阳光书桌前的Q版桃乐丝写便条，身旁两只小粉鲸衔着纸飞机',
+        en: 'Chibi Dorothy at a sunny wooden desk with two tiny pink whales carrying paper airplanes',
+        ja: '机でメモを取りながらピンクの小クジラたちと紙飛行機を送り出すちびドロシー',
+      },
+      caption: {
+        zh: '不冲突的事分头去办，这边桌上自己留个底。',
+        en: 'Sending non-overlapping errands across the desk while keeping notes.',
+        ja: 'ぶつからない用事を分けて送り出しつつ手元に控えを残すところ。',
+      },
+      title: {
+        zh: '怎么同时盯好几件事，还不把桌面弄乱',
+        en: 'Juggling several tasks without tangling your workspace',
+        ja: 'いくつか並行で進めても机が散らからない理由',
+      },
+      excerpt: {
+        zh: '不打架的事分头跑，大改动先在旁边的临时分支里做好；约定好稍后再接上的后续活，我也会记条提醒免得转头忘掉。真要派活的项目才登记工作区并顺嘴告诉你，交活前连改动和删掉的文件都先核过一遍。',
+        en: 'Independent tasks move side by side, larger edits wait in a spare branch, and any promised follow-up gets a reminder so it never slips between turns. I only register workspaces for projects we’re actually working in (and tell you when I do), then check deliverables and diffs myself first.',
+        ja: '重ならない作業は並行で進め、大きな修正は別ブランチに隔離します。あとで続ける約束にはすぐリマインダーを付け、ワークスペースも実際に作業する分だけ登録してお知らせしたうえで、提出前に自分の目で差分を確かめます。',
+      },
+      paragraphs: {
+        zh: [
+          '手头几件事如果互不打架，我会一起安排下去；要是你刚好也在改同一批文件，或者这轮改动动静比较大，就等前面依赖的改动落稳再去临时分支里做好——合回来、留着还是丢掉，最后听你的。平时也只给真要派活的项目登记工作区，添完顺嘴告诉你一声，不会为了随便翻一翻就把整片上级目录都挂进来。',
+          '要是约好了等你点完验收再接着往下做，我会立刻挂条对应着前置任务的提醒，哪怕关了空闲巡检也不会跨轮断掉；写要求前也会先核对仓库里实际有的脚本和分支，不凭印象瞎猜。每次交活前我自己先把改动和删掉的文件看一遍，你觉得哪几行不顺直接圈出来退回就行，同一处连卡三次就停下来找你商量，不瞎转圈。',
+        ],
+        en: [
+          'When requests don’t step on the same files, I move them forward together. If you’re mid-edit or the change is wide, I wait until any prerequisite commits have actually landed and then isolate the work in a spare branch—leaving merging, keeping, or discarding up to you. I also only register a workspace when we’re dispatching work into that project (and let you know right away), rather than adding broad parent folders just to browse.',
+          'Whenever we agree on a follow-up after you accept an earlier task, I set a reminder tied to it right away so the handoff doesn’t vanish between turns even with routine idle checks turned off, and I double-check the repo’s actual scripts and branches before naming them. Before handing anything back, I read the changed files myself, keep deleted files in the side-by-side diff so you can quote exact lines for another pass, and pause to ask if the same spot stalls three times.',
+        ],
+        ja: [
+          '同じファイルに触らない用事はまとめて進められますし、編集中の箇所と重なるときや大がかりな修正は、前提になる変更が落ち着いてから別ブランチで仕上げます。最後に「マージする・残す・破棄する」を選ぶだけで大丈夫です。ワークスペースも実際に作業を頼むプロジェクト分だけ登録してその場でお知らせし、中身を覗くためだけに親フォルダごと追加したりはしません。',
+          '先のタスクを承認してもらってから続きを進める約束をしたときは、定期チェックをオフにしていても見落とさないよう、元のタスクに紐づけたリマインダーをその場で入れておきます。リポジトリ内のスクリプトやブランチも推測せず事前に確認し、提出前には削除ファイルまで含めた差分を自分で確かめてから返します。気になる行があればそのまま指定して直せますし、同じ箇所で三度詰まったら手を止めて相談しますね。',
+        ],
+      },
+    },
+    {
       slug: 'memory-in-lines',
       date: '2026.11.23',
       category: 'rules',
@@ -355,47 +396,6 @@
         ja: [
           '毎回「呼び方」や「任せる範囲」を言い直すのは大変ですよね。設定はひとつの引き出しにまとめて、他プラグインの追加機能も既定はオフにしてあります。決めた項目の横にある鍵を押せば、以後はわたしからの変更提案もしません。',
           'それから、任意の GitHub 連携をオンにすると PR の新しいコメントやテスト失敗も、最初にその PR を出したタスクの下へ戻ってくるようになりました。タスクにせず雑談や壁打ちだけしたいときも気軽に声をかけてください。',
-        ],
-      },
-    },
-    {
-      slug: 'parallel-and-diff',
-      date: '2026.11.22',
-      category: 'work',
-      image: 'images/chibi-dispatch.jpg',
-      aspect: 'square',
-      imageAlt: {
-        zh: '阳光书桌前的Q版桃乐丝写便条，身旁两只小粉鲸衔着纸飞机',
-        en: 'Chibi Dorothy at a sunny wooden desk with two tiny pink whales carrying paper airplanes',
-        ja: '机でメモを取りながらピンクの小クジラたちと紙飛行機を送り出すちびドロシー',
-      },
-      caption: {
-        zh: '不冲突的事分头去办，这边桌上自己留个底。',
-        en: 'Sending non-overlapping errands across the desk while keeping notes.',
-        ja: 'ぶつからない用事を分けて送り出しつつ手元に控えを残すところ。',
-      },
-      title: {
-        zh: '怎么同时盯好几件事，还不把桌面弄乱',
-        en: 'Juggling several tasks without tangling your workspace',
-        ja: 'いくつか並行で進めても机が散らからない理由',
-      },
-      excerpt: {
-        zh: '以前同时盯四五个窗口实在眼花，现在不打架的事分头去跑，大改动去旁边的临时分支里做完。交活前我先自己过一遍，连删掉的文件都能按行圈出来退回。',
-        en: 'Independent tasks run side by side while bigger changes hide out in a spare branch. I review deliverables myself first, and you can quote exact lines back for revision.',
-        ja: '重ならない作業は並行して進め、大きな修正は別ブランチに隔離します。提出前に自分で確かめ、削除ファイルも含めて行単位で差し戻せます。',
-      },
-      paragraphs: {
-        zh: [
-          '手头几件事如果互不挨着，直接交给我就好，我会一起安排下去；要是你刚好也在改同一批文件，或者这轮改动动静比较大，就先去临时分支里改好、跑完检查再端回来——合回来、留着还是丢掉，最后听你的。',
-          '我不太喜欢闭着眼喊“改好了”就交差。每次汇报前我都会自己先把涉及的文件看一遍，连中途删掉的文件也会放进前后对照里。你看完觉得哪几行不顺，直接点中那几行写一句退回意见就行；同一处连卡三次的话，我会停下来找你商量，不瞎转圈。',
-        ],
-        en: [
-          'When requests don’t step on the same files, I move them forward together. If you’re mid-edit or the change spans lots of files, I isolate the work in a temporary branch and leave merging, keeping, or discarding up to you.',
-          'I’d rather inspect the files myself than blindly announce something is finished. Every delivery comes with clean before/after diffs (deleted files included), where you can highlight any line to ask for another pass—and if something stalls three times in a row, I stop and check in.',
-        ],
-        ja: [
-          '同じファイルに触らない用事はまとめて進められますし、編集中の箇所と重なりそうなときや大がかりな修正は別ブランチで完結させます。最後に「マージする・残す・破棄する」を選ぶだけで大丈夫です。',
-          '中身を見ないまま終わりましたと言うのは落ち着かないので、渡す前に自分で変更を確認しています。削除したファイルも比較対象に入り、気になる行を選んで修正を頼めます。同じ場所で三度詰まったら一度止まって相談しますね。',
         ],
       },
     },

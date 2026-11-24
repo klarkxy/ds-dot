@@ -11,7 +11,7 @@
  */
 
 import { spawn, spawnSync } from 'node:child_process'
-import { existsSync, realpathSync } from 'node:fs'
+import { existsSync, realpathSync, statSync } from 'node:fs'
 import * as fs from 'node:fs/promises'
 import * as net from 'node:net'
 import * as os from 'node:os'
@@ -442,24 +442,101 @@ export function buildIsolatedEnv(tempHome, allowEnv = [], source = process.env) 
   return env
 }
 
-export function quoteWindowsCmdArg(arg) {
+const DEFAULT_WINDOWS_PATHEXT = ['.COM', '.EXE', '.BAT', '.CMD', '.VBS', '.VBE', '.JS', '.JSE', '.WSF', '.WSH', '.MSC']
+
+function envLookup(env, name) {
+  if (!env) return undefined
+  if (typeof env[name] === 'string') return env[name]
+  const upper = name.toUpperCase()
+  for (const [key, value] of Object.entries(env)) {
+    if (key.toUpperCase() === upper && typeof value === 'string') return value
+  }
+  return undefined
+}
+
+function isRegularFile(filePath) {
+  try {
+    return !statSync(filePath).isDirectory()
+  } catch {
+    return false
+  }
+}
+
+function windowsPathExts(env) {
+  const raw = envLookup(env, 'PATHEXT')
+  if (!raw || !raw.trim()) return DEFAULT_WINDOWS_PATHEXT
+  const exts = raw.split(';').map(ext => ext.trim()).filter(Boolean).map(ext => (ext.startsWith('.') ? ext : `.${ext}`))
+  return exts.length > 0 ? exts : DEFAULT_WINDOWS_PATHEXT
+}
+
+export function resolveWindowsExecutable(bin, env = process.env, cwd = process.cwd()) {
+  const cmd = String(bin)
+  if (!cmd) return null
+  const exts = windowsPathExts(env)
+  const hasDir = /[\\/]/.test(cmd) || /^[A-Za-z]:/.test(cmd)
+  const baseCwd = cwd || process.cwd()
+  const dirs = hasDir
+    ? [null]
+    : [
+        baseCwd,
+        ...(envLookup(env, 'PATH') || '')
+          .split(';')
+          .map(entry => entry.trim().replace(/^"+|"+$/g, ''))
+          .filter(Boolean),
+      ]
+  for (const dir of dirs) {
+    const base = dir === null ? path.resolve(baseCwd, cmd) : path.resolve(dir, cmd)
+    const ext = path.extname(base)
+    if (ext && (/\.(?:exe|com|cmd|bat)$/i.test(base) || exts.some(e => e.toLowerCase() === ext.toLowerCase())) && isRegularFile(base)) {
+      return base
+    }
+    for (const candidateExt of exts) {
+      const lowerExt = candidateExt.toLowerCase()
+      if (lowerExt !== candidateExt && isRegularFile(`${base}${lowerExt}`)) return `${base}${lowerExt}`
+      const candidate = `${base}${candidateExt}`
+      if (isRegularFile(candidate)) return candidate
+    }
+  }
+  return null
+}
+
+function isWindowsNativeImage(bin) {
+  return /\.(?:exe|com)$/i.test(String(bin))
+}
+
+function quoteWindowsArg(arg, nativeArgv) {
   const value = String(arg)
   if (/[\0\r\n]/.test(value)) {
     throw new Error('Windows command arguments cannot contain newlines or NUL.')
   }
   if (value.length === 0) return '""'
-  // ( ) and ! are cmd metacharacters. Quoting them keeps one argument intact
-  // when the line is handed to cmd.exe /c. % is doubled because cmd expands
-  // %VAR% even inside quotes.
-  if (!/[\s"%&|<>^()!]/.test(value)) return value
-  return `"${value.replace(/%/g, '%%').replace(/"/g, '""')}"`
+  // ( ) ! , ; = are cmd delimiters/metacharacters. Quoting them keeps one
+  // argument intact when handed to cmd.exe /c. % is doubled for batch files.
+  if (!/[\s"%&|<>^()!,;=]/.test(value)) return value
+  let inner = value.replace(/%/g, '%%')
+  if (nativeArgv) {
+    // Native images are parsed by CommandLineToArgvW / the CRT: backslashes
+    // immediately before any quote (internal or the closing quote) must be
+    // doubled so the quote is not swallowed as an escape.
+    inner = inner.replace(/(\\*)"/g, (_, slashes) => `${slashes}${slashes}""`)
+    inner = inner.replace(/\\+$/, slashes => slashes + slashes)
+  } else {
+    inner = inner.replace(/"/g, '""')
+  }
+  return `"${inner}"`
+}
+
+export function quoteWindowsCmdArg(arg) {
+  return quoteWindowsArg(arg, false)
+}
+
+function quoteWindowsNativeArg(arg) {
+  return quoteWindowsArg(arg, true)
 }
 
 function comSpecFrom(env) {
-  if (env) {
-    const value = env.ComSpec || env.COMSPEC || env.comspec
-    if (typeof value === 'string' && value.trim()) return value
-  }
+  const value = envLookup(env, 'COMSPEC')
+  if (typeof value === 'string' && value.trim()) return value
   return 'cmd.exe'
 }
 
@@ -467,9 +544,11 @@ function comSpecFrom(env) {
 // ENOENT. spawn('npm.cmd') is EINVAL (CVE-2024-27980) unless shell is set.
 // shell:true concatenates arguments without quoting. Build one cmd.exe /c
 // argument instead, with each argv element already quoted.
-export function windowsCmdInvocation(bin, args, env = process.env) {
+export function windowsCmdInvocation(bin, args, env = process.env, cwd = undefined) {
   const argv = [bin, ...args].map(part => String(part))
-  const inner = argv.map(quoteWindowsCmdArg).join(' ')
+  const resolved = resolveWindowsExecutable(argv[0], env, cwd)
+  const quote = isWindowsNativeImage(resolved ?? argv[0]) ? quoteWindowsNativeArg : quoteWindowsCmdArg
+  const inner = argv.map(quote).join(' ')
   return {
     file: comSpecFrom(env),
     args: ['/d', '/v:off', '/s', '/c', `"${inner}"`],
@@ -478,8 +557,18 @@ export function windowsCmdInvocation(bin, args, env = process.env) {
   }
 }
 
-export function commandSpawnInvocation(bin, args, env = process.env) {
-  if (process.platform === 'win32') return windowsCmdInvocation(bin, args, env)
+export function commandSpawnInvocation(bin, args, env = process.env, cwd = undefined) {
+  if (process.platform === 'win32') {
+    const resolved = resolveWindowsExecutable(bin, env, cwd)
+    if (resolved && isWindowsNativeImage(resolved)) {
+      return {
+        file: resolved,
+        args: [...args].map(part => String(part)),
+        windowsHide: true,
+      }
+    }
+    return windowsCmdInvocation(bin, args, env, cwd)
+  }
   return { file: String(bin), args: [...args].map(part => String(part)) }
 }
 
@@ -500,8 +589,58 @@ export function formatSpawnFailure(res) {
   return lines.join('\n')
 }
 
+// --dsh-cmd is a single string like `"C:\Program Files\nodejs\node.exe" app.js`.
+// Split on unquoted whitespace only. Double quotes may open a quoted run
+// mid-token (e.g. --flag="path with spaces"). Single quotes open a quoted
+// run at a token boundary, or after `=` / `:` when a closing `'` exists
+// (e.g. --flag='a b'), so a bare apostrophe in a path stays literal.
+// Quote characters are removed; doubled quotes inside a quoted run collapse
+// to one literal quote.
+export function splitCommandLine(cmdString) {
+  const parts = []
+  let current = ''
+  let started = false
+  let quote = null
+  for (let i = 0; i < cmdString.length; i += 1) {
+    const ch = cmdString[i]
+    if (quote) {
+      if (ch === quote) {
+        if (cmdString[i + 1] === quote) {
+          current += ch
+          i += 1
+        } else {
+          quote = null
+        }
+      } else {
+        current += ch
+      }
+      continue
+    }
+    const prev = i > 0 ? cmdString[i - 1] : ''
+    if (
+      ch === '"'
+      || (ch === "'" && (!started || ((prev === '=' || prev === ':') && cmdString.indexOf("'", i + 1) !== -1)))
+    ) {
+      quote = ch
+      started = true
+    } else if (/\s/.test(ch)) {
+      if (started || current.length > 0) {
+        parts.push(current)
+        current = ''
+        started = false
+      }
+    } else {
+      current += ch
+      started = true
+    }
+  }
+  if (quote) throw new Error(`Unterminated quote in command: ${cmdString}`)
+  if (started || current.length > 0) parts.push(current)
+  return parts
+}
+
 function splitCommand(cmdString) {
-  const parts = cmdString.trim().split(/\s+/).filter(Boolean)
+  const parts = splitCommandLine(cmdString)
   if (!parts[0]) throw new Error('Invalid --dsh-cmd value.')
   return { bin: parts[0], prefixArgs: parts.slice(1) }
 }
@@ -514,11 +653,12 @@ function spawnCrossPlatform(bin, args, options) {
       const parent = process.env.ComSpec || process.env.COMSPEC || process.env.comspec
       if (parent) lookup.COMSPEC = parent
     }
-    const spec = windowsCmdInvocation(bin, args, lookup)
+    const spec = commandSpawnInvocation(bin, args, lookup, options.cwd)
     return spawn(spec.file, spec.args, {
       ...options,
+      shell: false,
       windowsHide: true,
-      windowsVerbatimArguments: true,
+      ...(spec.windowsVerbatimArguments ? { windowsVerbatimArguments: true } : {}),
     })
   }
   return spawn(bin, args, { ...options, detached: true })

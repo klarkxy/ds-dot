@@ -1,9 +1,12 @@
 import { describe, expect, it } from 'vitest'
-import { DEFAULT_SETTINGS, TOOL } from './contracts.ts'
+import { DEFAULT_SETTINGS, TOOL, type CognitionEntry } from './contracts.ts'
 import type { RawEvent } from './chat.ts'
 import type { DotHost } from './host.ts'
+import { applyCognitionOps, parseCognitionOps } from './memory.ts'
 import { ReflectionRunner, REFLECTION_FAILURE_COOLDOWN_MS, REFLECTION_INSTRUCTIONS, REFLECTION_INTERVAL_MS, REFLECTION_PRESET_ID, REFLECTION_PROPOSE_TOOL, REFLECTION_SUBMIT_TOOL, apply as applyReflection, buildReflectionInstruction, reflectionDue } from './reflection.ts'
 import { DotStore } from './store.ts'
+
+const entry = (id: string, text: string, seenAt = 1, pinned?: true): CognitionEntry => ({ id, text, createdAt: seenAt, updatedAt: seenAt, seenAt, ...(pinned ? { pinned } : {}) })
 
 describe('reflectionDue', () => {
   const base = {
@@ -92,7 +95,7 @@ function makeRunner(store: DotStore, host: DotHost, at: () => number) {
     store,
     homeDir: '/dot',
     now: at,
-    applyCognition: async text => { await store.setCognition(text) },
+    applyCognition: async (ops: string) => { await store.setCognitionEntries(applyCognitionOps(store.cognitionEntries, parseCognitionOps(ops), at(), () => store.nextKnowledgeId('c'))) },
     isDotIdle: () => true,
     timeoutMs: 60_000,
   })
@@ -103,15 +106,15 @@ describe('ReflectionRunner', () => {
     const store = new DotStore(undefined)
     await store.setSettings({ ...DEFAULT_SETTINGS, reflection: true })
     await store.setDot({ lastConversationAt: 5000 })
-    await store.setCognition('original')
+    await store.setCognitionEntries([entry('c1', 'original')])
     const fake = reflectionHost()
     const runner = makeRunner(store, fake.host, () => REFLECTION_INTERVAL_MS + 10_000)
     await runner.tick()
     const sessionId = await fake.prompted
-    await store.setCognition('human update')
-    await store.setCognition('original')
-    await expect(runner.submit('stale output', undefined, sessionId)).rejects.toThrow(/cognition changed/)
-    expect(store.cognition).toBe('original')
+    await store.setCognitionEntries([entry('c1', 'human update')])
+    await store.setCognitionEntries([entry('c1', 'original')])
+    await expect(runner.submit('[{"op":"add","text":"stale output"}]', undefined, sessionId)).rejects.toThrow(/cognition changed/)
+    expect(store.cognitionEntries.map(item => item.text)).toEqual(['original'])
     fake.finishIdle()
     await fake.released
   })
@@ -127,10 +130,10 @@ describe('ReflectionRunner', () => {
     expect(sessionId).toBe('ref-1')
     expect(fake.calls).toContain(`create ${REFLECTION_PRESET_ID}`)
     expect(store.reflections[0]).toMatchObject({ sessionId: 'ref-1', ok: false })
-    await runner.submit('the human prefers terse answers', 'two agreements conflict', sessionId)
+    await runner.submit('[{"op":"add","text":"the human prefers terse answers"}]', 'two agreements conflict', sessionId)
     fake.finishIdle()
     await fake.released
-    expect(store.cognition).toBe('the human prefers terse answers')
+    expect(store.cognitionEntries.map(item => item.text)).toEqual(['the human prefers terse answers'])
     expect(store.agreementNotes).toBe('two agreements conflict')
     expect(store.lastReflectedAt).toBe(now)
     expect(store.reflectionAttemptFailed).toBe(false)
@@ -146,14 +149,14 @@ describe('ReflectionRunner', () => {
     const runner = makeRunner(store, fake.host, () => REFLECTION_INTERVAL_MS + 10_000)
     await runner.tick()
     const sessionId = await fake.prompted
-    await expect(runner.submit('rogue write', undefined, 'other-session')).rejects.toThrow(/did not come from the running reflection pass/)
-    await expect(runner.submit('rogue write', undefined, '')).rejects.toThrow(/did not come/)
-    expect(store.cognition).toBe('')
+    await expect(runner.submit('[{"op":"add","text":"rogue write"}]', undefined, 'other-session')).rejects.toThrow(/did not come from the running reflection pass/)
+    await expect(runner.submit('[{"op":"add","text":"rogue write"}]', undefined, '')).rejects.toThrow(/did not come/)
+    expect(store.cognitionEntries).toEqual([])
     // The legitimate pass still works.
-    await runner.submit('real text', undefined, sessionId)
+    await runner.submit('[{"op":"add","text":"real text"}]', undefined, sessionId)
     fake.finishIdle()
     await fake.released
-    expect(store.cognition).toBe('real text')
+    expect(store.cognitionEntries.map(item => item.text)).toEqual(['real text'])
   })
 
   it('records a failure when the pass ends without submitting', async () => {    const store = new DotStore(undefined)
@@ -168,7 +171,7 @@ describe('ReflectionRunner', () => {
     expect(store.lastReflectedAt).toBeUndefined()
     expect(store.reflectionAttemptFailed).toBe(true)
     expect(store.reflections[0]).toMatchObject({ sessionId: 'ref-1', ok: false })
-    expect(store.cognition).toBe('')
+    expect(store.cognitionEntries).toEqual([])
   })
 
   it('does not count a submission as successful when a bookkeeping write fails', async () => {
@@ -182,7 +185,7 @@ describe('ReflectionRunner', () => {
     const sessionId = await fake.prompted
     const realFinish = store.finishReflectionRun.bind(store)
     store.finishReflectionRun = async () => { throw new Error('disk full') }
-    await expect(runner.submit('new text', undefined, sessionId)).rejects.toThrow('disk full')
+    await expect(runner.submit('[{"op":"add","text":"new text"}]', undefined, sessionId)).rejects.toThrow('disk full')
     store.finishReflectionRun = realFinish
     fake.finishIdle()
     await fake.released
@@ -214,7 +217,7 @@ describe('ReflectionRunner', () => {
     // Simulate a write that mutates memory and then fails: the runner must roll
     // the success time back so the failed pass is not mistaken for a success.
     store.markReflected = async (at: number) => { await realMark(at); throw new Error('disk full') }
-    await expect(runner.submit('new text', undefined, sessionId)).rejects.toThrow('disk full')
+    await expect(runner.submit('[]', undefined, sessionId)).rejects.toThrow('disk full')
     store.markReflected = realMark
     fake.finishIdle()
     await fake.released
@@ -259,28 +262,42 @@ describe('ReflectionRunner', () => {
 
 describe('buildReflectionInstruction', () => {
   it('keeps both parts of cognition without recording task details', () => {
-    for (const text of [REFLECTION_INSTRUCTIONS, buildReflectionInstruction({ agreements: '', cognition: '', now: 0 })]) {
-      expect(text).not.toMatch(/Dorothy|桃乐丝/)
-      expect(text).toContain('about herself')
-      expect(text).toContain('shared jokes')
-      expect(text).toContain('accomplished together')
-      expect(text).toContain('task details')
-    }
-    expect(REFLECTION_INSTRUCTIONS).toContain('Preserve useful entries about herself')
+    expect(REFLECTION_INSTRUCTIONS).not.toMatch(/Dorothy|桃乐丝/)
+    expect(REFLECTION_INSTRUCTIONS).toContain('about herself')
+    expect(REFLECTION_INSTRUCTIONS).toContain('shared jokes')
+    expect(REFLECTION_INSTRUCTIONS).toContain('accomplished together')
+    expect(REFLECTION_INSTRUCTIONS).toContain('task details')
+    expect(REFLECTION_INSTRUCTIONS).toContain('entry operations')
+    expect(REFLECTION_INSTRUCTIONS).toContain('Never add, remove, or reword [agreements]')
+    expect(buildReflectionInstruction({ agreements: [], cognition: [], limit: 30, now: 0 })).not.toMatch(/Dorothy|桃乐丝/)
   })
 
-  it('includes the current knowledge and names the submission tool', () => {
-    const text = buildReflectionInstruction({ agreements: '- be brief\n', cognition: 'she likes terse answers', now: 0 })
+  it('lists entries with id, state and last-confirmed date, and names the submission tool', () => {
+    const text = buildReflectionInstruction({
+      agreements: [{ id: 'a1', text: 'be brief', createdAt: 1, updatedAt: 1 }],
+      cognition: [
+        entry('c1', 'a pinned fact', Date.UTC(2026, 10, 20), true),
+        entry('c2', 'she likes terse answers', Date.UTC(2026, 10, 19)),
+        entry('c3', 'a dormant note', Date.UTC(2026, 10, 18)),
+      ],
+      limit: 2,
+      now: 0,
+    })
     expect(text).toContain('- be brief')
-    expect(text).toContain('she likes terse answers')
     expect(text).toContain('dot_reflection_submit')
     expect(text).toContain('never change')
+    expect(text).toContain('id · state · last confirmed · text')
+    expect(text).toContain('- c1 · pinned · 2026-11-20 · a pinned fact')
+    expect(text).toContain('- c2 · active · 2026-11-19 · she likes terse answers')
+    expect(text).toContain('- c3 · dormant · 2026-11-18 · a dormant note')
+    expect(text).toContain('submit ops=[]')
+    expect(buildReflectionInstruction({ agreements: [], cognition: [], limit: 30, now: 0 })).toContain('(none yet)')
   })
 
   it('adds the recipes section only when hints exist', () => {
-    const plain = buildReflectionInstruction({ agreements: '', cognition: '', now: 0 })
+    const plain = buildReflectionInstruction({ agreements: [], cognition: [], limit: 30, now: 0 })
     expect(plain).not.toContain('[recipes]')
-    const withRecipes = buildReflectionInstruction({ agreements: '', cognition: '', now: 0, recipes: '- rcp-1 "weekly" rev 2 — 1/4 accepted' })
+    const withRecipes = buildReflectionInstruction({ agreements: [], cognition: [], limit: 30, now: 0, recipes: '- rcp-1 "weekly" rev 2 — 1/4 accepted' })
     expect(withRecipes).toContain('[recipes]')
     expect(withRecipes).toContain('rcp-1 "weekly"')
     expect(withRecipes).toContain('dot_reflection_recipe_propose')

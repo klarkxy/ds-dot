@@ -634,8 +634,8 @@ describe('i18n end-to-end lifecycle and PersonaPanel integration', () => {
     for (const loc of SUPPORTED_LOCALES) {
       let current: DotSettings = { ...DEFAULT_SETTINGS }
       const knowledge = {
-        agreements: { text: '', maxChars: 4000, canUndo: false },
-        cognition: { text: '', maxChars: 4000, history: [] },
+        agreements: { entries: [], canUndo: false },
+        cognition: { entries: [], history: [] },
       }
 
       function Harness() {
@@ -655,9 +655,9 @@ describe('i18n end-to-end lifecycle and PersonaPanel integration', () => {
           decideSetting: async () => '',
           settings: async () => current,
           knowledge: async () => knowledge,
-          setAgreements: async () => knowledge,
+          editAgreements: async () => knowledge,
           undoAgreements: async () => knowledge,
-          setCognition: async () => knowledge,
+          editCognition: async () => knowledge,
           restoreCognition: async () => knowledge,
         }
         return createElement(PersonaPanel, { locale: loc, api, settings, onSaved: setSettings })

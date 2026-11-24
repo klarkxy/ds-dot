@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { z } from 'zod'
 import { DEFAULT_SETTINGS } from './contracts.ts'
 import { reasonBeforeDelivery } from './segments.ts'
 import { parseSettingProposal, STATE_KEY } from './storage.ts'
@@ -350,7 +351,7 @@ describe('DotStore', () => {
     mode = 'off'
     const state = new DotStore(wrapped)
     mode = 'state'
-    await expect(state.setAgreements('a rule')).rejects.toMatchObject({ code: 'unknown-state' })
+    await expect(state.setAgreementEntries([{ id: 'a1', text: 'a rule', createdAt: 1, updatedAt: 1 }])).rejects.toMatchObject({ code: 'unknown-state' })
     expect(state.work.dispatchAllowed(reserved.run.id)).toMatchObject({ code: 'recovery' })
     expect(await state.work.addDelivery(reserved.run.id, followUp)).toMatchObject({ code: 'recovery' })
     expect(await state.work.reserveRun({ changeId: change.id, cwd: 'D:\\else', writeScope: { kind: 'paths', paths: [] }, at: 5 })).toMatchObject({ code: 'recovery' })
@@ -401,56 +402,187 @@ describe('DotStore agreements and cognition', () => {
   it('keeps agreements and one undo step across a reload', async () => {
     const { domain } = fakeDomain()
     const store = new DotStore(domain)
-    expect(store.agreements).toBe('')
-    expect(store.agreementsUndo).toBeUndefined()
-    await store.setAgreements('- use the standard preset\n')
-    await store.setAgreements('- never push to main\n')
-    expect(new DotStore(domain).agreements).toBe('- never push to main\n')
-    expect(store.agreementsUndo).toBe('- use the standard preset\n')
+    expect(store.agreementEntries).toEqual([])
+    expect(store.agreementEntriesUndo).toBeUndefined()
+    const first = [{ id: 'a1', text: 'use the standard preset', createdAt: 1, updatedAt: 1 }]
+    const second = [{ id: 'a1', text: 'never push to main', createdAt: 2, updatedAt: 2 }]
+    await store.setAgreementEntries(first)
+    await store.setAgreementEntries(second)
+    expect(new DotStore(domain).agreementEntries).toEqual(second)
+    expect(store.agreementEntriesUndo).toEqual(first)
     expect(await store.undoAgreements()).toBe(true)
-    expect(store.agreements).toBe('- use the standard preset\n')
-    // One step is kept: taking back again swaps the same two texts.
-    expect(store.agreementsUndo).toBe('- never push to main\n')
+    expect(store.agreementEntries).toEqual(first)
+    // One step is kept: taking back again swaps the same two lists.
+    expect(store.agreementEntriesUndo).toEqual(second)
     expect(await store.undoAgreements()).toBe(true)
-    expect(store.agreements).toBe('- never push to main\n')
-    expect(new DotStore(domain).agreements).toBe('- never push to main\n')
+    expect(store.agreementEntries).toEqual(second)
+    expect(new DotStore(domain).agreementEntries).toEqual(second)
   })
 
   it('records each cognition replacement in a capped, strictly increasing history', async () => {
     const store = new DotStore(undefined)
-    expect(store.cognitionHistory).toEqual([])
+    expect(store.cognitionEntryHistory).toEqual([])
+    const entry = (text: string) => [{ id: 'c1', text, createdAt: 1, updatedAt: 1, seenAt: 1 }]
     // Same millisecond writes still get distinct, increasing timestamps.
-    for (let index = 0; index < 12; index++) await store.setCognition(`v${index}`, 1000)
-    expect(store.cognition).toBe('v11')
-    expect(store.cognitionHistory).toHaveLength(10)
+    for (let index = 0; index < 12; index++) await store.setCognitionEntries(entry(`v${index}`), 1000)
+    expect(store.cognitionEntries.map(row => row.text)).toEqual(['v11'])
+    expect(store.cognitionEntryHistory).toHaveLength(10)
     // Newest first; the oldest two fell off.
-    expect(store.cognitionHistory[0]!.text).toBe('v10')
-    expect(store.cognitionHistory[9]!.text).toBe('v1')
-    const ats = store.cognitionHistory.map(entry => entry.at)
+    expect(store.cognitionEntryHistory[0]!.entries[0]!.text).toBe('v10')
+    expect(store.cognitionEntryHistory[9]!.entries[0]!.text).toBe('v1')
+    const ats = store.cognitionEntryHistory.map(entry => entry.at)
     expect(new Set(ats).size).toBe(ats.length)
     for (let index = 1; index < ats.length; index++) expect(ats[index]!).toBeLessThan(ats[index - 1]!)
   })
 
-  it('restores an older cognition text and pushes the replaced one back onto the history', async () => {
+  it('writes seenAt-only changes without spending a history version', async () => {
     const store = new DotStore(undefined)
-    await store.setCognition('first', 10)
-    await store.setCognition('second', 20)
-    await store.setCognition('third', 30)
-    const target = store.cognitionHistory.find(entry => entry.text === 'first')!
+    const base = { id: 'c1', text: 'steady', createdAt: 1, updatedAt: 1, seenAt: 1 }
+    await store.setCognitionEntries([base], 10)
+    const versions = store.cognitionEntryHistory.length
+    // A confirm moves only seenAt: the write and the revision still land…
+    const revision = store.cognitionVersion
+    await store.setCognitionEntries([{ ...base, seenAt: 20 }], 20)
+    expect(store.cognitionEntries[0]!.seenAt).toBe(20)
+    expect(store.cognitionVersion).toBeGreaterThan(revision)
+    // …but the history does not grow, so real versions are not evicted.
+    expect(store.cognitionEntryHistory).toHaveLength(versions)
+    // A text change is content: it pushes a version.
+    await store.setCognitionEntries([{ ...base, text: 'revised', updatedAt: 30, seenAt: 30 }], 30)
+    expect(store.cognitionEntryHistory).toHaveLength(versions + 1)
+    expect(store.cognitionEntryHistory[0]!.entries[0]!.seenAt).toBe(20)
+    // Pinning is content too.
+    await store.setCognitionEntries([{ ...base, text: 'revised', updatedAt: 30, seenAt: 30, pinned: true as const }], 40)
+    expect(store.cognitionEntryHistory).toHaveLength(versions + 2)
+  })
+
+  it('restores an older cognition entry list and pushes the replaced one back onto the history', async () => {
+    const store = new DotStore(undefined)
+    const entry = (text: string) => [{ id: 'c1', text, createdAt: 1, updatedAt: 1, seenAt: 1 }]
+    await store.setCognitionEntries(entry('first'), 10)
+    await store.setCognitionEntries(entry('second'), 20)
+    await store.setCognitionEntries(entry('third'), 30)
+    const target = store.cognitionEntryHistory.find(entry => entry.entries[0]?.text === 'first')!
     expect(await store.restoreCognition(target.at, 40)).toBe(true)
-    expect(store.cognition).toBe('first')
-    // The text it replaced is now the newest history entry.
-    expect(store.cognitionHistory[0]!.text).toBe('third')
+    expect(store.cognitionEntries.map(row => row.text)).toEqual(['first'])
+    // The list it replaced is now the newest history entry.
+    expect(store.cognitionEntryHistory[0]!.entries[0]!.text).toBe('third')
     expect(await store.restoreCognition(999, 50)).toBe(false)
   })
 
-  it('lets the empty text be a restorable version', async () => {
+  it('lets the empty list be a restorable version', async () => {
     const store = new DotStore(undefined)
-    await store.setCognition('something', 10)
-    const empty = store.cognitionHistory.find(entry => entry.text === '')!
+    await store.setCognitionEntries([{ id: 'c1', text: 'something', createdAt: 1, updatedAt: 1, seenAt: 1 }], 10)
+    const empty = store.cognitionEntryHistory.find(entry => entry.entries.length === 0)!
     expect(empty).toBeDefined()
     expect(await store.restoreCognition(empty.at, 20)).toBe(true)
-    expect(store.cognition).toBe('')
+    expect(store.cognitionEntries).toEqual([])
+  })
+
+  it('migrates a legacy state row to entry lists and persists the new shape', async () => {
+    const { domain, tables } = fakeDomain({
+      state: {
+        [STATE_KEY]: {
+          agreements: '# 规矩\n- do not push\nfree prose\n\n- keep this',
+          agreementsUndo: '- earlier rule',
+          cognition: '## 对人类的理解\n- human 1\n- human 2\n- 只归档文件「Release  Notes.md」\n- 缩进\t靠 tab\n## 对自己的理解\n- self 1',
+          cognitionHistory: [{ text: '- old idea\n# heading\n- older idea\n- 旧条目  双空格', at: 7 }],
+        },
+      },
+    })
+    const store = new DotStore(domain)
+    expect(store.agreementEntries.map(entry => entry.text)).toEqual(['# 规矩', 'do not push', 'free prose', 'keep this'])
+    expect(store.agreementEntries.map(entry => entry.id)).toEqual(['a1', 'a2', 'a3', 'a4'])
+    expect(store.agreementEntriesUndo?.map(entry => entry.text)).toEqual(['earlier rule'])
+    expect(store.cognitionEntries.map(entry => entry.text)).toEqual(['human 1', 'human 2', '只归档文件「Release  Notes.md」', '缩进\t靠 tab', 'self 1'])
+    expect(store.cognitionEntries.every(entry => entry.seenAt === entry.createdAt && entry.createdAt === entry.updatedAt)).toBe(true)
+    // Converted history snapshots keep their text verbatim too, and restoring
+    // the version brings the exact spacing back.
+    expect(store.cognitionEntryHistory[0]!.entries.map(entry => entry.text)).toEqual(['old idea', 'older idea', '旧条目  双空格'])
+    expect(store.cognitionEntryHistory[0]!.at).toBe(7)
+    await store.restoreCognition(7)
+    expect(store.cognitionEntries.map(entry => entry.text)).toEqual(['old idea', 'older idea', '旧条目  双空格'])
+    // The migrated shape is queued to the durable row: legacy keys do not come back.
+    await new Promise(resolve => setTimeout(resolve, 0))
+    const row = tables.state!.get(STATE_KEY) as Record<string, unknown>
+    expect(row.agreements).toBeUndefined()
+    expect(row.agreementsUndo).toBeUndefined()
+    expect(row.cognition).toBeUndefined()
+    expect(row.cognitionHistory).toBeUndefined()
+    expect((row.agreementEntries as { id: string }[]).map(entry => entry.id)).toEqual(['a1', 'a2', 'a3', 'a4'])
+    expect((row.agreementEntriesUndo as { id: string }[]).map(entry => entry.id)).toEqual(['a5'])
+    expect(row.cognitionEntryHistory).toHaveLength(2)
+    // Migration seeds the id counters above every entry it handed out.
+    expect(row.knowledgeIdSeq).toEqual({ a: 5, c: 8 })
+    expect(new DotStore(domain).cognitionEntries.map(entry => entry.text)).toEqual(['old idea', 'older idea', '旧条目  双空格'])
+  })
+
+  it('stays readable to an older plugin whose schema only knows the legacy keys', async () => {
+    // The dev-era (v10) knowledge fields, exactly as that version declared
+    // them: a downgrade must parse the row, not wipe it.
+    const legacyKnowledgeFields = {
+      agreements: z.string().optional(),
+      agreementsUndo: z.string().optional(),
+      cognition: z.string().optional(),
+      cognitionHistory: z.array(z.object({ text: z.string(), at: z.number() })).optional(),
+    }
+    const devEraStateSchema = z.object({
+      settings: z.record(z.string(), z.unknown()).optional(),
+      dotSessionId: z.string().optional(),
+      ...legacyKnowledgeFields,
+    })
+    const { domain, tables } = fakeDomain()
+    const store = new DotStore(domain)
+    await store.setDot({ settings: { scope: 'all' }, dotSessionId: 'dot-9' })
+    // A panel edit, an undo-producing change and a cognition change with history.
+    await store.setAgreementEntries([{ id: 'a1', text: 'rule one', createdAt: 1, updatedAt: 1 }])
+    await store.setAgreementEntries([{ id: 'a1', text: 'rule one', createdAt: 1, updatedAt: 1 }, { id: 'a2', text: 'rule two', createdAt: 2, updatedAt: 2 }])
+    await store.setCognitionEntries([{ id: 'c1', text: 'idea', createdAt: 1, updatedAt: 1, seenAt: 1 }], 10)
+    await store.setCognitionEntries([{ id: 'c1', text: 'idea', createdAt: 1, updatedAt: 1, seenAt: 1 }, { id: 'c2', text: 'idea two', createdAt: 2, updatedAt: 2, seenAt: 2 }], 20)
+    const row = tables.state!.get(STATE_KEY)
+    const parsed = devEraStateSchema.safeParse(row)
+    expect(parsed.success).toBe(true)
+    expect((parsed as { data: Record<string, unknown> }).data.settings).toEqual({ scope: 'all' })
+    expect((parsed as { data: Record<string, unknown> }).data.dotSessionId).toBe('dot-9')
+  })
+
+  it('never reuses an entry id, even after the highest one is removed', async () => {
+    const { domain, tables } = fakeDomain()
+    const store = new DotStore(domain)
+    const add = async (text: string) => {
+      const id = store.nextKnowledgeId('c')
+      await store.setCognitionEntries([...store.cognitionEntries, { id, text, createdAt: 1, updatedAt: 1, seenAt: 1 }], 10)
+    }
+    await add('one')
+    await add('two')
+    await add('three')
+    expect(store.cognitionEntries.map(entry => entry.id)).toEqual(['c1', 'c2', 'c3'])
+    await store.setCognitionEntries(store.cognitionEntries.filter(entry => entry.id !== 'c3'), 20)
+    // The removed c3 stays gone for good: the counter already passed it.
+    await add('four')
+    expect(store.cognitionEntries.map(entry => entry.id)).toEqual(['c1', 'c2', 'c4'])
+    // The counter survives a reload; even a direct write of foreign ids lifts it.
+    const reloaded = new DotStore(domain)
+    await reloaded.setCognitionEntries([{ id: 'c9', text: 'foreign', createdAt: 1, updatedAt: 1, seenAt: 1 }], 30)
+    expect(reloaded.nextKnowledgeId('c')).toBe('c10')
+    // The lift was persisted with the write; the fresh allocation rides the next one.
+    expect((tables.state!.get(STATE_KEY) as { knowledgeIdSeq: { c: number } }).knowledgeIdSeq.c).toBe(9)
+  })
+
+  it('seeds missing id counters from entries, undo and history on load', async () => {
+    const { domain } = fakeDomain({
+      state: {
+        [STATE_KEY]: {
+          agreementEntries: [{ id: 'a2', text: 'rule', createdAt: 1, updatedAt: 1 }],
+          agreementEntriesUndo: [{ id: 'a7', text: 'older', createdAt: 1, updatedAt: 1 }],
+          cognitionEntries: [{ id: 'c3', text: 'idea', createdAt: 1, updatedAt: 1, seenAt: 1 }],
+          cognitionEntryHistory: [{ at: 5, entries: [{ id: 'c9', text: 'past', createdAt: 1, updatedAt: 1, seenAt: 1 }] }],
+        },
+      },
+    })
+    const store = new DotStore(domain)
+    expect(store.nextKnowledgeId('a')).toBe('a8')
+    expect(store.nextKnowledgeId('c')).toBe('c10')
   })
 
 })
@@ -465,16 +597,16 @@ describe('factory reset of the store', () => {
     })
     const store = new DotStore(domain)
     await store.setSettings({ ...DEFAULT_SETTINGS, scope: 'all', reflection: false })
-    await store.setAgreements('do not push')
-    await store.setCognition('short answers')
+    await store.setAgreementEntries([{ id: 'a1', text: 'do not push', createdAt: 1, updatedAt: 1 }])
+    await store.setCognitionEntries([{ id: 'c1', text: 'short answers', createdAt: 1, updatedAt: 1, seenAt: 1 }])
     expect(store.list()).toHaveLength(1)
     await store.factoryReset(5000)
     expect(store.list()).toEqual([])
     expect(store.schedules).toEqual([])
     expect(store.recipes).toEqual([])
     expect(store.settingProposals).toEqual([])
-    expect(store.agreements).toBe('')
-    expect(store.cognition).toBe('')
+    expect(store.agreementEntries).toEqual([])
+    expect(store.cognitionEntries).toEqual([])
     expect(store.settings).toEqual(DEFAULT_SETTINGS)
     expect(store.lastFactoryResetAt).toBe(5000)
     expect(store.dotSessionId).toBeUndefined()

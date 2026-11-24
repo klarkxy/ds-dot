@@ -486,7 +486,7 @@ export function apply(ctx: Context): void {
     description: "Manage the human's standing rules in [agreements], preserved in their own words. action=add: call only when the human explicitly states a standing rule or asks you to remember one; record a single concise line verbatim without paraphrasing. action=remove: remove an entry the human asked to drop by quoting enough of it to match uniquely. Updates take effect in the prompt prefix on the next segment.",
     parameters: {
       action: { type: 'string', enum: ['add', 'remove'], required: true, description: 'Operation: add or remove.' },
-      text: { type: 'string', required: true, description: "add: single-line rule in the human's exact words (max 400 characters). remove: exact rule text or a unique substring." },
+      text: { type: 'string', required: true, description: "add: single-line rule in the human's exact words. remove: exact rule text or a unique substring." },
     },
     execute: async (args) => str(args, 'action') === 'remove' ? dot().agreementRemove(str(args, 'text') ?? '') : dot().agreementAdd(str(args, 'text') ?? ''),
     title: 'Agreement',
@@ -495,11 +495,30 @@ export function apply(ctx: Context): void {
   // ── dot_cognition ─────────────────────────────────────────────────────────
   tool(defineToolInput({
     name: TOOL.cognition,
-    description: 'Rewrite your [cognition] block: your concise, durable understanding of the human (workflow preferences, habits) and of yourself (formed preferences, shared jokes, accomplishments together). Always pass the complete replacement text (empty string clears it); never include transient task status, and remember [agreements] always take precedence. Updates take effect in the prompt prefix on the next segment.',
+    description: 'Inspect or change your [cognition]: your durable understanding of the human (workflow preferences, habits) and of yourself (formed preferences, shared jokes, accomplishments together). action=list searches (optional query) and pages (offset, limit) through all stored entries, including dormant ones outside the prompt. action=add records a new entry; action=update replaces the entry that match identifies; action=remove deletes it. Keep each entry to one self-contained point, update an existing entry instead of adding a near-duplicate, never record transient task status, and remember [agreements] always take precedence. Pinned entries belong to the human: you cannot update or remove them. Updates take effect in the prompt prefix on the next segment.',
     parameters: {
-      text: { type: 'string', required: true, description: 'Complete replacement [cognition] text (max 4000 characters; empty clears it).' },
+      action: { type: 'string', enum: ['list', 'add', 'update', 'remove'], required: true, description: 'Operation: list, add, update, or remove.' },
+      text: { type: 'string', description: 'add/update: the entry text, one self-contained point.' },
+      match: { type: 'string', description: 'update/remove: the exact entry text or a unique substring of it.' },
+      query: { type: 'string', description: 'list: optional search text (case-insensitive words) to filter stored entries, including dormant ones.' },
+      offset: { type: 'integer', description: 'list: zero-based starting offset for paging (default 0).' },
+      limit: { type: 'integer', description: 'list: maximum entries to return (default 40, max 100).' },
     },
-    execute: async (args) => dot().cognitionRewrite(str(args, 'text') ?? ''),
+    execute: async (args) => {
+      const action = str(args, 'action')
+      if (action === 'list') {
+        const offset = num(args, 'offset')
+        const limit = num(args, 'limit')
+        return dot().cognitionList({
+          ...str(args, 'query') !== undefined ? { query: str(args, 'query')! } : {},
+          ...offset === undefined ? {} : { offset },
+          ...limit === undefined ? {} : { limit },
+        })
+      }
+      if (action === 'update') return dot().cognitionUpdate(str(args, 'match') ?? '', str(args, 'text') ?? '')
+      if (action === 'remove') return dot().cognitionRemove(str(args, 'match') ?? '')
+      return dot().cognitionAdd(str(args, 'text') ?? '')
+    },
     title: 'Cognition',
   }))
 
@@ -573,7 +592,7 @@ export function apply(ctx: Context): void {
   // human grants them in Settings > Capabilities, or approves a proposal here.
   tool(defineToolInput({
     name: TOOL.capabilities,
-    description: 'List optional extra capabilities (tools from other plugins and MCP servers) or propose changes. Extras are off by default. action=list shows a tree of selectors (tool:<name>, mcp:<server>, plugin:<bundle>[#<entry>], builtin:<id>, prefix:<segment>) with each tool\'s grant, whether it is applied to this segment, conditional, high-risk, and unavailable state. action=propose queues {selector, grant, reason} for human approval in Settings; grant is off | ask (each call pauses for human approval) | auto (calls run freely). Nothing changes until the human approves, and grants apply only from the next segment. action=propose_install {spec, version, reason} asks the human to install a plugin package; to find one use the official plugin_market/plugin_manager tools if the human granted them, else dsh_plugins (version is optional for official catalog bundles, exact otherwise). To build a new plugin or wire up an MCP server, dispatch a dot_task with preset "cordis" — a wrapper plugin can register an MCP server through mcpManager.',
+    description: 'List optional extra capabilities (tools from other plugins and MCP servers) or propose changes. Extras are off by default. action=list shows a tree of selectors (tool:<name>, mcp:<server>, plugin:<bundle>[#<entry>], builtin:<id>, prefix:<segment>) with each tool\'s grant, whether it is applied to this segment, conditional, task-only, and unavailable state. Task-only tools (bash, pwsh, write, edit, apply_patch, plugin_manager) belong to runs and are never granted to you. action=propose queues {selector, grant, reason} for human approval in Settings; grant is off | ask (each call pauses for human approval) | auto (calls run freely). Nothing changes until the human approves, and grants apply only from the next segment. action=propose_install {spec, version, reason} asks the human to install a plugin package; to find one use the official plugin_market tool if the human granted it, else dsh_plugins (version is optional for official catalog bundles, exact otherwise). To build a new plugin or wire up an MCP server, dispatch a dot_task with preset "cordis" — a wrapper plugin can register an MCP server through mcpManager.',
     parameters: {
       action: { type: 'string', enum: ['list', 'propose', 'propose_install'], required: true, description: 'Operation: list the catalog, propose a grant change, or propose installing a plugin.' },
       selector: { type: 'string', description: 'propose: selector id from list output, e.g. tool:<name>, mcp:<server>, plugin:<bundle>, plugin:<bundle>#<entry>, builtin:<id>.' },

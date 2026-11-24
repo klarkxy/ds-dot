@@ -41,6 +41,16 @@ Dorothy's own session never receives the host built-in names in `TASK_ONLY_TOOLS
 - **Workspaces & follow-up reminders:** Dorothy registers a new project workspace only when dispatching work there (and tells you when she does) rather than adding broad parent folders just to browse. Promised follow-ups waiting on panel acceptance or prerequisite repo changes use `dot_schedule` reminders (and isolated `worktree` tasks are created only after prerequisite changes land in the target checkout) so they still wake even when *Routine check* is `0`.
 - **Arena-backed model recommendations:** `dot_list_models` ranks permitted `provider/model` choices from a pinned LMArena snapshot (`mode=raw` preserves the raw catalog view); Dorothy never substitutes a model you explicitly named. See [Arena data and aggregation notes](https://github.com/klarkxy/ds-dot/blob/dev/docs/model-arena.md).
 - **Factory reset** (bottom of Settings): Previews exact counts of Dorothy's own state before clearing; your own sessions, project files, and host persona stay untouched.
+- **Scoped web lookup & GitHub API compaction:** Dorothy's isolated `web_search` / `web_fetch` respect explicit `DSH_WEB_SEARCH_PROVIDER` / `DSH_WEB_FETCH_PROVIDER` pins. When unpinned, `web_fetch` upgrades `http://api.github.com` URLs to `https:`, fetches `api.github.com` directly with an 8s timeout, strips repetitive endpoint `*_url`/`node_id`/`reactions` metadata while preserving primary records and `html_url`, and falls back to Jina (cooling down direct attempts for 10 minutes on 403/429 or network errors).
+
+## MCP servers (Dorothy only)
+
+The **MCP servers** page connects remote MCP servers that only Dorothy can use — they are mounted inside her own preset scope, so other DSH sessions never see the `mcp__<server>__*` tools. Connecting a server only mounts it; grant its tools under the server row or the **Extra capabilities** page (`mcp:<server>` / `tool:` selectors) before she can call them.
+
+- **Recommended catalog:** GitHub (`https://api.githubcopilot.com/mcp/readonly`), DeepWiki, Context7, Exa, Microsoft Learn, Cloudflare Docs, Hugging Face.
+- **GitHub token:** needs a [fine-grained PAT](https://github.com/settings/personal-access-tokens/new) with read-only access — Contents, Issues, Pull requests, Actions, Metadata. Tokens are stored in the host credential store (`DOT_MCP_<NAME>_TOKEN`) and never echoed back.
+- **Custom servers:** name plus URL with an optional token. Remote (streamable-http) endpoints only: `https` everywhere, `http` allowed for loopback addresses. No stdio/command entries — a browser panel must not define commands to spawn — and no OAuth flow (DSH has none), so token-auth and no-auth servers only.
+- Servers stay configured across restarts; a factory reset removes them together with their `DOT_MCP_*` credentials.
 
 ---
 

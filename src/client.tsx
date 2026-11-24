@@ -17,7 +17,7 @@ import { createAttentionWatcher, DESKTOP_NOTIFY_KEY, type AttentionWatcher } fro
 import { contextCss } from './context-panel.tsx'
 import { personaCss } from './persona-panel.tsx'
 import { trajectoryCss } from './trajectory-panel.tsx'
-import { PLUGIN_NAME, RPC_CHANNEL, type AttentionView, type BoardView, type RecipeBoardRow, type CapabilityCatalogView, type ChatSnapshot, type DotContextView, type DotSettings, type FactoryResetPreview, type FactoryResetResult, type KeepaliveInfo, type KnowledgeView, type ReflectionRun, type SelfStatusView, type SettingProposal, type TrajectoryView, type TaskPermission } from './contracts.ts'
+import { PLUGIN_NAME, RPC_CHANNEL, type AttentionView, type BoardView, type RecipeBoardRow, type CapabilityCatalogView, type ChatSnapshot, type DotContextView, type DotMcpListView, type DotSettings, type FactoryResetPreview, type FactoryResetResult, type KeepaliveInfo, type KnowledgeView, type ReflectionRun, type SelfStatusView, type SettingProposal, type TrajectoryView, type TaskPermission } from './contracts.ts'
 import type { UpdateStatus } from './auto-update.ts'
 import { copyLocale, t, type CopyLocale } from './ui-copy.ts'
 import { DotIcon } from './whale.tsx'
@@ -95,6 +95,9 @@ export function apply(ctx: Context): void {
     settingProposals: signal => call<SettingProposal[]>('settings.proposals', {}, signal),
     decideSetting: (id, allow) => call<string>('settings.decide', { id, allow }),
     capabilities: signal => call<CapabilityCatalogView>('capabilities.catalog', {}, signal),
+    mcpList: signal => call<DotMcpListView>('mcp.list', {}, signal),
+    mcpCredentialSet: (server: string, value: string) => call<{ configured: boolean; masked?: string }>('mcp.credential.set', { server, value }),
+    mcpCredentialUnset: (server: string) => call<{ configured: boolean }>('mcp.credential.unset', { server }),
     taskPermissionOptions: signal => call<{ options: TaskPermission[] }>('settings.taskpermissions', {}, signal),
     newSegment: () => call<string>('segment.new'),
     updateStatus: signal => call<UpdateStatus | null>('update.status', {}, signal),

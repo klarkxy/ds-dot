@@ -22,14 +22,16 @@ import { registerHostRpc, type HostRpcContext } from '@klarkxy/dsh-plugin-kit/ho
 import { installPluginLogger } from '@klarkxy/dsh-plugin-kit/logger'
 import { approvalAuditId, raceApproval } from './approval-relay.ts'
 import type { RawEvent } from './chat.ts'
-import { COGNITION_PROMPT_ENTRIES_DEFAULT, COMPACTION_POLICY, PLUGIN_NAME, PRESET_ID, RPC_CHANNEL, SERVICE_NAME, type ChatSnapshot, type PendingQuestionItem, type TaskPermission, type TaskRecord } from './contracts.ts'
+import { COGNITION_PROMPT_ENTRIES_DEFAULT, COMPACTION_POLICY, dotOwnedCredentialRefs, mcpCredentialName, mcpGuess, mcpServerOf, MCP_CREDENTIAL_VALUE_MAX, MCP_SERVER_NAME_PATTERN, PLUGIN_NAME, PRESET_ID, RPC_CHANNEL, SERVICE_NAME, validateMcpCredentialSet, type ChatSnapshot, type PendingQuestionItem, type TaskPermission, type TaskRecord } from './contracts.ts'
 import { CHAT_SAY_BODY_BYTES, checkChatImages } from './chat-images.ts'
 import { ChatFeed } from './feed.ts'
+import { hostImport } from './host-import.ts'
 import { DotCapabilities, type CapabilityPluginManager, type CapabilityTools } from './capabilities.ts'
 import { bindHost } from './host.ts'
 import { InboxLedger } from './inbox.ts'
 import { installInboxIngress } from './inbox-github.ts'
 import { clip } from './ledger.ts'
+import { sharedDotMcp } from './mcp-shared.ts'
 import { detachNative } from './native.ts'
 import { PeerLedger } from './peer.ts'
 import { DOT_INSTRUCTIONS } from './prompt.ts'
@@ -114,14 +116,56 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
   )
   const store = new DotStore(domain, [...domain.table('tasks').entries()].map(([, value]) => parseTask(value)).filter((task): task is TaskRecord => task !== undefined))
   let sealOwned: ((agent: unknown) => void) | undefined
+  /** Tool definitions published on dot's preset scope (the ds-dot/mcp mounts). */
+  const presetScopeDefs = async (): Promise<readonly { readonly name: string; readonly description?: string }[]> => {
+    const presets = ctx.agentPresets as unknown as {
+      acquireScope?(id: string): Promise<{ key: unknown } & { [Symbol.asyncDispose](): Promise<void> }>
+    }
+    const toolsService = ctx.get('tools' as never) as
+      | (CapabilityTools & { definitions?(key?: unknown): readonly { readonly name: string; readonly description?: string }[] })
+      | undefined
+    const handle = await presets.acquireScope?.(PRESET_ID)
+    if (handle === undefined || toolsService?.definitions === undefined) return []
+    try { return toolsService.definitions(handle.key) } finally { await handle[Symbol.asyncDispose]() }
+  }
+  /** Global MCP server names: manager rows plus names guessed from root `mcp__x__y` tools. */
+  const globalMcpNames = (): ReadonlySet<string> => {
+    const names = new Set<string>()
+    try {
+      const manager = ctx.get('mcpManager' as never) as { list(): readonly { readonly name: string }[] } | undefined
+      for (const row of manager?.list() ?? []) names.add(row.name)
+    } catch { /* optional host service */ }
+    try {
+      const tools = ctx.get('tools' as never) as { definitions?(): readonly { readonly name: string }[] } | undefined
+      for (const def of tools?.definitions?.() ?? []) {
+        const guess = mcpGuess(def.name)
+        if (guess !== undefined) names.add(guess)
+      }
+    } catch { /* optional host service */ }
+    return names
+  }
   const capabilities = new DotCapabilities({
     tools: () => ctx.get('tools' as never) as CapabilityTools | undefined,
     mcpManager: () => ctx.get('mcpManager' as never) as { list(): readonly { readonly name: string }[] } | undefined,
     pluginManager: () => ctx.get('pluginManager' as never) as CapabilityPluginManager | undefined,
     settings: () => store.settings,
     locked: DOT_INHERITED_ALLOW,
+    presetDefs: presetScopeDefs,
   })
   capabilities.prewarm()
+  // Host credentials service: dot-local MCP tokens are stored and read here;
+  // `ctx.credentials` is inject-gated, so go through ctx.get like mcp-client.
+  interface CredentialsService {
+    describe?(ref: unknown): Promise<{ readonly configured: boolean; readonly masked?: string } | undefined>
+    set?(ref: unknown, value: string): Promise<unknown>
+    unset?(ref: unknown): Promise<unknown>
+  }
+  const credentialsService = () => ctx.get('credentials' as never) as CredentialsService | undefined
+  let credentialsModule: Promise<{ credentialRef(name: string): unknown }> | undefined
+  const credentialRefFor = async (name: string) => {
+    credentialsModule ??= hostImport(ctx, '@deepseek-ai/dsh-credentials') as Promise<{ credentialRef(name: string): unknown }>
+    return (await credentialsModule).credentialRef(name)
+  }
   const host = bindHost(name => ctx.get(name as never), log, () => store.settings.model, agent => { sealOwned?.(agent) }, capabilities)
   const service = new DotService({
     host,
@@ -136,7 +180,32 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
     cognitionPromptEntries: Number.isFinite(config.cognitionPromptEntries) ? Math.max(0, Math.trunc(config.cognitionPromptEntries!)) : COGNITION_PROMPT_ENTRIES_DEFAULT,
     pluginManager: () => ctx.get('pluginManager' as never),
     selfInstall: detectSelfInstall(),
+    globalMcpNames,
+    credentials: {
+      describe: async (ref: string) => credentialsService()?.describe?.(await credentialRefFor(ref)),
+      unset: async (ref: string) => credentialsService()?.unset?.(await credentialRefFor(ref)),
+    },
   })
+  // The ds-dot/mcp preset row reads settings and reports tool-set changes
+  // through the globalThis channel; a changed set re-applies the live agent's
+  // restrict so a granted server's late tools become visible at once.
+  const mcpShared = sharedDotMcp()
+  mcpShared.settings = () => store.settings
+  // The preset layer's dot-local tool names, longest-prefix attributed: a
+  // same-count tool swap still changes the row's change signature.
+  mcpShared.presetToolNames = async () => {
+    const dotServers = store.settings.mcpServers ?? {}
+    const enabled = Object.keys(dotServers).filter(name => dotServers[name]?.enabled !== false)
+    if (enabled.length === 0) return []
+    const all = [...globalMcpNames(), ...enabled]
+    return (await presetScopeDefs())
+      .map(def => def.name)
+      .filter(name => { const owner = mcpServerOf(name, all); return owner !== undefined && enabled.includes(owner) })
+  }
+  mcpShared.onToolsChanged = () => {
+    const dot = store.dotSessionId
+    if (dot !== undefined) void host.reapplyCapabilities?.(dot)
+  }
   sealOwned = agent => service.sealAgent(agent)
   void service.sealExisting()
   const syncHostLocale = () => {
@@ -224,6 +293,8 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
           ],
         },
         { id: 'dot-tools', name: 'ds-dot/tools' },
+        // Dot-local MCP servers, mounted on the preset scope from settings.
+        { id: 'dot-mcp', name: 'ds-dot/mcp' },
         // Global-nature host built-ins, grantable through Extra capabilities;
         // the agent-scope restrict masks them until granted.
         { id: 'tool-skill', name: '@deepseek-ai/dsh-tool-skill' },
@@ -500,6 +571,32 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
           return { ok: true, value: { options } }
         }
         case 'capabilities.catalog': return { ok: true, value: await service.capabilitiesView() }
+        case 'mcp.list': return { ok: true, value: await service.mcpServersView() }
+        case 'mcp.credential.set': {
+          const server = field(payload, 'server')
+          const value = field(payload, 'value')
+          // The panel saves the server row before writing its token, so only
+          // a stored `mcpServers` name is valid here.
+          const known = new Set(Object.keys(store.settings.mcpServers ?? {}))
+          const problem = validateMcpCredentialSet(server, value, known)
+          if (problem === 'bad-server') return { ok: false, error: { code: 'dot/mcp-bad-server', message: `invalid server name: ${String(server)}` } }
+          if (problem === 'unknown-server') return { ok: false, error: { code: 'dot/mcp-bad-server', message: `unknown MCP server: ${String(server)}` } }
+          if (problem === 'bad-credential') return { ok: false, error: { code: 'dot/mcp-bad-credential', message: `credential value must be a non-empty string of at most ${MCP_CREDENTIAL_VALUE_MAX} characters` } }
+          const credentials = credentialsService()
+          if (credentials?.set === undefined || credentials.describe === undefined) return { ok: false, error: { code: 'dot/mcp-unavailable', message: 'the host credentials service is unavailable' } }
+          const ref = await credentialRefFor(mcpCredentialName(server as string))
+          await credentials.set(ref, value as string)
+          const info = await credentials.describe(ref)
+          return { ok: true, value: { configured: info?.configured === true, masked: info?.masked } }
+        }
+        case 'mcp.credential.unset': {
+          const server = field(payload, 'server')
+          if (typeof server !== 'string' || !MCP_SERVER_NAME_PATTERN.test(server)) return { ok: false, error: { code: 'dot/mcp-bad-server', message: `invalid server name: ${String(server)}` } }
+          const credentials = credentialsService()
+          if (credentials?.unset === undefined) return { ok: false, error: { code: 'dot/mcp-unavailable', message: 'the host credentials service is unavailable' } }
+          await credentials.unset(await credentialRefFor(mcpCredentialName(server)))
+          return { ok: true, value: { configured: false } }
+        }
         case 'settings.decide': {
           const id = field(payload, 'id')
           return { ok: true, value: await service.selfSettings.decide(typeof id === 'string' ? id : '', field(payload, 'allow') === true) }
@@ -637,11 +734,24 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
           return { ok: true, value: await service.restoreCognition(typeof at === 'number' ? at : Number.NaN) }
         }
         case 'settings.set': {
+          const previous = store.settings
           let groups
           try { groups = (await service.capabilitiesView()).groups } catch { groups = undefined }
-          const next = patchSettings(store.settings, field(payload, 'patch'), service.locale, groups)
+          const next = patchSettings(previous, field(payload, 'patch'), service.locale, groups)
+          // A new dot-local server may not reuse a global server's name: its
+          // mount would shadow the global group for dot and inherit grants
+          // the human gave to the global row.
+          const added = Object.keys(next.mcpServers ?? {}).filter(name => !(previous.mcpServers !== undefined && name in previous.mcpServers))
+          const clash = added.find(name => globalMcpNames().has(name))
+          if (clash !== undefined) return { ok: false, error: { code: 'dot/mcp-global-conflict', message: `an MCP server named ${clash} is already connected globally; grant it under extra capabilities instead` } }
           await store.setSettings(next)
           await service.settingsChanged()
+          // Removed dot-local servers release the dot-owned credentials their
+          // headers referenced; other refs (hand-entered names) are left alone.
+          const removed = Object.entries(previous.mcpServers ?? {}).filter(([name]) => !(next.mcpServers !== undefined && name in next.mcpServers))
+          for (const ref of dotOwnedCredentialRefs(removed.map(([, row]) => row))) {
+            try { await credentialsService()?.unset?.(await credentialRefFor(ref)) } catch { /* best effort */ }
+          }
           logger.info('settings.updated', 'Updated Dot settings via RPC.')
           return { ok: true, value: next }
         }

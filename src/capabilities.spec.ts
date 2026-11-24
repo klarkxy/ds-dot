@@ -1298,3 +1298,119 @@ describe('capability card ordering', () => {
     expect(placed?.at).toBe(299)
   })
 })
+
+describe('dot-local MCP groups', () => {
+  const mcpSettings = (mcpServers: DotSettings['mcpServers'], grants: Record<string, 'off' | 'ask' | 'auto'> = {}): DotSettings =>
+    ({ ...DEFAULT_SETTINGS, capabilities: { grants }, mcpServers })
+
+  it('lists preset-scope tools as dot groups with status and shadows same-name global servers', async () => {
+    const { sharedDotMcp } = await import('./mcp-shared.ts')
+    sharedDotMcp().servers.set('github', { state: 'connected', toolCount: 1 })
+    try {
+      const caps = new DotCapabilities({
+        tools: () => fakeTools(['mcp__github__global_tool', 'mcp__exa__search', 'other_tool']),
+        mcpManager: () => ({ list: () => [{ name: 'github' }, { name: 'exa' }] }),
+        pluginManager: () => undefined,
+        settings: () => mcpSettings({ github: { url: 'https://api.githubcopilot.com/mcp/readonly', enabled: true }, deepwiki: { url: 'https://mcp.deepwiki.com/mcp', enabled: true } }),
+        locked: LOCKED,
+        presetDefs: async () => [
+          { name: 'mcp__github__repo_info', description: 'repo info' },
+          { name: 'mcp__deepwiki__ask', description: 'ask' },
+          { name: 'web_search' },
+        ],
+      })
+      const { groups } = await caps.catalog()
+      // The dot-local github group shadows the same-name global one: one row,
+      // preset tools only, live status, dot scope marker.
+      const githubRows = groups.filter(group => group.id === 'mcp:github')
+      expect(githubRows).toHaveLength(1)
+      expect(githubRows[0]).toMatchObject({ scope: 'dot', status: { state: 'connected', toolCount: 1 } })
+      expect(githubRows[0]!.tools.map(tool => tool.name)).toEqual(['mcp__github__repo_info'])
+      const deepwiki = groups.find(group => group.id === 'mcp:deepwiki')!
+      expect(deepwiki.scope).toBe('dot')
+      expect(deepwiki.tools.map(tool => tool.name)).toEqual(['mcp__deepwiki__ask'])
+      // The unrelated global server stays an ordinary group.
+      expect(groups.some(group => group.id === 'mcp:exa' && group.scope === undefined)).toBe(true)
+      // Grants resolve dot-local tool names like any other group.
+      const resolved = resolveGrants({ 'mcp:github': 'auto' }, groups)
+      expect(resolved.get('mcp__github__repo_info')).toMatchObject({ grant: 'auto' })
+    } finally { sharedDotMcp().servers.clear() }
+  })
+
+  it('attributes overlapping prefixes to the longest server name only', async () => {
+    // `team__docs` reaches settings as a stored legacy row; granting the
+    // global `team` must never cover `mcp__team__docs__*` tools.
+    const caps = new DotCapabilities({
+      tools: () => fakeTools(['mcp__team__list', 'mcp__team__docs__search']),
+      mcpManager: () => ({ list: () => [{ name: 'team' }] }),
+      pluginManager: () => undefined,
+      settings: () => mcpSettings({ 'team__docs': { url: 'https://docs.example/mcp', enabled: true } }),
+      locked: LOCKED,
+      presetDefs: async () => [{ name: 'mcp__team__docs__search' }],
+    })
+    const { groups } = await caps.catalog()
+    const team = groups.find(group => group.id === 'mcp:team')!
+    const teamDocs = groups.find(group => group.id === 'mcp:team__docs')!
+    expect(team.scope).toBeUndefined()
+    expect(team.tools.map(tool => tool.name)).toEqual(['mcp__team__list'])
+    expect(teamDocs.scope).toBe('dot')
+    expect(teamDocs.tools.map(tool => tool.name)).toEqual(['mcp__team__docs__search'])
+    // Every tool lands in exactly one group.
+    const all = groups.flatMap(group => group.tools.map(tool => tool.name))
+    expect(all).toHaveLength(new Set(all).size)
+  })
+
+  it('keeps a configured but disconnected server listed so it can be pre-granted', async () => {
+    const caps = new DotCapabilities({
+      tools: () => fakeTools([]),
+      mcpManager: () => undefined,
+      pluginManager: () => undefined,
+      settings: () => mcpSettings({ slow: { url: 'https://slow.example/mcp', enabled: true }, off: { url: 'https://x.example/mcp', enabled: false } }),
+      locked: LOCKED,
+      presetDefs: async () => [],
+    })
+    const { groups } = await caps.catalog()
+    const slow = groups.find(group => group.id === 'mcp:slow')!
+    expect(slow).toMatchObject({ kind: 'mcp', scope: 'dot', tools: [] })
+    expect(groups.find(group => group.id === 'mcp:off')?.status?.state).toBe('off')
+    const resolved = resolveGrants({ 'mcp:slow': 'auto' }, groups)
+    expect(resolved.size).toBe(0)
+  })
+})
+
+describe('mcpServersView', () => {
+  it('describes dot-owned credential refs without ever returning values', async () => {
+    const described: string[] = []
+    const store = new DotStore(undefined)
+    await store.setSettings({
+      ...DEFAULT_SETTINGS,
+      mcpServers: {
+        github: { catalog: 'github', url: 'https://api.githubcopilot.com/mcp/readonly', headers: { Authorization: 'Bearer ${credential:DOT_MCP_GITHUB_TOKEN}' }, enabled: true },
+        deepwiki: { url: 'https://mcp.deepwiki.com/mcp', enabled: true },
+      },
+    })
+    const service = new DotService({
+      host: {} as never, store, homeDir: '/tmp/dot-mcp-view-test',
+      credentials: { describe: async (ref: string) => { described.push(ref); return { configured: true, masked: '•••1' } } },
+    })
+    const view = await service.mcpServersView()
+    const github = view.servers.find(server => server.name === 'github')!
+    expect(github).toMatchObject({ auth: 'token', credential: { ref: 'DOT_MCP_GITHUB_TOKEN', configured: true, masked: '•••1' }, tokenUrl: 'https://github.com/settings/personal-access-tokens/new' })
+    expect(view.servers.find(server => server.name === 'deepwiki')?.auth).toBe('none')
+    // Already-configured ids drop out of the recommended catalog.
+    expect(view.catalog.some(entry => entry.id === 'github' || entry.id === 'deepwiki')).toBe(false)
+    expect(view.catalog.some(entry => entry.id === 'exa')).toBe(true)
+    // No credential value rides the payload — only its configured/masked state.
+    expect(described).toEqual(['DOT_MCP_GITHUB_TOKEN'])
+    expect(JSON.stringify(view)).not.toMatch(/sk_|ghp_|secret/i)
+  })
+
+  it('releases only dot-owned credential refs when servers are removed', async () => {
+    const { dotOwnedCredentialRefs } = await import('./contracts.ts')
+    const removed = [
+      { url: 'u', enabled: true, headers: { Authorization: 'Bearer ${credential:DOT_MCP_A_TOKEN}', 'X-B': '${credential:OTHER_REF}' } },
+      { url: 'u', enabled: true },
+    ]
+    expect(dotOwnedCredentialRefs(removed)).toEqual(['DOT_MCP_A_TOKEN'])
+  })
+})

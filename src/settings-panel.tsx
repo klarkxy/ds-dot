@@ -1402,7 +1402,7 @@ export const settingsCss = `
 .dsh-dot-chat .dsh-dot-mcp-line { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 8px; min-width: 0; }
 .dsh-dot-chat .dsh-dot-mcp-name { flex-shrink: 0; font-size: 13px; line-height: 20px; font-weight: 500; color: var(--dsw-alias-label-primary); }
 .dsh-dot-chat .dsh-dot-mcp-status, .dsh-dot-chat .dsh-dot-mcp-about { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; line-height: 16px; color: var(--dsw-alias-label-tertiary); }
-.dsh-dot-chat .dsh-dot-mcp-actions { display: inline-flex; align-items: center; gap: 4px; margin-left: auto; flex-shrink: 0; }
+.dsh-dot-chat .dsh-dot-mcp-actions { display: inline-flex; align-items: center; flex-wrap: wrap; justify-content: flex-end; gap: 2px 4px; margin-left: auto; flex-shrink: 1; min-width: 0; }
 .dsh-dot-chat .dsh-dot-mcp-menu { display: inline-flex; align-items: center; gap: 0; }
 .dsh-dot-chat .dsh-dot-mcp-state { display: inline-block; width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
 .dsh-dot-chat .dsh-dot-mcp-state--ok { background: var(--dsw-alias-state-success-primary); }

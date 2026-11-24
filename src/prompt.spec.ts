@@ -75,4 +75,25 @@ describe('coordinator prompt contract', () => {
       expect(DOT_INSTRUCTIONS, stale).not.toContain(stale)
     }
   })
+  it('grounds repo references in real files and git refs, accounting for linked worktrees', () => {
+    const repoCheck = DOT_INSTRUCTIONS.split('\n').find((entry) => entry.includes('names a repository script, remote, or branch'))
+    expect(repoCheck).toBeDefined()
+    for (const phrase of ['package.json', "main checkout's .git/config", 'pointer file', 'linked worktree', 'reading .git/config there fails', 'never proves a branch exists', 'verify refs inside the run', 'base_ref', 'base_remote']) {
+      expect(repoCheck).toContain(phrase)
+    }
+  })
+  it('guards promised follow-ups and worktree creation against stale baselines and disabled idle checks', () => {
+    const followUp = DOT_INSTRUCTIONS.split('\n').find((entry) => entry.includes('promise follow-up work for later'))
+    expect(followUp).toBeDefined()
+    for (const phrase of ['isolation=worktree', 'stacked PR', 'never call action=create early on a stale HEAD', TOOL.schedule, 'prerequisite task ID', 'idleCheckMinutes === 0', 'land in the target checkout', 'panel acceptance']) {
+      expect(followUp).toContain(phrase)
+    }
+  })
+  it('registers project workspaces only when dispatching work there and informs the human', () => {
+    const workspace = DOT_INSTRUCTIONS.split('\n').find((entry) => entry.includes('Register a new workspace'))
+    expect(workspace).toBeDefined()
+    for (const phrase of ['dispatch work into', 'mention it to the human', 'do not register broad parent folders']) {
+      expect(workspace).toContain(phrase)
+    }
+  })
 })

@@ -3539,22 +3539,26 @@ export class DotService {
   private selfRunBlocked(change: ChangeRecord, run: RunRecord | undefined, scope: WriteScope): boolean {
     const self = this.options.selfInstall
     if (!self || !scopeWrites(scope)) return false
+    const root = self.root
     const isolation = change.isolation
-    if (isolation?.kind === 'worktree') {
+    // Only a linked self-maintenance worktree gets cwd / workspace-exclusive
+    // exemption; explicit scope.paths are always checked against live self.root.
+    const selfWorktree = (() => {
+      if (isolation?.kind !== 'worktree' || !this.sameRealPath(isolation.repoRoot, root)) return false
       try {
-        if (insideOrEqual(realpathOrResolve(isolation.worktree), realpathOrResolve(change.cwd))) return false
+        return insideOrEqual(realpathOrResolve(isolation.worktree), realpathOrResolve(change.cwd))
       } catch {
         // A missing worktree still must not authorize a live-checkout cwd.
+        return false
       }
-    }
-    const root = self.root
-    if (insideOrEqual(root, realpathOrResolve(change.cwd))) return true
+    })()
+    if (!selfWorktree && insideOrEqual(root, realpathOrResolve(change.cwd))) return true
     const scopeRoot = run?.workspaceRoot || change.cwd
     const scopeRootReal = realpathOrResolve(scopeRoot)
     if (self.mode === 'installed') {
       // Only the package itself is off-limits. A host project that merely
       // contains node_modules/ds-dot is a normal write target.
-      if (scope.kind === 'workspace-exclusive') return insideOrEqual(root, scopeRootReal)
+      if (scope.kind === 'workspace-exclusive') return !selfWorktree && insideOrEqual(root, scopeRootReal)
       return scope.paths.some(entry => {
         try {
           return insideOrEqual(root, realpathOrResolve(absoluteScopePath(scopeRoot, entry.path)))
@@ -3563,7 +3567,10 @@ export class DotService {
         }
       })
     }
-    if (scope.kind === 'workspace-exclusive') return insideOrEqual(scopeRootReal, root) || insideOrEqual(root, scopeRootReal)
+    if (scope.kind === 'workspace-exclusive') {
+      if (selfWorktree) return false
+      return insideOrEqual(scopeRootReal, root) || insideOrEqual(root, scopeRootReal)
+    }
     return scope.paths.some(entry => {
       try {
         const absolute = realpathOrResolve(absoluteScopePath(scopeRoot, entry.path))
@@ -3610,14 +3617,16 @@ export class DotService {
     return { dir, isolation: 'worktree' }
   }
 
-  /** Map in-checkout absolute write paths onto the new worktree; leave relative paths alone; reject anything outside the original cwd. */
+  /** Map in-checkout absolute write paths onto the worktree; keep paths already in the worktree and relative paths; reject anything outside both. */
   private remapSelfScopePaths(fromRoot: string, toRoot: string, paths: string): string {
     const listed = pathScope(paths)
     if (!listed) return paths
     const from = realpathOrResolve(fromRoot)
+    const to = realpathOrResolve(toRoot)
     return JSON.stringify(listed.map(entry => {
       if (!isAbsolute(entry.path)) return entry
       const absolute = realpathOrResolve(entry.path)
+      if (insideOrEqual(to, absolute)) return entry
       if (!insideOrEqual(from, absolute)) {
         throw new DotError('dot/invalid', `scope ${entry.path} is outside ${fromRoot}`)
       }
@@ -4252,6 +4261,11 @@ export class DotService {
       }
       changeId = change.id
       void this.pruneWorkArtifactsIfNeeded()
+    } else if (paths && role !== 'review' && input.access === 'write' && change.isolation?.kind === 'worktree') {
+      const self = this.options.selfInstall
+      if (self?.mode === 'linked' && this.sameRealPath(change.isolation.repoRoot, self.root)) {
+        paths = this.remapSelfScopePaths(change.isolation.repoRoot, change.isolation.worktree, paths)
+      }
     }
     // Three failed rounds on this input revision is a sign to stop, not retry.
     if (role !== 'review') {
@@ -4273,7 +4287,9 @@ export class DotService {
     // Changes older than the self-checkout guard can still name dot's live
     // checkout; their write runs stop here, before any reservation is taken.
     if (role !== 'review' && this.selfRunBlocked(change, selected, scope)) {
-      throw new DotError('dot/self', `${change.id} targets dot's own live checkout without isolation, so no write run starts on it. Create a new task for this work; it runs in a git worktree.`)
+      throw new DotError('dot/self', change.isolation?.kind === 'worktree'
+        ? `${change.id} targets dot's own live checkout in its write scope, so no write run starts on it.`
+        : `${change.id} targets dot's own live checkout without isolation, so no write run starts on it. Create a new task for this work; it runs in a git worktree.`)
     }
     const report = await this.scopeReport(change.cwd, change.id, selected ? occupantOf(selected) : plannedOccupant(change.cwd, scope, this.rootHint(change.cwd)))
     if (scopeWrites(scope) && report.blocked) throw new DotError('dot/locked', report.text)

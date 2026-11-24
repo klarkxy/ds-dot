@@ -70,7 +70,7 @@ import { formatDuration, formatTokens } from './ui-copy.ts'
 import type { RawEvent } from './chat.ts'
 import { SelfSettings } from './self-settings.ts'
 import { approvalCardCopy, copyLocale, t, type CopyLocale } from './i18n/index.ts'
-import { HIGH_RISK_TOOLS, HOST_SCHEDULE_MUTATORS, hostScheduleTargetsDot, resolveGrants, type DotCapabilities } from './capabilities.ts'
+import { HOST_SCHEDULE_MUTATORS, hostScheduleTargetsDot, isTaskOnlySelector, TASK_ONLY_TOOLS, type DotCapabilities } from './capabilities.ts'
 import type { CapabilityCatalogView, CapabilityGrant, CapabilityGroupView } from './contracts.ts'
 import type { GateVerdict } from './tool-scope.ts'
 
@@ -463,6 +463,9 @@ export class DotService {
     const caps = this.options.capabilities
     const dot = this.store.dotSessionId
     if (!caps || !dot || this.closing) return { kind: 'deny', reason: 'This preset cannot run that tool.' }
+    // Task-run tools never reach dot's own session; if one was somehow applied
+    // anyway the gate still refuses it here.
+    if (TASK_ONLY_TOOLS.has(exec.name)) return { kind: 'deny', reason: `${exec.name} belongs to task runs; dispatch a dot_task instead.` }
     const entry = caps.appliedFor(dot)?.get(exec.name)
     if (!entry) return { kind: 'deny', reason: `The extra capability ${exec.name} was not applied to this segment.` }
     const live = caps.liveGrant(entry.chain)
@@ -565,9 +568,13 @@ export class DotService {
       const chain = group.kind === 'host' || group.id === 'builtin' ? parents : [group.id, ...parents]
       for (const tool of group.tools) {
         if (tool.missing === true) { lines.push(`${indent}  ${tool.name} — UNAVAILABLE (grant kept)`); continue }
+        if (tool.taskOnly === true) {
+          lines.push(`${indent}  ${tool.name} — grant=off (task-only: runs use it; never applied to dot)`)
+          continue
+        }
         let effective: string | undefined
         for (const selector of [`tool:${tool.name}`, ...chain]) { if (grants[selector] !== undefined) { effective = grants[selector]; break } }
-        const flags = [tool.conditional ? 'conditional (when-gate bypassed while granted)' : '', tool.highRisk === true ? 'HIGH RISK (runs unapproved and unsandboxed)' : '', applied?.has(tool.name) ? `applied=${applied.get(tool.name)?.grant}` : 'not applied this segment'].filter(Boolean).join(', ')
+        const flags = [tool.conditional ? 'conditional (when-gate bypassed while granted)' : '', applied?.has(tool.name) ? `applied=${applied.get(tool.name)?.grant}` : 'not applied this segment'].filter(Boolean).join(', ')
         lines.push(`${indent}  ${tool.name} — grant=${effective ?? 'off'}${flags ? ` (${flags})` : ''}`)
       }
       for (const child of group.children ?? []) row(child, chain, `${indent}  `)
@@ -589,17 +596,15 @@ export class DotService {
     if (selector === 'host' || selector === 'builtin') throw new DotError('dot/invalid', 'unattributed tools are granted one by one with tool:<name> or prefix:<segment>; there is no host-wide grant')
     if (!/^(tool|mcp|plugin|prefix|builtin):/.test(selector)) throw new DotError('dot/invalid', 'selector must be tool:<name>, mcp:<server>, plugin:<bundle>[#<entry>], builtin:<id>, or prefix:<segment>')
     if (selector.startsWith('tool:') && caps.locked.includes(selector.slice(5))) throw new DotError('dot/invalid', `${selector.slice(5)} is a locked dot tool; it is always on and cannot be granted`)
+    let groups: readonly CapabilityGroupView[] | undefined
+    try { groups = (await caps.catalog()).groups } catch { groups = undefined }
+    if (isTaskOnlySelector(selector, groups)) {
+      const name = selector.startsWith('tool:') ? selector.slice(5) : selector
+      throw new DotError('dot/invalid', `${name} belongs to task runs; dispatch a dot_task instead.`)
+    }
     if (!['off', 'ask', 'auto'].includes(input.grant)) throw new DotError('dot/invalid', 'grant must be off, ask, or auto')
     const grants = { ...this.store.settings.capabilities?.grants, [selector]: input.grant }
-    let reason = input.reason
-    if (input.grant === 'auto') {
-      // Warn the human when the merged grants would let a self-escalating tool
-      // run unapproved and unsandboxed; the proposal still stands.
-      const { groups } = await caps.catalog()
-      const risky = [...resolveGrants(grants, groups)].filter(([name, resolved]) => resolved.grant === 'auto' && HIGH_RISK_TOOLS.has(name)).map(([name]) => name).sort()
-      if (risky.length > 0) reason = `${reason}\nWarning: this makes ${risky.join(', ')} run automatically — no approval and no sandbox.`
-    }
-    return this.selfSettings.propose({ field: 'capabilities', value: { grants }, reason })
+    return this.selfSettings.propose({ field: 'capabilities', value: { grants }, reason: input.reason })
   }
 
   /**

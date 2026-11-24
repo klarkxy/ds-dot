@@ -609,7 +609,9 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
           return { ok: true, value: await service.restoreCognition(typeof at === 'number' ? at : Number.NaN) }
         }
         case 'settings.set': {
-          const next = patchSettings(store.settings, field(payload, 'patch'), service.locale)
+          let groups
+          try { groups = (await service.capabilitiesView()).groups } catch { groups = undefined }
+          const next = patchSettings(store.settings, field(payload, 'patch'), service.locale, groups)
           await store.setSettings(next)
           await service.settingsChanged()
           logger.info('settings.updated', 'Updated Dot settings via RPC.')

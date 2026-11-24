@@ -369,8 +369,8 @@ export interface CapabilityToolView {
   readonly conditional: boolean
   /** Granted but not currently registered. */
   readonly missing?: boolean
-  /** Self-escalating under dot's full-access session: runs unsandboxed with no host approval. */
-  readonly highRisk?: boolean
+  /** Belongs to task runs: never applied to dot's own session under any grant. */
+  readonly taskOnly?: boolean
 }
 
 /** A grantable group of extra tools: one MCP server, one bundle, one loader entry, one host built-in row, an unattributed name prefix, or the unattributed remainder. */
@@ -381,8 +381,6 @@ export interface CapabilityGroupView {
   readonly label: string
   /** Granted but nothing currently owns the selector. */
   readonly missing?: boolean
-  /** At least one tool inside the group (at any depth) is high-risk. */
-  readonly highRisk?: boolean
   readonly tools: readonly CapabilityToolView[]
   readonly children?: readonly CapabilityGroupView[]
 }

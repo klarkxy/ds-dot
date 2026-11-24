@@ -278,17 +278,17 @@
       paragraphs: {
         zh: [
           '查文件、列目录或者跑平常的本地测试，照你的设置顺手放行就好，省得写正顺手时老被打断；只读任务借用外部工具时，也只让查资料的动作过去。任务跑在独立的临时工作树里时，像拉取分支或本地清理这类只在它自己目录里转的沙盒申请和 Git 重置，现在我会先对照任务目标自己掂量，免得老打断你；遇到参数太长被截断的请求，也会先翻完完整内容再决定批不批（万一拿不到全文，还是乖乖交回给你）。',
-          '不过门前的红线一点没松：只要命令带着目录切换或参数指回你的主目录和其他文件夹，或者遇到真删文件、往外推送发布、碰敏感凭据、拿不准边界的事，动作会立刻停下。面板会递上一张写清前因后果和建议的确认卡，你在别处处理了或卡片过期了它会自己收起；哪怕平时面板折起来，真需要你拍板时侧栏红点和桌面提示还是会叫你，你不点就绝不算答应。',
+          '不过门前的红线一点没松：只要命令带着目录切换或参数指回你的主目录和其他文件夹，或者遇到真删文件、往外推送发布、碰敏感凭据、拿不准边界的事，动作会立刻停下。面板会递上一张写清前因后果和建议的确认卡，你在别处处理了或卡片过期了它会自己收起；哪怕平时面板折起来，真需要你拍板时侧栏红点和桌面提示还是会叫你，你不点就绝不算答应。改我自己也算这一类：从插件市场装的那份我不动，想改请找维护者；开发时链接进来的那份，我先在旁边的临时分支里改，你点了合并才重新构建，旧版本也会先备份好。重建要是没加载上，面板会告诉你上次备份在哪，把那份 lib 拷回去再重启就行。',
           '后来又把一条线划死了：凡是改文件、跑命令这类真动手的工具，我自己一律不碰——就算你顺手给了授权，它们也只归派出去的任务用。我呢，写备忘、递提案、查查资料就好；真要动手就写工单派任务，反正那边有范围有留档，出了岔子也查得回来。',
         ],
         en: [
           'Read-only checks, directory listings, and ordinary local tests pass quietly under your defaults so nobody breaks your focus, and read-only tasks still block external write tools. When a task runs inside its own isolated worktree, though, things like wider sandbox access for a git fetch or a git reset/clean confined strictly to that worktree are things I now weigh against the task scope myself instead of waking you every time. For extra-long requests that get trimmed in summary, I read the full arguments first before allowing them—and if the full text isn’t available, I still hand it over to you.',
-          'Anything pointing back at your main checkout or another folder, real file deletions, outward pushes or publishes, secret access, or gray areas still freeze at the gate. You get one clean card stating what is waiting and what I suggest (settled or expired cards tidy themselves up), and even with my panel folded away, a sidebar badge and optional desktop ping call you in—silence never counts as yes.',
+          'Anything pointing back at your main checkout or another folder, real file deletions, outward pushes or publishes, secret access, or gray areas still freeze at the gate. You get one clean card stating what is waiting and what I suggest (settled or expired cards tidy themselves up), and even with my panel folded away, a sidebar badge and optional desktop ping call you in—silence never counts as yes. Changing myself counts too: a copy installed from the plugin market stays untouched (ask the maintainers instead), and on a linked dev checkout I work on a side branch first, rebuilding only after you merge, with the old build backed up. If that rebuild fails to load, the panel points at the backup so you can copy it back onto lib/ and restart.',
           'One line is now set in stone: any tool that edits files or runs commands stays out of my hands—even if you grant it to me, it only works inside a dispatched run. I stick to notes, proposals, and quick lookups; when something needs doing for real, I write a work order and send a task, which comes with a scope and a paper trail.',
         ],
         ja: [
           'ファイル参照やローカルテストのような普段の確認はそのまま通して作業を止めず、読み取り専用の作業では外部ツールの書き込み系もしっかり抑えています。一方で、独立した一時ワークツリーの中で動くタスクが作業用の権限を広げたり、そのワークツリー内だけで git reset や clean を行う場合は、作業目的に沿っているか自分で確かめて判断するようにしました。引数が長くて省略されたリクエストも、まず全文を読み切ってから可否を決めます（全文が取れないときは無理せずお任せします）。',
-          'ただし元の作業フォルダや別ディレクトリへ向く指定、ファイル削除や外部へのプッシュ、機密情報へのアクセス、判断に迷う場面ではその場でピタッと止まります。理由と提案つきの確認カードを出して待ち（解決や期限切れで自動クローズ）、パネルを閉じていてもバッジやデスクトップ通知でお知らせするので、無言のまま進んでしまうことはありません。',
+          'ただし元の作業フォルダや別ディレクトリへ向く指定、ファイル削除や外部へのプッシュ、機密情報へのアクセス、判断に迷う場面ではその場でピタッと止まります。理由と提案つきの確認カードを出して待ち（解決や期限切れで自動クローズ）、パネルを閉じていてもバッジやデスクトップ通知でお知らせするので、無言のまま進んでしまうことはありません。自分自身を直す場合も同じで、プラグインマーケットから入れた本体には手を付けず（変更はメンテナーへ）、開発用にリンクした本体なら横の作業ブランチで直し、マージしてもらってから旧版を控えて組み直します。組み直しが読み込めなかったときは、パネルがバックアップ場所を案内するので、その lib を戻して再起動してください。',
           'もう一つ、線をはっきり引きました。ファイルを書き換えたりコマンドを実行したりするツールは、私自身の手では一切使いません。許可をいただいても、そういう作業は派遣したタスクだけのものです。私はメモや提案、簡単な調べ物にとどめて、本当に手を動かす必要があれば作業指示を書いてタスクに任せます。範囲も記録も残るので安心です。',
         ],
       },

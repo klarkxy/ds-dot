@@ -1,7 +1,7 @@
-import { execFileSync } from 'node:child_process'
+import { execFileSync, spawn } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { describe, expect, it, vi } from 'vitest'
 import type { Timer } from './batcher.ts'
 import type { RawEvent } from './chat.ts'
@@ -14,8 +14,13 @@ import { launchReservedRun } from './execution.ts'
 import { shouldDeferApprovalToSafeAuto } from './approval-safe-auto.ts'
 import { agreementsSection } from './memory.ts'
 import { PACKAGE_NAME, type PluginManagerLike } from './auto-update.ts'
+import { DomainFacility } from '@deepseek-ai/dsh-storage-domain'
+import { JsonStorageBackend } from '@deepseek-ai/dsh-storage-json'
+import { openCompatibleDomain } from '@klarkxy/dsh-plugin-kit/domain'
+import { dotDomain } from './storage.ts'
 import { DotStore, type DotDomainHandle } from './store.ts'
 import { TASK_BRANCH_PREFIX, TASK_WORKTREES_DIR, listTaskWorktrees, runGit } from './git-worktree.ts'
+import { killProcessTree, libHashOf, runSelfBuild } from './self-root.ts'
 import { canonicalPath, onDiskPath } from './work.ts'
 import { upsertRecipeOutcome } from './recipes.ts'
 
@@ -174,7 +179,7 @@ function fakeHost() {
   }
 }
 
-function setup(settings?: Partial<DotSettings>, trace?: { info: (event: string, message: string, context?: Record<string, unknown>) => boolean; debug: (event: string, message: string, context?: Record<string, unknown>) => boolean; warn: (event: string, message: string, error?: unknown, context?: Record<string, unknown>) => boolean }, homeDir = join(tmpdir(), 'dsh-dot-spec'), extra: { pluginManager?: () => unknown; git?: typeof runGit; capabilities?: unknown; cognitionPromptEntries?: number } = {}) {
+function setup(settings?: Partial<DotSettings>, trace?: { info: (event: string, message: string, context?: Record<string, unknown>) => boolean; debug: (event: string, message: string, context?: Record<string, unknown>) => boolean; warn: (event: string, message: string, error?: unknown, context?: Record<string, unknown>) => boolean }, homeDir = join(tmpdir(), 'dsh-dot-spec'), extra: { pluginManager?: () => unknown; git?: typeof runGit; capabilities?: unknown; cognitionPromptEntries?: number; selfInstall?: { readonly root: string; readonly mode: 'linked' | 'installed' }; selfBuild?: (root: string, signal?: AbortSignal) => Promise<{ readonly ok: boolean; readonly output: string }> } = {}) {
   const fake = fakeHost()
   const clock = manualTimer()
   const store = new DotStore(undefined)
@@ -185,7 +190,7 @@ function setup(settings?: Partial<DotSettings>, trace?: { info: (event: string, 
   // A fresh install defaults to tracked; see DEFAULT_SETTINGS.
   void store.setSettings({ ...DEFAULT_SETTINGS, reflection: false, idleCheckMinutes: 0, autoUpdate: false, scope: 'all', ...settings })
   let at = 1000
-  const service = new DotService({ host: fake.host, store, homeDir, approvalGraceMs: 0, timer: clock.timer, now: () => at, ...(trace ? { trace } : {}), ...(extra.pluginManager ? { pluginManager: extra.pluginManager } : {}), ...(extra.git ? { git: extra.git } : {}), ...(extra.capabilities !== undefined ? { capabilities: extra.capabilities as never } : {}), ...(extra.cognitionPromptEntries !== undefined ? { cognitionPromptEntries: extra.cognitionPromptEntries } : {}) })
+  const service = new DotService({ host: fake.host, store, homeDir, approvalGraceMs: 0, timer: clock.timer, now: () => at, ...(trace ? { trace } : {}), ...(extra.pluginManager ? { pluginManager: extra.pluginManager } : {}), ...(extra.git ? { git: extra.git } : {}), ...(extra.capabilities !== undefined ? { capabilities: extra.capabilities as never } : {}), ...(extra.cognitionPromptEntries !== undefined ? { cognitionPromptEntries: extra.cognitionPromptEntries } : {}), ...(extra.selfInstall ? { selfInstall: extra.selfInstall } : {}), ...(extra.selfBuild ? { selfBuild: extra.selfBuild } : {}) })
   return { ...fake, ...clock, store, service, advance: (ms: number) => { at += ms } }
 }
 
@@ -4451,6 +4456,653 @@ describe('recipe proposals', () => {
     const reopened = new DotStore(memoryDomain(seed).domain)
     expect(reopened.recipeProposals).toHaveLength(1)
     expect(reopened.recipeProposals[0]).toMatchObject({ id: 'rpp-1', kind: 'restore', targetRevision: 1, status: 'pending' })
+  })
+})
+
+describe.skipIf(!worktreeGitAvailable)('self-checkout guard and self-upgrade', { timeout: 30_000 }, () => {
+  const linkedSelf = (repo: string) => ({ root: realpathSync.native(repo), mode: 'linked' as const })
+  const installedSelf = (repo: string) => {
+    const root = join(repo, 'node_modules', 'ds-dot')
+    mkdirSync(root, { recursive: true })
+    return { root: realpathSync.native(root), mode: 'installed' as const }
+  }
+  const selfLib = (root: string, body: string) => { mkdirSync(join(root, 'lib'), { recursive: true }); writeFileSync(join(root, 'lib', 'index.js'), body) }
+  const upgradeDirs = (home: string) => {
+    const root = join(home, 'self-upgrade')
+    return existsSync(root) ? readdirSync(root) : []
+  }
+  const openDiskStore = async (dir: string) => {
+    const backend = new JsonStorageBackend(dir)
+    const facility = new DomainFacility({
+      storage: { backend: { get: (name: string) => {
+        if (name !== 'json') throw new Error('unexpected backend')
+        return backend
+      } } }, logger: { error() {}, warn() {} }, emit() {},
+    } as never, { backend: 'json' })
+    const domain = await openCompatibleDomain(spec => facility.open(spec), dotDomain)
+    const store = new DotStore(domain)
+    return {
+      store,
+      close: async () => {
+        await store.flush()
+        await domain.close()
+        await facility.closeAll()
+        await backend.close()
+      },
+    }
+  }
+  /** Boot a DotService backed by a freshly opened on-disk DotStore so restart persistence is exercised end-to-end. */
+  const openBoot = async (
+    home: string,
+    extra: {
+      shared?: { readonly host: DotHost; readonly timer: Timer; readonly said: ReturnType<typeof fakeHost>['said'] }
+      init?: boolean
+      git?: typeof runGit
+      selfInstall?: { readonly root: string; readonly mode: 'linked' | 'installed' }
+      selfBuild?: (root: string, signal?: AbortSignal) => Promise<{ readonly ok: boolean; readonly output: string }>
+    } = {},
+  ) => {
+    const base = extra.shared ?? (() => {
+      const fake = fakeHost()
+      const clock = manualTimer()
+      return { host: fake.host, timer: clock.timer, said: fake.said }
+    })()
+    const disk = await openDiskStore(join(home, 'domain'))
+    if (extra.init) {
+      await disk.store.setSettings({ ...DEFAULT_SETTINGS, reflection: false, idleCheckMinutes: 0, autoUpdate: false, scope: 'all' })
+    }
+    const service = new DotService({
+      host: base.host, store: disk.store, homeDir: home, approvalGraceMs: 0, timer: base.timer, now: () => 1000,
+      ...(extra.git ? { git: extra.git } : {}),
+      ...(extra.selfInstall ? { selfInstall: extra.selfInstall } : {}),
+      ...(extra.selfBuild ? { selfBuild: extra.selfBuild } : {}),
+    })
+    return {
+      ...base,
+      store: disk.store,
+      service,
+      close: async () => {
+        await service.dispose()
+        await disk.close()
+      },
+    }
+  }
+  const taskBranches = async (repo: string) =>
+    (await runGit(['for-each-ref', '--format=%(refname:short)', `refs/heads/${TASK_BRANCH_PREFIX}*`], repo))
+      .split('\n').map(line => line.trim()).filter(Boolean)
+
+  it('create on a linked checkout forces a worktree even when isolation is "none"', async () => {
+    const { repo, home, cleanup } = makeSpecRepo('dot-self-link-')
+    const h = setup(undefined, undefined, home, { git: runGit, selfInstall: linkedSelf(repo) })
+    try {
+      const raw = await h.service.manageTask({ action: 'create', title: 'Self', goal: 'patch dot', dir: repo, isolation: 'none' })
+      const created = JSON.parse(raw) as { id: string; isolationNote?: string }
+      const change = h.store.work.change(created.id)!
+      expect(change.isolation?.kind).toBe('worktree')
+      expect(change.cwd).toContain(TASK_WORKTREES_DIR)
+      expect(created.isolationNote).toContain('live checkout')
+    } finally { await h.service.dispose(); cleanup() }
+  })
+
+  it('create on an installed package is refused outright; a dir outside self is untouched', async () => {
+    const { repo, home, cleanup } = makeSpecRepo('dot-self-inst-')
+    const h = setup(undefined, undefined, home, { git: runGit, selfInstall: installedSelf(repo) })
+    try {
+      await expect(h.service.manageTask({ action: 'create', title: 'Self', goal: 'patch', dir: join(repo, 'node_modules', 'ds-dot') }))
+        .rejects.toMatchObject({ code: 'dot/self' })
+      const raw = await h.service.manageTask({ action: 'create', title: 'Other', goal: 'elsewhere', dir: repo, isolation: 'none' })
+      const created = JSON.parse(raw) as { id: string; isolationNote?: string }
+      expect(h.store.work.change(created.id)!.isolation).toBeUndefined()
+      expect(created.isolationNote).toBeUndefined()
+    } finally { await h.service.dispose(); cleanup() }
+  })
+
+  it('an implicit write dispatch into a linked checkout is isolated; installed is refused; read is untouched', async () => {
+    const { repo, home, cleanup } = makeSpecRepo('dot-self-disp-')
+    const h = setup(undefined, undefined, home, { git: runGit, selfInstall: linkedSelf(repo) })
+    try {
+      await h.service.manageTask({ action: 'dispatch', title: 'W', message: 'edit dot', dir: repo, access: 'write' })
+      const write = h.store.work.listChanges().at(-1)!
+      expect(write.isolation?.kind).toBe('worktree')
+      expect(write.cwd).toContain(TASK_WORKTREES_DIR)
+      await h.service.manageTask({ action: 'dispatch', title: 'R', message: 'read dot', dir: repo, access: 'read' })
+      const read = h.store.work.listChanges().at(-1)!
+      expect(read.isolation).toBeUndefined()
+    } finally { await h.service.dispose(); cleanup() }
+
+    const { repo: repo2, home: home2, cleanup: cleanup2 } = makeSpecRepo('dot-self-disp2-')
+    const h2 = setup(undefined, undefined, home2, { git: runGit, selfInstall: installedSelf(repo2) })
+    try {
+      await expect(h2.service.manageTask({ action: 'dispatch', title: 'W', message: 'edit dot', dir: join(repo2, 'node_modules', 'ds-dot'), access: 'write' }))
+        .rejects.toMatchObject({ code: 'dot/self' })
+      await h2.service.manageTask({ action: 'dispatch', title: 'R', message: 'read dot', dir: join(repo2, 'node_modules', 'ds-dot'), access: 'read' })
+      expect(h2.store.work.listChanges().at(-1)!.isolation).toBeUndefined()
+    } finally { await h2.service.dispose(); cleanup2() }
+  })
+
+  it('a pre-existing non-isolated self change refuses a write dispatch; isolated and non-self changes run', async () => {
+    const { repo, home, cleanup } = makeSpecRepo('dot-self-old-')
+    const h = setup(undefined, undefined, home, { git: runGit, selfInstall: linkedSelf(repo) })
+    try {
+      // Simulates a change created before the guard, like the live c-16.
+      const old = await h.service.createWorkChange({ title: 'Old self write', cwd: repo, goal: 'patch dot', requirements: [{ requirementRef: 'goal', text: 'patch dot', required: true }], at: 1 })
+      await expect(h.service.manageTask({ action: 'dispatch', task_id: old.id, instruction: 'edit', access: 'write' }))
+        .rejects.toMatchObject({ code: 'dot/self', message: expect.stringContaining('live checkout') })
+      // The refusal took no reservation and captured no baseline.
+      expect(h.store.work.listRuns().filter(run => run.changeId === old.id)).toHaveLength(0)
+
+      const other = await h.service.createWorkChange({ title: 'Other', cwd: join(repo, '..', 'elsewhere-x'), goal: 'elsewhere', requirements: [{ requirementRef: 'goal', text: 'elsewhere', required: true }], at: 2 })
+      await expect(h.service.manageTask({ action: 'dispatch', task_id: other.id, instruction: 'edit', access: 'write' })).resolves.toMatch(/started|reserved/)
+
+      const created = JSON.parse(await h.service.manageTask({ action: 'create', title: 'Iso self', goal: 'patch dot', dir: repo })) as { id: string }
+      expect(h.store.work.change(created.id)!.isolation?.kind).toBe('worktree')
+      await expect(h.service.manageTask({ action: 'dispatch', task_id: created.id, instruction: 'edit', access: 'write' })).resolves.toMatch(/started|reserved/)
+    } finally { await h.service.dispose(); cleanup() }
+  })
+
+  it('merge into a linked self repo queues the rebuild: backup, build, marker plus lastBackup follow', async () => {
+    const { repo, home, cleanup } = makeSpecRepo('dot-self-up-')
+    selfLib(repo, 'bundle-v1')
+    await runGit(['add', '-A'], repo)
+    await runGit(['commit', '-m', 'lib v1'], repo)
+    const selfBuild = vi.fn(async () => ({ ok: true as const, output: 'built' }))
+    const h = setup(undefined, undefined, home, { git: runGit, selfInstall: linkedSelf(repo), selfBuild })
+    try {
+      await h.service.ensureDot()
+      const created = JSON.parse(await h.service.manageTask({ action: 'create', title: 'Self', goal: 'patch', dir: repo, isolation: 'worktree', human_review: true })) as { id: string }
+      await finishIsolated(h, created.id, cwd => writeFileSync(join(cwd, 'made.ts'), 'made'))
+      const merged = await h.service.integrateWork(created.id, 'merge')
+      expect(merged).toMatchObject({ ok: true })
+      expect(merged.ok ? merged.text : '').toContain('rebuilding in the background, a notice follows when it finishes')
+      await h.service.selfDeploysSettled()
+      expect(selfBuild).toHaveBeenCalledWith(realpathSync.native(repo), expect.any(AbortSignal))
+      const dirs = upgradeDirs(home)
+      expect(dirs).toHaveLength(1)
+      const backupDir = join(home, 'self-upgrade', dirs[0]!)
+      const backupLib = join(backupDir, 'lib')
+      expect(readFileSync(join(backupLib, 'index.js'), 'utf-8')).toBe('bundle-v1')
+      const marker = h.store.selfUpgrade
+      expect(marker).toMatchObject({ backupDir, libHash: libHashOf(realpathSync.native(repo)) })
+      expect(marker!.commitSha).toMatch(/^[0-9a-f]{40}$/)
+      expect(h.store.selfBackup).toEqual({ dir: backupLib, lib: join(realpathSync.native(repo), 'lib') })
+      await h.service.say('ping')
+      expect(h.said.at(-1)?.carriedNotices).toContain('dot was rebuilt')
+      expect(h.said.at(-1)?.carriedNotices).toContain(`the previous lib is kept at ${backupLib}`)
+      expect(h.said.at(-1)?.carriedNotices).toContain('Restart DeepSeek Harness to load it.')
+    } finally { await h.service.dispose(); cleanup() }
+  })
+
+  it('a failed self build restores lib byte-for-byte and leaves no marker', async () => {
+    const { repo, home, cleanup } = makeSpecRepo('dot-self-fail-')
+    selfLib(repo, 'bundle-v1')
+    await runGit(['add', '-A'], repo)
+    await runGit(['commit', '-m', 'lib v1'], repo)
+    const selfBuild = vi.fn(async (root: string) => {
+      writeFileSync(join(root, 'lib', 'index.js'), 'broken')
+      return { ok: false as const, output: 'compile exploded' }
+    })
+    const h = setup(undefined, undefined, home, { git: runGit, selfInstall: linkedSelf(repo), selfBuild })
+    try {
+      await h.service.ensureDot()
+      const created = JSON.parse(await h.service.manageTask({ action: 'create', title: 'Self', goal: 'patch', dir: repo, isolation: 'worktree', human_review: true })) as { id: string }
+      await finishIsolated(h, created.id, cwd => writeFileSync(join(cwd, 'made.ts'), 'made'))
+      const merged = await h.service.integrateWork(created.id, 'merge')
+      expect(merged).toMatchObject({ ok: true })
+      expect(merged.ok ? merged.text : '').toContain('rebuilding in the background')
+      await h.service.selfDeploysSettled()
+      expect(readFileSync(join(realpathSync.native(repo), 'lib', 'index.js'), 'utf-8')).toBe('bundle-v1')
+      expect(h.store.selfUpgrade).toBeUndefined()
+      expect(upgradeDirs(home)).toHaveLength(0)
+      await h.service.say('ping')
+      const notice = h.said.at(-1)?.carriedNotices ?? ''
+      expect(notice).toContain('rebuild failed')
+      expect(notice).toContain('restored from')
+      expect(notice).toContain('compile exploded')
+    } finally { await h.service.dispose(); cleanup() }
+  })
+
+  it('a dirty live checkout is never rebuilt: no backup, no build, no marker', async () => {
+    const { repo, home, cleanup } = makeSpecRepo('dot-self-dirty-')
+    selfLib(repo, 'bundle-v1')
+    await runGit(['add', '-A'], repo)
+    await runGit(['commit', '-m', 'lib v1'], repo)
+    const selfBuild = vi.fn(async () => ({ ok: true as const, output: 'built' }))
+    const h = setup(undefined, undefined, home, { git: runGit, selfInstall: linkedSelf(repo), selfBuild })
+    try {
+      await h.service.ensureDot()
+      const created = JSON.parse(await h.service.manageTask({ action: 'create', title: 'Self', goal: 'patch', dir: repo, isolation: 'worktree', human_review: true })) as { id: string }
+      await finishIsolated(h, created.id, cwd => writeFileSync(join(cwd, 'made.ts'), 'made'))
+      // Uncommitted tracked edits in the live root ship in a build; untracked
+      // files do not, so this stray file alone would be fine — a.ts is not.
+      writeFileSync(join(repo, 'untracked.txt'), 'ignored by the check')
+      writeFileSync(join(repo, 'a.ts'), 'dirty')
+      const merged = await h.service.integrateWork(created.id, 'merge')
+      expect(merged).toMatchObject({ ok: true })
+      expect(merged.ok ? merged.text : '').toContain('rebuilding in the background')
+      await h.service.selfDeploysSettled()
+      expect(selfBuild).not.toHaveBeenCalled()
+      expect(upgradeDirs(home)).toHaveLength(0)
+      expect(h.store.selfUpgrade).toBeUndefined()
+      await h.service.say('ping')
+      expect(h.said.at(-1)?.carriedNotices).toContain('uncommitted tracked changes')
+    } finally { await h.service.dispose(); cleanup() }
+  })
+
+  it('merge into a non-self repo never calls the self build', async () => {
+    const { repo, home, cleanup } = makeSpecRepo('dot-self-none-')
+    const selfBuild = vi.fn(async () => ({ ok: true as const, output: 'built' }))
+    const h = setup(undefined, undefined, home, { git: runGit, selfInstall: { root: join(home, 'elsewhere'), mode: 'linked' }, selfBuild })
+    try {
+      const created = JSON.parse(await h.service.manageTask({ action: 'create', title: 'Other', goal: 'land', dir: repo, isolation: 'worktree', human_review: true })) as { id: string }
+      await finishIsolated(h, created.id, cwd => writeFileSync(join(cwd, 'made.ts'), 'made'))
+      const merged = await h.service.integrateWork(created.id, 'merge')
+      expect(merged).toMatchObject({ ok: true })
+      expect(selfBuild).not.toHaveBeenCalled()
+      expect(merged.ok ? merged.text : '').not.toContain('Restart DeepSeek Harness')
+      expect(h.store.selfUpgrade).toBeUndefined()
+    } finally { await h.service.dispose(); cleanup() }
+  })
+
+  it('on start a matching marker reports the running build and clears; a different hash reports the mismatch', async () => {
+    const { repo, home, cleanup } = makeSpecRepo('dot-self-mark-')
+    selfLib(repo, 'bundle-v2')
+    let active: Awaited<ReturnType<typeof openBoot>> | undefined
+    try {
+      active = await openBoot(home, { init: true, selfInstall: linkedSelf(repo) })
+      await active.store.setSelfUpgrade({ at: 1, commitSha: 'abc1234', backupDir: join(home, 'self-upgrade', '1-abc1234'), libHash: libHashOf(realpathSync.native(repo))! })
+      const shared = { host: active.host, timer: active.timer, said: active.said }
+      await active.close()
+      active = undefined
+
+      active = await openBoot(home, { shared, selfInstall: linkedSelf(repo) })
+      expect(active.store.selfUpgrade).toMatchObject({ commitSha: 'abc1234', libHash: libHashOf(realpathSync.native(repo))! })
+      await active.service.ensureDot()
+      active.service.startReminders()
+      await vi.waitFor(() => expect(active!.store.selfUpgrade).toBeUndefined())
+      await active.service.say('ping')
+      expect(active.said.at(-1)?.carriedNotices).toContain('Self-upgrade to abc1234 is running')
+      expect(active.said.at(-1)?.carriedNotices).toContain('1-abc1234')
+      await active.store.setSelfUpgrade({ at: 2, commitSha: 'def5678', backupDir: join(home, 'self-upgrade', '2-def5678'), libHash: 'other-hash' })
+      await active.close()
+      active = undefined
+
+      active = await openBoot(home, { shared, selfInstall: linkedSelf(repo) })
+      expect(active.store.selfUpgrade).toMatchObject({ commitSha: 'def5678', libHash: 'other-hash' })
+      await active.service.ensureDot()
+      active.service.startReminders()
+      await vi.waitFor(() => expect(active!.store.selfUpgrade).toBeUndefined())
+      await active.service.say('ping')
+      expect(active.said.at(-1)?.carriedNotices).toContain('does not match')
+    } finally { await active?.close(); cleanup() }
+  })
+
+  it('revise remaps a live-checkout dir back into the worktree and dispatch still writes there', async () => {
+    const { repo, home, cleanup } = makeSpecRepo('dot-self-revise-')
+    mkdirSync(join(repo, 'src'), { recursive: true })
+    writeFileSync(join(repo, 'src', 'held.ts'), 'held')
+    await runGit(['add', '-A'], repo)
+    await runGit(['commit', '-m', 'src'], repo)
+    const h = setup(undefined, undefined, home, { git: runGit, selfInstall: linkedSelf(repo) })
+    try {
+      const created = JSON.parse(await h.service.manageTask({ action: 'create', title: 'Self', goal: 'patch', dir: repo, isolation: 'none' })) as { id: string }
+      const worktree = h.store.work.change(created.id)!.isolation!.worktree
+      await h.service.manageTask({ action: 'revise', task_id: created.id, dir: join(repo, 'src') })
+      const revised = h.store.work.change(created.id)!
+      expect(canonicalPath(revised.cwd)).toBe(canonicalPath(join(worktree, 'src')))
+      expect(revised.cwd).toContain(TASK_WORKTREES_DIR)
+      await expect(h.service.manageTask({ action: 'dispatch', task_id: created.id, instruction: 'edit', access: 'write' })).resolves.toMatch(/started|reserved/)
+      const run = h.store.work.listRuns().filter(row => row.changeId === created.id).at(-1)!
+      expect(run.cwd).toContain(TASK_WORKTREES_DIR)
+      expect(canonicalPath(run.cwd)).not.toBe(canonicalPath(join(repo, 'src')))
+    } finally { await h.service.dispose(); cleanup() }
+  })
+
+  it('a stale worktree flag with cwd back on the live checkout refuses the write', async () => {
+    const { repo, home, cleanup } = makeSpecRepo('dot-self-stale-')
+    const h = setup(undefined, undefined, home, { git: runGit, selfInstall: linkedSelf(repo) })
+    try {
+      const ghost = join(home, 'worktrees', 'ghost')
+      mkdirSync(ghost, { recursive: true })
+      const old = await h.service.createWorkChange({
+        title: 'Stale iso', cwd: repo, goal: 'patch dot',
+        requirements: [{ requirementRef: 'goal', text: 'patch dot', required: true }],
+        isolation: {
+          kind: 'worktree', repoRoot: realpathSync.native(repo), worktree: ghost,
+          branch: 'dot/task-ghost', baseSha: 'abc', state: 'active', at: 1,
+        },
+        at: 1,
+      })
+      await expect(h.service.manageTask({ action: 'dispatch', task_id: old.id, instruction: 'edit', access: 'write' }))
+        .rejects.toMatchObject({ code: 'dot/self' })
+      expect(h.store.work.listRuns().filter(run => run.changeId === old.id)).toHaveLength(0)
+    } finally { await h.service.dispose(); cleanup() }
+  })
+
+  it('revise of a normal task onto an installed package is refused', async () => {
+    const { repo, home, cleanup } = makeSpecRepo('dot-self-revinst-')
+    const h = setup(undefined, undefined, home, { git: runGit, selfInstall: installedSelf(repo) })
+    try {
+      const created = JSON.parse(await h.service.manageTask({ action: 'create', title: 'Host', goal: 'app', dir: repo, isolation: 'none' })) as { id: string }
+      await expect(h.service.manageTask({ action: 'revise', task_id: created.id, dir: join(repo, 'node_modules', 'ds-dot') }))
+        .rejects.toMatchObject({ code: 'dot/self' })
+      expect(h.store.work.change(created.id)!.cwd).toBe(canonicalPath(repo))
+    } finally { await h.service.dispose(); cleanup() }
+  })
+
+  it('installed mode allows a write on the host project that contains node_modules/ds-dot', async () => {
+    const { repo, home, cleanup } = makeSpecRepo('dot-self-host-')
+    const h = setup(undefined, undefined, home, { git: runGit, selfInstall: installedSelf(repo) })
+    try {
+      await expect(h.service.manageTask({ action: 'dispatch', title: 'App', message: 'edit app', dir: repo, access: 'write' }))
+        .resolves.toMatch(/started|reserved/)
+      const change = h.store.work.listChanges().at(-1)!
+      expect(change.isolation).toBeUndefined()
+      expect(canonicalPath(change.cwd)).toBe(canonicalPath(repo))
+    } finally { await h.service.dispose(); cleanup() }
+  })
+
+  it('auto-isolating a write remaps in-checkout absolute paths onto the worktree', async () => {
+    const { repo, home, cleanup } = makeSpecRepo('dot-self-remap-')
+    const h = setup(undefined, undefined, home, { git: runGit, selfInstall: linkedSelf(repo) })
+    try {
+      const liveFile = join(realpathSync.native(repo), 'a.ts')
+      await expect(h.service.manageTask({
+        action: 'dispatch', title: 'W', message: 'edit a.ts', dir: repo, access: 'write',
+        paths: JSON.stringify([{ path: liveFile, type: 'file' }]),
+      })).resolves.toMatch(/started|reserved/)
+      const change = h.store.work.listChanges().at(-1)!
+      expect(change.cwd).toContain(TASK_WORKTREES_DIR)
+      const run = h.store.work.listRuns().filter(row => row.changeId === change.id).at(-1)!
+      expect(run.writeScope.kind).toBe('paths')
+      const scoped = run.writeScope.kind === 'paths' ? run.writeScope.paths[0]!.path : ''
+      expect(scoped).toContain(TASK_WORKTREES_DIR)
+      expect(canonicalPath(scoped)).not.toBe(canonicalPath(liveFile))
+      const worktreesBefore = listTaskWorktrees(home)
+      const branchesBefore = await taskBranches(repo)
+      await expect(h.service.manageTask({
+        action: 'dispatch', title: 'Out', message: 'edit outside', dir: repo, access: 'write',
+        paths: JSON.stringify([{ path: join(tmpdir(), 'not-self.ts'), type: 'file' }]),
+      })).rejects.toMatchObject({ code: 'dot/invalid' })
+      expect(listTaskWorktrees(home)).toEqual(worktreesBefore)
+      expect(await taskBranches(repo)).toEqual(branchesBefore)
+    } finally { await h.service.dispose(); cleanup() }
+  })
+
+  it('two-step create then dispatch remaps in-checkout absolute paths onto the worktree', async () => {
+    const { repo, home, cleanup } = makeSpecRepo('dot-self-twostep-')
+    const h = setup(undefined, undefined, home, { git: runGit, selfInstall: linkedSelf(repo) })
+    try {
+      const created = JSON.parse(await h.service.manageTask({ action: 'create', title: 'Self', goal: 'patch', dir: repo })) as { id: string }
+      const worktree = h.store.work.change(created.id)!.isolation!.worktree
+      const liveFile = join(realpathSync.native(repo), 'a.ts')
+      await expect(h.service.manageTask({
+        action: 'dispatch', task_id: created.id, instruction: 'edit a.ts', access: 'write',
+        paths: JSON.stringify([{ path: liveFile, type: 'file' }]),
+      })).resolves.toMatch(/started|reserved/)
+      const firstRun = h.store.work.listRuns().filter(row => row.changeId === created.id).at(-1)!
+      expect(firstRun.writeScope.kind).toBe('paths')
+      const remapped = firstRun.writeScope.kind === 'paths' ? firstRun.writeScope.paths[0]!.path : ''
+      expect(canonicalPath(remapped)).toBe(canonicalPath(join(worktree, 'a.ts')))
+      await h.service.manageTask({ action: 'finish', task_id: created.id, run_id: firstRun.id })
+
+      // Paths already targeting the worktree stay valid; paths outside both are rejected.
+      const worktreeFile = join(worktree, 'b.ts')
+      await expect(h.service.manageTask({
+        action: 'dispatch', task_id: created.id, instruction: 'edit b.ts', access: 'write',
+        paths: JSON.stringify([{ path: worktreeFile, type: 'file' }]),
+      })).resolves.toMatch(/started|reserved/)
+      const secondRun = h.store.work.listRuns().filter(row => row.changeId === created.id).at(-1)!
+      await h.service.manageTask({ action: 'finish', task_id: created.id, run_id: secondRun.id })
+      await expect(h.service.manageTask({
+        action: 'dispatch', task_id: created.id, instruction: 'outside', access: 'write',
+        paths: JSON.stringify([{ path: join(tmpdir(), 'outside.ts'), type: 'file' }]),
+      })).rejects.toMatchObject({ code: 'dot/invalid' })
+    } finally { await h.service.dispose(); cleanup() }
+  })
+
+  it('a worktree task on a non-self repo still blocks scope.paths pointing into live self.root', async () => {
+    const self = makeSpecRepo('dot-self-target-')
+    const other = makeSpecRepo('dot-other-wt-')
+    const h = setup(undefined, undefined, other.home, { git: runGit, selfInstall: linkedSelf(self.repo) })
+    try {
+      const created = JSON.parse(await h.service.manageTask({ action: 'create', title: 'Other', goal: 'work', dir: other.repo, isolation: 'worktree' })) as { id: string }
+      await expect(h.service.manageTask({
+        action: 'dispatch', task_id: created.id, instruction: 'touch self', access: 'write',
+        paths: JSON.stringify([{ path: join(realpathSync.native(self.repo), 'a.ts'), type: 'file' }]),
+      })).rejects.toMatchObject({ code: 'dot/self' })
+      expect(h.store.work.listRuns().filter(run => run.changeId === created.id)).toHaveLength(0)
+    } finally { await h.service.dispose(); self.cleanup(); other.cleanup() }
+
+    const host = makeSpecRepo('dot-host-wt-')
+    const installed = installedSelf(host.repo)
+    const h2 = setup(undefined, undefined, host.home, { git: runGit, selfInstall: installed })
+    try {
+      const created = JSON.parse(await h2.service.manageTask({ action: 'create', title: 'Host', goal: 'work', dir: host.repo, isolation: 'worktree' })) as { id: string }
+      await expect(h2.service.manageTask({
+        action: 'dispatch', task_id: created.id, instruction: 'touch pkg', access: 'write',
+        paths: JSON.stringify([{ path: join(installed.root, 'lib', 'index.js'), type: 'file' }]),
+      })).rejects.toMatchObject({ code: 'dot/self' })
+      expect(h2.store.work.listRuns().filter(run => run.changeId === created.id)).toHaveLength(0)
+      await expect(h2.service.manageTask({
+        action: 'dispatch', task_id: created.id, instruction: 'edit host app', access: 'write',
+        paths: JSON.stringify([{ path: 'a.ts', type: 'file' }]),
+      })).resolves.toMatch(/started|reserved/)
+    } finally { await h2.service.dispose(); host.cleanup() }
+  })
+
+  it('a recipe saved from an isolated self task reruns after merge deletes the worktree', async () => {
+    const { repo, home, cleanup } = makeSpecRepo('dot-self-recipe-')
+    selfLib(repo, 'bundle-v1')
+    await runGit(['add', '-A'], repo)
+    await runGit(['commit', '-m', 'lib v1'], repo)
+    const selfBuild = vi.fn(async () => ({ ok: true as const, output: 'built' }))
+    const h = setup(undefined, undefined, home, { git: runGit, selfInstall: linkedSelf(repo), selfBuild })
+    try {
+      await h.service.ensureDot()
+      const created = JSON.parse(await h.service.manageTask({ action: 'create', title: 'Self', goal: 'patch', dir: repo, isolation: 'worktree', human_review: true })) as { id: string }
+      const isolation = h.store.work.change(created.id)!.isolation!
+      await h.service.manageRecipe({ action: 'save', name: 'self patch', from_task: created.id })
+      const recipe = h.store.recipes[0]!
+      expect(recipe.isolation).toBe('worktree')
+      expect(canonicalPath(recipe.dir)).toBe(canonicalPath(isolation.repoRoot))
+      expect(recipe.dir).not.toContain(TASK_WORKTREES_DIR)
+      await finishIsolated(h, created.id, cwd => writeFileSync(join(cwd, 'made.ts'), 'made'))
+      await h.service.integrateWork(created.id, 'merge')
+      await h.service.selfDeploysSettled()
+      expect(existsSync(isolation.worktree)).toBe(false)
+      const again = JSON.parse(await h.service.manageTask({ action: 'create', recipe: recipe.id })) as { id: string }
+      const rerun = h.store.work.change(again.id)!
+      expect(rerun.isolation?.kind).toBe('worktree')
+      expect(rerun.cwd).toContain(TASK_WORKTREES_DIR)
+      expect(existsSync(rerun.cwd)).toBe(true)
+    } finally { await h.service.dispose(); cleanup() }
+  })
+
+  it('failed builds drop their backup and keep the restore hint pointing at the last success', async () => {
+    const { repo, home, cleanup } = makeSpecRepo('dot-self-prune-')
+    selfLib(repo, 'bundle-v1')
+    await runGit(['add', '-A'], repo)
+    await runGit(['commit', '-m', 'lib v1'], repo)
+    let fail = false
+    const selfBuild = vi.fn(async () => fail ? { ok: false as const, output: 'boom' } : { ok: true as const, output: 'built' })
+    const h = setup(undefined, undefined, home, { git: runGit, selfInstall: linkedSelf(repo), selfBuild })
+    try {
+      await h.service.ensureDot()
+      const first = JSON.parse(await h.service.manageTask({ action: 'create', title: 'Ok', goal: 'patch', dir: repo, isolation: 'worktree', human_review: true })) as { id: string }
+      await finishIsolated(h, first.id, cwd => writeFileSync(join(cwd, 'ok.ts'), 'ok'))
+      await h.service.integrateWork(first.id, 'merge')
+      await h.service.selfDeploysSettled()
+      const kept = h.store.selfBackup
+      expect(kept).toBeDefined()
+      expect(existsSync(kept!.dir)).toBe(true)
+      expect(upgradeDirs(home)).toHaveLength(1)
+
+      fail = true
+      for (let i = 0; i < 3; i += 1) {
+        const created = JSON.parse(await h.service.manageTask({ action: 'create', title: `Fail ${i}`, goal: 'patch', dir: repo, isolation: 'worktree', human_review: true })) as { id: string }
+        await finishIsolated(h, created.id, cwd => writeFileSync(join(cwd, `fail${i}.ts`), 'x'))
+        await h.service.integrateWork(created.id, 'merge')
+        await h.service.selfDeploysSettled()
+      }
+      expect(h.store.selfBackup).toEqual(kept)
+      expect(existsSync(kept!.dir)).toBe(true)
+      expect(upgradeDirs(home)).toHaveLength(1)
+    } finally { await h.service.dispose(); cleanup() }
+  })
+
+  it('an aborted self build cannot keep writing after rollback starts', async () => {
+    const { repo, home, cleanup } = makeSpecRepo('dot-self-orphan-')
+    selfLib(repo, 'bundle-v1')
+    await runGit(['add', '-A'], repo)
+    await runGit(['commit', '-m', 'lib v1'], repo)
+    const selfBuild = async (root: string, signal?: AbortSignal) => {
+      const target = join(root, 'lib', 'index.js')
+      const script = join(root, 'writer.cjs')
+      writeFileSync(script, `const fs=require('fs');\nsetInterval(()=>fs.appendFileSync(${JSON.stringify(target)},'orphan'),20);\n`)
+      const child = spawn(process.execPath, [script], { detached: process.platform !== 'win32', stdio: 'ignore', windowsHide: true, cwd: root })
+      const pid = child.pid
+      const started = Date.now()
+      while (Date.now() - started < 3_000) {
+        try { if (readFileSync(target, 'utf8').includes('orphan')) break } catch { /* not yet */ }
+        await new Promise(resolve => setTimeout(resolve, 20))
+      }
+      await new Promise<void>(resolve => {
+        if (!signal || signal.aborted) { resolve(); return }
+        signal.addEventListener('abort', () => resolve(), { once: true })
+      })
+      if (pid !== undefined) await killProcessTree(pid)
+      return { ok: false as const, output: 'aborted' }
+    }
+    const h = setup(undefined, undefined, home, { git: runGit, selfInstall: linkedSelf(repo), selfBuild })
+    try {
+      await h.service.ensureDot()
+      const created = JSON.parse(await h.service.manageTask({ action: 'create', title: 'Self', goal: 'patch', dir: repo, isolation: 'worktree', human_review: true })) as { id: string }
+      await finishIsolated(h, created.id, cwd => writeFileSync(join(cwd, 'made.ts'), 'made'))
+      const merged = await h.service.integrateWork(created.id, 'merge')
+      expect(merged).toMatchObject({ ok: true })
+      await vi.waitFor(() => {
+        expect(readFileSync(join(realpathSync.native(repo), 'lib', 'index.js'), 'utf8')).toContain('orphan')
+      })
+      await h.service.dispose()
+      const restored = readFileSync(join(realpathSync.native(repo), 'lib', 'index.js'), 'utf8')
+      expect(restored).toBe('bundle-v1')
+      await new Promise(resolve => setTimeout(resolve, 150))
+      expect(readFileSync(join(realpathSync.native(repo), 'lib', 'index.js'), 'utf8')).toBe('bundle-v1')
+    } finally { cleanup() }
+  })
+
+  it('an aborted runSelfBuild kills grandchild writers before rollback restores lib', async () => {
+    const { repo, home, cleanup } = makeSpecRepo('dot-self-grandchild-')
+    selfLib(repo, 'bundle-v1')
+    await runGit(['add', '-A'], repo)
+    await runGit(['commit', '-m', 'lib v1'], repo)
+    const repoReal = realpathSync.native(repo)
+    const target = join(repoReal, 'lib', 'index.js')
+    const grandchildScript = join(home, 'grandchild-writer.cjs')
+    const parentScript = join(home, 'parent-launcher.cjs')
+    writeFileSync(grandchildScript, `const fs = require('fs');\nsetInterval(() => { try { fs.appendFileSync(${JSON.stringify(target)}, 'orphan'); } catch {} }, 20);\n`)
+    writeFileSync(parentScript, `const { spawn } = require('child_process');\nconst child = spawn(process.execPath, [${JSON.stringify(grandchildScript)}], { stdio: 'ignore', windowsHide: true });\nconst keepalive = setInterval(() => {}, 1000);\nchild.on('exit', () => { clearInterval(keepalive); process.exit(0); });\n`)
+    const command = `${JSON.stringify(process.execPath)} ${JSON.stringify(parentScript)}`
+    const h = setup(undefined, undefined, home, {
+      git: runGit,
+      selfInstall: linkedSelf(repo),
+      selfBuild: (buildRoot, signal) => runSelfBuild(buildRoot, command, signal),
+    })
+    try {
+      await h.service.ensureDot()
+      const created = JSON.parse(await h.service.manageTask({ action: 'create', title: 'Self', goal: 'patch', dir: repo, isolation: 'worktree', human_review: true })) as { id: string }
+      await finishIsolated(h, created.id, cwd => writeFileSync(join(cwd, 'made.ts'), 'made'))
+      const merged = await h.service.integrateWork(created.id, 'merge')
+      expect(merged).toMatchObject({ ok: true })
+      await vi.waitFor(() => {
+        expect(readFileSync(target, 'utf8')).toContain('orphan')
+      }, { timeout: 10_000 })
+      await h.service.dispose()
+      expect(readFileSync(target, 'utf8')).toBe('bundle-v1')
+      await new Promise(resolve => setTimeout(resolve, 200))
+      expect(readFileSync(target, 'utf8')).toBe('bundle-v1')
+    } finally { await h.service.dispose(); cleanup() }
+  })
+
+  it('keeps the upgrade notice until a session exists, and records repo HEAD as the deploy sha', async () => {
+    const { repo, home, cleanup } = makeSpecRepo('dot-self-notice-')
+    selfLib(repo, 'bundle-v1')
+    await runGit(['add', '-A'], repo)
+    await runGit(['commit', '-m', 'lib v1'], repo)
+    const selfBuild = vi.fn(async () => ({ ok: true as const, output: 'built' }))
+    let active: Awaited<ReturnType<typeof openBoot>> | undefined
+    try {
+      active = await openBoot(home, { init: true, git: runGit, selfInstall: linkedSelf(repo), selfBuild })
+      await active.store.setSelfUpgrade({ at: 1, commitSha: 'abc1234', backupDir: join(home, 'self-upgrade', '1-abc1234'), libHash: libHashOf(realpathSync.native(repo))! })
+      const shared = { host: active.host, timer: active.timer, said: active.said }
+      await active.close()
+      active = undefined
+
+      active = await openBoot(home, { shared, git: runGit, selfInstall: linkedSelf(repo), selfBuild })
+      expect(active.store.selfUpgrade).toMatchObject({ commitSha: 'abc1234' })
+      active.service.startReminders()
+      await new Promise(resolve => setTimeout(resolve, 30))
+      expect(active.store.selfUpgrade).toBeDefined()
+      await active.service.ensureDot()
+      await vi.waitFor(() => expect(active!.store.selfUpgrade).toBeUndefined())
+      await active.service.say('ping')
+      expect(active.said.at(-1)?.carriedNotices).toContain('Self-upgrade to abc1234 is running')
+
+      const created = JSON.parse(await active.service.manageTask({ action: 'create', title: 'Self', goal: 'patch', dir: repo, isolation: 'worktree', human_review: true })) as { id: string }
+      await finishIsolated(active, created.id, cwd => writeFileSync(join(cwd, 'made.ts'), 'made'))
+      await active.service.integrateWork(created.id, 'merge')
+      await active.service.selfDeploysSettled()
+      const head = (await runGit(['rev-parse', 'HEAD'], repo)).trim()
+      expect(active.store.selfUpgrade?.commitSha).toBe(head)
+      await active.close()
+      active = undefined
+
+      active = await openBoot(home, { shared, git: runGit, selfInstall: linkedSelf(repo), selfBuild })
+      expect(active.store.selfUpgrade?.commitSha).toBe(head)
+    } finally { await active?.close(); cleanup() }
+  })
+
+  it('a self-build marker survives ensureDot on this instance; a new process consumes it', async () => {
+    const { repo, home, cleanup } = makeSpecRepo('dot-self-same-')
+    selfLib(repo, 'bundle-v1')
+    await runGit(['add', '-A'], repo)
+    await runGit(['commit', '-m', 'lib v1'], repo)
+    const selfBuild = vi.fn(async () => ({ ok: true as const, output: 'built' }))
+    let active: Awaited<ReturnType<typeof openBoot>> | undefined
+    try {
+      active = await openBoot(home, { init: true, git: runGit, selfInstall: linkedSelf(repo), selfBuild })
+      const shared = { host: active.host, timer: active.timer, said: active.said }
+      await active.service.ensureDot()
+      const created = JSON.parse(await active.service.manageTask({ action: 'create', title: 'Self', goal: 'patch', dir: repo, isolation: 'worktree', human_review: true })) as { id: string }
+      await finishIsolated(active, created.id, cwd => writeFileSync(join(cwd, 'made.ts'), 'made'))
+      await active.service.integrateWork(created.id, 'merge')
+      await active.service.selfDeploysSettled()
+      const marker = active.store.selfUpgrade
+      expect(marker).toBeDefined()
+      await active.service.ensureDot()
+      await new Promise(resolve => setTimeout(resolve, 50))
+      expect(active.store.selfUpgrade).toEqual(marker)
+      await active.close()
+      active = undefined
+
+      active = await openBoot(home, { shared, git: runGit, selfInstall: linkedSelf(repo) })
+      expect(active.store.selfUpgrade).toEqual(marker)
+      await active.service.ensureDot()
+      await vi.waitFor(() => expect(active!.store.selfUpgrade).toBeUndefined())
+      await active.service.say('ping')
+      expect(active.said.at(-1)?.carriedNotices).toContain(`Self-upgrade to ${marker!.commitSha} is running`)
+
+      await active.store.setSelfUpgrade({ ...marker!, libHash: 'other-hash' })
+      await active.close()
+      active = undefined
+
+      active = await openBoot(home, { shared, git: runGit, selfInstall: linkedSelf(repo) })
+      expect(active.store.selfUpgrade).toEqual({ ...marker!, libHash: 'other-hash' })
+      await active.service.ensureDot()
+      await vi.waitFor(() => expect(active!.store.selfUpgrade).toBeUndefined())
+      await active.service.say('ping')
+      expect(active.said.at(-1)?.carriedNotices).toContain('does not match')
+    } finally { await active?.close(); cleanup() }
   })
 })
 

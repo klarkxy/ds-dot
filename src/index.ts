@@ -22,7 +22,7 @@ import { registerHostRpc, type HostRpcContext } from '@klarkxy/dsh-plugin-kit/ho
 import { installPluginLogger } from '@klarkxy/dsh-plugin-kit/logger'
 import { approvalAuditId, raceApproval } from './approval-relay.ts'
 import type { RawEvent } from './chat.ts'
-import { COGNITION_PROMPT_ENTRIES_DEFAULT, COMPACTION_POLICY, dotOwnedCredentialRefs, mcpCredentialName, mcpGuess, mcpServerOf, MCP_CREDENTIAL_VALUE_MAX, MCP_SERVER_NAME_PATTERN, PLUGIN_NAME, PRESET_ID, RPC_CHANNEL, SERVICE_NAME, validateMcpCredentialSet, type PendingQuestionItem, type TaskPermission, type TaskRecord } from './contracts.ts'
+import { COGNITION_PROMPT_ENTRIES_DEFAULT, COMPACTION_POLICY, dotOwnedCredentialRefs, mcpCredentialName, mcpGuess, mcpServerOf, MCP_CREDENTIAL_VALUE_MAX, MCP_SERVER_NAME_PATTERN, PLUGIN_NAME, PRESET_ID, RPC_CHANNEL, SERVICE_NAME, validateMcpCredentialSet, type ChatSnapshot, type PendingQuestionItem, type TaskPermission, type TaskRecord } from './contracts.ts'
 import { CHAT_SAY_BODY_BYTES, checkChatImages } from './chat-images.ts'
 import { ChatFeed } from './feed.ts'
 import { hostImport } from './host-import.ts'
@@ -40,6 +40,7 @@ import { shouldDeferApprovalToSafeAuto } from './approval-safe-auto.ts'
 import { REFLECTION_INSTRUCTIONS, REFLECTION_PRESET_ID } from './reflection.ts'
 import { KnowledgeError, parseKnowledgeEdit } from './memory.ts'
 import { APPROVAL_GRACE_MS, DotError, DotService, messageOf } from './service.ts'
+import { detectSelfInstall } from './self-root.ts'
 import { configI18n } from './i18n/index.ts'
 import { patchSettings } from './settings.ts'
 import { dotDomain, parseInboxRecord, parsePeerDelivery, parseTask } from './storage.ts'
@@ -178,6 +179,7 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
     approvalGraceMs: Number.isFinite(config.approvalGraceMs) ? Math.max(0, Math.min(60_000, config.approvalGraceMs!)) : APPROVAL_GRACE_MS,
     cognitionPromptEntries: Number.isFinite(config.cognitionPromptEntries) ? Math.max(0, Math.trunc(config.cognitionPromptEntries!)) : COGNITION_PROMPT_ENTRIES_DEFAULT,
     pluginManager: () => ctx.get('pluginManager' as never),
+    selfInstall: detectSelfInstall(),
     globalMcpNames,
     credentials: {
       describe: async (ref: string) => credentialsService()?.describe?.(await credentialRefFor(ref)),
@@ -505,9 +507,14 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
   const field = (payload: unknown, key: string): unknown => payload !== null && typeof payload === 'object' ? (payload as Record<string, unknown>)[key] : undefined
   const num = (payload: unknown, key: string): number => { const value = field(payload, key); return typeof value === 'number' && Number.isFinite(value) ? value : 0 }
   const str = (payload: unknown, key: string): string => { const value = field(payload, key); return typeof value === 'string' ? value : '' }
+  const withSelfBackup = (snapshot: ChatSnapshot | undefined): ChatSnapshot | undefined => {
+    if (!snapshot) return snapshot
+    const lastBackup = service.selfStatus().lastBackup
+    return lastBackup ? { ...snapshot, lastBackup } : snapshot
+  }
   // The kit's 64 KiB default answers 413 before `say` runs. A PNG of about
   // 51 KB does not fit after base64; the cap below fits the advertised images.
-  const PASSIVE_ENDPOINTS = new Set(['wait', 'board', 'attention', 'work.list', 'work.read', 'card.pending', 'card.detail', 'recipes'])
+  const PASSIVE_ENDPOINTS = new Set(['wait', 'board', 'attention', 'work.list', 'work.read', 'card.pending', 'card.detail', 'recipes', 'self.status'])
   ctx.effect(() => registerHostRpc(ctx as unknown as HostRpcContext, RPC_CHANNEL, async (endpoint, payload, signal) => {
     try {
       const reqLocale = field(payload, 'uiLocale')
@@ -521,12 +528,12 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
         case 'ensure': return { ok: true, value: { sessionId: await ensureDot() } }
         case 'chat': {
           await ensureDot()
-          return { ok: true, value: feed.snapshot(num(payload, 'itemsRev')) }
+          return { ok: true, value: withSelfBackup(feed.snapshot(num(payload, 'itemsRev'))) }
         }
         case 'wait': {
           await ensureDot()
           await feed.wait(num(payload, 'rev'), signal, WAIT_MS)
-          return { ok: true, value: feed.snapshot(num(payload, 'itemsRev')) }
+          return { ok: true, value: withSelfBackup(feed.snapshot(num(payload, 'itemsRev'))) }
         }
         case 'say': {
           const text = field(payload, 'text')
@@ -597,6 +604,7 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
         case 'segment.new': return { ok: true, value: await service.newSegment() }
         case 'update.status': return { ok: true, value: service.updateStatus() ?? null }
         case 'update.check': return { ok: true, value: await service.checkUpdates() }
+        case 'self.status': return { ok: true, value: service.selfStatus() }
         case 'keepalive': {
           return { ok: true, value: service.keepaliveInfo() }
         }

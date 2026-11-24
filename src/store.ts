@@ -168,6 +168,15 @@ export class DotStore {
     return this.setDot({ update: next })
   }
 
+  get selfUpgrade(): import('./self-root.ts').SelfUpgradeMarker | undefined { return this.state.selfUpgrade }
+  setSelfUpgrade(next: import('./self-root.ts').SelfUpgradeMarker | undefined): Promise<void> {
+    return this.setDot({ selfUpgrade: next })
+  }
+  get selfBackup(): import('./self-root.ts').SelfBackup | undefined { return this.state.selfBackup }
+  setSelfBackup(next: import('./self-root.ts').SelfBackup): Promise<void> {
+    return this.setDot({ selfBackup: next })
+  }
+
   addCard(card: import('./card-state.ts').DotCardRecord): Promise<void> {
     const updated = [...this.cards.map(row => row.answer || row.keepAlive ? row : { ...row, expired: true }), card]
     if (updated.length <= MAX_STORED_CARDS) {

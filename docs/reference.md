@@ -37,6 +37,15 @@ The static check is pattern-based rather than exhaustive; silence is never treat
 - **Arena-backed model recommendations:** `dot_list_models` ranks permitted `provider/model` choices from a pinned LMArena snapshot (`mode=raw` preserves the raw catalog view); Dorothy never substitutes a model you explicitly named. See [Arena data and aggregation notes](https://github.com/klarkxy/ds-dot/blob/dev/docs/model-arena.md).
 - **Factory reset** (bottom of Settings): Previews exact counts of Dorothy's own state before clearing; your own sessions, project files, and host persona stay untouched.
 
+## MCP servers (Dorothy only)
+
+The **MCP servers** page connects remote MCP servers that only Dorothy can use — they are mounted inside her own preset scope, so other DSH sessions never see the `mcp__<server>__*` tools. Connecting a server only mounts it; grant its tools under the server row or the **Extra capabilities** page (`mcp:<server>` / `tool:` selectors) before she can call them.
+
+- **Recommended catalog:** GitHub (`https://api.githubcopilot.com/mcp/readonly`), DeepWiki, Context7, Exa, Microsoft Learn, Cloudflare Docs, Hugging Face.
+- **GitHub token:** needs a [fine-grained PAT](https://github.com/settings/personal-access-tokens/new) with read-only access — Contents, Issues, Pull requests, Actions, Metadata. Tokens are stored in the host credential store (`DOT_MCP_<NAME>_TOKEN`) and never echoed back.
+- **Custom servers:** name plus URL with an optional token. Remote (streamable-http) endpoints only: `https` everywhere, `http` allowed for loopback addresses. No stdio/command entries — a browser panel must not define commands to spawn — and no OAuth flow (DSH has none), so token-auth and no-auth servers only.
+- Servers stay configured across restarts; a factory reset removes them together with their `DOT_MCP_*` credentials.
+
 ---
 
 ## GitHub events (optional)

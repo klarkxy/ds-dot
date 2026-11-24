@@ -8,7 +8,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { applyWebFetchTool, applyWebSearchTool } from '@deepseek-ai/dsh-tool-web'
 import { WebRuntime, type WebFetchProvider, type WebSearchProvider } from '@deepseek-ai/dsh-web'
 import {
-  duckDuckGoSearch, fetchReady, fetchWithFallback, isolatedProviderId, jinaFetch, searchReady, searchWithFallback,
+  duckDuckGoSearch, fetchReady, fetchWithFallback, gitHubApiFetch, isolatedProviderId, jinaFetch, searchReady, searchWithFallback,
   type LookupFetch, type ParentWeb,
 } from './web-lookup.ts'
 
@@ -18,6 +18,7 @@ const SEARCH_MAX_RESULTS = 8
 const SEARCH_MAX_QUERIES = 4
 const SEARCH_SUMMARY_MAX = 800
 const FETCH_MAX_CHARS = 200_000
+const GITHUB_COOLDOWN_MS = 10 * 60_000
 
 function parentWeb(ctx: Context): ParentWeb | undefined {
   try {
@@ -50,17 +51,25 @@ export function dotSearchProvider(parent: ParentWeb | undefined, fetch: LookupFe
   }
 }
 
-export function dotFetchProvider(parent: ParentWeb | undefined, fetch: LookupFetch = globalThis.fetch.bind(globalThis)): WebFetchProvider | undefined {
+export function dotFetchProvider(parent: ParentWeb | undefined, fetch: LookupFetch = globalThis.fetch.bind(globalThis), now: () => number = Date.now): WebFetchProvider | undefined {
   const pinned = process.env.DSH_WEB_FETCH_PROVIDER?.trim() || undefined
   const id = isolatedProviderId(pinned, 'jina', canDelegateFetch(parent))
   if (!id) return undefined
+  let githubCooldownUntil = 0
   return {
     id,
     available: () => true,
     ready: llmProvider => fetchReady(parent, llmProvider),
-    fetch: (request, signal) => fetchWithFallback(parent, request, signal, () => jinaFetch(request.url, {
-      fetch, signal, timeoutMs: FETCH_TIMEOUT_MS, maxChars: FETCH_MAX_CHARS,
-    }), pinned),
+    fetch: async (request, signal) => {
+      if (!pinned && now() >= githubCooldownUntil) {
+        const direct = await gitHubApiFetch(request.url, { fetch, signal, maxChars: FETCH_MAX_CHARS })
+        if (direct?.ok) return direct.result
+        if (direct && !direct.ok && direct.cooldown) githubCooldownUntil = now() + GITHUB_COOLDOWN_MS
+      }
+      return fetchWithFallback(parent, request, signal, () => jinaFetch(request.url, {
+        fetch, signal, timeoutMs: FETCH_TIMEOUT_MS, maxChars: FETCH_MAX_CHARS,
+      }), pinned)
+    },
   }
 }
 

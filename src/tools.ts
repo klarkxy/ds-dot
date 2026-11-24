@@ -356,7 +356,7 @@ export function apply(ctx: Context): void {
   // Callers pass either allow or answers, never both.
   tool(defineToolInput({
     name: TOOL.answerPending,
-    description: 'Inspect untruncated approval parameters with action=read, or settle a pending approval or question from another session by request id. For an approval, pass allow=true or false; for a question, pass answers as a JSON array string covering every question id exactly once. Honor [settings snapshot], [agreements], and the approval principles in your system prompt (requests marked human-required cannot be answered here). If a request is already settled elsewhere, do not retry it and stay silent unless another update requires the human.',
+    description: 'Inspect untruncated approval parameters with action=read, or settle a pending approval or question from another session by request id. For an approval, pass allow=true or false; for a question, pass answers as a JSON array string covering every question id exactly once. Honor [settings snapshot], [agreements], and the approval principles in your system prompt (requests marked human-required cannot be answered here, and a truncated request must be read with action=read before allowing). If a request is already settled elsewhere, do not retry it and stay silent unless another update requires the human.',
     parameters: {
       id: { type: 'string', required: true, description: 'Pending request id from the notice.' },
       action: { type: 'string', enum: ['read'], description: 'Pass "read" to inspect full recorded approval arguments without settling the request.' },

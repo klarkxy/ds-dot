@@ -24,7 +24,7 @@ import {
   occupantOf, pathScope, plannedOccupant, plannedScope, requirementList, samePathList,
   stepList, verifyRefusal,
 } from './work-actions.ts'
-import { absoluteScopePath, canonicalPath, changeIsTerminal, MAX_COMPLETED_CHANGES, InputShapeError, inputContractError, occupantsConflict, runCostTotals, runIsTerminal, scopeWithinRoot, scopeWrites, type ChangeRecord, type Constraint, type Occupant, type Requirement, type RootHint, type RunRecord, type TaskIsolation, type WorkRefusal } from './work.ts'
+import { absoluteScopePath, canonicalPath, changeIsTerminal, MAX_COMPLETED_CHANGES, InputShapeError, inputContractError, occupantsConflict, pathsOverlap, runCostTotals, runIsTerminal, scopeWithinRoot, scopeWrites, type ChangeRecord, type Constraint, type Occupant, type Requirement, type RootHint, type RunRecord, type TaskIsolation, type WorkRefusal } from './work.ts'
 import type { ShownView, ViewAnswer } from '@klarkxy/dsh-deep-view/contracts'
 import { DotCards, cardAnswerText, type DotCardRecord } from './card-state.ts'
 import { checkChatImages, type ChatImage } from './chat-images.ts'
@@ -152,6 +152,8 @@ export class DotService {
   private readonly openCapabilityAsks = new Map<string, { readonly chain: readonly string[]; readonly withdraw: () => void }>()
   /** Decision wakes already queued in this process. The durable mark is notifiedAt. */
   private readonly decisionWakes = new Set<string>()
+  /** Truncated approvals dot read in full; allowing one without a read is refused. */
+  private readonly readApprovals = new Set<string>()
   private readonly childRefreshers = new Set<() => void>()
   private readonly childReleases = new Map<string, () => void>()
   private resetArmed?: { readonly token: string; readonly expiresAt: number }
@@ -438,6 +440,7 @@ export class DotService {
   readApprovalDetail(id: string): string {
     const detail = this.store.approvalDetails.find(row => row.requestId === id)
     if (!detail) throw new DotError('dot/unknown-request', `no recorded approval ${id}`)
+    this.readApprovals.add(id)
     return JSON.stringify(detail)
   }
 
@@ -1581,6 +1584,7 @@ export class DotService {
     }
     // A model-generated tool call is not evidence of a human decision.
     if (view.kind === 'approval' && answer.kind === 'approval' && (view.humanRequired === true || this.rules.approvals === 'human')) throw new DotError('dot/human-required', `approval ${id} requires a direct human decision`)
+    if (view.kind === 'approval' && answer.kind === 'approval' && answer.allow === true && view.truncated === true && !this.readApprovals.has(id)) throw new DotError('dot/read-required', `approval ${id} was truncated; read it with ${TOOL.answerPending} action=read before allowing`)
     if (view.kind === 'question' && this.rules.questions === 'human') throw new DotError('dot/human-required', `question ${id} requires a direct human answer in the original session`)
     // The human may switch to deny while dot is still judging a delivered request.
     const denied = view.kind === 'approval' && answer.kind === 'approval' && this.rules.approvals === 'deny'
@@ -1600,6 +1604,7 @@ export class DotService {
 
   private pruneApprovalDetails(): Promise<void> {
     const open = new Set(this.pending.list().filter(row => row.kind === 'approval').map(row => row.id))
+    for (const id of [...this.readApprovals]) if (!open.has(id)) this.readApprovals.delete(id)
     const kept = this.store.approvalDetails.filter(row => open.has(row.requestId)).slice(-APPROVAL_DETAIL_LIMIT)
     return this.store.replaceApprovalDetails(kept)
   }
@@ -2453,6 +2458,15 @@ export class DotService {
     const route = routeRequest(this.rules, input.kind)
     if (route.action === 'skip' || route.action === 'deny') return { decided: route.action }
     const run = this.store.work.sessionRun(input.sessionId)
+    const runChange = run ? this.store.work.change(run.changeId) : undefined
+    // A git reset/clean is dot's call only when the requester's write run lives
+    // inside its own active task worktree and the command points nowhere else.
+    const isolation = runChange?.isolation
+    const ownWorktree = input.viaSubagent !== true
+      && run?.access === 'write'
+      && isolation?.kind === 'worktree'
+      && isolation.state === 'active'
+      && pathsOverlap(canonicalPath(run.cwd), canonicalPath(isolation.worktree))
     const notice = input.kind === 'approval'
       ? approvalNotice({
           toolName: input.toolName ?? input.subject,
@@ -2461,6 +2475,7 @@ export class DotService {
           ...(input.arguments !== undefined ? { arguments: input.arguments } : {}),
           ...(input.viaSubagent ? { viaSubagent: true } : {}),
           ...(run?.access === 'read' ? { readOnly: true } : {}),
+          ...(ownWorktree ? { ownWorktree: true } : {}),
         })
       : undefined
     const detail = notice?.text ?? input.detail
@@ -2473,12 +2488,14 @@ export class DotService {
       ...(input.questions !== undefined ? { questions: input.questions } : {}),
       ...(input.signal !== undefined ? { signal: input.signal } : {}),
       ...(humanRequired ? { humanRequired: true } : {}),
+      ...(notice?.truncated === true ? { truncated: true } : {}),
     })
-    const runChange = run ? this.store.work.change(run.changeId) : undefined
     const where = task ? `task "${task.title}"` : `untracked session${input.cwd ? ` in ${input.cwd}` : ''}`
     const lines = [runChange ? `${opened.id} for task ${runChange.id} "${runChange.title}": ${input.kind} · "${input.subject}"` : `${opened.id} · ${input.kind} from ${where} · "${input.subject}"`]
     if (detail) lines.push(`  detail: ${notice ? detail : clip(detail, 600)}`)
     if (humanRequired && notice) lines.push(`  human-required: ${notice.reasons.join(', ')}; do not use dot_answer.`)
+    if (notice && notice.cautions.length > 0) lines.push(`  caution: ${notice.cautions.join(', ')}; judge by authority and impact.`)
+    if (notice?.truncated === true) lines.push(`  truncated: read the full arguments with ${TOOL.answerPending} action=read before allowing.`)
     if (input.kind === 'question' && route.action === 'human') lines.push('  The human must answer the original question in its session; do not use dot_answer.')
     for (const q of input.questions ?? []) {
       lines.push(`  [${q.id}] ${q.question}${q.options?.length ? ' options: ' + q.options.map(o => o.label).join(' | ') : ''}${q.multiSelect ? ' (multi)' : ''}`)

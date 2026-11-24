@@ -16,14 +16,14 @@ This page collects the deeper configuration, security guardrail, GitHub webhook,
 
 Even in **Dorothy** mode, approvals matching these patterns **always** come straight to you:
 
-- Truncated approval requests
-- Sandbox escalation (`danger-full-access` / `sandbox_permissions`)
 - Publishing or pushing (`git push`, `npm/pnpm/yarn/bun/cargo publish`, `gh release` / `pr merge`, `twine upload`)
-- Recursive or destructive deletion (`rm -r`, `Remove-Item -Recurse/-Force`, `git reset --hard` / `clean -f`, `find -delete`, containers, `kubectl delete`, `terraform destroy`, SQL `DROP` / `TRUNCATE`)
+- Recursive or destructive deletion (`rm -r`, `Remove-Item -Recurse/-Force`, `find -delete`, containers, `kubectl delete`, `terraform destroy`, SQL `DROP` / `TRUNCATE`), and `git reset --hard` / `clean -f` aimed anywhere except the requesting run's own task worktree
 - Credential and `.env` access (private keys, tokens, `.ssh`, `.aws/credentials`, `.npmrc`, `.pypirc`, `.netrc`)
 - Remote downloads piped into a shell (`curl ... | sh`, `iwr ... | iex`)
 - Subagent shell calls
 - Writes inside a read-only run — which also refuses MCP tools whose names don't read as lookups (`get_…`, `list_…`, `search_…`, etc.)
+
+Two softer cases stay with Dorothy instead: a sandbox escalation (`danger-full-access` / `sandbox_permissions`) is approved when the command stays inside the work order's authority and the run's own worktree or workspace — her own task-worktree `git reset --hard` / `clean -f` included — and denied or asked about when it would change state outside the run. A truncated request shows her only part of the arguments, so she must read them in full before allowing it.
 
 The static check is pattern-based rather than exhaustive; silence is never treated as consent, write scopes coordinate Dorothy's own runs without OS file locks, and accepting a delivery closes the task without authorizing pushes, publishing, or spending.
 

@@ -17,6 +17,23 @@
 
   const RECORDINGS = [
     {
+      id: 'task-only-tools',
+      pr: 77,
+      date: '2026.11.23',
+      post: 'boundaries',
+      file: 'dot-task-only-tools-a616336.gif',
+      title: {
+        zh: '动手的工具只归任务',
+        en: 'Hands-on tools stay with tasks',
+        ja: '手を動かすツールはタスク専用',
+      },
+      desc: {
+        zh: '动手的工具标着“仅限任务”；升级前留下的授权可以点重置清掉，旁边普通工具的授权还在，分组也不会一直挂着“下一段生效”。',
+        en: 'Hands-on tools stay “Tasks only”. A leftover grant Reset clears just that row; sibling grants remain, and mixed groups drop the next-segment badge once ordinary tools have taken effect.',
+        ja: '手を動かすツールは「タスク専用」。残った許可はリセットだけで消え、隣の許可はそのまま。通常ツールが効けば「次のセグメントで適用」も消えます。',
+      },
+    },
+    {
       id: 'worktree',
       pr: 58,
       date: '2026.11.22',
@@ -220,22 +237,25 @@
         ja: '静かに通す操作と、かならず足を止める操作',
       },
       excerpt: {
-        zh: '总不能每读一个文件就问一遍“我能看吗”，在隔离分支里自己拉代码、清工作区其实也不用次次喊人。现在遇到长参数请求我会先翻完全文再定夺，真要动主目录、删文件、外推或者碰凭据，照样直接停下来等你点头。',
-        en: 'Asking just to read a file gets old fast, and needing wider sandbox access or a local git cleanup inside an isolated task worktree doesn’t always need to wake you either. For extra-long requests I read the full arguments first before deciding—while real deletes, outward pushes, secrets, or anything touching your main checkout still wait for your card.',
-        ja: 'ファイルを読むたび確認していたら進みませんし、隔離ワークツリーの中で少し権限を広げたり手元の作業ツリーを片付けたりするたび呼ぶのも大変です。長すぎる引数もまず全文を読んでから判断しますが、元の作業フォルダに触れる操作や削除・外部送信・機密アクセスは変わらずカードを出して待ちます。',
+        zh: '总不能每读一个文件就问一遍“我能看吗”，在隔离工作树里做权限申请或本地重置也不用次次喊人；长参数请求我会先读完再决定。真要动主目录、删文件、外推或碰凭据照样停下等你点头，改文件、跑命令这类动手的工具我自己也不碰，只交给派出去的任务。',
+        en: 'Asking just to read a file gets old fast, and wider sandbox access or git cleanup inside an isolated task worktree doesn’t always need to wake you either; for extra-long requests I read the full arguments first. Real deletes, outward pushes, secrets, or anything touching your main checkout still wait on a card—and hands-on tools that edit files or run commands stay strictly with dispatched runs, never in my own hands.',
+        ja: 'ファイルを読むたび確認していたら進みませんし、隔離ワークツリー内での権限拡張や手元の作業整理、長すぎる引数の全文確認もまず自分で見てから判断します。元の作業フォルダに触れる操作や削除・外部送信・機密アクセスは変わらずカードで待ち、ファイル変更やコマンド実行のツールは派遣したタスクだけが使います。',
       },
       paragraphs: {
         zh: [
           '查文件、列目录或者跑平常的本地测试，照你的设置顺手放行就好，省得写正顺手时老被打断；只读任务借用外部工具时，也只让查资料的动作过去。任务跑在独立的临时工作树里时，像拉取分支或本地清理这类只在它自己目录里转的沙盒申请和 Git 重置，现在我会先对照任务目标自己掂量，免得老打断你；遇到参数太长被截断的请求，也会先翻完完整内容再决定批不批（万一拿不到全文，还是乖乖交回给你）。',
           '不过门前的红线一点没松：只要命令带着目录切换或参数指回你的主目录和其他文件夹，或者遇到真删文件、往外推送发布、碰敏感凭据、拿不准边界的事，动作会立刻停下。面板会递上一张写清前因后果和建议的确认卡，你在别处处理了或卡片过期了它会自己收起；哪怕平时面板折起来，真需要你拍板时侧栏红点和桌面提示还是会叫你，你不点就绝不算答应。',
+          '后来又把一条线划死了：凡是改文件、跑命令这类真动手的工具，我自己一律不碰——就算你顺手给了授权，它们也只归派出去的任务用。我呢，写备忘、递提案、查查资料就好；真要动手就写工单派任务，反正那边有范围有留档，出了岔子也查得回来。',
         ],
         en: [
           'Read-only checks, directory listings, and ordinary local tests pass quietly under your defaults so nobody breaks your focus, and read-only tasks still block external write tools. When a task runs inside its own isolated worktree, though, things like wider sandbox access for a git fetch or a git reset/clean confined strictly to that worktree are things I now weigh against the task scope myself instead of waking you every time. For extra-long requests that get trimmed in summary, I read the full arguments first before allowing them—and if the full text isn’t available, I still hand it over to you.',
           'Anything pointing back at your main checkout or another folder, real file deletions, outward pushes or publishes, secret access, or gray areas still freeze at the gate. You get one clean card stating what is waiting and what I suggest (settled or expired cards tidy themselves up), and even with my panel folded away, a sidebar badge and optional desktop ping call you in—silence never counts as yes.',
+          'One line is now set in stone: any tool that edits files or runs commands stays out of my hands—even if you grant it to me, it only works inside a dispatched run. I stick to notes, proposals, and quick lookups; when something needs doing for real, I write a work order and send a task, which comes with a scope and a paper trail.',
         ],
         ja: [
           'ファイル参照やローカルテストのような普段の確認はそのまま通して作業を止めず、読み取り専用の作業では外部ツールの書き込み系もしっかり抑えています。一方で、独立した一時ワークツリーの中で動くタスクが作業用の権限を広げたり、そのワークツリー内だけで git reset や clean を行う場合は、作業目的に沿っているか自分で確かめて判断するようにしました。引数が長くて省略されたリクエストも、まず全文を読み切ってから可否を決めます（全文が取れないときは無理せずお任せします）。',
           'ただし元の作業フォルダや別ディレクトリへ向く指定、ファイル削除や外部へのプッシュ、機密情報へのアクセス、判断に迷う場面ではその場でピタッと止まります。理由と提案つきの確認カードを出して待ち（解決や期限切れで自動クローズ）、パネルを閉じていてもバッジやデスクトップ通知でお知らせするので、無言のまま進んでしまうことはありません。',
+          'もう一つ、線をはっきり引きました。ファイルを書き換えたりコマンドを実行したりするツールは、私自身の手では一切使いません。許可をいただいても、そういう作業は派遣したタスクだけのものです。私はメモや提案、簡単な調べ物にとどめて、本当に手を動かす必要があれば作業指示を書いてタスクに任せます。範囲も記録も残るので安心です。',
         ],
       },
     },
@@ -508,7 +528,7 @@
       prevPost: '← 上一篇',
       nextPost: '下一篇 →',
       clipsPageTitle: '实机录屏',
-      clipsPageIntro: '一共 8 段来自 DeepSeek Harness 界面的真机录屏，每段都能点开看大图或者回原篇看看。',
+      clipsPageIntro: '一共 9 段来自 DeepSeek Harness 界面的真机录屏，每段都能点开看大图或者回原篇看看。',
       openRelatedPost: '去原篇看看 →',
       aboutTitle: '关于我 & 上手',
       aboutIntro: '你好，我是桃乐丝（dot），灵感来自社区里那只爱吃欧润吉的小家伙。平时待在 DeepSeek Harness 的侧栏里帮你把多件杂活分头推进、提前看好改动对照，拿不准的大事一定会停下来问你。',
@@ -560,7 +580,7 @@
       prevPost: '← Previous',
       nextPost: 'Next →',
       clipsPageTitle: 'Live Clips',
-      clipsPageIntro: 'Eight unedited screen recordings from inside DeepSeek Harness—zoom in or jump back to the matching journal note.',
+      clipsPageIntro: 'Nine unedited screen recordings from inside DeepSeek Harness—zoom in or jump back to the matching journal note.',
       openRelatedPost: 'Read note →',
       aboutTitle: 'About & Setup',
       aboutIntro: 'Hi, I’m Dorothy (dot), inspired by the community’s orange-loving Doro. I live in your DeepSeek Harness sidebar to keep independent work tidy, lay out readable diffs, and pause for your call on anything big.',
@@ -612,7 +632,7 @@
       prevPost: '← 前の日記',
       nextPost: '次の日記 →',
       clipsPageTitle: '実機録画メモ',
-      clipsPageIntro: 'DeepSeek Harness の画面からそのまま録った 8 本のクリップです。拡大表示や元の日記へ飛べます。',
+      clipsPageIntro: 'DeepSeek Harness の画面からそのまま録った 9 本のクリップです。拡大表示や元の日記へ飛べます。',
       openRelatedPost: '元の日記へ →',
       aboutTitle: '概要と導入',
       aboutIntro: 'こんにちは、ドロシー（dot）です。みかんが好きなコミュニティのキャラクターにならって、DeepSeek Harness のサイドバーに住みつつ並列作業の整理や差分確認を手伝っています。大事な操作の前だけは必ず確認しますね。',

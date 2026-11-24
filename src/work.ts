@@ -3,6 +3,7 @@
  * runs themselves. There is no lock table. The short lane only commits; a
  * caller reads the workspace outside it and must pass the revision it saw.
  */
+import { realpathSync } from 'node:fs'
 import path from 'node:path'
 import { subjectKey, subjectMaterial, type DeliverySubject, type SubjectLook } from './acceptance.ts'
 import { totalUsage } from './context.ts'
@@ -430,6 +431,16 @@ export function canonicalPath(value: string, platform: NodeJS.Platform = process
   const root = api.parse(resolved).root
   const trimmed = resolved === root ? root : resolved.replace(/[\\/]+$/, '')
   return platform === 'win32' ? trimmed.toLowerCase() : trimmed
+}
+
+/**
+ * The cwd a session should be created in: stored values are canonicalized
+ * (case-folded on win32), so hand the host the on-disk spelling. Falls back
+ * to the stored value when the path cannot be resolved; identity elsewhere.
+ */
+export function onDiskPath(value: string, platform: NodeJS.Platform = process.platform): string {
+  if (platform !== 'win32') return value
+  try { return realpathSync.native(value) } catch { return value }
 }
 
 export function pathsOverlap(left: string, right: string, platform: NodeJS.Platform = process.platform): boolean {

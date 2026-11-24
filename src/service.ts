@@ -24,7 +24,7 @@ import {
   occupantOf, pathScope, plannedOccupant, plannedScope, requirementList, samePathList,
   stepList, verifyRefusal,
 } from './work-actions.ts'
-import { absoluteScopePath, canonicalPath, changeIsTerminal, MAX_COMPLETED_CHANGES, InputShapeError, inputContractError, occupantsConflict, runCostTotals, runIsTerminal, scopeWithinRoot, scopeWrites, type ChangeRecord, type Constraint, type Occupant, type Requirement, type RootHint, type RunRecord, type TaskIsolation, type WorkRefusal } from './work.ts'
+import { absoluteScopePath, canonicalPath, onDiskPath, changeIsTerminal, MAX_COMPLETED_CHANGES, InputShapeError, inputContractError, occupantsConflict, runCostTotals, runIsTerminal, scopeWithinRoot, scopeWrites, type ChangeRecord, type Constraint, type Occupant, type Requirement, type RootHint, type RunRecord, type TaskIsolation, type WorkRefusal } from './work.ts'
 import type { ShownView, ViewAnswer } from '@klarkxy/dsh-deep-view/contracts'
 import { DotCards, cardAnswerText, type DotCardRecord } from './card-state.ts'
 import { checkChatImages, type ChatImage } from './chat-images.ts'
@@ -2740,7 +2740,7 @@ export class DotService {
       sessionId, origin: 'started',
       title: change ? runTitle(change.title, `${run.changeId}/${run.id}`) : run.id,
       goal: `${run.changeId} ${run.id} input ${run.inputRef}@${run.inputRevision}`,
-      cwd: run.cwd, at: this.now(),
+      cwd: onDiskPath(run.cwd), at: this.now(),
     })
   }
   supplementWorkRun(runId: string, text: string, senderId: string, expected: { readonly inputRef: string; readonly inputRevision: number }) {

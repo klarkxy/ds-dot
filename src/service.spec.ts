@@ -1267,6 +1267,25 @@ describe('DotService WorkBook sessions', () => {
     await h.service.dispose()
   })
 
+  it('creates the run session in the on-disk casing while the record stays canonical', async () => {
+    const dir = realpathSync.native(mkdtempSync(join(tmpdir(), 'dot-CaSiNg-')))
+    const h = setup()
+    try {
+      await h.service.ensureDot()
+      await h.service.manageTask({action: 'dispatch',  dir, title: 't', message: 'go', goal: 'g' })
+      const run = h.store.work.listRuns()[0]!
+      const created = h.calls.find(call => call.startsWith(`create ${run.sessionId} `))
+      // The host gets the real on-disk spelling, never the case-folded record.
+      expect(created).toBe(`create ${run.sessionId} ${dir}`)
+      expect(run.cwd).toBe(canonicalPath(dir))
+      if (process.platform === 'win32') expect(run.cwd).not.toBe(dir)
+      // confirmSession still matches, so the run is confirmed and owned.
+      expect(run.creation).toBe('confirmed')
+      expect(run.sessionId).toBe(run.requestedSessionId)
+      expect(h.store.task(run.sessionId!)?.cwd).toBe(dir)
+    } finally { await h.service.dispose(); rmSync(dir, { recursive: true, force: true }) }
+  })
+
   it('refuses unavailable models and presets before creating a session', async () => {
     const h = setup({ taskModels: { mode: 'deny', list: ['p/big'] } })
     const signal = new AbortController().signal

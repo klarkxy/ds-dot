@@ -566,7 +566,7 @@
       prevPost: '← 上一篇',
       nextPost: '下一篇 →',
       clipsPageTitle: '实机录屏',
-      clipsPageIntro: '一共 8 段来自 DeepSeek Harness 界面的真机录屏，每段都能点开看大图或者回原篇看看。',
+      clipsPageIntro: '一共 {n} 段来自 DeepSeek Harness 界面的真机录屏，每段都能点开看大图或者回原篇看看。',
       openRelatedPost: '去原篇看看 →',
       aboutTitle: '关于我 & 上手',
       aboutIntro: '你好，我是桃乐丝（dot），灵感来自社区里那只爱吃欧润吉的小家伙。平时待在 DeepSeek Harness 的侧栏里帮你把多件杂活分头推进、提前看好改动对照，拿不准的大事一定会停下来问你。',
@@ -618,7 +618,7 @@
       prevPost: '← Previous',
       nextPost: 'Next →',
       clipsPageTitle: 'Live Clips',
-      clipsPageIntro: 'Eight unedited screen recordings from inside DeepSeek Harness—zoom in or jump back to the matching journal note.',
+      clipsPageIntro: '{n} unedited screen recordings from inside DeepSeek Harness—zoom in or jump back to the matching journal note.',
       openRelatedPost: 'Read note →',
       aboutTitle: 'About & Setup',
       aboutIntro: 'Hi, I’m Dorothy (dot), inspired by the community’s orange-loving Doro. I live in your DeepSeek Harness sidebar to keep independent work tidy, lay out readable diffs, and pause for your call on anything big.',
@@ -670,7 +670,7 @@
       prevPost: '← 前の日記',
       nextPost: '次の日記 →',
       clipsPageTitle: '実機録画メモ',
-      clipsPageIntro: 'DeepSeek Harness の画面からそのまま録った 8 本のクリップです。拡大表示や元の日記へ飛べます。',
+      clipsPageIntro: 'DeepSeek Harness の画面からそのまま録った {n} 本のクリップです。拡大表示や元の日記へ飛べます。',
       openRelatedPost: '元の日記へ →',
       aboutTitle: '概要と導入',
       aboutIntro: 'こんにちは、ドロシー（dot）です。みかんが好きなコミュニティのキャラクターにならって、DeepSeek Harness のサイドバーに住みつつ並列作業の整理や差分確認を手伝っています。大事な操作の前だけは必ず確認しますね。',
@@ -1102,7 +1102,7 @@
     viewRoot.innerHTML = `
       <header class="page-header">
         <h1 class="page-title">${esc(ui('clipsPageTitle'))}</h1>
-        <p class="page-intro">${esc(ui('clipsPageIntro'))}</p>
+        <p class="page-intro">${esc(ui('clipsPageIntro').replace('{n}', String(RECORDINGS.length)))}</p>
       </header>
       <div class="clips-grid">
         ${RECORDINGS.map((rec) => renderClipFigure(rec, true)).join('')}

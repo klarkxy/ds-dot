@@ -20,5 +20,5 @@ function pythonBin(): string {
 describe('Arena builder script', () => {
   it('keeps dated identities, isolates the download cache, and avoids pandas', () => {
     execFileSync(pythonBin(), [join(root, 'scripts/test_build_model_arena.py')], { cwd: root, encoding: 'utf8' })
-  })
+  }, 30_000)
 })

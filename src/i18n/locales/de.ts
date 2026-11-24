@@ -358,6 +358,14 @@ const deUi: UiText = {
   pCognitionVersionAt: '{time}',
   pKnowledgeLoading: 'Wird geladen…',
   pKnowledgeFailed: 'Laden fehlgeschlagen: ',
+  pEntryAdd: 'Hinzufügen',
+  pEntryEdit: 'Bearbeiten',
+  pEntryDelete: 'Löschen',
+  pPin: 'Anheften',
+  pUnpin: 'Loslösen',
+  pDormant: 'ruhend',
+  pPinned: 'angeheftet',
+  pDormantHint: 'Ruhende Einträge bleiben gespeichert, erscheinen aber gerade nicht in Dorothys Prompt; anheften, um sie sichtbar zu halten.',
   ctxTitle: 'Kontextnutzung',
   ctxLoading: 'Kontext wird gelesen…',
   ctxIdle: 'Die Kontextnutzung erscheint hier, nachdem du deine erste Nachricht gesendet hast.',
@@ -743,6 +751,7 @@ export const de: LocalePack = {
   config: {
     homeDir: 'Ordner für Dorothys eigenen Arbeitsbereich und ihre Sitzung; leer verwendet den Ordner dot im DSH-Home. Weitere Einstellungen befinden sich hinter dem Zahnrad-Symbol in Dorothys Panel.',
     approvalGraceMs: 'Schonfrist für Genehmigungsbenachrichtigungen in Millisekunden (Standard 10000); Genehmigungen, die währenddessen in der Ursprungssitzung geklärt werden, wecken Dorothy nicht.',
+    cognitionPromptEntries: 'Wie viele Erkenntnis-Einträge Dorothy im Prompt behält (Standard 30); angeheftete Einträge stehen zuerst und bleiben auch über diese Zahl hinaus sichtbar, die restlichen Plätze gehen an die zuletzt bestätigten Einträge.',
   },
   approvalCard: {
     title: 'Genehmigung',

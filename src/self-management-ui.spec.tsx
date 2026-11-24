@@ -1,7 +1,8 @@
 import { act, useState } from 'react'
 import { JSDOM } from 'jsdom'
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
-import { DEFAULT_SETTINGS, type DotSettings } from './contracts.ts'
+import { DEFAULT_SETTINGS, type CognitionEntry, type DotSettings, type KnowledgeEdit } from './contracts.ts'
+import { applyAgreementEdit, applyCognitionEdit, cognitionWithActive } from './memory.ts'
 import { ContextPanel } from './context-panel.tsx'
 import { PersonaPanel } from './persona-panel.tsx'
 import { SettingsPanel } from './settings-panel.tsx'
@@ -102,11 +103,22 @@ describe('Dorothy self-management controls', () => {
 
   it('edits, discards and saves the persona, and keeps agreements and cognition apart', async () => {
     let current: DotSettings = { ...DEFAULT_SETTINGS }
+    const flagged = (entries: readonly CognitionEntry[]) => cognitionWithActive(entries, 2)
+    let seq = 1
     let knowledge = {
-      agreements: { text: '- 先给结论', maxChars: 4000, canUndo: true },
-      cognition: { text: '他偏好先看结论。', maxChars: 4000, history: [{ text: '旧的一版。', at: 1_700_000_000_000 }] },
+      agreements: { entries: [{ id: 'a1', text: '先给结论', createdAt: 1, updatedAt: 1 }], canUndo: true },
+      cognition: {
+        entries: flagged([
+          { id: 'c2', text: '一条休眠认知。', createdAt: 1, updatedAt: 1, seenAt: 1 },
+          { id: 'c3', text: '共享的梗。', createdAt: 2, updatedAt: 2, seenAt: 2 },
+          { id: 'c1', text: '他偏好先看结论。', createdAt: 3, updatedAt: 3, seenAt: 3 },
+        ]),
+        history: [{ entries: [{ id: 'c9', text: '旧的一版。', createdAt: 1, updatedAt: 1, seenAt: 1 }], at: 1_700_000_000_000 }],
+      },
     }
     const restores: number[] = []
+    const agreementEdits: KnowledgeEdit[] = []
+    const cognitionEdits: KnowledgeEdit[] = []
     function Harness() {
       const [settings, setSettings] = useState<DotSettings>(current)
       const api = {
@@ -121,22 +133,24 @@ describe('Dorothy self-management controls', () => {
           return current
         },
         knowledge: async () => knowledge,
-        setAgreements: async (text: string) => {
-          knowledge = { ...knowledge, agreements: { ...knowledge.agreements, text, canUndo: true } }
+        editAgreements: async (edit: KnowledgeEdit) => {
+          agreementEdits.push(edit)
+          knowledge = { ...knowledge, agreements: { entries: applyAgreementEdit(knowledge.agreements.entries, edit, 9, () => `a${++seq}`), canUndo: true } }
           return knowledge
         },
         undoAgreements: async () => {
-          knowledge = { ...knowledge, agreements: { ...knowledge.agreements, text: '', canUndo: false } }
+          knowledge = { ...knowledge, agreements: { entries: [], canUndo: false } }
           return knowledge
         },
-        setCognition: async (text: string) => {
-          knowledge = { ...knowledge, cognition: { ...knowledge.cognition, text } }
+        editCognition: async (edit: KnowledgeEdit) => {
+          cognitionEdits.push(edit)
+          knowledge = { ...knowledge, cognition: { ...knowledge.cognition, entries: flagged(applyCognitionEdit(knowledge.cognition.entries, edit, 9, () => `c${++seq}`)) } }
           return knowledge
         },
         restoreCognition: async (at: number) => {
           restores.push(at)
           const hit = knowledge.cognition.history.find(item => item.at === at)
-          knowledge = { ...knowledge, cognition: { ...knowledge.cognition, text: hit?.text ?? '' } }
+          knowledge = { ...knowledge, cognition: { ...knowledge.cognition, entries: flagged(hit?.entries ?? []) } }
           return knowledge
         },
       }
@@ -160,12 +174,18 @@ describe('Dorothy self-management controls', () => {
     await act(async () => buttons().filter(btn => btn.textContent === '恢复默认')[1]!.click())
     expect(current.persona).toBeUndefined()
 
-    // The two knowledge blocks are separate and carry their own copy.
-    const agreementsBox = document.querySelector<HTMLTextAreaElement>('textarea[aria-label="约定"]')!
-    const cognitionBox = document.querySelector<HTMLTextAreaElement>('textarea[aria-label="认知"]')!
-    expect(agreementsBox.value).toBe('- 先给结论')
-    expect(cognitionBox.value).toBe('他偏好先看结论。')
+    // The two knowledge lists render their entries separately.
+    const sections = [...document.querySelectorAll<HTMLElement>('.dsh-dot-pane-section')]
+    const agreementsSection = sections[1]!
+    const cognitionSection = sections[2]!
+    expect(agreementsSection.textContent).toContain('先给结论')
+    expect(cognitionSection.textContent).toContain('他偏好先看结论。')
     expect(document.body.textContent).toContain('与认知冲突时，一律以约定为准')
+    // A dormant entry is muted and tagged, and the list explains what dormant means.
+    const dormant = cognitionSection.querySelector<HTMLElement>('.dsh-dot-entry[data-dormant]')!
+    expect(dormant.textContent).toContain('一条休眠认知。')
+    expect(dormant.textContent).toContain('休眠')
+    expect(cognitionSection.textContent).toContain('休眠条目当前不出现在桃乐丝的提示词里')
 
     // The agreements keep a lock toggle, so an existing lock can be lifted here.
     const lock = document.querySelector<HTMLButtonElement>('button[aria-label="禁止桃乐丝修改：约定"]')!
@@ -174,22 +194,83 @@ describe('Dorothy self-management controls', () => {
     const unlock = document.querySelector<HTMLButtonElement>('button[aria-label="允许桃乐丝申请修改：约定"]')!
     expect(unlock.hasAttribute('data-locked')).toBe(true)
 
-    // Saving the agreements calls the agreements endpoint only.
-    await act(async () => { changeValue(agreementsBox, '- 先给结论\n- 少说废话') })
-    await act(async () => buttons().find(btn => btn.textContent === '保存修改' && btn.closest('.dsh-ui-field')?.textContent?.includes('约定'))!.click())
-    expect(knowledge.agreements.text).toContain('- 少说废话')
-    expect(knowledge.cognition.text).toBe('他偏好先看结论。')
+    // Adding an agreement entry calls the agreements edit endpoint only.
+    const addInput = agreementsSection.querySelector<HTMLInputElement>('input[aria-label="添加"]')!
+    await act(async () => { changeValue(addInput, '少说废话') })
+    await act(async () => [...agreementsSection.querySelectorAll<HTMLButtonElement>('button')].find(btn => btn.textContent === '添加')!.click())
+    expect(agreementEdits).toEqual([{ op: 'add', text: '少说废话' }])
+    expect(agreementsSection.textContent).toContain('少说废话')
+    expect(cognitionEdits).toEqual([])
+
+    // Inline edit on a cognition row sends an edit op for that entry.
+    const jokeRow = [...cognitionSection.querySelectorAll<HTMLElement>('.dsh-dot-entry')].find(row => row.textContent?.includes('共享的梗。'))!
+    await act(async () => [...jokeRow.querySelectorAll<HTMLButtonElement>('button')].find(btn => btn.textContent === '编辑')!.click())
+    const editor = jokeRow.querySelector<HTMLTextAreaElement>('textarea[aria-label="编辑"]')!
+    await act(async () => { changeValue(editor, '共享的新梗。') })
+    await act(async () => [...jokeRow.querySelectorAll<HTMLButtonElement>('button')].find(btn => btn.textContent === '保存修改')!.click())
+    expect(cognitionEdits).toEqual([{ op: 'edit', id: 'c3', text: '共享的新梗。' }])
+    expect(cognitionSection.textContent).toContain('共享的新梗。')
+
+    // Pinning a cognition row sends a pin op; the row then offers unpin and carries a pinned tag.
+    const pinRow = [...cognitionSection.querySelectorAll<HTMLElement>('.dsh-dot-entry')].find(row => row.textContent?.includes('他偏好先看结论。'))!
+    await act(async () => [...pinRow.querySelectorAll<HTMLButtonElement>('button')].find(btn => btn.textContent === '置顶')!.click())
+    expect(cognitionEdits[1]).toEqual({ op: 'pin', id: 'c1', pinned: true })
+    expect(pinRow.textContent).toContain('取消置顶')
+    expect(pinRow.textContent).toContain('已置顶')
+
+    // Deleting an agreement row sends a remove op.
+    const newRow = [...agreementsSection.querySelectorAll<HTMLElement>('.dsh-dot-entry')].find(row => row.textContent?.includes('少说废话'))!
+    await act(async () => [...newRow.querySelectorAll<HTMLButtonElement>('button')].find(btn => btn.textContent === '删除')!.click())
+    expect(agreementEdits[1]).toEqual({ op: 'remove', id: 'a2' })
+    expect(agreementsSection.textContent).not.toContain('少说废话')
 
     // One step of undo on the agreements.
     await act(async () => buttons().find(btn => btn.textContent === '回退上次保存')!.click())
-    expect(knowledge.agreements.text).toBe('')
+    expect(knowledge.agreements.entries).toEqual([])
 
-    // The cognition history lists an earlier version and restores it by its timestamp.
+    // The cognition history previews a version's entries and restores by timestamp.
     expect(document.body.textContent).toContain('历史版本')
+    expect(document.body.textContent).toContain('- 旧的一版。')
     await act(async () => buttons().find(btn => btn.textContent === '回到这一版')!.click())
     expect(restores).toEqual([1_700_000_000_000])
-    expect(knowledge.cognition.text).toBe('旧的一版。')
+    expect(knowledge.cognition.entries.map(entry => entry.text)).toEqual(['旧的一版。'])
 
+    await act(async () => root.unmount())
+  })
+
+  it('ignores a second click while a knowledge edit is in flight', async () => {
+    let current: DotSettings = { ...DEFAULT_SETTINGS }
+    let knowledge = {
+      agreements: { entries: [{ id: 'a1', text: '先给结论', createdAt: 1, updatedAt: 1 }], canUndo: true },
+      cognition: { entries: [] as never[], history: [] },
+    }
+    const agreementEdits: KnowledgeEdit[] = []
+    let release!: (view: typeof knowledge) => void
+    const gate = new Promise<typeof knowledge>(resolve => { release = resolve })
+    function Harness() {
+      const [settings, setSettings] = useState<DotSettings>(current)
+      const api = {
+        setSettings: async () => current,
+        knowledge: async () => knowledge,
+        editAgreements: async (edit: KnowledgeEdit) => {
+          agreementEdits.push(edit)
+          knowledge = { ...knowledge, agreements: { entries: applyAgreementEdit(knowledge.agreements.entries, edit, 9, () => 'a2'), canUndo: true } }
+          return gate
+        },
+        undoAgreements: async () => knowledge,
+        editCognition: async () => knowledge,
+        restoreCognition: async () => knowledge,
+      }
+      return <PersonaPanel locale="zh" api={api} settings={settings} onSaved={setSettings} />
+    }
+    const root = createRoot(document.getElementById('root')!)
+    await act(async () => root.render(<Harness />))
+    await act(async () => { await Promise.resolve() })
+    const deleteBtn = [...document.querySelectorAll<HTMLButtonElement>('button')].find(btn => btn.textContent === '删除')!
+    await act(async () => { deleteBtn.click(); deleteBtn.click() })
+    expect(agreementEdits).toEqual([{ op: 'remove', id: 'a1' }])
+    expect(deleteBtn.disabled).toBe(true)
+    await act(async () => { release(knowledge); await gate })
     await act(async () => root.unmount())
   })
 

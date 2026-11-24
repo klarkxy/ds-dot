@@ -359,6 +359,14 @@ export const zhUi = {
   pCognitionVersionAt: '{time}',
   pKnowledgeLoading: '正在读取…',
   pKnowledgeFailed: '读取失败：',
+  pEntryAdd: '添加',
+  pEntryEdit: '编辑',
+  pEntryDelete: '删除',
+  pPin: '置顶',
+  pUnpin: '取消置顶',
+  pDormant: '休眠',
+  pPinned: '已置顶',
+  pDormantHint: '休眠条目当前不出现在桃乐丝的提示词里；置顶可让它常驻视野。',
   ctxTitle: '上下文用量',
   ctxLoading: '正在读取上下文…',
   ctxIdle: '发送第一条消息后，这里会展示当前分段的上下文用量。',
@@ -676,6 +684,7 @@ export const zh: LocalePack = {
   config: {
     homeDir: '桃乐丝专属工作区与自身会话所在的目录；留空则默认使用 DSH 主目录下的 dot 文件夹。其余设置位于桃乐丝面板右上角的齿轮菜单中。',
     approvalGraceMs: '审批通知宽限期（毫秒，默认 10000）；在此期间已于原会话处理的审批不会唤醒桃乐丝。',
+    cognitionPromptEntries: '认知提示词条目数（默认 30）：桃乐丝提示词中保留的认知条目总数；置顶条目排在最前，即使超出此数也始终显示，其余名额归最近确认过的条目。',
   },
   approvalCard: {
     title: '审批',

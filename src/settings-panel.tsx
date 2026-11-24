@@ -543,12 +543,13 @@ function mcpStatusText(locale: CopyLocale, server: DotMcpServerView): string {
  * catalog, and the custom-server form. Adding a server only mounts it; its
  * tools still need a grant here or under 额外能力.
  */
-function McpPane({ locale, api, settings, grants, onPick }: {
+function McpPane({ locale, api, settings, grants, onPick, onSaved }: {
   locale: CopyLocale
   api: SettingsApi
   settings: DotSettings
   grants: Readonly<Record<string, CapabilityGrant>>
   onPick: (selector: string, grant: CapabilityGrant | undefined) => void
+  onSaved: (next: DotSettings) => void
 }) {
   const [view, setView] = useState<DotMcpListView>()
   const [error, setError] = useState('')
@@ -576,7 +577,7 @@ function McpPane({ locale, api, settings, grants, onPick }: {
   const servers = settings.mcpServers ?? {}
   const saveServers = (next: Record<string, DotMcpServer>) => {
     setBusy(true)
-    api.setSettings({ mcpServers: next }).catch(() => {}).finally(() => setBusy(false))
+    api.setSettings({ mcpServers: next }).then(saved => onSaved(saved), () => {}).finally(() => setBusy(false))
   }
   const catalogRow = (entry: DotMcpCatalogEntry): DotMcpServer => ({
     catalog: entry.id, url: entry.url, ...(entry.headers !== undefined ? { headers: entry.headers } : {}), enabled: true,
@@ -1248,7 +1249,7 @@ export function SettingsPanel({ locale, api, settings, section = 'all', proposal
       {show('mcp') ? (
         <div className="dsh-dot-pane-section">
           {allSections ? <h3 className="dsh-dot-pane-section-title">{t(locale, 'sMcp')}</h3> : null}
-          <McpPane locale={locale} api={api} settings={settings} grants={settings.capabilities?.grants ?? {}} onPick={(selector, grant) => {
+          <McpPane locale={locale} api={api} settings={settings} grants={settings.capabilities?.grants ?? {}} onSaved={onSaved} onPick={(selector, grant) => {
             const grants = { ...settings.capabilities?.grants }
             if (grant === undefined) delete grants[selector]
             else grants[selector] = grant

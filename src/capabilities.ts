@@ -75,9 +75,51 @@ export function hostScheduleTargetsDot(args: unknown, sessionIds: ReadonlySet<st
  * Tools that belong to task runs only: they mutate files or run commands in
  * the caller's own session, which for dot is danger-full-access and would
  * bypass work orders, write scopes, baselines, locks and verification. They
- * are never applied to dot's agent, whatever the grant says.
+ * are never applied to dot's agent, whatever the grant says. The set is the
+ * host's built-in names; third-party write/command aliases gated in
+ * approval-risk stay a separate product decision.
  */
 export const TASK_ONLY_TOOLS: ReadonlySet<string> = new Set(['plugin_manager', 'bash', 'pwsh', 'write', 'edit', 'apply_patch'])
+
+const countGroupTools = (group: CapabilityGroupView): number =>
+  group.tools.length + (group.children ?? []).reduce((sum, child) => sum + countGroupTools(child), 0)
+
+const countGroupTaskOnly = (group: CapabilityGroupView): number =>
+  group.tools.filter(tool => tool.taskOnly === true).length
+    + (group.children ?? []).reduce((sum, child) => sum + countGroupTaskOnly(child), 0)
+
+/** True when the group has tools and every one of them is task-only. Empty groups are not. */
+export function groupAllTaskOnly(group: CapabilityGroupView): boolean {
+  const total = countGroupTools(group)
+  return total > 0 && countGroupTaskOnly(group) === total
+}
+
+function findGroup(groups: readonly CapabilityGroupView[], id: string): CapabilityGroupView | undefined {
+  for (const group of groups) {
+    if (group.id === id) return group
+    const child = findGroup(group.children ?? [], id)
+    if (child !== undefined) return child
+  }
+  return undefined
+}
+
+/**
+ * Whether a grant selector can never apply to Dorothy: a `tool:` name in
+ * `TASK_ONLY_TOOLS`, a static builtin group whose members are all task-only
+ * (`builtin:plugin-manager`), or — when a catalog is passed — any group whose
+ * tools are all task-only.
+ */
+export function isTaskOnlySelector(selector: string, groups?: readonly CapabilityGroupView[]): boolean {
+  if (selector.startsWith(SELECTOR.tool)) return TASK_ONLY_TOOLS.has(selector.slice(SELECTOR.tool.length))
+  if (selector.startsWith(SELECTOR.builtin)) {
+    const id = selector.slice(SELECTOR.builtin.length)
+    const entry = BUILTIN_GROUPS.find(group => group.id === id)
+    if (entry !== undefined && entry.tools.length > 0 && entry.tools.every(name => TASK_ONLY_TOOLS.has(name))) return true
+  }
+  if (groups === undefined) return false
+  const group = findGroup(groups, selector)
+  return group !== undefined && groupAllTaskOnly(group)
+}
 
 /** DeepSeek function-name contract shared with the MCP public-name derivation. */
 const MCP_INVALID_CHARS = /[^A-Za-z0-9_-]/g

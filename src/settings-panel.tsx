@@ -302,6 +302,15 @@ function Proposals({ locale, choices, state, showTitle }: { locale: CopyLocale; 
 
 const GRANT_MODES: readonly [CapabilityGrant, CapabilityGrant, CapabilityGrant] = ['off', 'ask', 'auto']
 
+/** Delete one stored grant row. Used by GrantPicker and leftover task-only Reset. */
+function GrantReset({ locale, selector, onPick }: {
+  locale: CopyLocale
+  selector: string
+  onPick: (selector: string, grant: CapabilityGrant | undefined) => void
+}) {
+  return <Button variant="ghost" size="sm" className="dsh-dot-cap-clear" onClick={() => onPick(selector, undefined)}>{t(locale, 'sCapClear')}</Button>
+}
+
 /**
  * The off/ask/auto control of one row. A row without its own grant row shows
  * the value it inherits, dimmed; the clear button removes its own override.
@@ -326,7 +335,7 @@ function GrantPicker({ locale, label, chain, grants, applied, onPick }: {
   return (
     <span className="dsh-dot-cap-grant" data-inherited={hasOwn ? undefined : ''}>
       <SegmentedChoice locale={locale} label={label} value={effective} options={GRANT_MODES} labelKeyOf={option => `sCap_${option}` as TextKey} onChange={next => { if (own !== undefined) onPick(own, next) }} />
-      {hasOwn ? <Button variant="ghost" size="sm" className="dsh-dot-cap-clear" onClick={() => { if (own !== undefined) onPick(own, undefined) }}>{t(locale, 'sCapClear')}</Button> : null}
+      {hasOwn && own !== undefined ? <GrantReset locale={locale} selector={own} onPick={onPick} /> : null}
       {applied !== undefined && applied !== effective ? <span className="dsh-dot-cap-badge">{t(locale, 'sCapNext')}</span> : null}
     </span>
   )
@@ -380,6 +389,7 @@ function Capabilities({ locale, api, grants, onPick }: {
   // are all task-only has nothing for the picker to do. Empty groups keep it.
   const groupAllTaskOnly = (group: CapabilityGroupView): boolean =>
     countTools(group) > 0 && countTaskOnly(group) === countTools(group)
+  const countsTowardGroup = (tool: CapabilityToolView): boolean => tool.taskOnly !== true && tool.missing !== true
   const kindLabel = (group: CapabilityGroupView): string =>
     group.kind === 'mcp' ? t(locale, 'sCapKind_mcp')
     : group.kind === 'builtin' ? t(locale, 'sCapKind_builtin')
@@ -392,9 +402,9 @@ function Capabilities({ locale, api, grants, onPick }: {
   const groupRows = (group: CapabilityGroupView, parents: readonly string[], showFull = false): ReactNode => {
     // The host and builtin groups are display-only: their tools grant one by one / via children.
     const chain = group.kind === 'host' || group.id === 'builtin' ? parents : [group.id, ...parents]
-    const changed = group.tools.some(tool => (applied[tool.name] ?? 'off') !== effectiveFor([`tool:${tool.name}`, ...chain]))
-    const granted = group.tools.some(tool => effectiveFor([`tool:${tool.name}`, ...chain]) !== 'off')
-      || (group.children ?? []).some(child => child.tools.some(tool => effectiveFor([`tool:${tool.name}`, child.id, ...chain]) !== 'off'))
+    const changed = group.tools.some(tool => countsTowardGroup(tool) && (applied[tool.name] ?? 'off') !== effectiveFor([`tool:${tool.name}`, ...chain]))
+    const granted = group.tools.some(tool => countsTowardGroup(tool) && effectiveFor([`tool:${tool.name}`, ...chain]) !== 'off')
+      || (group.children ?? []).some(child => child.tools.some(tool => countsTowardGroup(tool) && effectiveFor([`tool:${tool.name}`, child.id, ...chain]) !== 'off'))
     const label = displayedLabel(group)
     const selfHit = showFull || groupSelfHits(group)
     if (capNeedle !== '' && !selfHit && !groupHits(group)) return null
@@ -405,7 +415,15 @@ function Capabilities({ locale, api, grants, onPick }: {
           <span className="dsh-dot-cap-name" title={group.id}>{label}{group.kind === 'builtin' && group.id !== 'builtin' ? null : <span className="dsh-dot-cap-tag">{kindLabel(group)}</span>}<span className="dsh-dot-cap-count">{t(locale, 'sCapToolCount').replace('{n}', String(countTools(group)))}</span></span>
           {group.missing === true ? <span className="dsh-dot-cap-badge">{t(locale, 'sCapMissing')}</span> : null}
           {changed ? <span className="dsh-dot-cap-badge">{t(locale, 'sCapNext')}</span> : null}
-          {group.kind === 'host' || group.id === 'builtin' || groupAllTaskOnly(group) ? null : (
+          {group.kind === 'host' || group.id === 'builtin' ? null : groupAllTaskOnly(group) ? (
+            grants[group.id] !== undefined ? (
+              <span className="dsh-dot-cap-control" onClick={event => event.preventDefault()}>
+                <span className="dsh-dot-cap-grant">
+                  <GrantReset locale={locale} selector={group.id} onPick={onPick} />
+                </span>
+              </span>
+            ) : null
+          ) : (
             <span className="dsh-dot-cap-control" onClick={event => event.preventDefault()}>
               <GrantPicker locale={locale} label={label} chain={chain} grants={grants} applied={undefined} onPick={onPick} />
             </span>
@@ -428,7 +446,15 @@ function Capabilities({ locale, api, grants, onPick }: {
                 {tool.missing === true ? <span className="dsh-dot-cap-badge">{t(locale, 'sCapMissing')}</span> : null}
                 {tool.conditional ? <span className="dsh-dot-cap-badge">{t(locale, 'sCapConditional')}</span> : null}
                 {tool.taskOnly === true ? <span className="dsh-dot-cap-badge dsh-dot-cap-badge--warn" title={t(locale, 'sCapTaskOnlyHint')}>{t(locale, 'sCapTaskOnly')}</span> : null}
-                {soloNoOwnGrant || tool.taskOnly === true ? null : <GrantPicker locale={locale} label={tool.name} chain={toolChain} grants={grants} applied={tool.missing === true ? undefined : (applied[tool.name] ?? 'off')} onPick={onPick} />}
+                {tool.taskOnly === true ? (
+                  grants[`tool:${tool.name}`] !== undefined ? (
+                    <span className="dsh-dot-cap-grant">
+                      <GrantReset locale={locale} selector={`tool:${tool.name}`} onPick={onPick} />
+                    </span>
+                  ) : null
+                ) : soloNoOwnGrant ? null : (
+                  <GrantPicker locale={locale} label={tool.name} chain={toolChain} grants={grants} applied={tool.missing === true ? undefined : (applied[tool.name] ?? 'off')} onPick={onPick} />
+                )}
               </div>
             )
           })}

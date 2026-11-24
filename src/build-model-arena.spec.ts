@@ -23,7 +23,7 @@ async function pythonBin(): Promise<string> {
 }
 
 describe('Arena builder script', () => {
-  it('keeps dated identities, isolates the download cache, and avoids pandas', async () => {
-    await execFileAsync(await pythonBin(), [join(root, 'scripts/test_build_model_arena.py')], { cwd: root, encoding: 'utf8', windowsHide: true })
-  }, 30_000)
+  it('keeps dated identities, isolates the download cache, and avoids pandas', { timeout: 50_000 }, async () => {
+    await execFileAsync(await pythonBin(), [join(root, 'scripts/test_build_model_arena.py')], { cwd: root, encoding: 'utf8', windowsHide: true, timeout: 30_000 })
+  })
 })

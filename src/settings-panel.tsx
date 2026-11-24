@@ -8,7 +8,7 @@ import { Button, Checkbox, IconCheckCircleFillRegular, IconChevronRightOutlineRe
 import { createContext, useCallback, useContext, useEffect, useId, useMemo, useRef, useState, type ReactNode } from 'react'
 import type { SettingsSection } from './chat-hooks.ts'
 export type { SettingsSection } from './chat-hooks.ts'
-import { mcpCredentialName, mcpPrefix, isMcpServerUrl, MCP_SERVER_NAME_PATTERN, type ApprovalMode, type CapabilityCatalogView, type CapabilityGrant, type CapabilityGroupView, type CapabilityToolView, type DotMcpCatalogEntry, type DotMcpListView, type DotMcpServer, type DotMcpServerView, type DotSettings, type FactoryResetPreview, type FactoryResetResult, type KeepaliveInfo, type ModelChoice, type SettingField, type SettingProposal, type TakeoverMode, type TaskModelRule, type TaskPermission } from './contracts.ts'
+import { mcpCredentialName, mcpPrefix, mcpServerOf, isMcpServerUrl, MCP_NEW_SERVER_NAME_PATTERN, type ApprovalMode, type CapabilityCatalogView, type CapabilityGrant, type CapabilityGroupView, type CapabilityToolView, type DotMcpCatalogEntry, type DotMcpListView, type DotMcpServer, type DotMcpServerView, type DotSettings, type FactoryResetPreview, type FactoryResetResult, type KeepaliveInfo, type ModelChoice, type SettingField, type SettingProposal, type TakeoverMode, type TaskModelRule, type TaskPermission } from './contracts.ts'
 import { DESKTOP_NOTIFY_KEY } from './attention-client.ts'
 import type { UpdateResult, UpdateStatus } from './auto-update.ts'
 import { factoryResetScope, formatWhen, t, type CopyLocale, type TextKey } from './ui-copy.ts'
@@ -483,7 +483,7 @@ function Capabilities({ locale, api, grants, onPick, onOpenMcp }: {
   const sectionOf = (group: CapabilityGroupView): 'mcp' | 'plugin' | 'host' =>
     group.kind === 'mcp' ? 'mcp' : group.kind === 'plugin' || group.kind === 'entry' ? 'plugin' : 'host'
   const allGroups = view?.groups ?? []
-  const shownGroups = allGroups.filter(group => capNeedle === '' ? !onlyOn || groupGranted(group) : groupHits(group))
+  const shownGroups = allGroups.filter(group => (capNeedle === '' || groupHits(group)) && (!onlyOn || groupGranted(group)))
   return (
     <div className="dsh-dot-caps">
       <p className="dsh-dot-cap-intro">{t(locale, 'sCapIntro')}</p>
@@ -561,6 +561,7 @@ function McpPane({ locale, api, settings, grants, onPick, onSaved }: {
 }) {
   const [view, setView] = useState<DotMcpListView>()
   const [error, setError] = useState('')
+  const [saveError, setSaveError] = useState('')
   const [tokenFor, setTokenFor] = useState<string>()
   const [tokenDraft, setTokenDraft] = useState('')
   const [busy, setBusy] = useState(false)
@@ -583,36 +584,37 @@ function McpPane({ locale, api, settings, grants, onPick, onSaved }: {
   if (view === undefined && !error) return <PaneSkeleton label={t(locale, 'settingsLoading')} />
 
   const servers = settings.mcpServers ?? {}
-  const fail = (failure: unknown) => setError(failure instanceof Error ? failure.message : String(failure))
-  const savePatch = async (patch: SettingsPatch): Promise<boolean> => {
-    setBusy(true)
+  const fail = (failure: unknown) => setSaveError(failure instanceof Error ? failure.message : String(failure))
+  const attemptPatch = async (patch: SettingsPatch): Promise<boolean> => {
     try {
       const saved = await api.setSettings(patch)
+      setSaveError('')
       onSaved(saved)
       return true
     } catch (failure) {
       fail(failure)
       return false
-    } finally { setBusy(false) }
+    }
+  }
+  const savePatch = async (patch: SettingsPatch): Promise<boolean> => {
+    setBusy(true)
+    try { return await attemptPatch(patch) } finally { setBusy(false) }
   }
   const saveServers = (next: Record<string, DotMcpServer>) => savePatch({ mcpServers: next })
   const catalogRow = (entry: DotMcpCatalogEntry): DotMcpServer => ({
     catalog: entry.id, url: entry.url, ...(entry.headers !== undefined ? { headers: entry.headers } : {}), enabled: true,
   })
   const connect = async (entry: DotMcpCatalogEntry, token?: string) => {
+    // Row first, token second: credential.set only accepts a stored server
+    // name. A failed token write keeps the row, which then offers the
+    // waiting-for-token field for a retry.
     setBusy(true)
-    let credentialStored = false
     try {
+      if (!await attemptPatch({ mcpServers: { ...servers, [entry.id]: catalogRow(entry) } })) return
       if (entry.auth === 'token' && token !== undefined && token !== '' && api.mcpCredentialSet !== undefined) {
         await api.mcpCredentialSet(entry.id, token)
-        credentialStored = true
       }
-      if (await saveServers({ ...servers, [entry.id]: catalogRow(entry) })) {
-        setTokenFor(undefined); setTokenDraft('')
-      } else if (credentialStored && servers[entry.id] === undefined) {
-        // The token landed but the new row did not; do not leave it orphaned.
-        await api.mcpCredentialUnset?.(entry.id).catch(() => {})
-      }
+      setTokenFor(undefined); setTokenDraft('')
     } catch (failure) { fail(failure) } finally { setBusy(false) }
   }
   const saveToken = async (server: string, value: string) => {
@@ -626,33 +628,35 @@ function McpPane({ locale, api, settings, grants, onPick, onSaved }: {
   const removeServer = (name: string) => {
     const next = { ...servers }
     delete next[name]
-    // Dropping a server drops its grants in the same patch: the server-level
-    // selector plus every tool: selector under its normalized prefix.
-    const toolPrefix = `tool:${mcpPrefix(name)}`
-    const cleaned = Object.fromEntries(Object.entries(grants).filter(([selector]) => selector !== `mcp:${name}` && !selector.startsWith(toolPrefix)))
+    // Dropping a server drops its grants in the same patch: the mcp: selector
+    // plus only the tool: selectors longest-prefix attribution gives to it —
+    // tools owned by an overlapping name (team vs team__docs) or by nothing
+    // keep their selectors.
+    const names = Object.keys(servers)
+    const cleaned = Object.fromEntries(Object.entries(grants).filter(([selector]) => {
+      if (selector === `mcp:${name}`) return false
+      if (!selector.startsWith('tool:')) return true
+      return mcpServerOf(selector.slice('tool:'.length), names) !== name
+    }))
     void savePatch({ mcpServers: next, capabilities: { grants: cleaned } })
   }
   const addCustom = () => {
     const name = customName.trim()
     const url = customUrl.trim()
-    if (!MCP_SERVER_NAME_PATTERN.test(name)) { setCustomError(t(locale, 'sMcpErrName')); return }
+    if (!MCP_NEW_SERVER_NAME_PATTERN.test(name)) { setCustomError(t(locale, 'sMcpErrName')); return }
     if (name in servers) { setCustomError(t(locale, 'sMcpErrDuplicate')); return }
+    if (view?.globals?.includes(name) === true) { setCustomError(t(locale, 'sMcpGlobal')); return }
     if (!isMcpServerUrl(url)) { setCustomError(t(locale, 'sMcpErrUrl')); return }
     setCustomError('')
     const headers = customToken === '' ? undefined : { Authorization: `Bearer \${credential:${mcpCredentialName(name)}}` }
     void (async () => {
       setBusy(true)
-      let credentialStored = false
       try {
+        if (!await attemptPatch({ mcpServers: { ...servers, [name]: { url, ...(headers !== undefined ? { headers } : {}), enabled: true } } })) return
         if (customToken !== '' && api.mcpCredentialSet !== undefined) {
           await api.mcpCredentialSet(name, customToken)
-          credentialStored = true
         }
-        if (await saveServers({ ...servers, [name]: { url, ...(headers !== undefined ? { headers } : {}), enabled: true } })) {
-          setCustomName(''); setCustomUrl(''); setCustomToken('')
-        } else if (credentialStored) {
-          await api.mcpCredentialUnset?.(name).catch(() => {})
-        }
+        setCustomName(''); setCustomUrl(''); setCustomToken('')
       } catch (failure) { fail(failure) } finally { setBusy(false) }
     })()
   }
@@ -686,6 +690,12 @@ function McpPane({ locale, api, settings, grants, onPick, onSaved }: {
     <div className="dsh-dot-mcp">
       <p className="dsh-dot-cap-intro">{t(locale, 'sMcpIntro')}</p>
       {error ? <div className="dsh-ui-error" role="alert">{error}</div> : null}
+      {saveError !== '' ? (
+        <div className="dsh-ui-error" role="alert">
+          {saveError}
+          <Button variant="ghost" size="sm" aria-label={t(locale, 'dismissError')} title={t(locale, 'dismissError')} onClick={() => setSaveError('')}><IconCloseOutlineRegular size={12} /></Button>
+        </div>
+      ) : null}
       {view === undefined ? null : (
         <>
           {(view.servers ?? []).length > 0 ? <div className="dsh-dot-cap-section">{t(locale, 'sMcpConnected')}</div> : null}
@@ -718,22 +728,26 @@ function McpPane({ locale, api, settings, grants, onPick, onSaved }: {
             )
           })}
           {(view.catalog ?? []).length > 0 ? <div className="dsh-dot-cap-section">{t(locale, 'sMcpRecommended')}</div> : null}
-          {(view.catalog ?? []).map(entry => (
-            <div key={entry.id} className="dsh-dot-mcp-row">
-              <div className="dsh-dot-mcp-line">
-                <span className="dsh-dot-mcp-name">{entry.name}</span>
-                <span className="dsh-dot-mcp-about">{t(locale, entry.about as TextKey)}</span>
-                <span className="dsh-dot-mcp-actions">
-                  {entry.auth === 'none' ? (
-                    <Button variant="ghost" size="sm" disabled={busy} onClick={() => void connect(entry)}>{t(locale, 'sMcpConnect')}</Button>
-                  ) : (
-                    <Button variant="ghost" size="sm" disabled={busy} onClick={() => { setTokenFor(tokenFor === entry.id ? undefined : entry.id); setTokenDraft('') }}>{t(locale, 'sMcpConnect')}</Button>
-                  )}
-                </span>
+          {(view.catalog ?? []).map(entry => {
+            const global = view.globals?.includes(entry.id) === true
+            return (
+              <div key={entry.id} className="dsh-dot-mcp-row">
+                <div className="dsh-dot-mcp-line">
+                  <span className="dsh-dot-mcp-name">{entry.name}</span>
+                  <span className="dsh-dot-mcp-about">{t(locale, entry.about as TextKey)}</span>
+                  <span className="dsh-dot-mcp-actions">
+                    {global ? null : entry.auth === 'none' ? (
+                      <Button variant="ghost" size="sm" disabled={busy} onClick={() => void connect(entry)}>{t(locale, 'sMcpConnect')}</Button>
+                    ) : (
+                      <Button variant="ghost" size="sm" disabled={busy} onClick={() => { setTokenFor(tokenFor === entry.id ? undefined : entry.id); setTokenDraft('') }}>{t(locale, 'sMcpConnect')}</Button>
+                    )}
+                  </span>
+                </div>
+                {global ? <div className="dsh-dot-mcp-global"><span className="dsh-dot-cap-badge">{t(locale, 'sMcpGlobal')}</span><span className="dsh-dot-mcp-token-help">{t(locale, 'sMcpGlobalHint')}</span></div> : null}
+                {!global && tokenFor === entry.id ? connectField(entry) : null}
               </div>
-              {tokenFor === entry.id ? connectField(entry) : null}
-            </div>
-          ))}
+            )
+          })}
           <details className="dsh-dot-mcp-custom">
             <summary>{t(locale, 'sMcpCustom')}</summary>
             <div className="dsh-dot-mcp-custom-body">
@@ -1452,6 +1466,8 @@ export const settingsCss = `
 .dsh-dot-chat .dsh-dot-mcp-token .dsh-ui-input, .dsh-dot-chat .dsh-dot-mcp-token input { flex: 1 1 140px; min-width: 0; }
 .dsh-dot-chat .dsh-dot-mcp-token-link { font-size: 11px; }
 .dsh-dot-chat .dsh-dot-mcp-token-help { flex-basis: 100%; font-size: 11px; line-height: 15px; color: var(--dsw-alias-label-tertiary); }
+.dsh-dot-chat .dsh-dot-mcp-global { display: flex; align-items: baseline; flex-wrap: wrap; gap: 6px; }
+.dsh-dot-chat .dsh-dot-mcp-global .dsh-dot-mcp-token-help { flex-basis: auto; }
 .dsh-dot-chat .dsh-dot-mcp-custom > summary { padding: 4px; font-size: 12px; line-height: 18px; color: var(--dsw-alias-label-secondary); cursor: pointer; list-style: none; }
 .dsh-dot-chat .dsh-dot-mcp-custom > summary::-webkit-details-marker { display: none; }
 .dsh-dot-chat .dsh-dot-mcp-custom > summary::before { content: '▸'; margin-right: 6px; color: var(--dsw-alias-label-tertiary); }

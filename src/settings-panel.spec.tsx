@@ -625,13 +625,44 @@ describe('MCP servers page', () => {
     await act(async () => root.unmount())
   })
 
-  it('unsets the credential when a new server row fails to save', async () => {
-    const unset: string[] = []
+  it('connects a token-auth catalog entry row-first, then stores the token', async () => {
+    // mcp.credential.set only accepts a stored mcpServers name, so the row
+    // must land before the token write.
+    const order: string[] = []
+    const saved: Array<Record<string, unknown>> = []
+    const setCalls: Array<{ server: string; value: string }> = []
     const api = apiStub({
-      setSettings: async () => { throw new Error('store exploded') },
+      setSettings: async (patch: Record<string, unknown>) => { order.push('settings'); saved.push(patch); return DEFAULT_SETTINGS },
+      mcpList: async () => ({
+        servers: [],
+        catalog: [{ id: 'github', name: 'GitHub', about: 'sMcpAbout_github', url: 'https://api.githubcopilot.com/mcp/readonly', auth: 'token', headers: { Authorization: 'Bearer ${credential:DOT_MCP_GITHUB_TOKEN}' } }],
+      }),
+      mcpCredentialSet: async (server: string, value: string) => { order.push('credential'); setCalls.push({ server, value }); return { configured: true, masked: '•••1' } },
+    })
+    const root = createRoot(document.getElementById('root')!)
+    await act(async () => root.render(<SettingsPanel locale="en" section="mcp" api={api as never} settings={DEFAULT_SETTINGS} onSaved={() => {}} />))
+    await act(async () => { await Promise.resolve() })
+    const open = [...document.querySelectorAll('button')].find(button => button.textContent === 'Connect')!
+    await act(async () => open.click())
+    await act(async () => { await Promise.resolve() })
+    const input = document.querySelector<HTMLInputElement>('input[type="password"]')!
+    await act(async () => { type(input, 'tok-9') })
+    const connect = [...document.querySelectorAll('button')].filter(button => button.textContent === 'Connect').pop()!
+    await act(async () => connect.click())
+    await act(async () => { await Promise.resolve() })
+    expect(order).toEqual(['settings', 'credential'])
+    expect(saved).toEqual([{ mcpServers: { github: { catalog: 'github', url: 'https://api.githubcopilot.com/mcp/readonly', headers: { Authorization: 'Bearer ${credential:DOT_MCP_GITHUB_TOKEN}' }, enabled: true } } }])
+    expect(setCalls).toEqual([{ server: 'github', value: 'tok-9' }])
+    await act(async () => root.unmount())
+  })
+
+  it('keeps the saved row when the following token write fails', async () => {
+    const order: string[] = []
+    const api = apiStub({
+      setSettings: async () => { order.push('settings'); return DEFAULT_SETTINGS },
       mcpList: async () => ({ servers: [], catalog: [] }),
-      mcpCredentialSet: async () => ({ configured: true, masked: '••' }),
-      mcpCredentialUnset: async (server: string) => { unset.push(server); return { configured: false } },
+      mcpCredentialSet: async () => { order.push('credential'); throw new Error('vault closed') },
+      mcpCredentialUnset: async () => { order.push('unset'); return { configured: false } },
     })
     const root = createRoot(document.getElementById('root')!)
     await act(async () => root.render(<SettingsPanel locale="en" section="mcp" api={api as never} settings={DEFAULT_SETTINGS} onSaved={() => {}} />))
@@ -641,8 +672,100 @@ describe('MCP servers page', () => {
     const add = [...document.querySelectorAll('button')].find(button => button.textContent === 'Add')!
     await act(async () => add.click())
     await act(async () => { await Promise.resolve() })
-    expect(unset).toEqual(['alpha'])
+    // Row stays, no orphan-rollback fires, the failure surfaces.
+    expect(order).toEqual(['settings', 'credential'])
+    expect(document.querySelector('.dsh-dot-mcp > .dsh-ui-error')?.textContent).toContain('vault closed')
+    expect(nameIn!.value).toBe('alpha')
+    await act(async () => root.unmount())
+  })
+
+  it('never writes the token when the server row itself fails to save', async () => {
+    const calls: string[] = []
+    const api = apiStub({
+      setSettings: async () => { throw new Error('store exploded') },
+      mcpList: async () => ({ servers: [], catalog: [] }),
+      mcpCredentialSet: async () => { calls.push('set'); return { configured: true } },
+      mcpCredentialUnset: async () => { calls.push('unset'); return { configured: false } },
+    })
+    const root = createRoot(document.getElementById('root')!)
+    await act(async () => root.render(<SettingsPanel locale="en" section="mcp" api={api as never} settings={DEFAULT_SETTINGS} onSaved={() => {}} />))
+    await act(async () => { await Promise.resolve() })
+    const [nameIn, urlIn, tokenIn] = [...document.querySelectorAll<HTMLInputElement>('.dsh-dot-mcp-custom-body input')]
+    await act(async () => { type(nameIn!, 'alpha'); type(urlIn!, 'https://a.example/mcp'); type(tokenIn!, 'tok-1') })
+    const add = [...document.querySelectorAll('button')].find(button => button.textContent === 'Add')!
+    await act(async () => add.click())
+    await act(async () => { await Promise.resolve() })
+    expect(calls).toEqual([])
     expect(document.querySelector('.dsh-dot-mcp > .dsh-ui-error')?.textContent).toContain('store exploded')
+    await act(async () => root.unmount())
+  })
+
+  it('keeps a save error across list polling and clears it on the next save', async () => {
+    let failNext = true
+    let lists = 0
+    const api = apiStub({
+      setSettings: async () => { if (failNext) throw new Error('store exploded'); return DEFAULT_SETTINGS },
+      mcpList: async () => { lists += 1; return { servers: [], catalog: [{ id: 'deepwiki', name: 'DeepWiki', about: 'sMcpAbout_deepwiki', url: 'https://mcp.deepwiki.com/mcp', auth: 'none' }] } },
+    })
+    // The poll interval must register on the fake clock, so timers go fake
+    // before render; promise-based saves still flush through microtasks.
+    vi.useFakeTimers()
+    const root = createRoot(document.getElementById('root')!)
+    try {
+      await act(async () => root.render(<SettingsPanel locale="en" section="mcp" api={api as never} settings={DEFAULT_SETTINGS} onSaved={() => {}} />))
+      await act(async () => { await Promise.resolve() })
+      const connect = () => [...document.querySelectorAll('button')].find(button => button.textContent === 'Connect')!
+      await act(async () => connect().click())
+      await act(async () => { await Promise.resolve() })
+      expect(document.querySelector('.dsh-dot-mcp > .dsh-ui-error')?.textContent).toContain('store exploded')
+      // Polls keep running on the load path; the save error survives them.
+      await act(async () => { vi.advanceTimersByTime(5000); await Promise.resolve() })
+      expect(lists).toBeGreaterThanOrEqual(2)
+      expect(document.querySelector('.dsh-dot-mcp > .dsh-ui-error')?.textContent).toContain('store exploded')
+      // The next successful save clears it.
+      failNext = false
+      await act(async () => connect().click())
+      await act(async () => { await Promise.resolve() })
+      expect(document.querySelector('.dsh-dot-mcp > .dsh-ui-error')).toBeNull()
+    } finally {
+      vi.useRealTimers()
+      await act(async () => root.unmount())
+    }
+  })
+
+  it('marks catalog entries that already exist as global servers', async () => {
+    const api = apiStub({
+      mcpList: async () => ({
+        servers: [],
+        catalog: [{ id: 'github', name: 'GitHub', about: 'sMcpAbout_github', url: 'https://api.githubcopilot.com/mcp/readonly', auth: 'token' }],
+        globals: ['github'],
+      }),
+    })
+    const root = createRoot(document.getElementById('root')!)
+    await act(async () => root.render(<SettingsPanel locale="en" section="mcp" api={api as never} settings={DEFAULT_SETTINGS} onSaved={() => {}} />))
+    await act(async () => { await Promise.resolve() })
+    expect(document.body.textContent).toContain('Already connected globally')
+    expect(document.body.textContent).toContain('Grant it under Extra capabilities instead')
+    expect([...document.querySelectorAll('button')].some(button => button.textContent === 'Connect')).toBe(false)
+    await act(async () => root.unmount())
+  })
+
+  it('rejects custom names that could split a tool prefix across two servers', async () => {
+    const saved: Array<Record<string, unknown>> = []
+    const api = apiStub({
+      setSettings: async (patch: Record<string, unknown>) => { saved.push(patch); return DEFAULT_SETTINGS },
+      mcpList: async () => ({ servers: [], catalog: [] }),
+    })
+    const root = createRoot(document.getElementById('root')!)
+    await act(async () => root.render(<SettingsPanel locale="en" section="mcp" api={api as never} settings={DEFAULT_SETTINGS} onSaved={() => {}} />))
+    await act(async () => { await Promise.resolve() })
+    const [nameIn, urlIn] = [...document.querySelectorAll<HTMLInputElement>('.dsh-dot-mcp-custom-body input')]
+    await act(async () => { type(nameIn!, 'team__docs'); type(urlIn!, 'https://a.example/mcp') })
+    const add = [...document.querySelectorAll('button')].find(button => button.textContent === 'Add')!
+    await act(async () => add.click())
+    await act(async () => { await Promise.resolve() })
+    expect(saved).toEqual([])
+    expect(document.querySelector('.dsh-ui-error')?.textContent).toContain('1–32')
     await act(async () => root.unmount())
   })
 
@@ -679,6 +802,42 @@ describe('MCP servers page', () => {
     }])
     await act(async () => root.unmount())
   })
+
+  it('removing `team` keeps the grants longest-prefix gives to `team__docs`', async () => {
+    // team__docs is a stored legacy row; `mcp__team__docs__search` belongs to
+    // it, not to `team`, so it survives the removal patch.
+    const saved: Array<Record<string, unknown>> = []
+    const settings: DotSettings = {
+      ...DEFAULT_SETTINGS,
+      mcpServers: {
+        team: { url: 'https://team.example/mcp', enabled: true },
+        'team__docs': { url: 'https://docs.example/mcp', enabled: true },
+      },
+      capabilities: { grants: { 'mcp:team': 'auto', 'tool:mcp__team__list': 'ask', 'tool:mcp__team__docs__search': 'auto' } },
+    }
+    const api = apiStub({
+      setSettings: async (patch: Record<string, unknown>) => { saved.push(patch); return settings },
+      mcpList: async () => ({
+        servers: [
+          { name: 'team', url: 'https://team.example/mcp', enabled: true, auth: 'none' },
+          { name: 'team__docs', url: 'https://docs.example/mcp', enabled: true, auth: 'none' },
+        ],
+        catalog: [],
+      }),
+    })
+    const root = createRoot(document.getElementById('root')!)
+    await act(async () => root.render(<SettingsPanel locale="en" section="mcp" api={api as never} settings={settings} onSaved={() => {}} />))
+    await act(async () => { await Promise.resolve() })
+    const row = [...document.querySelectorAll('.dsh-dot-mcp-row')].find(node => node.querySelector('.dsh-dot-mcp-name')?.textContent === 'team')!
+    const remove = [...row.querySelectorAll('button')].find(button => button.textContent === 'Remove')!
+    await act(async () => remove.click())
+    await act(async () => { await Promise.resolve() })
+    expect(saved).toEqual([{
+      mcpServers: { 'team__docs': settings.mcpServers!['team__docs'] },
+      capabilities: { grants: { 'tool:mcp__team__docs__search': 'auto' } },
+    }])
+    await act(async () => root.unmount())
+  })
 })
 
 describe('capabilities sections', () => {
@@ -712,6 +871,31 @@ describe('capabilities sections', () => {
     expect(text()).not.toContain('exa')
     expect(text()).not.toContain('pt_tool')
     expect(text()).toContain('github')
+    await act(async () => root.unmount())
+  })
+
+  it('applies the enabled-only filter together with the search', async () => {
+    const api = {
+      models: async () => ({ groups: [] }),
+      settings: async () => DEFAULT_SETTINGS,
+      settingProposals: async () => [],
+      decideSetting: async () => 'ok',
+      setSettings: async () => DEFAULT_SETTINGS,
+      capabilities: async () => ({ locked: [], groups, grants: {}, applied: {} }),
+    }
+    const settings: DotSettings = { ...DEFAULT_SETTINGS, capabilities: { grants: { 'mcp:github': 'auto' } } }
+    const root = createRoot(document.getElementById('root')!)
+    await act(async () => root.render(<SettingsPanel locale="en" section="capabilities" api={api as never} settings={settings} onSaved={() => {}} />))
+    await act(async () => { await Promise.resolve() })
+    const text = () => document.body.textContent ?? ''
+    // 'mcp' matches both groups' ids; enabled-only must still drop exa.
+    const search = document.querySelector<HTMLInputElement>('.dsh-dot-cap-search')!
+    await act(async () => { type(search, 'mcp') })
+    const toggle = [...document.querySelectorAll('input[type="checkbox"]')].find(input => input.closest('label')?.textContent === 'Enabled only')!
+    await act(async () => toggle.click())
+    await act(async () => { await Promise.resolve() })
+    expect(text()).toContain('github')
+    expect(text()).not.toContain('exa')
     await act(async () => root.unmount())
   })
 

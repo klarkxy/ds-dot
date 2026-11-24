@@ -3588,8 +3588,12 @@ describe.skipIf(!worktreeGitAvailable)('task worktree isolation', { timeout: 30_
       expect(isolation.baseSha).toBe('f00dcafe1234')
       expect(h.store.work.workView(created.id)?.isolation?.base).toEqual({ ref: 'refs/pull/9/head', remote: 'upstream' })
       const fetch = calls.find(args => args[0] === 'fetch')
-      expect(fetch?.slice(0, 3)).toEqual(['fetch', '--no-tags', '--no-write-fetch-head'])
+      expect(fetch?.slice(0, 4)).toEqual(['fetch', '--no-tags', '--no-write-fetch-head', '--refmap='])
       expect(fetch?.some(arg => arg.includes('+refs/pull/9/head:refs/dot/base/'))).toBe(true)
+      // Credential-bearing https base_remote URLs are rejected without echoing secrets.
+      await expect(h.service.manageTask({ action: 'create', title: 'x', goal: 'g', dir: repo, isolation: 'worktree', base_ref: 'main', base_remote: 'https://x-access-token:ghp_secret@github.com/org/repo.git' })).rejects.toSatisfy(
+        (err: Error) => /must not contain credentials/.test(err.message) && !err.message.includes('ghp_secret'),
+      )
       // The same ref/remote check rejects bad combinations before touching git.
       await expect(h.service.manageTask({ action: 'create', title: 'x', goal: 'g', dir: repo, base_ref: 'main' })).rejects.toMatchObject({ code: 'dot/invalid' })
       await expect(h.service.manageTask({ action: 'create', title: 'x', goal: 'g', dir: repo, isolation: 'none', base_ref: 'main' })).rejects.toMatchObject({ code: 'dot/invalid' })
@@ -3600,6 +3604,52 @@ describe.skipIf(!worktreeGitAvailable)('task worktree isolation', { timeout: 30_
       expect(h.store.work.change(local.id)!.isolation!.base).toEqual({ ref: 'release/1.0' })
       expect(calls.some(args => args[0] === 'fetch')).toBe(false)
       expect(calls.some(args => args[0] === 'rev-parse' && args.includes('release/1.0^{commit}'))).toBe(true)
+    } finally { await h.service.dispose(); cleanup() }
+  })
+
+  it('does not hold the serial lane across remote git fetch during create', async () => {
+    const { repo, home, cleanup } = makeSpecRepo('dot-iso-fetch-lock-')
+    let releaseFetch!: () => void
+    const fetchGate = new Promise<void>(resolve => { releaseFetch = resolve })
+    const fake: typeof runGit = async (args) => {
+      if (args[0] === 'rev-parse' && args[1] === '--show-toplevel') return repo
+      if (args[0] === 'remote') return 'upstream'
+      if (args[0] === 'fetch') { await fetchGate; return '' }
+      if (args[0] === 'rev-parse') return 'f00dcafe1234'
+      return ''
+    }
+    const h = setup(undefined, undefined, home, { git: fake })
+    try {
+      await h.service.ensureDot()
+      await h.service.manageTask({ action: 'dispatch', dir: '/proj', title: 'run', message: 'go' })
+      const sessionId = h.store.work.listRuns()[0]!.sessionId!
+      const creating = h.service.manageTask({ action: 'create', title: 'PR fix', goal: 'land', dir: repo, isolation: 'worktree', base_ref: 'refs/pull/9/head', base_remote: 'upstream' })
+      await new Promise(resolve => setTimeout(resolve, 20))
+      // Remote fetch is still blocked; interrupt and serial-lane ops must not stall behind it.
+      const interrupted = await h.service.interrupt(sessionId)
+      expect(interrupted).toContain(sessionId)
+      expect(await h.service.serialSettings(async () => 'free')).toBe('free')
+      releaseFetch()
+      const created = JSON.parse(await creating) as { id: string }
+      expect(h.store.work.change(created.id)?.isolation?.base).toEqual({ ref: 'refs/pull/9/head', remote: 'upstream' })
+    } finally { await h.service.dispose(); cleanup() }
+  })
+
+  it('cancelling an unmodified PR-based isolated change deletes the branch even when unmerged into HEAD', async () => {
+    const { repo, home, cleanup } = makeSpecRepo('dot-iso-cancel-base-')
+    const h = setup(undefined, undefined, home, { git: runGit })
+    try {
+      await runGit(['checkout', '-b', 'pr-branch'], repo)
+      writeFileSync(join(repo, 'pr.ts'), 'pr change')
+      await runGit(['add', 'pr.ts'], repo)
+      await runGit(['commit', '-m', 'pr commit'], repo)
+      await runGit(['checkout', 'main'], repo)
+
+      const created = JSON.parse(await h.service.manageTask({ action: 'create', title: 'PR', goal: 'land', dir: repo, isolation: 'worktree', base_ref: 'pr-branch' })) as { id: string }
+      const isolation = h.store.work.change(created.id)!.isolation!
+      await h.service.manageTask({ action: 'cancel', task_id: created.id })
+      expect(existsSync(isolation.worktree)).toBe(false)
+      expect(await runGit(['branch', '--list', isolation.branch], repo)).toBe('')
     } finally { await h.service.dispose(); cleanup() }
   })
 

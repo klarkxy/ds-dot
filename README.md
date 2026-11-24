@@ -26,7 +26,7 @@ Remind me every weekday at 9:00 AM to check overnight builds.
 
 ## Highlights
 
-- **Parallel work & clean diffs:** Runs non-overlapping tasks together or on isolated branches, reads changes first, lets you quote exact lines to revise, and stops after three stalled tries.
+- **Parallel work & clean diffs:** Runs non-overlapping tasks together or on isolated branches (from your checkout or a PR/remote `base_ref` — keep or discard foreign branches without merging over your checkout), reads changes first, lets you quote exact lines to revise, and stops after three stalled tries.
 - **Clear safety boundaries:** Routine reversible checks run quietly; deletions, pushes, credentials, and gray areas pause with clear confirmation cards and sidebar/desktop alerts.
 - **Recipes & reminders:** Save repeatable workflows once, run them directly from plain-language schedules, and review restore suggestions if a tweaked recipe slips.
 - **Settings & optional companions:** Lock settings you want untouched, inspect context or trajectory anytime, and optionally pair with `@klarkxy/dsh-dev-index`, `@klarkxy/dsh-model-picker`, and `@deepseek-ai/dsh-webhook` (all off unless enabled).

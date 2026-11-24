@@ -1412,6 +1412,7 @@ export const settingsCss = `
 .dsh-dot-chat .dsh-dot-mcp-actions { display: inline-flex; align-items: center; gap: 0; margin-left: auto; flex-shrink: 0; }
 .dsh-dot-chat .dsh-dot-mcp-grant { display: flex; align-items: center; }
 .dsh-dot-chat .dsh-dot-mcp-state { display: inline-block; width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
+.dsh-dot-chat .dsh-dot-cap-name .dsh-dot-mcp-state { margin-right: 6px; vertical-align: middle; }
 .dsh-dot-chat .dsh-dot-mcp-state--ok { background: var(--dsw-alias-state-success-primary); }
 .dsh-dot-chat .dsh-dot-mcp-state--warn { background: var(--dsw-alias-state-warn-primary); }
 .dsh-dot-chat .dsh-dot-mcp-state--bad { background: var(--dsw-alias-state-danger-primary, var(--dsw-alias-state-warn-primary)); }

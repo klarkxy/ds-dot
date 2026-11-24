@@ -227,7 +227,7 @@
       paragraphs: {
         zh: [
           '说实话，光凭我身上这几件家什，遇到「react 仓库现在长什么样」这种问题还是得去网上翻半天。现在设置里多了个「MCP 服务」页，替我接了几位懂行的帮手：查文档的有、盯 GitHub 仓库的也有。不过接入和真用是两回事——每个帮手的开关都在「额外能力」里，默认全关着，开哪个、开多松还是你说了算。',
-          '这些帮手只认我，不会溜去你别的会话里露脸。有的要令牌才肯干活，比如 GitHub 用的是细粒度只读 PAT，令牌我收进凭据库，界面上只露个影子。不跑本地命令，也不走 OAuth，规矩就这三条。有帮手在，想知道仓库结构直接问本人，比翻网页快还准嘛。',
+          '这些帮手只认我，不会溜去你别的会话里露脸。有的要令牌才肯干活，比如 GitHub 用的是细粒度只读 PAT，令牌我收进凭据库，界面上只露个影子。不跑本地命令，也不走 OAuth，这两条是定死的。有帮手在，想知道仓库结构直接问本人，比翻网页快还准嘛。',
         ],
         en: [
           'Until now, “what does the react repo look like right now” still sent me wandering the open web. There’s a new “MCP servers” page in my settings that lets me call in specialists—docs readers, a GitHub watcher, that sort. Connecting one and actually using it stay separate calls: every helper has its own switch under “Extra capabilities”, off by default, and you set how loose it runs.',

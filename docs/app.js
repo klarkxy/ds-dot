@@ -169,6 +169,23 @@
         ja: '任意の GitHub 連携を有効にすると、PR についたコメントや結果が最初に開いたタスクの下にまとまります。',
       },
     },
+    {
+      id: 'entry-knowledge',
+      pr: 78,
+      date: '2026.11.23',
+      post: 'memory-in-lines',
+      file: 'dot-78-entry-knowledge.gif',
+      title: {
+        zh: '约定与认知按条管理',
+        en: 'Agreements and cognition as entry lists',
+        ja: '取り決めと認知をエントリー単位で管理',
+      },
+      desc: {
+        zh: '约定一行一行记、认知可置顶常驻，排不进提示词的条目按确认新旧自动休眠、再确认即回前排。',
+        en: 'Agreements edit line by line, cognition pins stay in view, and entries past the prompt slots go dormant least-confirmed first until a confirm moves them back up front.',
+        ja: '取り決めは一行ずつ編集、認知はピン留めで常時表示、枠に入りきらない項目は確認の古い順に休眠し、再確認で未ピン留めの先頭に戻ります。',
+      },
+    },
   ];
 
   const POSTS = [
@@ -256,6 +273,47 @@
           'ファイル参照やローカルテストのような普段の確認はそのまま通して作業を止めず、読み取り専用の作業では外部ツールの書き込み系もしっかり抑えています。一方で、独立した一時ワークツリーの中で動くタスクが作業用の権限を広げたり、そのワークツリー内だけで git reset や clean を行う場合は、作業目的に沿っているか自分で確かめて判断するようにしました。引数が長くて省略されたリクエストも、まず全文を読み切ってから可否を決めます（全文が取れないときは無理せずお任せします）。',
           'ただし元の作業フォルダや別ディレクトリへ向く指定、ファイル削除や外部へのプッシュ、機密情報へのアクセス、判断に迷う場面ではその場でピタッと止まります。理由と提案つきの確認カードを出して待ち（解決や期限切れで自動クローズ）、パネルを閉じていてもバッジやデスクトップ通知でお知らせするので、無言のまま進んでしまうことはありません。',
           'もう一つ、線をはっきり引きました。ファイルを書き換えたりコマンドを実行したりするツールは、私自身の手では一切使いません。許可をいただいても、そういう作業は派遣したタスクだけのものです。私はメモや提案、簡単な調べ物にとどめて、本当に手を動かす必要があれば作業指示を書いてタスクに任せます。範囲も記録も残るので安心です。',
+        ],
+      },
+    },
+    {
+      slug: 'memory-in-lines',
+      date: '2026.11.23',
+      category: 'rules',
+      image: 'images/chibi-memory.jpg',
+      aspect: 'square',
+      imageAlt: {
+        zh: '阳光窗台边往手账上一行一行写小条目的Q版桃乐丝',
+        en: 'Chibi Dorothy writing single lines into her notebook by a sunlit bay window',
+        ja: '出窓のそばで手帳に一行ずつ書き込むちびドロシー',
+      },
+      caption: {
+        zh: '规矩一条条记，要紧的别针别住。',
+        en: 'Rules kept line by line, essentials pinned in place.',
+        ja: '約束は一行ずつ、大事なものはピンで留めて。',
+      },
+      title: {
+        zh: '约定和认知都改成一条条记了',
+        en: 'Agreements and cognition, now line by line',
+        ja: '取り決めと認知を一行ずつ管理するようにしました',
+      },
+      excerpt: {
+        zh: '以前改一句规矩得换掉整块文字，现在约定和认知都是一行一行的清单：没有字数上限，置顶的永远占住前排，其余名额给最近确认的条目；排不进去的从最久没确认的开始休眠，而不是被删掉。',
+        en: 'Fixing one rule used to mean rewriting a whole text block. Both agreements and cognition are now line-by-line lists—no length cap, pinned entries always take a front slot, the rest go to the most recently confirmed, and whatever still does not fit naps least-confirmed first instead of vanishing.',
+        ja: '一文だけ直すのに全文を書き替えていた取り決めと認知が、一行ずつのリストになりました。長さ制限もなく、ピン留めした項目はいつも最前列、残りの枠は最近確認した順、それでも入りきらない分は確認の古い順に消えずにお休みします。',
+      },
+      paragraphs: {
+        zh: [
+          '「约定」里记的是你亲口定下的规矩，「认知」里是我平时攒下的理解。以前两边都是一整块文字，改一句就得整块重写，写长了还会顶到字数上限。现在都拆成了一条一条：规矩按你的原话一行一行存着，我的心得也一条一条攒着，改哪条动哪条，再也不限量了。',
+          '认知那边还多了两个小机关：特别要紧的条目点一下「置顶」，不管攒了多少条它都一直在我的视野前排；提示词的名额先给置顶条目，剩下的位置排给最近确认的，最久没被确认的那些自动休眠——还存着，需要时也能按关键词翻找出来，只是暂时不占提示词的位置。我再确认一条，它就回到未置顶队伍的最前面；置顶的话不管名额多挤都一直有它。约定万一改错也别慌，抬头有个「回退上次保存」兜底，doro~',
+        ],
+        en: [
+          '“Agreements” keeps your standing rules in your own words; “cognition” is the understanding I collect along the way. Both used to be single blocks of text—tweaking one line meant rewriting everything, and there was a character ceiling to hit. Now each is a list of separate entries: edit or remove exactly the line you mean, with no length limit at all.',
+          'Cognition also picked up two little states worth knowing: pin an entry and it stays at the front of my view no matter how long the list grows; pinned entries take their slots first, the rest of the prompt goes to the most recently confirmed, and the least recently confirmed ones go dormant on their own—still stored and searchable when needed, just out of my prompt. A fresh confirm moves an entry back to the front of the unpinned line, and a pin keeps it showing no matter how crowded it gets. And if an agreement edit goes sideways, the revert-last-save button up top has your back, doro~',
+        ],
+        ja: [
+          '「取り決め」にはあなたが決めたルールをそのままの言葉で、「認知」にはわたしが積み重ねた理解を書いています。どちらも前はひとまとめの長文で、1か所直すだけで全部書き替え、長くなると文字数の天井に当たっていました。いまはどちらも一項目ずつのリストなので、直したい行だけを直せて、長さの上限もありません。',
+          '認知には小さな仕掛けがふたつ増えました。とくに大事な項目は「ピン留め」すると何件あってもいちばん前に置き続けます。プロンプトの枠はピン留めが先に使い、残りは最近確認した項目から順に、入りきらない分は確認の古い順に自動で休眠します——消えずに残っていて必要なときは検索で掘り起こせ、再確認すると未ピン留めの先頭に戻り、ピン留めならいつでも表示されます。取り決めを書きまちがえても「前回の保存を取り消す」があるので安心です、doro~',
         ],
       },
     },

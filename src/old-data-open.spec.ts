@@ -84,7 +84,7 @@ describe('old data directory', () => {
       }
       const segmentRow = stateRow.segment as Record<string, unknown>
       for (const key of ['memory', 'memorySeen', 'openCard']) expect(key in segmentRow, key).toBe(false)
-      expect(store.agreements).toBe('- keep this')
+      expect(store.agreementEntries.map(entry => entry.text)).toEqual(['keep this'])
       // The task ledger opens; the oldest rows still default their timestamps.
       const task = store.task('s-1')!
       expect(task.status).toBe('idle')

@@ -2,7 +2,7 @@ import { act, useState } from 'react'
 import { JSDOM } from 'jsdom'
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 import { DEFAULT_SETTINGS, type DotSettings } from './contracts.ts'
-import { SettingsPanel } from './settings-panel.tsx'
+import { SettingsPanel, settingsCss } from './settings-panel.tsx'
 
 const dom = new JSDOM('<div id="root"></div>', { url: 'https://local.test' })
 vi.stubGlobal('window', dom.window)
@@ -1106,5 +1106,117 @@ describe('capabilities sections', () => {
     expect(code?.textContent).toBe('ping')
     expect(code?.closest('.dsh-dot-cap-tool')?.getAttribute('title')).toBe('mcp__srv_name__ping')
     await act(async () => root.unmount())
+  })
+})
+
+describe('dispatch settings layout', () => {
+  const catalog = {
+    groups: [
+      { id: 'magpie', name: 'Magpie', models: [
+        { id: 'agnes', name: 'Agnes 3.0 Flash · KLARKXY' },
+        { id: 'ds-flash', name: 'DeepSeek V4.1 Flash · KLARKXY' },
+        { id: 'glm', name: 'GLM-5.3 Flash · KLARKXY' },
+        { id: 'grok', name: 'Grok 4.6 · routing group' },
+      ] },
+      { id: 'deepseek', name: 'DeepSeek', models: [
+        { id: 'chat', name: 'DeepSeek Chat' },
+        { id: 'reasoner', name: 'DeepSeek Reasoner' },
+      ] },
+      { id: 'account', name: 'DeepSeek Account', models: [
+        { id: 'v4', name: 'deepseek-v4' },
+        { id: 'flash', name: 'deepseek-flash' },
+      ] },
+    ],
+  }
+  const selected = ['magpie/agnes', 'magpie/ds-flash', 'magpie/glm', 'deepseek/chat', 'account/v4']
+
+  function mount(settings: DotSettings, saves: Array<Partial<DotSettings>>) {
+    let current = settings
+    const api = {
+      models: async () => catalog,
+      settings: async () => current,
+      settingProposals: async () => [],
+      decideSetting: async () => 'ok',
+      setSettings: async (patch: Partial<DotSettings>) => {
+        saves.push(patch)
+        current = { ...current, ...patch } as DotSettings
+        return current
+      },
+    }
+    function Harness() {
+      const [value, setValue] = useState<DotSettings>(current)
+      return <SettingsPanel locale="en" section="dispatch" api={api as never} settings={value} onSaved={setValue} />
+    }
+    return Harness
+  }
+
+  it('groups dispatch settings and keeps model search, selection, and empty states', async () => {
+    const saves: Array<Partial<DotSettings>> = []
+    const Harness = mount({ ...DEFAULT_SETTINGS, taskPermission: 'workspace-write', taskModels: { mode: 'allow', list: selected }, idleCheckMinutes: 10 }, saves)
+    const root = createRoot(document.getElementById('root')!)
+    await act(async () => root.render(<Harness />))
+    await act(async () => { await Promise.resolve() })
+
+    expect([...document.querySelectorAll('.dsh-dot-dispatch-group')].map(node => node.getAttribute('data-group'))).toEqual(['permission', 'models', 'routine'])
+    expect(document.querySelector('input[aria-label="Routine check"]')).not.toBeNull()
+    expect(document.querySelector('[role="tablist"][aria-label="Task permissions"]')).not.toBeNull()
+    const picker = document.querySelector('.dsh-dot-model-picker')!
+    expect(picker.getAttribute('aria-label')).toBe('Allow selected')
+    expect(document.querySelector('.dsh-dot-model-summary')?.textContent).toContain('5 selected')
+    expect(document.querySelectorAll('.dsh-dot-model-chip')).toHaveLength(5)
+    expect(document.querySelector('.dsh-dot-model-chip-provider')).toBeNull()
+    expect(document.querySelector('.dsh-dot-model-chip')?.getAttribute('title')).toBe('Magpie / Agnes 3.0 Flash · KLARKXY')
+    expect(document.querySelectorAll('.dsh-dot-model-group')).toHaveLength(3)
+    expect(document.querySelector('.dsh-dot-model-group-count')?.textContent).toBe('3/4')
+    expect(document.querySelectorAll('.dsh-dot-model-item--on').length).toBeGreaterThanOrEqual(5)
+
+    const filter = document.querySelector<HTMLInputElement>('input[aria-label="Filter models…"]')!
+    await act(async () => { type(filter, 'account') })
+    const visible = [...document.querySelectorAll<HTMLInputElement>('.dsh-dot-model-list input[type="checkbox"]')]
+    expect(visible).toHaveLength(2)
+    expect(document.querySelector('.dsh-dot-model-group-name')?.textContent).toBe('DeepSeek Account')
+
+    await act(async () => { type(filter, 'no-such-model') })
+    expect(document.querySelector('.dsh-dot-model-empty')?.textContent).toBe('No matching models')
+    expect(document.querySelector('.dsh-dot-model-group')).toBeNull()
+
+    await act(async () => { type(filter, '') })
+    const remove = document.querySelector<HTMLButtonElement>('.dsh-dot-model-chip-remove')!
+    expect(remove.getAttribute('aria-label')).toBe('Remove Agnes 3.0 Flash · KLARKXY')
+    await act(async () => { remove.click() })
+    expect(saves.at(-1)?.taskModels).toEqual({ mode: 'allow', list: selected.slice(1) })
+
+    const toggle = [...document.querySelectorAll<HTMLElement>('.dsh-dot-model-group-toggle')].find(el => el.parentElement?.textContent?.includes('DeepSeek Account'))!
+    await act(async () => { toggle.click() })
+    expect(saves.at(-1)?.taskModels?.list).toEqual(expect.arrayContaining(['account/v4', 'account/flash']))
+
+    await act(async () => { document.querySelector<HTMLButtonElement>('.dsh-dot-model-summary button')!.click() })
+    expect(saves.at(-1)?.taskModels).toEqual({ mode: 'allow', list: [] })
+    expect(document.querySelector('.dsh-dot-model-chip')).toBeNull()
+    expect(document.querySelector('.dsh-ui-help')?.textContent).toContain('No models selected')
+
+    const unrestricted = [...document.querySelectorAll<HTMLButtonElement>('[role="tab"]')].find(node => node.textContent === 'Unrestricted')!
+    await act(async () => { unrestricted.click() })
+    expect(saves.at(-1)?.taskModels).toEqual({ mode: 'all', list: [] })
+    expect(document.querySelector('.dsh-dot-model-picker')).toBeNull()
+
+    const exclude = [...document.querySelectorAll<HTMLButtonElement>('[role="tab"]')].find(node => node.textContent === 'Exclude selected')!
+    await act(async () => { exclude.click() })
+    expect(document.querySelector('.dsh-dot-model-picker')?.getAttribute('aria-label')).toBe('Exclude selected')
+    expect(document.querySelector('.dsh-dot-model-empty')).toBeNull()
+
+    await act(async () => root.unmount())
+  })
+
+  it('does not give the model list or selected tokens their own scrollbar', () => {
+    const rule = (selector: string) => {
+      const start = settingsCss.indexOf(selector)
+      expect(start).toBeGreaterThan(-1)
+      return settingsCss.slice(start, settingsCss.indexOf('}', start))
+    }
+    expect(rule('.dsh-dot-chat .dsh-dot-model-list {')).not.toMatch(/max-height|overflow/)
+    expect(rule('.dsh-dot-chat .dsh-dot-model-chips {')).not.toMatch(/max-height|overflow/)
+    expect(settingsCss).toContain(".dsh-dot-dispatch-group[data-group='models']")
+    expect(settingsCss).toContain('width: 100%')
   })
 })

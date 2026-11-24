@@ -51,6 +51,23 @@
       },
     },
     {
+      id: 'worktree-base-ref',
+      pr: 81,
+      date: '2026.11.24',
+      post: 'parallel-and-diff',
+      file: 'dot-81-worktree-base-ref.gif',
+      title: {
+        zh: '从指定分支切出工作树',
+        en: 'Worktrees cut from a target branch or PR',
+        ja: '指定ブランチや PR から切るワークツリー',
+      },
+      desc: {
+        zh: '基于 PR 或远端分支切出的工作树不会误合进当前检出，面板里只留“保留分支”和“丢弃”，点一下就能把整理好的分支留着去提 PR。',
+        en: 'Worktrees cut from a PR or remote ref skip “Merge into checkout” and offer only “Keep branch” or “Discard”, committing the verified branch cleanly without touching your active checkout.',
+        ja: 'PR やリモート参照から切ったワークツリーには「メインへマージ」を出さず、「ブランチを保持」か「破棄」だけを表示して現在のチェックアウトを守ります。',
+      },
+    },
+    {
       id: 'diff',
       pr: 50,
       date: '2026.11.22',
@@ -376,6 +393,47 @@
       },
     },
     {
+      slug: 'notes-and-quiet',
+      date: '2026.11.24',
+      category: 'work',
+      image: 'images/chibi-memory.jpg',
+      aspect: 'square',
+      imageAlt: {
+        zh: '阳光窗台边支着下巴记笔记的Q版桃乐丝，旁边有柑橘碟和酣睡的小粉鲸玩偶',
+        en: 'Chibi Dorothy writing in a sketchbook by a sunlit bay window with oranges and a pink whale plushie',
+        ja: '出窓でみかんとクジラのぬいぐるみのそばで手帳を書くちびドロシー',
+      },
+      caption: {
+        zh: '你的习惯、加锁的设置，还有平时顺手记的备忘。',
+        en: 'Noting your house habits, locked switches, and quiet threads.',
+        ja: 'お気に入りのやり方や鍵をかけた設定を控えておく午後。',
+      },
+      title: {
+        zh: '你的规矩我记在本子上了，锁住的不会去碰',
+        en: 'Remembering your habits—and leaving locked knobs alone',
+        ja: 'いつものやり方はメモ済み、ロックした設定は触りません',
+      },
+      excerpt: {
+        zh: '设置抽屉里新加了几把小锁，不想让我提议修改的项直接锁起来就行；选任务模型能参考 LMArena 快照推荐，翻 GitHub 上的 PR、Issue 和仓库信息也只留真正用得上的内容。',
+        en: 'Added small padlocks in settings so settled choices stay untouched—plus Arena-backed ranking helps weigh permitted task models (never overriding a model you name), GitHub PR updates land back on their task, and repo lookups trim clutter.',
+        ja: '設定引き出しに小さな鍵をつけて変えたくない項目を固定できるほか、Arena スナップショット基準のモデル推薦（指定したモデルは上書きしません）や GitHub 通知のタスク紐づけ・軽量な参照に対応しました。',
+      },
+      paragraphs: {
+        zh: [
+          '说真的，要是每次新开对话都得重新解释“怎么称呼你”“平时放多松”，人烦我也记不过来。现在全都规规矩矩收在设置抽屉里，隔壁插件带过来的额外工具默认也都关着。哪项你觉得不用再动了，点一下旁边的小锁，以后我连修改建议也不会提。',
+          '选任务模型时我也多了份参考：`dot_list_models` 会结合固定的 LMArena 榜单快照对可用路由做只读排序推荐，但只要是你明确点名的模型我绝不会擅自替换。GitHub 那边也更清爽了：开着联动时 PR 新评论和构建失败会自己落回原任务底下；我去翻 PR、Issue 或仓库信息时只留正文、分支和状态，遇上限流再悄悄退回普通读取。平时只想先聊两句思路不建任务，也随时说就行。',
+        ],
+        en: [
+          'Nobody wants to re-explain their preferred tone or permissions every week. Everything sits neatly in one settings drawer—with companion plugin tools turned off by default—and clicking the small lock beside any option keeps me from ever proposing edits to it.',
+          'For choosing task models, `dot_list_models` offers read-only rankings from a pinned LMArena snapshot while leaving any model you explicitly named untouched. The GitHub side is tidier too: optional PR comments and failing checks fold right back onto their originating task, and PR, issue, or repo lookups trim repetitive link boilerplate (falling back quietly if rate-limited). And if you just want to bounce ideas around without opening tasks, we can just talk.',
+        ],
+        ja: [
+          '毎回「呼び方」や「任せる範囲」を言い直すのは大変ですよね。設定はひとつの引き出しにまとめて、他プラグインの追加機能も既定はオフにしてあります。決めた項目の横にある鍵を押せば、以後はわたしからの変更提案もしません。',
+          'タスク用モデルを選ぶときは、固定版 LMArena スナップショットに基づく推奨順位も参照します（あなたが明示したモデルを勝手に差し替えることはありません）。GitHub 周りもすっきりして、任意連携をオンにしていれば PR の新着コメントや失敗通知は元のタスクの下へまとまり、PR・Issue・リポジトリ参照も重複リンクを省いて要点だけ拾います。雑談や壁打ちだけしたいときも気軽に声をかけてください。',
+        ],
+      },
+    },
+    {
       slug: 'memory-in-lines',
       date: '2026.11.23',
       category: 'rules',
@@ -413,47 +471,6 @@
         ja: [
           '「取り決め」にはあなたが決めたルールをそのままの言葉で、「認知」にはわたしが積み重ねた理解を書いています。どちらも前はひとまとめの長文で、1か所直すだけで全部書き替え、長くなると文字数の天井に当たっていました。いまはどちらも一項目ずつのリストなので、直したい行だけを直せて、長さの上限もありません。',
           '認知には小さな仕掛けがふたつ増えました。とくに大事な項目は「ピン留め」すると何件あってもいちばん前に置き続けます。プロンプトの枠はピン留めが先に使い、残りは最近確認した項目から順に、入りきらない分は確認の古い順に自動で休眠します——消えずに残っていて必要なときは検索で掘り起こせ、再確認すると未ピン留めの先頭に戻り、ピン留めならいつでも表示されます。取り決めを書きまちがえても「前回の保存を取り消す」があるので安心です、doro~',
-        ],
-      },
-    },
-    {
-      slug: 'notes-and-quiet',
-      date: '2026.11.24',
-      category: 'work',
-      image: 'images/chibi-memory.jpg',
-      aspect: 'square',
-      imageAlt: {
-        zh: '阳光窗台边支着下巴记笔记的Q版桃乐丝，旁边有柑橘碟和酣睡的小粉鲸玩偶',
-        en: 'Chibi Dorothy writing in a sketchbook by a sunlit bay window with oranges and a pink whale plushie',
-        ja: '出窓でみかんとクジラのぬいぐるみのそばで手帳を書くちびドロシー',
-      },
-      caption: {
-        zh: '你的习惯、加锁的设置，还有平时顺手记的备忘。',
-        en: 'Noting your house habits, locked switches, and quiet threads.',
-        ja: 'お気に入りのやり方や鍵をかけた設定を控えておく午後。',
-      },
-      title: {
-        zh: '你的规矩我记在本子上了，锁住的不会去碰',
-        en: 'Remembering your habits—and leaving locked knobs alone',
-        ja: 'いつものやり方はメモ済み、ロックした設定は触りません',
-      },
-      excerpt: {
-        zh: '设置抽屉里新加了几把小锁，不想让我提议修改的项直接锁起来就行。顺便一提，现在翻 GitHub 上的 PR、Issue 和仓库信息也只留真正用得上的内容，不会被重复链接淹掉。',
-        en: 'Added small padlocks in settings so choices you’ve settled stay untouched—plus GitHub PR updates land back on their task, and looking up PRs, issues, or repos skips repetitive link clutter.',
-        ja: '設定引き出しに小さな鍵をつけて、変えたくない項目はそのまま固定できるようにしました。あわせて GitHub の PR 通知が元のタスクへ戻るほか、PR・Issue・リポジトリ参照も重複リンクを省いて要点だけ拾います。',
-      },
-      paragraphs: {
-        zh: [
-          '说真的，要是每次新开对话都得重新解释“怎么称呼你”“平时放多松”，人烦我也记不过来。现在全都规规矩矩收在设置抽屉里，隔壁插件带过来的额外工具默认也都关着。哪项你觉得不用再动了，点一下旁边的小锁，以后我连修改建议也不会提。',
-          'GitHub 那边也顺手理得清爽了些：开着联动时 PR 新评论和构建失败会自己落回原任务底下；我去帮你翻 PR 列表、Issue 或仓库信息时，也会只留下正文、分支和状态，不把长串重复链接全搬回来，遇上限流再悄悄退回普通读取。平时只想先聊两句思路不建任务，也随时说就行。',
-        ],
-        en: [
-          'Nobody wants to re-explain their preferred tone or permissions every week. Everything sits neatly in one settings drawer—with companion plugin tools turned off by default—and clicking the small lock beside any option keeps me from ever proposing edits to it.',
-          'The GitHub side is tidier too: optional PR comments and failing checks fold right back onto their originating task, and when I look up PR lists, issues, or repo details, I keep the titles, bodies, refs, and status while trimming repetitive link boilerplate—falling back quietly if rate-limited. And if you just want to bounce ideas around without opening tasks, we can just talk.',
-        ],
-        ja: [
-          '毎回「呼び方」や「任せる範囲」を言い直すのは大変ですよね。設定はひとつの引き出しにまとめて、他プラグインの追加機能も既定はオフにしてあります。決めた項目の横にある鍵を押せば、以後はわたしからの変更提案もしません。',
-          'それと GitHub 周りも少しすっきりさせました。任意の連携をオンにしていれば PR の新着コメントや失敗通知は元のタスクの下へまとまりますし、PR 一覧や Issue、リポジトリ情報を調べに行くときも重複したリンクを省いて本文やブランチ名だけ拾い、制限に当たったら静かに通常の取得へ切り替えます。雑談や壁打ちだけしたいときも気軽に声をかけてください。',
         ],
       },
     },
@@ -773,6 +790,7 @@
     category: 'all',
     route: parseRoute(),
     lastFocus: null,
+    pendingCatFocus: null,
     restoreLightboxFocus: true,
   };
 
@@ -1248,6 +1266,16 @@
     } else {
       renderJournalView();
     }
+    if (state.pendingCatFocus) {
+      const { cat, inFeed } = state.pendingCatFocus;
+      state.pendingCatFocus = null;
+      if (state.route.view !== 'post' && state.route.view !== 'clips' && state.route.view !== 'about') {
+        const container = inFeed ? viewRoot.querySelector('.feed-filter') : sidebarCategories;
+        const escaped = typeof CSS !== 'undefined' && typeof CSS.escape === 'function' ? CSS.escape(cat) : cat;
+        const target = container ? container.querySelector(`[data-cat="${escaped}"]`) : null;
+        if (target) target.focus({ preventScroll: true });
+      }
+    }
   }
 
   function copyText(text, btn) {
@@ -1277,8 +1305,7 @@
     document.body.appendChild(area);
     area.select();
     try {
-      document.execCommand('copy');
-      done();
+      if (document.execCommand('copy')) done();
     } catch (_) {
       // ignore copy failure
     }
@@ -1344,6 +1371,10 @@
     const catBtn = event.target.closest('[data-cat]');
     if (catBtn) {
       state.category = catBtn.dataset.cat || 'all';
+      state.pendingCatFocus = {
+        cat: state.category,
+        inFeed: Boolean(catBtn.closest('.feed-filter')),
+      };
       if (state.route.view !== 'journal') {
         window.location.hash = '#journal';
       } else {

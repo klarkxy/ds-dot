@@ -211,6 +211,6 @@ export function formatArenaRecommendation(models: readonly ArenaCatalogModel[], 
   for (const model of unranked.slice(0, Math.max(0, limit - shown.length))) {
     lines.push(`- ${model.provider}/${model.model} — no matching Arena evidence; still eligible, no score inferred`)
   }
-  if (ranked.length > shown.length) lines.push(`(${ranked.length - shown.length} more ranked model(s) not shown; use raw mode to inspect every eligible route)`)
+  if (ranked.length > shown.length) lines.push(`(${ranked.length - shown.length} more ranked model(s) not shown; use raw mode to inspect up to 80 eligible routes)`)
   return lines.join('\n')
 }

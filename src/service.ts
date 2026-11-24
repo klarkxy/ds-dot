@@ -610,10 +610,15 @@ export class DotService {
     if (groups.length === 0) lines.push('No extra capabilities are currently installed.')
     const row = (group: CapabilityGroupView, parents: readonly string[], indent: string) => {
       const grant = grants[group.id]
-      // The host and builtin groups are display-only: their tools answer to the child/per-tool grants.
-      const selector = group.kind === 'host' || group.id === 'builtin' ? '(per-tool grants only)' : `[${group.id}] grant=${grant ?? 'inherited'}`
+      // Only the host and builtin parent rows are display-only: their tools answer to child/per-tool grants.
+      const displayOnly = group.kind === 'host' || group.id === 'builtin'
+      const selector = displayOnly
+        ? '(per-tool grants only)'
+        : isTaskOnlySelector(group.id, groups)
+          ? '(task-only: runs use it; never applied to dot)'
+          : `[${group.id}] grant=${grant ?? 'inherited'}`
       lines.push(`${indent}${group.label} ${selector}${group.missing === true ? ' UNAVAILABLE' : ''}`)
-      const chain = group.kind === 'host' || group.id === 'builtin' ? parents : [group.id, ...parents]
+      const chain = displayOnly ? parents : [group.id, ...parents]
       for (const tool of group.tools) {
         if (tool.missing === true) { lines.push(`${indent}  ${tool.name} — UNAVAILABLE (grant kept)`); continue }
         if (tool.taskOnly === true) {

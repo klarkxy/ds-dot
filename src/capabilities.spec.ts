@@ -1052,6 +1052,16 @@ describe('service-level capability gate', () => {
     expect(await service.capabilityGate({ name: 'bash' })).toMatchObject({ reason: expect.stringContaining('dot_task') })
     expect(await service.capabilityGate({ name: 'extra_tool' })).toBe('next')
   })
+
+  it('shows built-in child group selectors and task-only group markers in listCapabilities', async () => {
+    const { service, apply } = serviceHarness({ 'builtin:schedule': 'auto' }, undefined, ['schedule_create', 'plugin_manager'])
+    await store0(service)
+    await apply()
+    const text = await service.listCapabilities()
+    expect(text).toContain('[builtin:schedule] grant=auto')
+    expect(text).toContain('schedule_create — grant=auto (applied=auto)')
+    expect(text).toContain('(task-only: runs use it; never applied to dot)')
+  })
 })
 
 async function store0(service: DotService): Promise<void> {

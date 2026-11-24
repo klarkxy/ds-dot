@@ -53,12 +53,41 @@ export interface SettingProposal {
 
 // ---- dot's knowledge: agreements and cognition -------------------------
 
-/** One earlier full text of dot's cognition, with the moment it was replaced. */
-export interface CognitionVersion {
+/** One of the human's standing rules, kept as its own entry in their exact words. */
+export interface AgreementEntry {
+  readonly id: string
   readonly text: string
+  readonly createdAt: number
+  readonly updatedAt: number
+}
+
+/**
+ * One entry of dot's own understanding. `seenAt` records when the text was last
+ * written or confirmed and drives prompt ranking; `pinned` entries always reach
+ * the prompt and only the human may change or remove them.
+ */
+export interface CognitionEntry {
+  readonly id: string
+  readonly text: string
+  readonly createdAt: number
+  readonly updatedAt: number
+  readonly seenAt: number
+  readonly pinned?: true
+}
+
+/** One earlier entry list of dot's cognition, with the moment it was replaced. */
+export interface CognitionVersion {
+  readonly entries: readonly CognitionEntry[]
   /** Unique, monotonically increasing; used to ask for that version back. */
   readonly at: number
 }
+
+/** One knowledge edit the human panel submits; `pin` is valid for cognition only. */
+export type KnowledgeEdit =
+  | { readonly op: 'add'; readonly text: string }
+  | { readonly op: 'edit'; readonly id: string; readonly text: string }
+  | { readonly op: 'remove'; readonly id: string }
+  | { readonly op: 'pin'; readonly id: string; readonly pinned: boolean }
 
 /**
  * One background reflection pass that was actually run as a session, kept so
@@ -75,17 +104,16 @@ export interface ReflectionRun {
 
 /** dot's agreements as the settings view shows them: the human's own standing requirements. */
 export interface AgreementView {
-  readonly text: string
-  readonly maxChars: number
-  /** Whether the change before the current text can be taken back. */
+  readonly entries: readonly AgreementEntry[]
+  /** Whether the change before the current entries can be taken back. */
   readonly canUndo: boolean
 }
 
 /** dot's cognition as the settings view shows it: its own understanding, with the versions it can return to. */
 export interface CognitionView {
-  readonly text: string
-  readonly maxChars: number
-  /** Newest first; at most COGNITION_HISTORY_MAX. The empty text is a version too. */
+  /** Ranked order: pinned first, then most recently confirmed; dormant entries are stored but not in dot's prompt. */
+  readonly entries: readonly (CognitionEntry & { readonly active: boolean })[]
+  /** Newest first; at most COGNITION_HISTORY_MAX. The empty list is a version too. */
   readonly history: readonly CognitionVersion[]
 }
 
@@ -95,12 +123,10 @@ export interface KnowledgeView {
   readonly cognition: CognitionView
 }
 
-/** Sizes of the two prompt blocks; the tools and the panel refuse to grow them past this. */
-export const AGREEMENTS_MAX_CHARS = 4000
-export const AGREEMENT_ENTRY_MAX_CHARS = 400
-export const COGNITION_MAX_CHARS = 4000
-/** How many earlier cognition texts are kept for rollback. */
+/** How many earlier cognition entry lists are kept for rollback. */
 export const COGNITION_HISTORY_MAX = 10
+/** How many cognition entries reach dot's prompt; pinned entries always do on top. */
+export const COGNITION_PROMPT_ENTRIES_DEFAULT = 30
 
 /**
  * First words of the one-time note the reflection pass leaves for dot's next
@@ -362,8 +388,8 @@ export interface CapabilityToolView {
   readonly conditional: boolean
   /** Granted but not currently registered. */
   readonly missing?: boolean
-  /** Self-escalating under dot's full-access session: runs unsandboxed with no host approval. */
-  readonly highRisk?: boolean
+  /** Belongs to task runs: never applied to dot's own session under any grant. */
+  readonly taskOnly?: boolean
 }
 
 /** A grantable group of extra tools: one MCP server, one bundle, one loader entry, one host built-in row, an unattributed name prefix, or the unattributed remainder. */
@@ -374,10 +400,19 @@ export interface CapabilityGroupView {
   readonly label: string
   /** Granted but nothing currently owns the selector. */
   readonly missing?: boolean
-  /** At least one tool inside the group (at any depth) is high-risk. */
-  readonly highRisk?: boolean
   readonly tools: readonly CapabilityToolView[]
   readonly children?: readonly CapabilityGroupView[]
+  /** 'dot' marks a group mounted on dot's own preset scope, invisible to other sessions. */
+  readonly scope?: 'dot'
+  /** Live connection status for an MCP group, when the host reports one. */
+  readonly status?: CapabilityMcpStatus
+}
+
+/** Connection status of one MCP server, as the settings view draws it. */
+export interface CapabilityMcpStatus {
+  readonly state: string
+  readonly toolCount?: number
+  readonly diagnostic?: string
 }
 
 /** The catalog the settings view draws: locked dot tools on top, grantable groups below. */
@@ -388,6 +423,42 @@ export interface CapabilityCatalogView {
   readonly grants: Readonly<Record<string, CapabilityGrant>>
   /** Grant each tool got when the live segment started, before any later edits. */
   readonly applied: Readonly<Record<string, CapabilityGrant>>
+}
+
+/** One configured dot-local MCP server as the settings view draws it. */
+export interface DotMcpServerView {
+  readonly name: string
+  readonly catalog?: string
+  readonly url: string
+  readonly enabled: boolean
+  /** 'token' when any header carries a credential template. */
+  readonly auth: 'none' | 'token'
+  /** The credential this server's headers reference; never its value. */
+  readonly credential?: { readonly ref: string; readonly configured: boolean; readonly masked?: string }
+  /** Token-creation page carried over from the catalog entry, when there is one. */
+  readonly tokenUrl?: string
+  readonly status?: CapabilityMcpStatus
+}
+
+/** One recommended-catalog entry as the settings view draws it; about/tokenHelp are text keys. */
+export interface DotMcpCatalogEntry {
+  readonly id: string
+  readonly name: string
+  readonly about: string
+  readonly url: string
+  /** Header templates the settings row inherits; never resolved values. */
+  readonly headers?: Readonly<Record<string, string>>
+  readonly auth: 'none' | 'token'
+  readonly tokenUrl?: string
+  readonly tokenHelp?: string
+}
+
+/** The MCP settings page payload: configured servers plus the recommended catalog. */
+export interface DotMcpListView {
+  readonly servers: readonly DotMcpServerView[]
+  readonly catalog: readonly DotMcpCatalogEntry[]
+  /** Global MCP server names (manager rows plus names guessed from root tools); a dot-local row may not reuse one. */
+  readonly globals?: readonly string[]
 }
 
 /** Everything the human tunes in dot's settings view; stored with dot's state. */
@@ -415,8 +486,132 @@ export interface DotSettings {
   readonly address?: string
   /** Grants for optional extra tools from other plugins and MCP servers; every extra defaults to off. */
   readonly capabilities: DotCapabilities
+  /** MCP servers mounted for dot's own agent only, keyed by serverName. */
+  readonly mcpServers?: Readonly<Record<string, DotMcpServer>>
   /** Missing and false both mean unlocked: existing installs opt in to self-management. */
   readonly locks?: SettingLocks
+}
+
+/** One dot-local MCP server row in settings. */
+export interface DotMcpServer {
+  /** Catalog entry id this row was added from; absent for a custom server. */
+  readonly catalog?: string
+  readonly url: string
+  /** Extra request headers; values may carry `${credential:REF}` templates. */
+  readonly headers?: Readonly<Record<string, string>>
+  readonly enabled: boolean
+}
+
+/** serverName keys of `mcpServers`, matching the host's MCP client limit. */
+export const MCP_SERVER_NAME_PATTERN = /^[A-Za-z0-9_-]{1,32}$/
+
+/**
+ * A NEW dot-local server name also must not touch the `__` separator or
+ * stray `_` edges — otherwise `mcp__a__x` could be claimed by both `a` and
+ * `a__x` and one grant would silently cover two servers. Stored legacy rows
+ * still parse; only additions are held to this.
+ */
+export const MCP_NEW_SERVER_NAME_PATTERN = /^(?!_)(?!.*__)(?!.*_$)[A-Za-z0-9_-]{1,32}$/
+
+/** MCP servers are remote-only: https anywhere, http only on loopback. */
+export function isMcpServerUrl(url: string): boolean {
+  let parsed: URL
+  try { parsed = new URL(url) } catch { return false }
+  if (parsed.protocol === 'https:') return true
+  if (parsed.protocol !== 'http:') return false
+  const host = parsed.hostname.toLowerCase()
+  return host === 'localhost' || host === '127.0.0.1' || host === '[::1]' || host === '::1'
+}
+
+/** Valid RFC 9110 header field-name characters. */
+const MCP_HEADER_NAME = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/
+
+/** One well-formed credential template. */
+const MCP_CREDENTIAL_TEMPLATE = /\$\{credential:([A-Za-z_][A-Za-z0-9_]*)\}/g
+
+/**
+ * Header values may embed `${credential:REF}` templates resolved from the
+ * host's credential store; every `${…}` must be a well-formed template.
+ */
+export function isMcpServerHeaders(headers: unknown): headers is Readonly<Record<string, string>> {
+  if (headers === undefined) return true
+  if (typeof headers !== 'object' || headers === null || Array.isArray(headers)) return false
+  for (const [name, value] of Object.entries(headers)) {
+    if (!MCP_HEADER_NAME.test(name) || typeof value !== 'string') return false
+    if (value.replace(MCP_CREDENTIAL_TEMPLATE, '').includes('${')) return false
+  }
+  return true
+}
+
+/** Credential refs a server's headers reference. */
+export function mcpCredentialRefs(server: Pick<DotMcpServer, 'headers'>): string[] {
+  const refs = new Set<string>()
+  for (const value of Object.values(server.headers ?? {})) {
+    for (const match of value.matchAll(MCP_CREDENTIAL_TEMPLATE)) refs.add(match[1]!)
+  }
+  return [...refs]
+}
+
+/** DeepSeek function-name contract shared with the MCP public-name derivation. */
+const MCP_INVALID_CHARS = /[^A-Za-z0-9_-]/g
+
+/** Normalize an MCP server name the way the harness does when it builds public tool names. */
+export function mcpPrefix(server: string): string {
+  return `mcp__${server.replace(MCP_INVALID_CHARS, '_')}__`
+}
+
+/** Hashed MCP names keep the normalized prefix only up to this many characters. */
+const MCP_PREFIX_MAX = 64 - 12 - 1
+
+/**
+ * The server a public MCP tool name belongs to. Clean names start with the
+ * full `mcp__<server>__` prefix; hashed names are clipped to 51 chars plus a
+ * hash, so the match accepts the prefix clipped to that length. Longest
+ * prefix wins, so `mcp__team__docs__x` is attributed to `team__docs`, never
+ * to `team`, when both exist.
+ */
+export function mcpServerOf(name: string, servers: readonly string[]): string | undefined {
+  const candidates = servers.map(server => ({ server, prefix: mcpPrefix(server) })).sort((left, right) => right.prefix.length - left.prefix.length)
+  for (const { server, prefix } of candidates) {
+    const clip = Math.min(prefix.length, MCP_PREFIX_MAX)
+    if (name.length >= clip && name.slice(0, clip) === prefix.slice(0, clip)) return server
+  }
+  return undefined
+}
+
+/** Best-effort server part of an `mcp__x__y` name when no configured server matches. */
+export function mcpGuess(name: string): string | undefined {
+  if (!name.startsWith('mcp__')) return undefined
+  const rest = name.slice(5)
+  const split = rest.indexOf('__')
+  return split > 0 ? rest.slice(0, split) : undefined
+}
+
+/** The credential name dot's panel allocates for one server: `DOT_MCP_<NAME>_TOKEN`. */
+export function mcpCredentialName(server: string): string {
+  return `DOT_MCP_${server.toUpperCase().replace(/-/g, '_')}_TOKEN`
+}
+
+/** Credential refs a set of removed servers releases: only dot-owned `DOT_MCP_*` refs. */
+export function dotOwnedCredentialRefs(removed: readonly DotMcpServer[]): string[] {
+  return [...new Set(removed.flatMap(server => mcpCredentialRefs(server)).filter(ref => ref.startsWith('DOT_MCP_')))]
+}
+
+/** Upper bound for one stored MCP credential value; empty means "use unset". */
+export const MCP_CREDENTIAL_VALUE_MAX = 4096
+
+export type McpCredentialSetError = 'bad-server' | 'unknown-server' | 'bad-credential'
+
+/** Validate `mcp.credential.set` args: a known server name plus a non-empty, bounded value. */
+export function validateMcpCredentialSet(
+  server: unknown,
+  value: unknown,
+  knownServers: ReadonlySet<string>,
+): McpCredentialSetError | undefined {
+  if (typeof server !== 'string' || !MCP_SERVER_NAME_PATTERN.test(server)) return 'bad-server'
+  if (!knownServers.has(server)) return 'unknown-server'
+  if (typeof value !== 'string' || value.trim() === '' || value.length > MCP_CREDENTIAL_VALUE_MAX) return 'bad-credential'
+  return undefined
 }
 
 export const DEFAULT_SETTINGS: DotSettings = {

@@ -1,3 +1,5 @@
+import { existsSync, realpathSync } from 'node:fs'
+import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { renderBrief, renderSupplement, runTitle, type BriefInput, type BriefRun } from './brief.ts'
 
@@ -145,6 +147,17 @@ describe('renderBrief', () => {
     expect(review).not.toContain('Changed files:')
     expect(review).toContain('- Open issues:')
     expect(review).toContain('compare the diff')
+  })
+
+  it.skipIf(process.platform !== 'win32' || !existsSync('C:\\PROGRA~1'))('renders expanded on-disk cwd instead of 8.3 short names in briefs', () => {
+    const longBase = realpathSync.native('C:\\PROGRA~1')
+    const text = renderBrief({
+      changeId: 'c-1',
+      title: 'Ship',
+      input,
+      run: run({ cwd: 'c:\\progra~1\\dot-8dot3-proj' }),
+    })
+    expect(text).toContain(`Working directory: ${join(longBase, 'dot-8dot3-proj')}`)
   })
 })
 

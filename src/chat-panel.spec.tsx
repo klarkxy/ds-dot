@@ -54,11 +54,11 @@ function makeApi(snapshot: ChatSnapshot): ChatApi {
     settingProposals: async () => [],
     decideSetting: async () => 'ok',
     newSegment: async () => 'dot-2',
-    knowledge: async () => ({ agreements: { text: '', maxChars: 4000, canUndo: false }, cognition: { text: '', maxChars: 4000, history: [] } }),
-    setAgreements: async () => ({ agreements: { text: '', maxChars: 4000, canUndo: false }, cognition: { text: '', maxChars: 4000, history: [] } }),
-    undoAgreements: async () => ({ agreements: { text: '', maxChars: 4000, canUndo: false }, cognition: { text: '', maxChars: 4000, history: [] } }),
-    setCognition: async () => ({ agreements: { text: '', maxChars: 4000, canUndo: false }, cognition: { text: '', maxChars: 4000, history: [] } }),
-    restoreCognition: async () => ({ agreements: { text: '', maxChars: 4000, canUndo: false }, cognition: { text: '', maxChars: 4000, history: [] } }),
+    knowledge: async () => ({ agreements: { entries: [], canUndo: false }, cognition: { entries: [], history: [] } }),
+    editAgreements: async () => ({ agreements: { entries: [], canUndo: false }, cognition: { entries: [], history: [] } }),
+    undoAgreements: async () => ({ agreements: { entries: [], canUndo: false }, cognition: { entries: [], history: [] } }),
+    editCognition: async () => ({ agreements: { entries: [], canUndo: false }, cognition: { entries: [], history: [] } }),
+    restoreCognition: async () => ({ agreements: { entries: [], canUndo: false }, cognition: { entries: [], history: [] } }),
     context: async () => ({ live: true, compactions: 0 }),
     clearUsage: async () => ({ live: true, compactions: 0 }),
     trajectory: async () => ({ turns: [], earlier: 0 }),
@@ -772,7 +772,7 @@ describe('ChatPanel activity and notice cards', () => {
     const navButtons = () => [...drawer.querySelectorAll<HTMLButtonElement>('.dsh-dot-drawer-nav button')]
     const navBy = (key: string) => drawer.querySelector<HTMLButtonElement>(`.dsh-dot-drawer-nav button[data-nav="${key}"]`)!
     expect(navButtons().map(node => node.querySelector('.dsh-dot-nav-label')?.textContent)).toEqual([
-      '待确认', '常规', '会话接管', '派发任务', '额外能力', '人设', '上下文', '轨迹',
+      '待确认', '常规', '会话接管', '派发任务', '额外能力', 'MCP 服务', '人设', '上下文', '轨迹',
     ])
     expect(navBy('proposals').querySelector('.dsh-dot-nav-badge')?.textContent).toBe('1')
     expect(region()).toBe('常规')

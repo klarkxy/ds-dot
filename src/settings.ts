@@ -4,10 +4,19 @@
  * patches from the panel are checked strictly and refused as a whole.
  */
 import { z } from 'zod'
-import { DEFAULT_SETTINGS, SETTING_FIELDS, TASK_MODEL_LIST_MAX, type DotSettings, type SettingField, type TaskPermission } from './contracts.ts'
+import { isTaskOnlySelector } from './capabilities.ts'
+import { DEFAULT_SETTINGS, SETTING_FIELDS, TASK_MODEL_LIST_MAX, isMcpServerHeaders, isMcpServerUrl, MCP_NEW_SERVER_NAME_PATTERN, MCP_SERVER_NAME_PATTERN, mcpServerOf, type CapabilityGroupView, type DotSettings, type SettingField, type TaskPermission } from './contracts.ts'
 import { type CopyLocale } from './i18n/index.ts'
 import { CACHE_TTL_MAX_ENTRIES, CACHE_TTL_MAX_MINUTES } from './keepalive.ts'
 import { ADDRESS_MAX_CHARS, PERSONA_MAX_CHARS, defaultAddress, defaultPersona } from './persona.ts'
+
+/** One stored `mcpServers` row; patches parse the record as a whole, stored reads drop bad rows. */
+const MCP_SERVER_ROW = z.object({
+  catalog: z.string().trim().min(1).max(100).optional(),
+  url: z.string().trim().min(1).max(2000).refine(isMcpServerUrl),
+  headers: z.record(z.string(), z.string().max(2000)).refine(isMcpServerHeaders).optional(),
+  enabled: z.boolean(),
+}).strict()
 
 const FIELDS = {
   model: z.object({
@@ -34,14 +43,21 @@ const FIELDS = {
     grants: z.record(z.string().trim().min(1).max(400), z.enum(['off', 'ask', 'auto']))
       .refine(map => Object.keys(map).length <= CAPABILITY_GRANTS_MAX),
   }).strict(),
+  mcpServers: z.record(
+    z.string().regex(MCP_SERVER_NAME_PATTERN),
+    MCP_SERVER_ROW,
+  ).refine(map => Object.keys(map).length <= MCP_SERVERS_MAX),
   locks: z.object(Object.fromEntries(SETTING_FIELDS.map(field => [field, z.boolean().optional()]))).strict(),
 } as const
 
 /** Selector rows the capabilities field may hold at once. */
 export const CAPABILITY_GRANTS_MAX = 500
 
+/** Dot-local MCP servers the settings field may hold at once. */
+export const MCP_SERVERS_MAX = 100
+
 /** Settings a patch may clear with null, going back to their defaults. */
-const CLEARABLE = new Set<string>(['model', 'persona', 'address'])
+const CLEARABLE = new Set<string>(['model', 'persona', 'address', 'mcpServers'])
 
 type Field = keyof typeof FIELDS
 
@@ -76,6 +92,16 @@ export function parseSettings(value: unknown): DotSettings {
       out.locks = locks
       continue
     }
+    if (key === 'mcpServers' && isRecord(row.mcpServers)) {
+      const servers: Record<string, unknown> = {}
+      for (const [name, value] of Object.entries(row.mcpServers)) {
+        if (!MCP_SERVER_NAME_PATTERN.test(name)) continue
+        const parsed = MCP_SERVER_ROW.safeParse(value)
+        if (parsed.success) servers[name] = parsed.data
+      }
+      if (Object.keys(servers).length > 0) out.mcpServers = servers
+      continue
+    }
     const parsed = FIELDS[key].safeParse(row[key])
     if (!parsed.success) continue
     out[key] = parsed.data
@@ -87,7 +113,7 @@ export function parseSettings(value: unknown): DotSettings {
 }
 
 /** Apply a patch from the settings view; null on model, persona or address goes back to the default. */
-export function patchSettings(current: DotSettings, patch: unknown, locale: CopyLocale = 'zh'): DotSettings {
+export function patchSettings(current: DotSettings, patch: unknown, locale: CopyLocale = 'zh', groups?: readonly CapabilityGroupView[]): DotSettings {
   if (!isRecord(patch)) throw new SettingsError('settings patch must be an object')
   const defaults: Record<string, string> = { persona: defaultPersona(locale), address: defaultAddress(locale) }
   const next: Record<string, unknown> = { ...current }
@@ -96,8 +122,51 @@ export function patchSettings(current: DotSettings, patch: unknown, locale: Copy
     if (CLEARABLE.has(key) && value === null) { delete next[key]; continue }
     const parsed = FIELDS[key as Field].safeParse(value)
     if (!parsed.success) throw new SettingsError(`invalid value for ${key}`)
+    if (key === 'mcpServers') {
+      // A stored legacy name still passes through on unrelated saves, but a
+      // key absent in current settings is an addition and must be strict.
+      for (const name of Object.keys(parsed.data as Record<string, unknown>)) {
+        if (!(name in (current.mcpServers ?? {})) && !MCP_NEW_SERVER_NAME_PATTERN.test(name)) {
+          throw new SettingsError(`invalid value for ${key}`)
+        }
+      }
+    }
+    // Task-run tools (and all-task-only groups) are never granted to dot; a
+    // grant row on one is a dead write. A patch carrying a stored row
+    // unchanged is a carry-along, not a new grant, and deleting the row stays
+    // allowed.
+    if (key === 'capabilities') {
+      const stored = current.capabilities?.grants ?? {}
+      for (const [sel, grant] of Object.entries((parsed.data as { grants: Record<string, 'off' | 'ask' | 'auto'> }).grants)) {
+        if (isTaskOnlySelector(sel, groups) && stored[sel] !== grant) {
+          const name = sel.startsWith('tool:') ? sel.slice(5) : sel
+          throw new SettingsError(`${name} belongs to task runs and cannot be granted to Dorothy; remove the selector instead`)
+        }
+      }
+    }
     if (key in defaults && (parsed.data as string).trim() === defaults[key]!.trim()) { delete next[key]; continue }
     next[key] = parsed.data
+  }
+  // A newly added server never inherits grants a human gave to something
+  // else: drop its `mcp:` selector and every `tool:` selector that resolves
+  // to it under longest-prefix attribution over the resulting server set.
+  const servers = (next as Partial<DotSettings>).mcpServers
+  if (servers !== undefined) {
+    const names = Object.keys(servers)
+    const added = names.filter(name => !(name in (current.mcpServers ?? {})))
+    if (added.length > 0) {
+      const grants = { ...((next as Partial<DotSettings>).capabilities?.grants ?? {}) }
+      let touched = false
+      for (const name of added) {
+        if (`mcp:${name}` in grants) { delete grants[`mcp:${name}`]; touched = true }
+      }
+      for (const selector of Object.keys(grants)) {
+        if (!selector.startsWith('tool:')) continue
+        const owner = mcpServerOf(selector.slice('tool:'.length), names)
+        if (owner !== undefined && added.includes(owner)) { delete grants[selector]; touched = true }
+      }
+      if (touched) next.capabilities = { grants }
+    }
   }
   return next as unknown as DotSettings
 }

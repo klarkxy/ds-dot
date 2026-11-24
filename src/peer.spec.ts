@@ -1,9 +1,11 @@
+import { existsSync, realpathSync } from 'node:fs'
+import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import { createScope } from '@deepseek-ai/dsh-scope'
 import { SystemPrompt } from '@deepseek-ai/dsh-system-prompt'
 import { ToolsService, defineTool } from '@deepseek-ai/dsh-tools'
 import { describe, expect, it, vi } from 'vitest'
-import { deliverPeer, PeerLedger, PEER_TOOL, refreshChildSeals, sealChildSession, sessionIsOwned, type PeerDeliveryDeps, type PeerTable } from './peer.ts'
+import { deliverPeer, guardRunWriteTool, PeerLedger, PEER_TOOL, refreshChildSeals, sealChildSession, sessionIsOwned, type PeerDeliveryDeps, type PeerTable } from './peer.ts'
 import { parsePeerDelivery, type PeerDelivery } from './storage.ts'
 
 function table(): PeerTable & { rows: Map<string, unknown> } {
@@ -278,4 +280,41 @@ describe('child-session seal', () => {
     expect(host.denied).toEqual([['subagent']])
   })
 
+  it.skipIf(process.platform !== 'win32' || !existsSync('C:\\PROGRA~1'))('allows writes under expanded long paths when Windows 8.3 short paths are in workspaceRoot or writeScope', () => {
+    const longBase = realpathSync.native('C:\\PROGRA~1')
+    const shortRoot = 'c:\\progra~1\\dot-8dot3-proj'
+    const longTarget = join(longBase, 'dot-8dot3-proj', 'src', 'a.ts')
+    const longOther = join(longBase, 'dot-8dot3-proj', 'src', 'other.ts')
+    const longOutside = join(longBase, 'elsewhere', 'src', 'a.ts')
+
+    const exclusiveRun = {
+      id: 'run-ws',
+      cwd: shortRoot,
+      workspaceRoot: shortRoot,
+      writeScope: { kind: 'workspace-exclusive' as const },
+      access: 'write' as const,
+    }
+    expect(guardRunWriteTool(exclusiveRun, { name: 'write_file', input: { path: longTarget } }, 'win32')).toEqual({ allow: true })
+    expect(guardRunWriteTool(exclusiveRun, { name: 'write_file', input: { path: longOutside } }, 'win32')).toMatchObject({ allow: false })
+
+    const relPathRun = {
+      id: 'run-rel',
+      cwd: shortRoot,
+      workspaceRoot: shortRoot,
+      writeScope: { kind: 'paths' as const, paths: [{ path: 'src/a.ts', type: 'file' as const }] },
+      access: 'write' as const,
+    }
+    expect(guardRunWriteTool(relPathRun, { name: 'edit_file', input: { file_path: longTarget } }, 'win32')).toEqual({ allow: true })
+    expect(guardRunWriteTool(relPathRun, { name: 'edit_file', input: { file_path: longOther } }, 'win32')).toMatchObject({ allow: false })
+
+    const absPathRun = {
+      id: 'run-abs',
+      cwd: shortRoot,
+      workspaceRoot: shortRoot,
+      writeScope: { kind: 'paths' as const, paths: [{ path: join(shortRoot, 'src', 'a.ts'), type: 'file' as const }] },
+      access: 'write' as const,
+    }
+    expect(guardRunWriteTool(absPathRun, { name: 'write_file', input: { path: longTarget } }, 'win32')).toEqual({ allow: true })
+    expect(guardRunWriteTool(absPathRun, { name: 'write_file', input: { path: longOther } }, 'win32')).toMatchObject({ allow: false })
+  })
 })

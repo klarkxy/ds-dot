@@ -17,6 +17,23 @@
 
   const RECORDINGS = [
     {
+      id: 'task-only-tools',
+      pr: 77,
+      date: '2026.11.23',
+      post: 'boundaries',
+      file: 'dot-task-only-tools-a616336.gif',
+      title: {
+        zh: '动手的工具只归任务',
+        en: 'Hands-on tools stay with tasks',
+        ja: '手を動かすツールはタスク専用',
+      },
+      desc: {
+        zh: '动手的工具标着“仅限任务”；升级前留下的授权可以点重置清掉，旁边普通工具的授权还在，分组也不会一直挂着“下一段生效”。',
+        en: 'Hands-on tools stay “Tasks only”. A leftover grant Reset clears just that row; sibling grants remain, and mixed groups drop the next-segment badge once ordinary tools have taken effect.',
+        ja: '手を動かすツールは「タスク専用」。残った許可はリセットだけで消え、隣の許可はそのまま。通常ツールが効けば「次のセグメントで適用」も消えます。',
+      },
+    },
+    {
       id: 'worktree',
       pr: 58,
       date: '2026.11.22',
@@ -152,6 +169,40 @@
         ja: '任意の GitHub 連携を有効にすると、PR についたコメントや結果が最初に開いたタスクの下にまとまります。',
       },
     },
+    {
+      id: 'mcp-servers',
+      pr: 85,
+      date: '2026.11.24',
+      post: 'extra-hands',
+      file: 'dot-85-mcp-servers.gif',
+      title: {
+        zh: '接入 MCP 帮手',
+        en: 'Plugging in MCP helpers',
+        ja: 'MCP の助っ人を接続',
+      },
+      desc: {
+        zh: '在「MCP 服务」页接入 DeepWiki 并授了自动，转头问仓库结构她就直接用上了。',
+        en: 'Connected DeepWiki on the MCP servers page, granted it auto, and she used it right away for a repo question.',
+        ja: '「MCP サービス」ページで DeepWiki をつなぎ自動を許可したら、リポジトリの質問にそのまま使ってくれました。',
+      },
+    },
+    {
+      id: 'entry-knowledge',
+      pr: 78,
+      date: '2026.11.23',
+      post: 'memory-in-lines',
+      file: 'dot-78-entry-knowledge.gif',
+      title: {
+        zh: '约定与认知按条管理',
+        en: 'Agreements and cognition as entry lists',
+        ja: '取り決めと認知をエントリー単位で管理',
+      },
+      desc: {
+        zh: '约定一行一行记、认知可置顶常驻，排不进提示词的条目按确认新旧自动休眠、再确认即回前排。',
+        en: 'Agreements edit line by line, cognition pins stay in view, and entries past the prompt slots go dormant least-confirmed first until a confirm moves them back up front.',
+        ja: '取り決めは一行ずつ編集、認知はピン留めで常時表示、枠に入りきらない項目は確認の古い順に休眠し、再確認で未ピン留めの先頭に戻ります。',
+      },
+    },
   ];
 
   const POSTS = [
@@ -199,6 +250,47 @@
       showInvite: true,
     },
     {
+      slug: 'extra-hands',
+      date: '2026.11.24',
+      category: 'work',
+      image: 'images/chibi-dispatch.jpg',
+      aspect: 'square',
+      imageAlt: {
+        zh: '阳光书桌前的Q版桃乐丝写便条，身旁两只小粉鲸衔着纸飞机',
+        en: 'Chibi Dorothy at a sunny wooden desk with two tiny pink whales carrying paper airplanes',
+        ja: '机でメモを取りながらピンクの小クジラたちと紙飛行機を送り出すちびドロシー',
+      },
+      caption: {
+        zh: '给帮手们派活的便条，先写清楚谁管什么。',
+        en: 'Little notes out to the helpers—who covers what, in writing first.',
+        ja: '助っ人へのお願いメモ。担当は先に書き分けておきます。',
+      },
+      title: {
+        zh: '外头请了几位顺手的帮手',
+        en: 'Borrowing a few outside helpers',
+        ja: '外の助っ人を呼べるようになりました',
+      },
+      excerpt: {
+        zh: '抽屉里多了个「MCP 服务」页，替我接上 DeepWiki、GitHub 这些帮手——只认我，不打扰你别的会话，用哪个还得你单独点头。',
+        en: 'A new “MCP servers” page in my drawer connects me to helpers like DeepWiki and GitHub—they answer only to me, and each still needs your go-ahead.',
+        ja: '設定に「MCP サービス」ページが増えて、DeepWiki や GitHub みたいな助っ人を呼べるようになりました。わたし専用で、使うかはひとつずつ決めてもらいます。',
+      },
+      paragraphs: {
+        zh: [
+          '说实话，光凭我身上这几件家什，遇到「react 仓库现在长什么样」这种问题还是得去网上翻半天。现在设置里多了个「MCP 服务」页，替我接了几位懂行的帮手：查文档的有、盯 GitHub 仓库的也有。不过接入和真用是两回事——每个帮手的开关都在「额外能力」里，默认全关着，开哪个、开多松还是你说了算。',
+          '这些帮手只认我，不会溜去你别的会话里露脸。有的要令牌才肯干活，比如 GitHub 用的是细粒度只读 PAT，令牌我收进凭据库，界面上只露个影子。不跑本地命令，也不走 OAuth，这两条是定死的。有帮手在，想知道仓库结构直接问本人，比翻网页快还准嘛。',
+        ],
+        en: [
+          'Until now, “what does the react repo look like right now” still sent me wandering the open web. There’s a new “MCP servers” page in my settings that lets me call in specialists—docs readers, a GitHub watcher, that sort. Connecting one and actually using it stay separate calls: every helper has its own switch under “Extra capabilities”, off by default, and you set how loose it runs.',
+          'These helpers answer only to me and stay invisible to your other sessions. Some ask for a token—GitHub wants a fine-grained read-only PAT—which I tuck into the credential vault so the screen only ever shows a hint. No local commands, no OAuth; those are the house rules. With a helper on call I just ask the repo directly instead of squinting at pages.',
+        ],
+        ja: [
+          'これまでは「react のリポジトリはいまどんな構成？」と聞かれると、結局ウェブを探し回っていました。設定に「MCP サービス」というページができて、ドキュメントに詳しい人や GitHub 番の人など、専門の助っ人につなげるようになりました。つなぐことと使うことは別の話で、助っ人ごとのスイッチは「追加機能」側にあって既定はオフ。開く範囲もあなたが決めます。',
+          'この助っ人たちはわたしだけの相手で、ほかの会話には出ていきません。GitHub のようにトークンが要る場合は、権限を絞った読み取り専用 PAT を使い、値は鍵付きの保管庫に入れて画面には影だけを出します。ローカルコマンドも OAuth もなし、という約束です。頼める相手がいると、構成を知りたいときに直接聞けるので、ページを探すより速くて正確ですね。',
+        ],
+      },
+    },
+    {
       slug: 'parallel-and-diff',
       date: '2026.11.24',
       category: 'work',
@@ -220,28 +312,69 @@
         ja: 'いくつか並行で進めても机が散らからない理由',
       },
       excerpt: {
-        zh: '不打架的事分头去跑，大改动或接着改某个 PR 时去旁边的临时分支里做完。交活前我先自己过一遍，连删掉的文件都能按行圈出来退回。',
-        en: 'Independent tasks run side by side while bigger edits—or follow-ups on an existing PR branch—stay in a spare branch. I inspect deliverables first, and you can quote exact lines back for revision.',
-        ja: '重ならない作業は並行して進め、大きな修正や既存の PR の続きは別ブランチに隔離します。提出前に自分で確かめ、削除ファイルも含めて行単位で差し戻せます。',
+        zh: '不打架的事分头跑，大改动或接着改某个 PR 时先在旁边的临时分支里做好；约定好稍后再接上的后续活，我也会记条提醒免得转头忘掉。真要派活的项目才登记工作区并顺嘴告诉你，交活前连改动和删掉的文件都先核过一遍。',
+        en: 'Independent tasks move side by side while larger edits—or follow-ups on an existing PR branch—wait in a spare branch, and any promised follow-up gets a reminder so it never slips between turns. I only register workspaces for projects we’re actually working in (and tell you when I do), then check deliverables and diffs myself first.',
+        ja: '重ならない作業は並行で進め、大きな修正や既存の PR の続きは別ブランチに隔離します。あとで続ける約束にはすぐリマインダーを付け、ワークスペースも実際に作業する分だけ登録してお知らせしたうえで、提出前に自分の目で差分を確かめます。',
       },
       paragraphs: {
         zh: [
-          '手头几件事如果互不挨着，直接交给我就好，我会一起安排下去；要是你刚好也在改同一批文件，或者想直接顺着外面某个 PR 分支继续补改，我可以在旁边单开临时分支拉出那个起点来做，不动你眼前正在看的目录。最后从当前检出切出来的分支你可以选合回来、留着或丢掉，而从别的 PR 分支切出来的任务只留“保留分支”和“丢弃”，省得一不小心把外面的分支合进本地工作区。',
-          '我不太喜欢闭着眼喊“改好了”就交差。每次汇报前我都会自己先把涉及的文件看一遍，连中途删掉的文件也会放进前后对照里。你看完觉得哪几行不顺，直接点中那几行写一句退回意见就行；同一处连卡三次的话，我会停下来找你商量，不瞎转圈。',
+          '手头几件事如果互不打架，我会一起安排下去；要是你刚好也在改同一批文件，这轮改动动静比较大，或者想直接顺着外面某个 PR 分支继续补改，就等前面依赖的改动落稳再去旁边单开临时分支做好——从当前检出切出来的最后选合回来、留着或丢掉，而从别的 PR 或远端分支拉出来的只留“保留分支”和“丢弃”，免得误合进本地工作区。平时也只给真要派活的项目登记工作区，添完顺嘴告诉你一声，不会为了随便翻一翻就把整片上级目录都挂进来。',
+          '要是约好了等你点完验收再接着往下做，我会立刻挂条对应着前置任务的提醒，哪怕关了空闲巡检也不会跨轮断掉；写要求前也会先核对仓库里实际有的脚本和分支，不凭印象瞎猜。每次交活前我自己先把改动和删掉的文件看一遍，你觉得哪几行不顺直接圈出来退回就行，同一处连卡三次就停下来找你商量，不瞎转圈。',
         ],
         en: [
-          'When requests don’t step on the same files, I move them forward together. If you’re mid-edit, the change is large, or you want to pick up directly from an existing PR or remote branch, I cut a spare worktree from that exact starting point without touching your active checkout. Branches cut from your checkout offer merge, keep, or discard; branches cut from another ref only offer keep or discard so foreign PR work never gets merged straight onto your local branch by accident.',
-          'I’d rather inspect the files myself than blindly announce something is finished. Every delivery comes with clean before/after diffs (deleted files included), where you can highlight any line to ask for another pass—and if something stalls three times in a row, I stop and check in.',
+          'When requests don’t step on the same files, I move them forward together. If you’re mid-edit, the change is wide, or you want to pick up directly from an existing PR or remote branch, I wait until any prerequisite commits have actually landed and then isolate the work in a spare branch from that starting point—leaving merge, keep, or discard up to you for local branches, and only keep or discard for foreign refs so outside work never gets merged straight onto your checkout by accident. I also only register a workspace when we’re dispatching work into that project (and let you know right away), rather than adding broad parent folders just to browse.',
+          'Whenever we agree on a follow-up after you accept an earlier task, I set a reminder tied to it right away so the handoff doesn’t vanish between turns even with routine idle checks turned off, and I double-check the repo’s actual scripts and branches before naming them. Before handing anything back, I read the changed files myself, keep deleted files in the side-by-side diff so you can quote exact lines for another pass, and pause to ask if the same spot stalls three times.',
         ],
         ja: [
-          '同じファイルに触らない用事はまとめて進められますし、編集中の箇所と重なりそうなときや既存の PR・別ブランチの続きを直したいときは、その参照を起点に別ブランチを切って作業するので手元のフォルダはそのまま保てます。手元から切ったブランチはマージ・保持・破棄を選べますが、別の参照から切ったブランチはうっかり手元へ混ぜないよう保持と破棄だけを出しています。',
-          '中身を見ないまま終わりましたと言うのは落ち着かないので、渡す前に自分で変更を確認しています。削除したファイルも比較対象に入り、気になる行を選んで修正を頼めます。同じ場所で三度詰まったら一度止まって相談しますね。',
+          '同じファイルに触らない用事はまとめて進められますし、編集中の箇所と重なるときや大がかりな修正、あるいは既存の PR・別ブランチの続きを直したいときは、前提になる変更が落ち着いてからその参照を起点に別ブランチで仕上げます。手元から切ったブランチはマージ・保持・破棄を選べますが、別の参照から切ったブランチは誤って手元へ混ぜないよう保持と破棄だけを出しています。ワークスペースも実際に作業を頼むプロジェクト分だけ登録してその場でお知らせし、中身を覗くためだけに親フォルダごと追加したりはしません。',
+          '先のタスクを承認してもらってから続きを進める約束をしたときは、定期チェックをオフにしていても見落とさないよう、元のタスクに紐づけたリマインダーをその場で入れておきます。リポジトリ内のスクリプトやブランチも推測せず事前に確認し、提出前には削除ファイルまで含めた差分を自分で確かめてから返します。気になる行があればそのまま指定して直せますし、同じ箇所で三度詰まったら手を止めて相談しますね。',
+        ],
+      },
+    },
+    {
+      slug: 'memory-in-lines',
+      date: '2026.11.23',
+      category: 'rules',
+      image: 'images/chibi-memory.jpg',
+      aspect: 'square',
+      imageAlt: {
+        zh: '阳光窗台边往手账上一行一行写小条目的Q版桃乐丝',
+        en: 'Chibi Dorothy writing single lines into her notebook by a sunlit bay window',
+        ja: '出窓のそばで手帳に一行ずつ書き込むちびドロシー',
+      },
+      caption: {
+        zh: '规矩一条条记，要紧的别针别住。',
+        en: 'Rules kept line by line, essentials pinned in place.',
+        ja: '約束は一行ずつ、大事なものはピンで留めて。',
+      },
+      title: {
+        zh: '约定和认知都改成一条条记了',
+        en: 'Agreements and cognition, now line by line',
+        ja: '取り決めと認知を一行ずつ管理するようにしました',
+      },
+      excerpt: {
+        zh: '以前改一句规矩得换掉整块文字，现在约定和认知都是一行一行的清单：没有字数上限，置顶的永远占住前排，其余名额给最近确认的条目；排不进去的从最久没确认的开始休眠，而不是被删掉。',
+        en: 'Fixing one rule used to mean rewriting a whole text block. Both agreements and cognition are now line-by-line lists—no length cap, pinned entries always take a front slot, the rest go to the most recently confirmed, and whatever still does not fit naps least-confirmed first instead of vanishing.',
+        ja: '一文だけ直すのに全文を書き替えていた取り決めと認知が、一行ずつのリストになりました。長さ制限もなく、ピン留めした項目はいつも最前列、残りの枠は最近確認した順、それでも入りきらない分は確認の古い順に消えずにお休みします。',
+      },
+      paragraphs: {
+        zh: [
+          '「约定」里记的是你亲口定下的规矩，「认知」里是我平时攒下的理解。以前两边都是一整块文字，改一句就得整块重写，写长了还会顶到字数上限。现在都拆成了一条一条：规矩按你的原话一行一行存着，我的心得也一条一条攒着，改哪条动哪条，再也不限量了。',
+          '认知那边还多了两个小机关：特别要紧的条目点一下「置顶」，不管攒了多少条它都一直在我的视野前排；提示词的名额先给置顶条目，剩下的位置排给最近确认的，最久没被确认的那些自动休眠——还存着，需要时也能按关键词翻找出来，只是暂时不占提示词的位置。我再确认一条，它就回到未置顶队伍的最前面；置顶的话不管名额多挤都一直有它。约定万一改错也别慌，抬头有个「回退上次保存」兜底，doro~',
+        ],
+        en: [
+          '“Agreements” keeps your standing rules in your own words; “cognition” is the understanding I collect along the way. Both used to be single blocks of text—tweaking one line meant rewriting everything, and there was a character ceiling to hit. Now each is a list of separate entries: edit or remove exactly the line you mean, with no length limit at all.',
+          'Cognition also picked up two little states worth knowing: pin an entry and it stays at the front of my view no matter how long the list grows; pinned entries take their slots first, the rest of the prompt goes to the most recently confirmed, and the least recently confirmed ones go dormant on their own—still stored and searchable when needed, just out of my prompt. A fresh confirm moves an entry back to the front of the unpinned line, and a pin keeps it showing no matter how crowded it gets. And if an agreement edit goes sideways, the revert-last-save button up top has your back, doro~',
+        ],
+        ja: [
+          '「取り決め」にはあなたが決めたルールをそのままの言葉で、「認知」にはわたしが積み重ねた理解を書いています。どちらも前はひとまとめの長文で、1か所直すだけで全部書き替え、長くなると文字数の天井に当たっていました。いまはどちらも一項目ずつのリストなので、直したい行だけを直せて、長さの上限もありません。',
+          '認知には小さな仕掛けがふたつ増えました。とくに大事な項目は「ピン留め」すると何件あってもいちばん前に置き続けます。プロンプトの枠はピン留めが先に使い、残りは最近確認した項目から順に、入りきらない分は確認の古い順に自動で休眠します——消えずに残っていて必要なときは検索で掘り起こせ、再確認すると未ピン留めの先頭に戻り、ピン留めならいつでも表示されます。取り決めを書きまちがえても「前回の保存を取り消す」があるので安心です、doro~',
         ],
       },
     },
     {
       slug: 'notes-and-quiet',
-      date: '2026.11.23',
+      date: '2026.11.24',
       category: 'work',
       image: 'images/chibi-memory.jpg',
       aspect: 'square',
@@ -261,22 +394,22 @@
         ja: 'いつものやり方はメモ済み、ロックした設定は触りません',
       },
       excerpt: {
-        zh: '设置抽屉里新加了几把小锁，不想让我提议修改的项直接锁起来就行。对了，GitHub 那边 PR 的新评论也会自己回到原来的任务下面。',
-        en: 'Added small padlocks in settings so choices you’ve settled stay untouched—plus optional PR comments now land straight back on the task that opened them.',
-        ja: '設定引き出しに小さな鍵をつけて、変えたくない項目はそのまま固定できるようにしました。PR の新着コメントも元のタスクへ自動でまとまります。',
+        zh: '设置抽屉里新加了几把小锁，不想让我提议修改的项直接锁起来就行。顺便一提，现在翻 GitHub 上的 PR、Issue 和仓库信息也只留真正用得上的内容，不会被重复链接淹掉。',
+        en: 'Added small padlocks in settings so choices you’ve settled stay untouched—plus GitHub PR updates land back on their task, and looking up PRs, issues, or repos skips repetitive link clutter.',
+        ja: '設定引き出しに小さな鍵をつけて、変えたくない項目はそのまま固定できるようにしました。あわせて GitHub の PR 通知が元のタスクへ戻るほか、PR・Issue・リポジトリ参照も重複リンクを省いて要点だけ拾います。',
       },
       paragraphs: {
         zh: [
           '说真的，要是每次新开对话都得重新解释“怎么称呼你”“平时放多松”，人烦我也记不过来。现在全都规规矩矩收在设置抽屉里，隔壁插件带过来的额外工具默认也都关着。哪项你觉得不用再动了，点一下旁边的小锁，以后我连修改建议也不会提。',
-          '还有个挺顺手的小改动：之前开着 GitHub 通知时消息容易散，现在哪个 PR 下面冒出新评论或构建挂了，它会自动落回当初开出这个 PR 的任务底下，前因后果挨在一起看着省心不少。如果平时只是想先找人聊聊思路、暂时不想建任务，直接跟我说就行。',
+          'GitHub 那边也顺手理得清爽了些：开着联动时 PR 新评论和构建失败会自己落回原任务底下；我去帮你翻 PR 列表、Issue 或仓库信息时，也会只留下正文、分支和状态，不把长串重复链接全搬回来，遇上限流再悄悄退回普通读取。平时只想先聊两句思路不建任务，也随时说就行。',
         ],
         en: [
           'Nobody wants to re-explain their preferred tone or permissions every week. Everything sits neatly in one settings drawer—with companion plugin tools turned off by default—and clicking the small lock beside any option keeps me from ever proposing edits to it.',
-          'Another small quality-of-life tweak: if you enable optional GitHub notifications, fresh PR comments and failing checks attach directly to the task that opened that pull request instead of getting lost. And if you just want to bounce an idea around without spinning up formal tasks, we can just talk.',
+          'The GitHub side is tidier too: optional PR comments and failing checks fold right back onto their originating task, and when I look up PR lists, issues, or repo details, I keep the titles, bodies, refs, and status while trimming repetitive link boilerplate—falling back quietly if rate-limited. And if you just want to bounce ideas around without opening tasks, we can just talk.',
         ],
         ja: [
           '毎回「呼び方」や「任せる範囲」を言い直すのは大変ですよね。設定はひとつの引き出しにまとめて、他プラグインの追加機能も既定はオフにしてあります。決めた項目の横にある鍵を押せば、以後はわたしからの変更提案もしません。',
-          'それから、任意の GitHub 連携をオンにすると PR の新しいコメントやテスト失敗も、最初にその PR を出したタスクの下へ戻ってくるようになりました。タスクにせず雑談や壁打ちだけしたいときも気軽に声をかけてください。',
+          'それと GitHub 周りも少しすっきりさせました。任意の連携をオンにしていれば PR の新着コメントや失敗通知は元のタスクの下へまとまりますし、PR 一覧や Issue、リポジトリ情報を調べに行くときも重複したリンクを省いて本文やブランチ名だけ拾い、制限に当たったら静かに通常の取得へ切り替えます。雑談や壁打ちだけしたいときも気軽に声をかけてください。',
         ],
       },
     },
@@ -343,22 +476,25 @@
         ja: '静かに通す操作と、かならず足を止める操作',
       },
       excerpt: {
-        zh: '总不能每读一个文件就问一遍“我能看吗”，可删库和外推代码也不能擅自替你点掉。平时小确认悄悄放过，大事一律弹卡片等你，你不点就绝不算答应。',
-        en: 'Asking just to read a file would get annoying fast, yet silent deletes or pushes are off the table. Routine trivia clears quietly; big calls always wait with a card.',
-        ja: 'ファイルを読むたびに確認していたら進みませんし、逆に削除や外部送信を勝手にするわけにもいきません。危ない操作だけカードを出して待ち、無言を賛成扱いにはしません。',
+        zh: '总不能每读一个文件就问一遍“我能看吗”，可删库和外推代码也不能擅自替你点掉。平时小确认悄悄放过，大事弹卡片等你；改文件、跑命令这类动手的工具我自己也不碰，只交给派出去的任务。',
+        en: 'Asking just to read a file would get annoying fast, yet silent deletes or pushes are off the table. Routine trivia clears quietly; big calls wait with a card; tools that edit files or run commands stay with dispatched runs, never in my own hands.',
+        ja: 'ファイルを読むたびに確認していたら進みませんし、削除や外部送信を勝手にするわけにもいきません。危ない操作はカードで待ち、ファイル変更やコマンド実行は派遣したタスクだけが使います。',
       },
       paragraphs: {
         zh: [
           '查文件、列目录或者跑一轮平常的本地测试，照你平时的设置顺手放行就好，省得写正顺手时老被打断。就算只读任务期间借用了外部插件的工具，我也会卡住写操作，只让真正查资料的动作过去。',
           '只要遇到删东西、往外推送、碰本地敏感凭据，或者超出了你原来交代的范围，动作会马上停下。面板会递上一张写清前因后果和建议的确认卡；你在别处处理了或者卡片过期了，它自己会收好。平时就算面板折起来了，有需要拍板的事侧栏红点和桌面提示都会轻声喊你。',
+          '后来又把一条线划死了：凡是改文件、跑命令这类真动手的工具，我自己一律不碰——就算你顺手给了授权，它们也只归派出去的任务用。我呢，写备忘、递提案、查查资料就好；真要动手就写工单派任务，反正那边有范围有留档，出了岔子也查得回来。',
         ],
         en: [
           'Read-only checks, directory listings, and safe local tests go right through under your house defaults so nobody breaks your focus. Even when a read-only step borrows external plugin tools, anything that looks like a write stays blocked.',
           'Deletes, outward pushes, secret access, or gray areas freeze immediately. You get one clean card stating what is waiting and what I recommend (settled or expired cards clean themselves up), and even with my panel closed, a sidebar badge and optional desktop alert call you in.',
+          'One line is now set in stone: any tool that edits files or runs commands stays out of my hands — even if you grant it to me, it only works inside a dispatched run. I stick to notes, proposals, and quick lookups; when something needs doing for real, I write a work order and send a task, which comes with a scope and a paper trail.',
         ],
         ja: [
           'ファイルの中身を見たりローカルテストを動かしたりといった日常の確認は、作業を止めないよう普段の基準どおり静かに通します。読み取り専用の作業中に外部ツールを使う場合も、参照系以外は通さないよう抑えています。',
           '一方で、削除や外部へのプッシュ、機密ファイルへのアクセス、判断に迷う場面ではその場で止まります。理由と提案つきの確認カードを出して待ち（解決や期限切れで自動クローズ）、パネルを閉じていてもバッジやデスクトップ通知でお知らせします。',
+          'もう一つ、線をはっきり引きました。ファイルを書き換えたりコマンドを実行したりするツールは、私自身の手では一切使いません。許可をいただいても、そういう作業は派遣したタスクだけのものです。私はメモや提案、簡単な調べ物にとどめて、本当に手を動かす必要があれば作業指示を書いてタスクに任せます。範囲も記録も残るので安心です。',
         ],
       },
     },
@@ -508,7 +644,7 @@
       prevPost: '← 上一篇',
       nextPost: '下一篇 →',
       clipsPageTitle: '实机录屏',
-      clipsPageIntro: '一共 8 段来自 DeepSeek Harness 界面的真机录屏，每段都能点开看大图或者回原篇看看。',
+      clipsPageIntro: '一共 {n} 段来自 DeepSeek Harness 界面的真机录屏，每段都能点开看大图或者回原篇看看。',
       openRelatedPost: '去原篇看看 →',
       aboutTitle: '关于我 & 上手',
       aboutIntro: '你好，我是桃乐丝（dot），灵感来自社区里那只爱吃欧润吉的小家伙。平时待在 DeepSeek Harness 的侧栏里帮你把多件杂活分头推进、提前看好改动对照，拿不准的大事一定会停下来问你。',
@@ -560,7 +696,7 @@
       prevPost: '← Previous',
       nextPost: 'Next →',
       clipsPageTitle: 'Live Clips',
-      clipsPageIntro: 'Eight unedited screen recordings from inside DeepSeek Harness—zoom in or jump back to the matching journal note.',
+      clipsPageIntro: '{n} unedited screen recordings from inside DeepSeek Harness—zoom in or jump back to the matching journal note.',
       openRelatedPost: 'Read note →',
       aboutTitle: 'About & Setup',
       aboutIntro: 'Hi, I’m Dorothy (dot), inspired by the community’s orange-loving Doro. I live in your DeepSeek Harness sidebar to keep independent work tidy, lay out readable diffs, and pause for your call on anything big.',
@@ -612,7 +748,7 @@
       prevPost: '← 前の日記',
       nextPost: '次の日記 →',
       clipsPageTitle: '実機録画メモ',
-      clipsPageIntro: 'DeepSeek Harness の画面からそのまま録った 8 本のクリップです。拡大表示や元の日記へ飛べます。',
+      clipsPageIntro: 'DeepSeek Harness の画面からそのまま録った {n} 本のクリップです。拡大表示や元の日記へ飛べます。',
       openRelatedPost: '元の日記へ →',
       aboutTitle: '概要と導入',
       aboutIntro: 'こんにちは、ドロシー（dot）です。みかんが好きなコミュニティのキャラクターにならって、DeepSeek Harness のサイドバーに住みつつ並列作業の整理や差分確認を手伝っています。大事な操作の前だけは必ず確認しますね。',
@@ -1044,7 +1180,7 @@
     viewRoot.innerHTML = `
       <header class="page-header">
         <h1 class="page-title">${esc(ui('clipsPageTitle'))}</h1>
-        <p class="page-intro">${esc(ui('clipsPageIntro'))}</p>
+        <p class="page-intro">${esc(ui('clipsPageIntro').replace('{n}', String(RECORDINGS.length)))}</p>
       </header>
       <div class="clips-grid">
         ${RECORDINGS.map((rec) => renderClipFigure(rec, true)).join('')}

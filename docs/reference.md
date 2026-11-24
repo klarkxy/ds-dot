@@ -27,15 +27,30 @@ Even in **Dorothy** mode, approvals matching these patterns **always** come stra
 
 The static check is pattern-based rather than exhaustive; silence is never treated as consent, write scopes coordinate Dorothy's own runs without OS file locks, and accepting a delivery closes the task without authorizing pushes, publishing, or spending.
 
+Dorothy's own session never receives the host built-in names in `TASK_ONLY_TOOLS` (`plugin_manager`, `bash`, `pwsh`, `write`, `edit`, `apply_patch`). Those tools stay with dispatched task runs. A stored legacy grant is inert and can be deleted from Settings → Extra capabilities; new or changed grants on those tools, on `builtin:plugin-manager`, or on any catalog group whose tools are all task-only are refused. Third-party write/command aliases used by the approval-risk gate are a separate check and are not part of this set.
+
 ---
 
 ## Optional DSH profile & settings details
 
 - `homeDir`: Dedicated workspace and session directory (defaults to `dot` under DSH home).
 - `approvalGraceMs`: Grace window in milliseconds (default `10000`) during which approvals settled in the originating session do not wake Dorothy.
+- `cognitionPromptEntries`: Total cognition entries kept in Dorothy's prompt (default `30`); pinned entries fill the first slots and stay visible even beyond this number, the remaining slots go to the most recently confirmed entries, and the rest stay stored as dormant.
+- **Agreements & cognition (Persona tab):** Both are editable entry lists, not single text blocks, and neither has a size limit. Agreements keep your standing rules in your exact words — one entry per line — and always override cognition when they conflict; a one-step undo is available. Cognition entries can be edited, deleted, pinned (always in Dorothy's prompt), or restored from earlier versions; pinned entries fill slots first and the remaining slots go to the most recently confirmed unpinned entries; when entries outnumber the slots, the least recently confirmed go dormant automatically — still stored, and Dorothy can search or page through them with `dot_cognition` (`action=list`). Confirming moves an entry back to the front of the unpinned entries (active unless pins fill every slot); pinning always shows it.
 - **Dispatched tasks settings:** Configure *Task permissions* (`Workspace write` or `Full access`, plus `Safe Auto` when `@klarkxy/dsh-safe-auto` is installed and `Auto review` when DSH experimental review is enabled), *Allowed task models*, and the idle *Routine check* interval (`0` disables it).
+- **Workspaces & follow-up reminders:** Dorothy registers a new project workspace only when dispatching work there (and tells you when she does) rather than adding broad parent folders just to browse. Promised follow-ups waiting on panel acceptance or prerequisite repo changes use `dot_schedule` reminders (and isolated `worktree` tasks are created only after prerequisite changes land in the target checkout) so they still wake even when *Routine check* is `0`.
 - **Arena-backed model recommendations:** `dot_list_models` ranks permitted `provider/model` choices from a pinned LMArena snapshot (`mode=raw` preserves the raw catalog view); Dorothy never substitutes a model you explicitly named. See [Arena data and aggregation notes](https://github.com/klarkxy/ds-dot/blob/dev/docs/model-arena.md).
 - **Factory reset** (bottom of Settings): Previews exact counts of Dorothy's own state before clearing; your own sessions, project files, and host persona stay untouched.
+- **Scoped web lookup & GitHub API compaction:** Dorothy's isolated `web_search` / `web_fetch` respect explicit `DSH_WEB_SEARCH_PROVIDER` / `DSH_WEB_FETCH_PROVIDER` pins. When unpinned, `web_fetch` upgrades `http://api.github.com` URLs to `https:`, fetches `api.github.com` directly with an 8s timeout, strips repetitive endpoint `*_url`/`node_id`/`reactions` metadata while preserving primary records and `html_url`, and falls back to Jina (cooling down direct attempts for 10 minutes on 403/429 or network errors).
+
+## MCP servers (Dorothy only)
+
+The **MCP servers** page connects remote MCP servers that only Dorothy can use — they are mounted inside her own preset scope, so other DSH sessions never see the `mcp__<server>__*` tools. Connecting a server only mounts it; grant its tools under the server row or the **Extra capabilities** page (`mcp:<server>` / `tool:` selectors) before she can call them.
+
+- **Recommended catalog:** GitHub (`https://api.githubcopilot.com/mcp/readonly`), DeepWiki, Context7, Exa, Microsoft Learn, Cloudflare Docs, Hugging Face.
+- **GitHub token:** needs a [fine-grained PAT](https://github.com/settings/personal-access-tokens/new) with read-only access — Contents, Issues, Pull requests, Actions, Metadata. Tokens are stored in the host credential store (`DOT_MCP_<NAME>_TOKEN`) and never echoed back.
+- **Custom servers:** name plus URL with an optional token. Remote (streamable-http) endpoints only: `https` everywhere, `http` allowed for loopback addresses. No stdio/command entries — a browser panel must not define commands to spawn — and no OAuth flow (DSH has none), so token-auth and no-auth servers only.
+- Servers stay configured across restarts; a factory reset removes them together with their `DOT_MCP_*` credentials.
 
 ---
 

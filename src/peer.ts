@@ -9,7 +9,7 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import { scopeContainsPath } from './acceptance.ts'
 import { mcpToolMayWrite } from './approval-risk.ts'
 import type { PeerDelivery } from './storage.ts'
-import { scopeWithinRoot, scopeWrites, type WriteScope } from './work.ts'
+import { onDiskPath, scopeWithinRoot, scopeWrites, type WriteScope } from './work.ts'
 
 /** Model-facing tool on a session dot opened. Not one of dot's own preset tools. */
 export const PEER_TOOL = 'dot_peer'
@@ -303,16 +303,34 @@ export function guardRunWriteTool(
     return { allow: true }
   }
   const root = run.workspaceRoot || run.cwd
+  const winDiskFallback = platform === 'win32' && process.platform === 'win32'
+  let diskRootCache: string | undefined
+  const diskRootOf = () => (diskRootCache ??= onDiskPath(root, platform))
   for (const raw of targets) {
     const abs = api.isAbsolute(raw) ? api.normalize(raw) : api.resolve(run.cwd, raw)
-    if (!scopeWithinRoot(root, abs, platform)) {
+    if (!scopeWithinRoot(root, abs, platform) && !(winDiskFallback && scopeWithinRoot(diskRootOf(), onDiskPath(abs, platform), platform))) {
       return { allow: false, reason: `Path "${raw}" is outside workspace root ${root} for run ${run.id}.` }
     }
     if (run.writeScope.kind === 'paths') {
       const rel = api.relative(root, abs).replaceAll('\\', '/')
       if (!scopeContainsPath(run.writeScope, root, rel, platform)) {
-        const allowed = run.writeScope.paths.map(item => item.path).join(', ')
-        return { allow: false, reason: `Path "${raw}" is outside run ${run.id}'s write scope (${allowed}).` }
+        if (!winDiskFallback) {
+          const allowed = run.writeScope.paths.map(item => item.path).join(', ')
+          return { allow: false, reason: `Path "${raw}" is outside run ${run.id}'s write scope (${allowed}).` }
+        }
+        const diskRoot = diskRootOf()
+        const diskRel = api.relative(diskRoot, onDiskPath(abs, platform)).replaceAll('\\', '/')
+        const diskScope: WriteScope = {
+          kind: 'paths',
+          paths: run.writeScope.paths.map(item => ({
+            ...item,
+            path: api.isAbsolute(item.path) ? onDiskPath(item.path, platform) : item.path,
+          })),
+        }
+        if (!scopeContainsPath(diskScope, diskRoot, diskRel, platform)) {
+          const allowed = run.writeScope.paths.map(item => item.path).join(', ')
+          return { allow: false, reason: `Path "${raw}" is outside run ${run.id}'s write scope (${allowed}).` }
+        }
       }
     }
   }

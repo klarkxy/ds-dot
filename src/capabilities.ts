@@ -584,11 +584,15 @@ export class DotCapabilities {
     const tools = this.deps.tools()
     const dotServers = this.deps.settings().mcpServers ?? {}
     const dotNames = Object.keys(dotServers)
-    const shadowed = (name: string) => dotNames.some(server => name.startsWith(mcpPrefix(server)))
+    // Only an enabled dot-local server mounts inside the preset scope and
+    // shadows a same-name global row; a disabled row is unmounted, so dot's
+    // agent falls back to the global tools again.
+    const enabledDotNames = dotNames.filter(name => dotServers[name]?.enabled !== false)
+    const shadowed = (name: string) => enabledDotNames.some(server => name.startsWith(mcpPrefix(server)))
     const defs = (tools?.definitions() ?? []).filter(def => !shadowed(def.name))
     let servers: string[] = []
     try { servers = (this.deps.mcpManager()?.list() ?? []).map(server => server.name) } catch { servers = [] }
-    servers = servers.filter(name => !(name in dotServers))
+    servers = servers.filter(name => !enabledDotNames.includes(name))
     let dotDefs: readonly CapabilityToolDef[] = []
     if (dotNames.length > 0 && this.deps.presetDefs !== undefined) {
       try { dotDefs = (await this.deps.presetDefs()).filter(def => shadowed(def.name)) } catch { dotDefs = [] }
@@ -604,7 +608,9 @@ export class DotCapabilities {
       builtinDescriptions: this.schemaDescriptions,
       builtinVisible: this.lastSchemaNames,
       dotMcp: dotNames.length === 0 ? undefined : {
-        servers: dotNames,
+        // A disabled row that shares its name with a surviving global server
+        // would produce a duplicate `mcp:<name>` group; the global row serves.
+        servers: dotNames.filter(name => enabledDotNames.includes(name) || !servers.includes(name)),
         defs: dotDefs,
         status: name => sharedDotMcp().servers.get(name) ?? (dotServers[name]?.enabled === false ? { state: 'off' } : undefined),
       },

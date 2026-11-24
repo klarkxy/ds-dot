@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import { WebError } from '@deepseek-ai/dsh-web'
 import {
-  duckDuckGoSearch, fetchWithFallback, isolatedProviderId, jinaFetch, jinaReaderUrl, parseDuckDuckGoHtml,
-  pinnedProviderId, searchWithFallback, unwrapDuckDuckGoUrl, type LookupFetch, type ParentWeb,
+  compactGitHubJson, duckDuckGoSearch, fetchWithFallback, gitHubApiFetch, isolatedProviderId, jinaFetch, jinaReaderUrl,
+  parseDuckDuckGoHtml, pinnedProviderId, searchWithFallback, unwrapDuckDuckGoUrl, type LookupFetch, type ParentWeb,
 } from './web-lookup.ts'
 
 const html = `
@@ -210,6 +210,117 @@ describe('dot web lookup', () => {
     const readError = await jinaFetch('https://example.com', { fetch: broken, timeoutMs: 5_000 }).catch((error: unknown) => error)
     expect(readError).toBeInstanceOf(WebError)
     expect(readError).toMatchObject({ code: 'WEB_PROVIDER_ERROR', message: 'network down' })
+  })
+
+  it('compacts GitHub API JSON, keeping content fields and dropping endpoint noise', () => {
+    const issue = {
+      url: 'https://api.github.com/repos/o/r/issues/5',
+      repository_url: 'https://api.github.com/repos/o/r',
+      labels_url: 'https://api.github.com/repos/o/r/issues/5/labels{/name}',
+      comments_url: 'https://api.github.com/repos/o/r/issues/5/comments',
+      html_url: 'https://github.com/o/r/issues/5',
+      id: 1, node_id: 'I_abc', number: 5,
+      title: 'Bug', state: 'open', locked: false,
+      body: 'repro steps',
+      user: { login: 'octo', id: 7, node_id: 'U_1', avatar_url: 'https://avatars/x', type: 'User', url: 'https://api.github.com/users/octo' },
+      labels: [{ id: 9, node_id: 'L_1', url: 'https://api.github.com/labels/bug', name: 'bug', color: 'd73a4a', default: true }],
+      assignee: null,
+      comments: 3,
+      created_at: '2025-01-01T00:00:00Z',
+      reactions: { url: 'https://api.github.com/reactions/1', total_count: 2 },
+      performed_via_github_app: null,
+      score: 1.0,
+    }
+    const compact = compactGitHubJson(issue) as Record<string, unknown>
+    expect(compact).toEqual({
+      html_url: 'https://github.com/o/r/issues/5',
+      id: 1, number: 5,
+      title: 'Bug', state: 'open', locked: false,
+      body: 'repro steps',
+      user: 'octo',
+      labels: ['bug'],
+      assignee: null,
+      comments: 3,
+      created_at: '2025-01-01T00:00:00Z',
+      score: 1.0,
+    })
+  })
+
+  it('collapses repository and review shapes inside a GitHub API response', () => {
+    const review = {
+      id: 80, node_id: 'PRR_x',
+      user: { login: 'reviewer', avatar_url: 'https://avatars/y', type: 'Bot', site_admin: false },
+      body: 'looks good', state: 'APPROVED', submitted_at: '2025-01-02T00:00:00Z',
+      commit_id: 'abc123',
+      html_url: 'https://github.com/o/r/pull/5#pullrequestreview-80',
+      pull_request_url: 'https://api.github.com/repos/o/r/pulls/5',
+      _links: { html: { href: 'x' } },
+      author_association: 'MEMBER',
+    }
+    const pr = {
+      number: 5, title: 'Fix', state: 'open', draft: false, mergeable: true,
+      head: { ref: 'feat/x', sha: 'aaa', repo: { id: 3, node_id: 'R_1', name: 'r', full_name: 'o/r', owner: { login: 'o', avatar_url: 'a', type: 'User' }, private: false, url: 'https://api.github.com/repos/o/r', description: 'the repo', fork: false } },
+      base: { ref: 'main', sha: 'bbb' },
+      url: 'https://api.github.com/repos/o/r/pulls/5',
+      html_url: 'https://github.com/o/r/pull/5',
+      diff_url: 'https://github.com/o/r/pull/5.diff',
+      patch_url: 'https://github.com/o/r/pull/5.patch',
+      issue_url: 'https://api.github.com/repos/o/r/issues/5',
+      commits_url: 'https://api.github.com/repos/o/r/pulls/5/commits',
+      review_comments_url: 'https://api.github.com/repos/o/r/pulls/5/comments',
+      statuses_url: 'https://api.github.com/repos/o/r/statuses/aaa',
+      user: { login: 'author', avatar_url: 'b', type: 'User' },
+      labels: [{ name: 'ready', color: '0e8a16' }],
+      merged_at: null, created_at: '2025-01-01T00:00:00Z', updated_at: '2025-01-03T00:00:00Z',
+      additions: 12, deletions: 4, changed_files: 2,
+    }
+    expect(compactGitHubJson(review)).toEqual({
+      id: 80,
+      user: 'reviewer',
+      body: 'looks good', state: 'APPROVED', submitted_at: '2025-01-02T00:00:00Z',
+      commit_id: 'abc123',
+      html_url: 'https://github.com/o/r/pull/5#pullrequestreview-80',
+      author_association: 'MEMBER',
+    })
+    expect(compactGitHubJson(pr)).toEqual({
+      number: 5, title: 'Fix', state: 'open', draft: false, mergeable: true,
+      head: { ref: 'feat/x', sha: 'aaa', repo: 'o/r' },
+      base: { ref: 'main', sha: 'bbb' },
+      html_url: 'https://github.com/o/r/pull/5',
+      user: 'author',
+      labels: ['ready'],
+      merged_at: null, created_at: '2025-01-01T00:00:00Z', updated_at: '2025-01-03T00:00:00Z',
+      additions: 12, deletions: 4, changed_files: 2,
+    })
+    const raw = JSON.stringify({ review, pr })
+    const small = JSON.stringify(compactGitHubJson({ review, pr }))
+    expect(small.length).toBeLessThan(raw.length / 2)
+  })
+
+  it('fetches api.github.com directly and returns compacted JSON', async () => {
+    const seen: Array<{ url: string; headers: unknown }> = []
+    const fetch: LookupFetch = async (input, init) => {
+      seen.push({ url: input, headers: init.headers })
+      return jsonResponse(JSON.stringify({ number: 5, title: 'Bug', node_id: 'I_x', url: 'https://api.github.com/repos/o/r/issues/5', html_url: 'https://github.com/o/r/issues/5', user: { login: 'octo', avatar_url: 'a', type: 'User' } }), 200, 'application/json')
+    }
+    const result = await gitHubApiFetch('https://api.github.com/repos/o/r/issues/5', { fetch })
+    expect(seen).toEqual([{ url: 'https://api.github.com/repos/o/r/issues/5', headers: { accept: 'application/vnd.github+json', 'user-agent': 'dsh-dot' } }])
+    expect(result).toMatchObject({ url: 'https://api.github.com/repos/o/r/issues/5', statusCode: 200, truncated: false })
+    expect(result?.body).toEqual({ kind: 'text', content: JSON.stringify({ number: 5, title: 'Bug', html_url: 'https://github.com/o/r/issues/5', user: 'octo' }, null, 1) })
+  })
+
+  it('defers to the normal path on GitHub errors, non-JSON, and other hosts', async () => {
+    let calls = 0
+    const failing: LookupFetch = async () => { calls += 1; return jsonResponse('rate limited', 403) }
+    expect(await gitHubApiFetch('https://api.github.com/rate_limit', { fetch: failing })).toBeUndefined()
+    expect(calls).toBe(1)
+    const notJson: LookupFetch = async () => jsonResponse('<html>no</html>', 200)
+    expect(await gitHubApiFetch('https://api.github.com/', { fetch: notJson })).toBeUndefined()
+    const other: LookupFetch = async () => { calls += 1; return jsonResponse('{}') }
+    expect(await gitHubApiFetch('https://github.com/o/r', { fetch: other })).toBeUndefined()
+    expect(await gitHubApiFetch('https://api.github.com.evil/x', { fetch: other })).toBeUndefined()
+    expect(await gitHubApiFetch('not a url', { fetch: other })).toBeUndefined()
+    expect(calls).toBe(1)
   })
 
   it('uses Jina URL Source only from the preamble, and otherwise keeps the requested URL', async () => {

@@ -261,6 +261,73 @@ export async function jinaFetch(rawUrl: string, options: {
   }
 }
 
+/**
+ * GitHub API responses bury the useful fields under per-object noise: every
+ * `*_url` endpoint echo, `node_id`, reactions, inlined apps. Compact recursively
+ * — collapse user/repo/label objects to their identifying string — while
+ * keeping the content fields (title, body, state, refs, timestamps, `html_url`).
+ */
+export function compactGitHubJson(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(compactGitHubJson)
+  if (!value || typeof value !== 'object') return value
+  const record = value as Record<string, unknown>
+  // Collapse shapes before key filtering — the marker keys would be dropped.
+  if (typeof record.login === 'string' && ('avatar_url' in record || 'type' in record)) return record.login
+  if (typeof record.full_name === 'string' && 'owner' in record) return record.full_name
+  if (typeof record.name === 'string' && 'color' in record) return record.name
+  const out: Record<string, unknown> = {}
+  for (const [key, entry] of Object.entries(record)) {
+    if (GITHUB_NOISE_KEYS.has(key)) continue
+    if (key.endsWith('_url') && key !== 'html_url') continue
+    if (key === 'url' && typeof entry === 'string' && entry.startsWith('https://api.github.com/')) continue
+    out[key] = compactGitHubJson(entry)
+  }
+  return out
+}
+
+const GITHUB_NOISE_KEYS = new Set(['node_id', 'gravatar_id', '_links', 'reactions', 'performed_via_github_app'])
+const GITHUB_API_HOST = 'api.github.com'
+
+/**
+ * Fetch the GitHub API directly — Jina renders the JSON as a wall of text —
+ * and compact it. Returns undefined on any failure so the caller falls back
+ * to the configured path unchanged.
+ */
+export async function gitHubApiFetch(rawUrl: string, options: {
+  fetch: LookupFetch
+  signal?: AbortSignal
+  timeoutMs?: number
+  maxChars?: number
+}): Promise<WebFetchResult | undefined> {
+  let target: URL
+  try { target = new URL(rawUrl) } catch { return undefined }
+  if ((target.protocol !== 'http:' && target.protocol !== 'https:') || target.hostname !== GITHUB_API_HOST) return undefined
+  const signal = combineSignal(options.signal, options.timeoutMs ?? DEFAULT_TIMEOUT_MS)
+  const maxChars = options.maxChars ?? DEFAULT_MAX_CHARS
+  try {
+    const response = await options.fetch(target.toString(), {
+      method: 'GET',
+      redirect: 'follow',
+      signal,
+      headers: { accept: 'application/vnd.github+json', 'user-agent': 'dsh-dot' },
+    })
+    if (!response.ok) {
+      await response.body?.cancel().catch(() => {})
+      return undefined
+    }
+    const body = await readBounded(response, maxChars, signal)
+    const parsed: unknown = JSON.parse(body.content)
+    return {
+      url: target.toString(),
+      statusCode: response.status,
+      body: { kind: 'text', content: JSON.stringify(compactGitHubJson(parsed), null, 1) },
+      truncated: body.truncated,
+    }
+  } catch {
+    return undefined
+  }
+}
+
 function configuredMissing(pinned: string): WebError {
   return new WebError(`configured web provider "${pinned}" is not registered`, 'WEB_PROVIDER_CONFIGURED_MISSING')
 }

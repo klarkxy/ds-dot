@@ -8,7 +8,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { applyWebFetchTool, applyWebSearchTool } from '@deepseek-ai/dsh-tool-web'
 import { WebRuntime, type WebFetchProvider, type WebSearchProvider } from '@deepseek-ai/dsh-web'
 import {
-  duckDuckGoSearch, fetchReady, fetchWithFallback, isolatedProviderId, jinaFetch, searchReady, searchWithFallback,
+  duckDuckGoSearch, fetchReady, fetchWithFallback, gitHubApiFetch, isolatedProviderId, jinaFetch, searchReady, searchWithFallback,
   type LookupFetch, type ParentWeb,
 } from './web-lookup.ts'
 
@@ -58,9 +58,13 @@ export function dotFetchProvider(parent: ParentWeb | undefined, fetch: LookupFet
     id,
     available: () => true,
     ready: llmProvider => fetchReady(parent, llmProvider),
-    fetch: (request, signal) => fetchWithFallback(parent, request, signal, () => jinaFetch(request.url, {
-      fetch, signal, timeoutMs: FETCH_TIMEOUT_MS, maxChars: FETCH_MAX_CHARS,
-    }), pinned),
+    fetch: async (request, signal) => {
+      const direct = await gitHubApiFetch(request.url, { fetch, signal, timeoutMs: FETCH_TIMEOUT_MS, maxChars: FETCH_MAX_CHARS })
+      if (direct) return direct
+      return fetchWithFallback(parent, request, signal, () => jinaFetch(request.url, {
+        fetch, signal, timeoutMs: FETCH_TIMEOUT_MS, maxChars: FETCH_MAX_CHARS,
+      }), pinned)
+    },
   }
 }
 

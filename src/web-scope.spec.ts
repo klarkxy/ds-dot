@@ -167,4 +167,63 @@ describe('dot web scope', () => {
       }, html)
     })
   })
+
+  it('fetches api.github.com directly with compacted JSON and never calls Jina', async () => {
+    await withPins(undefined, undefined, async () => {
+      const calls: string[] = []
+      const original = globalThis.fetch
+      globalThis.fetch = (async (input: RequestInfo | URL) => {
+        const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url
+        calls.push(url)
+        if (url === 'https://api.github.com/repos/o/r/issues/5') {
+          return new Response(JSON.stringify({ number: 5, title: 'Bug', node_id: 'I_x', user: { login: 'octo', avatar_url: 'a', type: 'User' } }), { status: 200, headers: { 'content-type': 'application/json' } })
+        }
+        return new Response('Title: Jina\n\nMarkdown Content:\nfallback', { status: 200, headers: { 'content-type': 'text/plain' } })
+      }) as typeof fetch
+      try {
+        const unavailable = () => { throw Object.assign(new Error('none'), { code: 'WEB_PROVIDER_UNAVAILABLE' }) }
+        const { ctx, runtime } = scopeFixture({
+          selectFetchProvider: unavailable,
+          fetch: async () => { throw new Error('should not run') },
+        })
+        installDotWeb(ctx as never)
+        const result = await runtime().fetch({ url: 'https://api.github.com/repos/o/r/issues/5' })
+        expect(result.url).toBe('https://api.github.com/repos/o/r/issues/5')
+        expect(result.body).toEqual({ kind: 'text', content: JSON.stringify({ number: 5, title: 'Bug', user: 'octo' }, null, 1) })
+        expect(calls).toEqual(['https://api.github.com/repos/o/r/issues/5'])
+      } finally {
+        globalThis.fetch = original
+      }
+    })
+  })
+
+  it('falls back to Jina when the GitHub API refuses and leaves other hosts untouched', async () => {
+    await withPins(undefined, undefined, async () => {
+      const calls: string[] = []
+      const original = globalThis.fetch
+      globalThis.fetch = (async (input: RequestInfo | URL) => {
+        const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url
+        calls.push(url)
+        if (url.startsWith('https://api.github.com/')) return new Response('rate limited', { status: 403 })
+        return new Response('Title: Page\n\nMarkdown Content:\nbody', { status: 200, headers: { 'content-type': 'text/plain' } })
+      }) as typeof fetch
+      try {
+        const unavailable = () => { throw Object.assign(new Error('none'), { code: 'WEB_PROVIDER_UNAVAILABLE' }) }
+        const { ctx, runtime } = scopeFixture({
+          selectFetchProvider: unavailable,
+          fetch: async () => { throw new Error('should not run') },
+        })
+        installDotWeb(ctx as never)
+        const refused = await runtime().fetch({ url: 'https://api.github.com/rate_limit' })
+        expect(refused.body).toEqual({ kind: 'text', content: 'Title: Page\n\nMarkdown Content:\nbody' })
+        expect(calls).toEqual(['https://api.github.com/rate_limit', 'https://r.jina.ai/https://api.github.com/rate_limit'])
+        calls.length = 0
+        const other = await runtime().fetch({ url: 'https://example.com/page' })
+        expect(other.body).toEqual({ kind: 'text', content: 'Title: Page\n\nMarkdown Content:\nbody' })
+        expect(calls).toEqual(['https://r.jina.ai/https://example.com/page'])
+      } finally {
+        globalThis.fetch = original
+      }
+    })
+  })
 })

@@ -199,6 +199,47 @@
       showInvite: true,
     },
     {
+      slug: 'boundaries',
+      date: '2026.11.24',
+      category: 'rules',
+      image: 'images/chibi-guard.jpg',
+      aspect: 'square',
+      imageAlt: {
+        zh: '站在阳光铁艺门前的Q版桃乐丝鼓起脸颊并拿着黄铜小摇铃',
+        en: 'Chibi Dorothy guarding a garden gate with a raised hand and brass bell',
+        ja: '庭の門扉の前で頬をふくらませて呼び鈴を手にするちびドロシー',
+      },
+      caption: {
+        zh: '门前划好边界：小事悄悄过，大事一定先摇铃问。',
+        en: 'Watching the gate: routine checks pass, real calls wait for you.',
+        ja: '門の前で線引き：ふだんの確認は通して、大事なことだけ相談。',
+      },
+      title: {
+        zh: '什么事我顺手办了，什么事一定先问你',
+        en: 'What flows quietly, and what stops at the door',
+        ja: '静かに通す操作と、かならず足を止める操作',
+      },
+      excerpt: {
+        zh: '总不能每读一个文件就问一遍“我能看吗”，在隔离分支里自己拉代码、清工作区其实也不用次次喊人。现在遇到长参数请求我会先翻完全文再定夺，真要动主目录、删文件、外推或者碰凭据，照样直接停下来等你点头。',
+        en: 'Asking just to read a file gets old fast, and needing wider sandbox access or a local git cleanup inside an isolated task worktree doesn’t always need to wake you either. For extra-long requests I read the full arguments first before deciding—while real deletes, outward pushes, secrets, or anything touching your main checkout still wait for your card.',
+        ja: 'ファイルを読むたび確認していたら進みませんし、隔離ワークツリーの中で少し権限を広げたり手元の作業ツリーを片付けたりするたび呼ぶのも大変です。長すぎる引数もまず全文を読んでから判断しますが、元の作業フォルダに触れる操作や削除・外部送信・機密アクセスは変わらずカードを出して待ちます。',
+      },
+      paragraphs: {
+        zh: [
+          '查文件、列目录或者跑平常的本地测试，照你的设置顺手放行就好，省得写正顺手时老被打断；只读任务借用外部工具时，也只让查资料的动作过去。任务跑在独立的临时工作树里时，像拉取分支或本地清理这类只在它自己目录里转的沙盒申请和 Git 重置，现在我会先对照任务目标自己掂量，免得老打断你；遇到参数太长被截断的请求，也会先翻完完整内容再决定批不批（万一拿不到全文，还是乖乖交回给你）。',
+          '不过门前的红线一点没松：只要命令带着目录切换或参数指回你的主目录和其他文件夹，或者遇到真删文件、往外推送发布、碰敏感凭据、拿不准边界的事，动作会立刻停下。面板会递上一张写清前因后果和建议的确认卡，你在别处处理了或卡片过期了它会自己收起；哪怕平时面板折起来，真需要你拍板时侧栏红点和桌面提示还是会叫你，你不点就绝不算答应。',
+        ],
+        en: [
+          'Read-only checks, directory listings, and ordinary local tests pass quietly under your defaults so nobody breaks your focus, and read-only tasks still block external write tools. When a task runs inside its own isolated worktree, though, things like wider sandbox access for a git fetch or a git reset/clean confined strictly to that worktree are things I now weigh against the task scope myself instead of waking you every time. For extra-long requests that get trimmed in summary, I read the full arguments first before allowing them—and if the full text isn’t available, I still hand it over to you.',
+          'Anything pointing back at your main checkout or another folder, real file deletions, outward pushes or publishes, secret access, or gray areas still freeze at the gate. You get one clean card stating what is waiting and what I suggest (settled or expired cards tidy themselves up), and even with my panel folded away, a sidebar badge and optional desktop ping call you in—silence never counts as yes.',
+        ],
+        ja: [
+          'ファイル参照やローカルテストのような普段の確認はそのまま通して作業を止めず、読み取り専用の作業では外部ツールの書き込み系もしっかり抑えています。一方で、独立した一時ワークツリーの中で動くタスクが作業用の権限を広げたり、そのワークツリー内だけで git reset や clean を行う場合は、作業目的に沿っているか自分で確かめて判断するようにしました。引数が長くて省略されたリクエストも、まず全文を読み切ってから可否を決めます（全文が取れないときは無理せずお任せします）。',
+          'ただし元の作業フォルダや別ディレクトリへ向く指定、ファイル削除や外部へのプッシュ、機密情報へのアクセス、判断に迷う場面ではその場でピタッと止まります。理由と提案つきの確認カードを出して待ち（解決や期限切れで自動クローズ）、パネルを閉じていてもバッジやデスクトップ通知でお知らせするので、無言のまま進んでしまうことはありません。',
+        ],
+      },
+    },
+    {
       slug: 'notes-and-quiet',
       date: '2026.11.23',
       category: 'work',
@@ -318,47 +359,6 @@
         ja: [
           '金曜日のまとめや定期チェックは、一度うまくいった段取りをレシピとして残せます。タイマーと結んでおけば書き直さずそのまま動き出し、所要時間や消費量も記録してくれます。',
           'それに、レシピを更新したあとにかえってやり直しやエラーが増えた場合は、過去の結果と見比べて「前のやり方に戻しませんか」と提案を出しておきます。実際に戻すかどうかは自分で決められます。',
-        ],
-      },
-    },
-    {
-      slug: 'boundaries',
-      date: '2026.11.22',
-      category: 'rules',
-      image: 'images/chibi-guard.jpg',
-      aspect: 'square',
-      imageAlt: {
-        zh: '站在阳光铁艺门前的Q版桃乐丝鼓起脸颊并拿着黄铜小摇铃',
-        en: 'Chibi Dorothy guarding a garden gate with a raised hand and brass bell',
-        ja: '庭の門扉の前で頬をふくらませて呼び鈴を手にするちびドロシー',
-      },
-      caption: {
-        zh: '门前划好边界：小事悄悄过，大事一定先摇铃问。',
-        en: 'Watching the gate: routine checks pass, real calls wait for you.',
-        ja: '門の前で線引き：ふだんの確認は通して、大事なことだけ相談。',
-      },
-      title: {
-        zh: '什么事我顺手办了，什么事一定先问你',
-        en: 'What flows quietly, and what stops at the door',
-        ja: '静かに通す操作と、かならず足を止める操作',
-      },
-      excerpt: {
-        zh: '总不能每读一个文件就问一遍“我能看吗”，可删库和外推代码也不能擅自替你点掉。平时小确认悄悄放过，大事一律弹卡片等你，你不点就绝不算答应。',
-        en: 'Asking just to read a file would get annoying fast, yet silent deletes or pushes are off the table. Routine trivia clears quietly; big calls always wait with a card.',
-        ja: 'ファイルを読むたびに確認していたら進みませんし、逆に削除や外部送信を勝手にするわけにもいきません。危ない操作だけカードを出して待ち、無言を賛成扱いにはしません。',
-      },
-      paragraphs: {
-        zh: [
-          '查文件、列目录或者跑一轮平常的本地测试，照你平时的设置顺手放行就好，省得写正顺手时老被打断。就算只读任务期间借用了外部插件的工具，我也会卡住写操作，只让真正查资料的动作过去。',
-          '只要遇到删东西、往外推送、碰本地敏感凭据，或者超出了你原来交代的范围，动作会马上停下。面板会递上一张写清前因后果和建议的确认卡；你在别处处理了或者卡片过期了，它自己会收好。平时就算面板折起来了，有需要拍板的事侧栏红点和桌面提示都会轻声喊你。',
-        ],
-        en: [
-          'Read-only checks, directory listings, and safe local tests go right through under your house defaults so nobody breaks your focus. Even when a read-only step borrows external plugin tools, anything that looks like a write stays blocked.',
-          'Deletes, outward pushes, secret access, or gray areas freeze immediately. You get one clean card stating what is waiting and what I recommend (settled or expired cards clean themselves up), and even with my panel closed, a sidebar badge and optional desktop alert call you in.',
-        ],
-        ja: [
-          'ファイルの中身を見たりローカルテストを動かしたりといった日常の確認は、作業を止めないよう普段の基準どおり静かに通します。読み取り専用の作業中に外部ツールを使う場合も、参照系以外は通さないよう抑えています。',
-          '一方で、削除や外部へのプッシュ、機密ファイルへのアクセス、判断に迷う場面ではその場で止まります。理由と提案つきの確認カードを出して待ち（解決や期限切れで自動クローズ）、パネルを閉じていてもバッジやデスクトップ通知でお知らせします。',
         ],
       },
     },

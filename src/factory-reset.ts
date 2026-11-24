@@ -21,8 +21,8 @@ export interface FactoryResetSource {
   cards: readonly unknown[]
   pastSegments: readonly { readonly sessionId: string }[]
   reflections: readonly { readonly sessionId: string }[]
-  agreements: string
-  cognition: string
+  agreementEntries: readonly unknown[]
+  cognitionEntries: readonly unknown[]
   ownedSessionIds(): readonly string[]
   dotSessionId?: string
 }
@@ -43,8 +43,8 @@ export function factoryResetCounts(source: FactoryResetSource, inbox = 0, worktr
     ownedSessions: source.ownedSessionIds().length,
     pastSegments: source.pastSegments.length,
     reflections: source.reflections.length,
-    hasAgreements: source.agreements.trim().length > 0,
-    hasCognition: source.cognition.trim().length > 0,
+    hasAgreements: source.agreementEntries.length > 0,
+    hasCognition: source.cognitionEntries.length > 0,
   }
 }
 

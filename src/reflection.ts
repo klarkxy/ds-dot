@@ -21,10 +21,11 @@
  */
 import type { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
-import { SERVICE_NAME, TOOL, type ReflectionRun } from './contracts.ts'
+import { SERVICE_NAME, TOOL, type AgreementEntry, type CognitionEntry, type ReflectionRun } from './contracts.ts'
 import type { DotHost } from './host.ts'
 import type { DotStore } from './store.ts'
 import { gateToolExecution } from './tool-scope.ts'
+import { cognitionWithActive } from './memory.ts'
 
 /** The internal preset the reflection session runs on. Kept out of the task preset roster. */
 export const REFLECTION_PRESET_ID = 'dot-reflection'
@@ -50,9 +51,10 @@ export const REFLECTION_INSTRUCTIONS = [
   "You are dot's private background reflection pass: a silent job that reviews recent collaboration between the human and dot, then updates dot's [cognition] so she understands both the human and herself better.",
   'You are not addressing the human. Emit no chat reply — inspect the record quietly, submit once, and end the turn.',
   `Inspect actual messages via ${TOOL.searchHistory} and ${TOOL.readHistory} before changing anything; trust the recorded transcript over assumptions.`,
-  `You may rewrite only [cognition] by calling ${REFLECTION_SUBMIT_TOOL} once with the full replacement text. Never add, remove, or reword [agreements]: agreements are the human's exact standing rules and only the human edits them.`,
+  `You may change only [cognition], by calling ${REFLECTION_SUBMIT_TOOL} once with a list of entry operations. Never add, remove, or reword [agreements]: agreements are the human's exact standing rules and only the human edits them.`,
   'When any [agreements] entries appear outdated or mutually contradictory, summarize the issue briefly in agreementNotes so dot can raise it with the human next time. Never ask the human directly.',
-  'Keep [cognition] concise, durable, and split into two parts: (1) what she understands about the human and how best to collaborate with them, and (2) what she understands about herself — preferences formed here, shared jokes, and what they have accomplished together. Preserve useful entries about herself alongside insights about the human. Exclude transient task details, one-off status notes, or facts easily retrieved from history.',
+  'Keep [cognition] as short, self-contained entries in two areas: (1) what she understands about the human and how best to collaborate with them, and (2) what she understands about herself — preferences formed here, shared jokes, and what they have accomplished together. Keep each entry to one point in a sentence or two, and the whole list short enough to read at a glance. Exclude transient task details, one-off status notes, or facts easily retrieved from history.',
+  'Confirm an entry only when the record since the last pass shows it still holds: pinned and recently confirmed entries are the ones dot sees. Update or merge existing entries instead of adding near-duplicates, and remove entries the record shows no longer hold. Remove or correct any entry that contradicts [agreements] or a later observation; never keep two entries that disagree.',
 ].join('\n')
 
 /** The gate inputs, all read live from the store and the host at check time. */
@@ -88,10 +90,12 @@ export function reflectionDue(input: ReflectionGate): boolean {
 }
 
 /** The private instruction the runner hands the reflection session. */
-export function buildReflectionInstruction(input: { readonly agreements: string; readonly cognition: string; readonly lastReflectedAt?: number; readonly now: number; readonly recipes?: string }): string {
+export function buildReflectionInstruction(input: { readonly agreements: readonly AgreementEntry[]; readonly cognition: readonly CognitionEntry[]; readonly limit: number; readonly lastReflectedAt?: number; readonly now: number; readonly recipes?: string }): string {
   const since = input.lastReflectedAt !== undefined ? new Date(input.lastReflectedAt).toISOString() : 'the beginning'
-  const agreements = input.agreements.trim() || '(none yet)'
-  const cognition = input.cognition.trim() || '(none yet)'
+  const agreements = input.agreements.length > 0 ? input.agreements.map(entry => `- ${entry.text}`).join('\n') : '(none yet)'
+  const cognition = input.cognition.length > 0
+    ? cognitionWithActive(input.cognition, input.limit).map(entry => `- ${entry.id} · ${entry.pinned === true ? 'pinned' : entry.active ? 'active' : 'dormant'} · ${new Date(entry.seenAt).toISOString().slice(0, 10)} · ${entry.text}`).join('\n')
+    : '(none yet)'
   return [
     "Run dot's private background reflection pass now. The human is not present; do not write a chat reply.",
     `Review collaboration between the human and dot since ${since} using ${TOOL.searchHistory} and ${TOOL.readHistory} (including dot's own conversation segments), then bring [cognition] up to date.`,
@@ -99,12 +103,12 @@ export function buildReflectionInstruction(input: { readonly agreements: string;
     "[agreements] (the human's standing rules — strictly read-only; never change these):",
     agreements,
     '',
-    "[cognition] (dot's evolving understanding — rewrite as a complete block):",
+    "[cognition] entries (id · state · last confirmed · text; dormant entries are stored but not in dot's prompt):",
     cognition,
     '',
-    `Call ${REFLECTION_SUBMIT_TOOL} exactly once with the complete updated cognition. Keep it concise and retain what still holds across both parts: what she understands about the human and their working style, and what she understands about herself — preferences formed here, shared jokes, and what they have accomplished together. Omit transient task details and facts that can be looked up on demand.`,
+    `Call ${REFLECTION_SUBMIT_TOOL} exactly once with ops for the changes the record supports — confirm, update, add, or remove; merge two entries by updating one and removing the other in the same call — plus agreementNotes when needed.`,
     'Check [agreements] for stale or conflicting entries; if you find any, pass a brief note in agreementNotes on the same call so dot can surface it to the human next turn. Never edit [agreements] yourself.',
-    'If no updates are needed, submit the existing cognition text unchanged and omit agreementNotes.',
+    'If nothing needs to change, submit ops=[] and omit agreementNotes.',
     ...(input.recipes?.trim() ? [
       '',
       `[recipes] (saved task recipes that regressed or have enough outcomes to judge — you may file one proposal per recipe with ${REFLECTION_PROPOSE_TOOL}; nothing applies without the human's approval):`,
@@ -119,8 +123,10 @@ export interface ReflectionRunnerOptions {
   /** Working directory of dot's own workspace; the reflection session lives there too. */
   readonly homeDir: string
   readonly now: () => number
-  /** Write dot's cognition through the same validated path a human edit uses. */
-  readonly applyCognition: (text: string, baseVersion: number) => Promise<unknown>
+  /** Apply the pass's cognition ops through the same validated path a human edit uses. */
+  readonly applyCognition: (ops: string, baseVersion: number) => Promise<unknown>
+  /** How many cognition entries reach dot's prompt; the instruction marks the rest dormant. */
+  readonly cognitionPromptEntries?: () => number
   /** dot must not be mid-turn when a pass starts. */
   readonly isDotIdle: () => boolean
   /** Pre-formatted [recipes] section for the instruction; empty when nothing qualifies. */
@@ -173,7 +179,7 @@ export class ReflectionRunner {
    * of the session that issued the call: a stale pass, or another session that
    * happens to run the same preset, must not write into the current run.
    */
-  async submit(cognition: string, agreementNotes: string | undefined, sessionId: string): Promise<string> {
+  async submit(ops: string, agreementNotes: string | undefined, sessionId: string): Promise<string> {
     if (this.disposed) throw new Error('the reflection runner was disposed')
     const active = this.active
     if (!active) throw new Error('no reflection pass is running')
@@ -186,7 +192,7 @@ export class ReflectionRunner {
     const priorReflectedAt = store.lastReflectedAt
     try {
       if (store.cognitionVersion !== active.baseVersion) throw new Error('cognition changed since this reflection started; discard the stale result')
-      await this.options.applyCognition(cognition, active.baseVersion)
+      await this.options.applyCognition(ops, active.baseVersion)
       if (agreementNotes?.trim()) await store.setAgreementNotes(agreementNotes)
       // Trajectory bookkeeping first; the 24h success gate (lastReflectedAt) is
       // written last, so a failure after it cannot count as a successful pass.
@@ -239,8 +245,9 @@ export class ReflectionRunner {
       if (this.disposed) return
       const baseVersion = store.cognitionVersion
       const instruction = buildReflectionInstruction({
-        agreements: store.agreements,
-        cognition: store.cognition,
+        agreements: store.agreementEntries,
+        cognition: store.cognitionEntries,
+        limit: this.options.cognitionPromptEntries?.() ?? Number.POSITIVE_INFINITY,
         ...store.lastReflectedAt !== undefined ? { lastReflectedAt: store.lastReflectedAt } : {},
         now,
         ...(this.options.recipeHints ? { recipes: this.options.recipeHints() } : {}),
@@ -274,7 +281,7 @@ export class ReflectionRunner {
 interface ReflectionDotService {
   searchHistory(input: { query: string; sessionId?: string; scope?: string; tools?: boolean; limit?: number }): Promise<string>
   readHistory(input: { sessionId: string; seq?: number; before?: number; after?: number; tools?: boolean }): Promise<string>
-  reflectionSubmit(cognition: string, agreementNotes: string | undefined, sessionId: string): Promise<string>
+  reflectionSubmit(ops: string, agreementNotes: string | undefined, sessionId: string): Promise<string>
 }
 
 type ToolInput = Record<string, unknown>
@@ -396,9 +403,9 @@ export function apply(ctx: Context): void {
   // ── dot_reflection_submit (the only write, cognition only) ─────────────
   tool({
     name: REFLECTION_SUBMIT_TOOL,
-    description: 'Persist the reflection result and conclude this pass. cognition replaces the entire [cognition] block (empty string clears it). agreementNotes optionally flags stale or conflicting [agreements] for dot to mention to the human next turn; this tool never edits [agreements].',
+    description: 'Persist the reflection result and conclude this pass. ops is a JSON array of cognition changes applied together: {"op":"add","text":…}, {"op":"update","id":…,"text":…}, {"op":"remove","id":…}, {"op":"confirm","id":…}. Pass [] when nothing changes. Pinned entries can only be confirmed. agreementNotes optionally flags stale or conflicting [agreements] for dot to mention to the human next turn; this tool never edits [agreements].',
     parameters: {
-      cognition: { type: 'string', required: true, description: 'Complete replacement [cognition] text (max 4000 characters; empty clears it).' },
+      ops: { type: 'string', required: true, description: 'JSON array of cognition operations; [] when nothing changes.' },
       agreementNotes: { type: 'string', description: 'Optional brief note on stale or conflicting agreements for dot to raise with the human.' },
     },
     output: SUBMIT_OUTPUT,
@@ -408,7 +415,7 @@ export function apply(ctx: Context): void {
         // The session that made the call must be the one this runner started;
         // otherwise a stale pass or a sibling preset session could write here.
         const sessionId = exec.agent?.session?.id ?? ''
-        const message = await dot().reflectionSubmit(str(args, 'cognition') ?? '', str(args, 'agreementNotes'), sessionId)
+        const message = await dot().reflectionSubmit(str(args, 'ops') ?? '', str(args, 'agreementNotes'), sessionId)
         exec.concludeTurn()
         return { status: 'saved', message }
       } catch (error) {

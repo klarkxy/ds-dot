@@ -152,6 +152,23 @@
         ja: '任意の GitHub 連携を有効にすると、PR についたコメントや結果が最初に開いたタスクの下にまとまります。',
       },
     },
+    {
+      id: 'mcp-servers',
+      pr: 85,
+      date: '2026.11.24',
+      post: 'extra-hands',
+      file: 'dot-85-mcp-servers.gif',
+      title: {
+        zh: '接入 MCP 帮手',
+        en: 'Plugging in MCP helpers',
+        ja: 'MCP の助っ人を接続',
+      },
+      desc: {
+        zh: '在「MCP 服务」页接入 DeepWiki 并授了自动，转头问仓库结构她就直接用上了。',
+        en: 'Connected DeepWiki on the MCP servers page, granted it auto, and she used it right away for a repo question.',
+        ja: '「MCP サービス」ページで DeepWiki をつなぎ自動を許可したら、リポジトリの質問にそのまま使ってくれました。',
+      },
+    },
   ];
 
   const POSTS = [

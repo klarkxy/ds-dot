@@ -168,6 +168,10 @@ describe('chat-format', () => {
     expect(summarizeToolCall(cognition, 'zh', EMPTY_TASKS)).toEqual({ summary: 'add · 他偏好先看结论，再给步骤。' })
     const cognitionUpdate = { ...cognition, key: 'c2', args: { action: 'update', match: '他偏好先看结论', text: '他偏好先看结论，再给步骤。' } }
     expect(summarizeToolCall(cognitionUpdate, 'zh', EMPTY_TASKS)).toEqual({ summary: 'update · 他偏好先看结论，再给步骤。' })
+    const cognitionList = { ...cognition, key: 'c3', args: { action: 'list' } }
+    expect(summarizeToolCall(cognitionList, 'zh', EMPTY_TASKS)).toEqual({ summary: 'list' })
+    const cognitionSearch = { ...cognition, key: 'c4', args: { action: 'list', query: '茶' } }
+    expect(summarizeToolCall(cognitionSearch, 'zh', EMPTY_TASKS)).toEqual({ summary: 'list · 茶' })
 
     // Conversations from before the split keep their old note calls readable.
     const legacy = {

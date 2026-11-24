@@ -32,11 +32,55 @@ export function entryKey(text: string): string {
 
 const MATCH_LIST_LIMIT = 40
 
-/** Current entries echoed in a match error, truncated so a large dormant list cannot bloat the model context. */
-function formatMatchList(entries: readonly { readonly text: string }[]): string {
-  const lines = entries.slice(0, MATCH_LIST_LIMIT).map(entry => `- ${entry.text}`)
-  if (entries.length > MATCH_LIST_LIMIT) lines.push(`… and ${entries.length - MATCH_LIST_LIMIT} more`)
+function matchScore(text: string, needle: string): number {
+  const wanted = entryKey(normalizeEntry(needle))
+  if (!wanted) return 0
+  const key = entryKey(text)
+  const tokens = wanted.split(' ').filter(Boolean)
+  let score = 0
+  for (const token of tokens) {
+    if (key.includes(token)) score += 1000
+  }
+  const compact = wanted.replace(/\s+/g, '')
+  if (compact.length >= 2) {
+    const seen = new Set<string>()
+    for (let i = 0; i < compact.length - 1; i += 1) {
+      const pair = compact.slice(i, i + 2)
+      if (!seen.has(pair)) {
+        seen.add(pair)
+        if (key.includes(pair)) score += 10
+      }
+    }
+  } else if (compact.length === 1 && key.includes(compact)) {
+    score += 10
+  }
+  return score
+}
+
+/** Current entries echoed in a match error, prioritizing partial/token hits before truncating. */
+function formatMatchList(entries: readonly { readonly text: string; readonly seenAt?: number; readonly updatedAt?: number }[], needle?: string, kind?: 'agreement' | 'cognition'): string {
+  const ordered = needle
+    ? [...entries].sort((a, b) =>
+        (matchScore(b.text, needle) - matchScore(a.text, needle))
+        || ((b.seenAt ?? b.updatedAt ?? 0) - (a.seenAt ?? a.updatedAt ?? 0)))
+    : entries
+  const lines = ordered.slice(0, MATCH_LIST_LIMIT).map(entry => `- ${entry.text}`)
+  if (ordered.length > MATCH_LIST_LIMIT) {
+    const hint = kind === 'cognition' ? ` (use ${TOOL.cognition} action=list to search or page)` : ''
+    lines.push(`… and ${ordered.length - MATCH_LIST_LIMIT} more${hint}`)
+  }
   return lines.join('\n')
+}
+
+/** Entries whose folded text contains every whitespace-separated word of `query` (or all entries when empty). */
+export function filterCognitionEntries<T extends { readonly text: string }>(entries: readonly T[], query?: string): T[] {
+  const normalized = query === undefined ? '' : entryKey(normalizeEntry(query))
+  if (!normalized) return [...entries]
+  const tokens = normalized.split(' ').filter(Boolean)
+  return entries.filter(entry => {
+    const key = entryKey(entry.text)
+    return tokens.every(token => key.includes(token))
+  })
 }
 
 /** Entries whose comparison key equals that of `text`. */
@@ -158,10 +202,10 @@ export function matchEntry<T extends { readonly id: string; readonly text: strin
   const unknown = kind === 'agreement' ? 'dot/unknown-agreement' : 'dot/unknown-entry'
   const ambiguous = kind === 'agreement' ? 'dot/ambiguous-agreement' : 'dot/ambiguous-entry'
   if (matches.length === 0) {
-    throw new KnowledgeError(unknown, entries.length === 0 ? `there is no ${noun} to match` : `no ${noun} matches "${note}". Current ${nouns}:\n${formatMatchList(entries)}`)
+    throw new KnowledgeError(unknown, entries.length === 0 ? `there is no ${noun} to match` : `no ${noun} matches "${note}". Current ${nouns}:\n${formatMatchList(entries, note, kind)}`)
   }
   if (matches.length > 1) {
-    throw new KnowledgeError(ambiguous, `"${note}" matches ${matches.length} ${nouns}; quote more of the specific entry:\n${formatMatchList(matches)}`)
+    throw new KnowledgeError(ambiguous, `"${note}" matches ${matches.length} ${nouns}; quote more of the specific entry:\n${formatMatchList(matches, undefined, kind)}`)
   }
   return matches[0]!
 }
@@ -356,7 +400,8 @@ export function applyCognitionOps(entries: readonly CognitionEntry[], ops: reado
         return [...list, { id: nextId(), text: op.text, createdAt: now, updatedAt: now, seenAt: now }]
       }
       case 'update': {
-        if (list.some(entry => entry.id !== op.id && entryKey(entry.text) === entryKey(op.text))) {
+        const key = entryKey(op.text)
+        if (list.some(entry => entry.id !== op.id && entryKey(entry.text) === key && !batchDropsKey(ops, entry.id, key))) {
           throw new KnowledgeError('dot/invalid', 'another cognition entry already has that text')
         }
         return list.map(entry => entry.id === op.id ? { ...entry, text: op.text, updatedAt: now, seenAt: now } : entry)

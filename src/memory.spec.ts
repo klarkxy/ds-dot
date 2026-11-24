@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import type { AgreementEntry, CognitionEntry } from './contracts.ts'
 import {
   agreementEntriesFromText, agreementsSection, agreementsText, applyAgreementEdit, applyCognitionEdit, applyCognitionOps,
-  cognitionEntriesFromText, cognitionSection, cognitionText, cognitionWithActive, matchEntry, maxEntrySuffix, migrateAgreementEntries,
+  cognitionEntriesFromText, cognitionSection, cognitionText, cognitionWithActive, filterCognitionEntries, matchEntry, maxEntrySuffix, migrateAgreementEntries,
   migrateCognitionEntries, normalizeEntry, parseCognitionOps, parseKnowledgeEdit, rankCognition, sameCognitionContent, sameEntries, splitEntryText,
 } from './memory.ts'
 
@@ -156,8 +156,17 @@ describe('knowledge edits', () => {
     expect(() => matchEntry(list, '', 'agreement')).toThrow(/text must be non-empty/)
     const many = Array.from({ length: 45 }, (_, i) => cognition(`c${i + 1}`, `fact ${i + 1}`))
     expect(() => matchEntry(many, 'missing', 'cognition')).toThrow(/… and 5 more/)
+    expect(() => matchEntry(many, 'missing', 'cognition')).toThrow(/dot_cognition action=list/)
     expect(() => matchEntry(many, 'missing', 'cognition')).toThrow(/cognition entries/)
     expect(() => matchEntry(many, 'missing', 'cognition')).not.toThrow(/cognition entrys/)
+    // When >40 entries exist, partial/token hits bubble to the top of the error echo.
+    const buried = [
+      ...Array.from({ length: 45 }, (_, i) => cognition(`c${i + 1}`, `unrelated routine note ${i + 1}`, i + 1)),
+      cognition('c46', 'prefers drinking green jasmine tea in the afternoon', 46),
+    ]
+    expect(() => matchEntry(buried, 'likes green tea', 'cognition')).toThrow(/prefers drinking green jasmine tea in the afternoon/)
+    expect(filterCognitionEntries(buried, 'tea green').map(entry => entry.id)).toEqual(['c46'])
+    expect(filterCognitionEntries(buried, '').length).toBe(46)
   })
 })
 
@@ -227,11 +236,51 @@ describe('reflection ops', () => {
     ])
   })
 
+  it('allows merging via [update, remove] in either order and swapping keys across updates', () => {
+    const base = [
+      cognition('c1', 'prefers concise review replies', 1, 3),
+      cognition('c2', 'likes concise replies', 2, 4),
+    ]
+    const updateThenRemove = applyCognitionOps(
+      base,
+      parseCognitionOps(JSON.stringify([{ op: 'update', id: 'c1', text: 'likes concise replies' }, { op: 'remove', id: 'c2' }])),
+      50,
+      ids('c', 2),
+    )
+    expect(updateThenRemove.map(entry => ({ id: entry.id, text: entry.text }))).toEqual([
+      { id: 'c1', text: 'likes concise replies' },
+    ])
+    const removeThenUpdate = applyCognitionOps(
+      base,
+      parseCognitionOps(JSON.stringify([{ op: 'remove', id: 'c2' }, { op: 'update', id: 'c1', text: 'likes concise replies' }])),
+      50,
+      ids('c', 2),
+    )
+    expect(removeThenUpdate.map(entry => ({ id: entry.id, text: entry.text }))).toEqual([
+      { id: 'c1', text: 'likes concise replies' },
+    ])
+    const swapped = applyCognitionOps(
+      base,
+      parseCognitionOps(JSON.stringify([
+        { op: 'update', id: 'c1', text: 'likes concise replies' },
+        { op: 'update', id: 'c2', text: 'prefers concise review replies' },
+      ])),
+      50,
+      ids('c', 2),
+    )
+    expect(swapped.map(entry => ({ id: entry.id, text: entry.text }))).toEqual([
+      { id: 'c1', text: 'likes concise replies' },
+      { id: 'c2', text: 'prefers concise review replies' },
+    ])
+  })
+
   it('rejects a reflection update that collides with another remaining entryKey', () => {
     const base = [cognition('c1', 'Likes tea', 1, 3), cognition('c2', 'other fact', 2, 4)]
     expect(() => applyCognitionOps(base, parseCognitionOps('[{"op":"update","id":"c2","text":"likes  tea"}]'), 50, ids('c', 2)))
       .toThrowError(expect.objectContaining({ code: 'dot/invalid' }))
     expect(() => applyCognitionOps(base, parseCognitionOps('[{"op":"update","id":"c2","text":"likes  tea"}]'), 50, ids('c', 2)))
+      .toThrow(/already has that text/)
+    expect(() => applyCognitionOps(base, parseCognitionOps('[{"op":"update","id":"c1","text":"shared"},{"op":"update","id":"c2","text":"Shared"}]'), 50, ids('c', 2)))
       .toThrow(/already has that text/)
     expect(() => applyCognitionEdit(base, { op: 'edit', id: 'c2', text: 'likes  tea' }, 50, ids('c', 2)))
       .toThrow(/already has that text/)

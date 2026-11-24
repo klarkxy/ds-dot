@@ -495,14 +495,26 @@ export function apply(ctx: Context): void {
   // ── dot_cognition ─────────────────────────────────────────────────────────
   tool(defineToolInput({
     name: TOOL.cognition,
-    description: 'Change one entry of your [cognition]: your durable understanding of the human (workflow preferences, habits) and of yourself (formed preferences, shared jokes, accomplishments together). action=add records a new entry; action=update replaces the entry that match identifies; action=remove deletes it. Keep each entry to one self-contained point, update an existing entry instead of adding a near-duplicate, never record transient task status, and remember [agreements] always take precedence. Pinned entries belong to the human: you cannot update or remove them. Updates take effect in the prompt prefix on the next segment.',
+    description: 'Inspect or change your [cognition]: your durable understanding of the human (workflow preferences, habits) and of yourself (formed preferences, shared jokes, accomplishments together). action=list searches (optional query) and pages (offset, limit) through all stored entries, including dormant ones outside the prompt. action=add records a new entry; action=update replaces the entry that match identifies; action=remove deletes it. Keep each entry to one self-contained point, update an existing entry instead of adding a near-duplicate, never record transient task status, and remember [agreements] always take precedence. Pinned entries belong to the human: you cannot update or remove them. Updates take effect in the prompt prefix on the next segment.',
     parameters: {
-      action: { type: 'string', enum: ['add', 'update', 'remove'], required: true, description: 'Operation: add, update, or remove.' },
+      action: { type: 'string', enum: ['list', 'add', 'update', 'remove'], required: true, description: 'Operation: list, add, update, or remove.' },
       text: { type: 'string', description: 'add/update: the entry text, one self-contained point.' },
       match: { type: 'string', description: 'update/remove: the exact entry text or a unique substring of it.' },
+      query: { type: 'string', description: 'list: optional search text (case-insensitive words) to filter stored entries, including dormant ones.' },
+      offset: { type: 'integer', description: 'list: zero-based starting offset for paging (default 0).' },
+      limit: { type: 'integer', description: 'list: maximum entries to return (default 40, max 100).' },
     },
     execute: async (args) => {
       const action = str(args, 'action')
+      if (action === 'list') {
+        const offset = num(args, 'offset')
+        const limit = num(args, 'limit')
+        return dot().cognitionList({
+          ...str(args, 'query') !== undefined ? { query: str(args, 'query')! } : {},
+          ...offset === undefined ? {} : { offset },
+          ...limit === undefined ? {} : { limit },
+        })
+      }
       if (action === 'update') return dot().cognitionUpdate(str(args, 'match') ?? '', str(args, 'text') ?? '')
       if (action === 'remove') return dot().cognitionRemove(str(args, 'match') ?? '')
       return dot().cognitionAdd(str(args, 'text') ?? '')

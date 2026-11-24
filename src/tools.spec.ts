@@ -77,6 +77,7 @@ function load(settings: { current: DotSettings; segment?: Seg; notes?: string; c
       },
       currentAgreementsBlock: () => settings.notes ?? '',
       currentCognitionBlock: () => settings.cognition ?? '',
+      cognitionList: async (input?: { query?: string; offset?: number; limit?: number }) => JSON.stringify(input ?? {}),
       selfSettings: realSelf,
       answer: (id: string, answer: unknown) => JSON.stringify({ id, answer }),
       presentCard: async (shown: { title: string; view: Record<string, unknown>; interactive: boolean }, callId?: string) => {
@@ -335,9 +336,21 @@ describe('dot tools', () => {
     expect(agreement.action).toMatchObject({ type: 'string', enum: ['add', 'remove'] })
     expect(agreement.text).toMatchObject({ type: 'string' })
     const cognition = propsOf(byName.get(TOOL.cognition)!)
-    expect(cognition.action).toMatchObject({ type: 'string', enum: ['add', 'update', 'remove'] })
+    expect(cognition.action).toMatchObject({ type: 'string', enum: ['list', 'add', 'update', 'remove'] })
     expect(cognition.text).toMatchObject({ type: 'string' })
     expect(cognition.match).toMatchObject({ type: 'string' })
+    expect(cognition.query).toMatchObject({ type: 'string' })
+    expect(cognition.offset).toMatchObject({ type: 'integer' })
+    expect(cognition.limit).toMatchObject({ type: 'integer' })
+  })
+
+  it('forwards dot_cognition list query, offset and limit to cognitionList', async () => {
+    const tool = load().find(row => row.name === TOOL.cognition) as { execute(args: unknown): Promise<string> }
+    expect(JSON.parse(await tool.execute({ action: 'list', query: 'tea', offset: 40, limit: 20 }))).toEqual({
+      query: 'tea',
+      offset: 40,
+      limit: 20,
+    })
   })
 
   it('exposes exactly the high-level task operations and rejects removed actions', async () => {

@@ -45,7 +45,7 @@ import { ACCEPTED_DELIVERY_HINT, IDLE_SILENCE_HINT } from './task-hints.ts'
 import { AutoUpdater, type PluginManagerLike, type UpdateStatus } from './auto-update.ts'
 import { DOT_TRACE, emitDotTrace, type DotTraceInput } from './trace.ts'
 import type { RunAccess, RunKind, ChangePriority, TaskLink } from './contracts.ts'
-import { KnowledgeError, agreementEntriesFromText, agreementNotesBlock, agreementsSection, applyAgreementEdit, applyCognitionEdit, applyCognitionOps, cognitionSection, cognitionWithActive, matchEntry, parseCognitionOps, parseKnowledgeEdit, sameEntries } from './memory.ts'
+import { KnowledgeError, agreementEntriesFromText, agreementNotesBlock, agreementsSection, applyAgreementEdit, applyCognitionEdit, applyCognitionOps, cognitionSection, cognitionWithActive, filterCognitionEntries, matchEntry, normalizeEntry, parseCognitionOps, parseKnowledgeEdit, sameEntries } from './memory.ts'
 import { COGNITION_PROMPT_ENTRIES_DEFAULT, type AgreementEntry, type CognitionEntry, type KnowledgeEdit } from './contracts.ts'
 import { deliverPeer, guardRunWriteTool, PeerLedger, refreshChildSeals, sealChildSession, type PeerSendInput } from './peer.ts'
 import { PendingHub, type PendingAnswer } from './pending.ts'
@@ -2357,6 +2357,31 @@ export class DotService {
       await this.afterCognitionChange(before, after, 'dot')
       return `Removed this cognition entry: "${target.text}".`
     })
+  }
+
+  /** List or search all stored cognition entries (pinned, active, and dormant) with offset/limit paging. */
+  async cognitionList(input?: { readonly query?: string; readonly offset?: number; readonly limit?: number }): Promise<string> {
+    const ranked = cognitionWithActive(this.store.cognitionEntries, this.cognitionPromptEntries)
+    if (ranked.length === 0) return 'No cognition entries yet.'
+    const query = input?.query === undefined ? undefined : normalizeEntry(input.query)
+    const matched = filterCognitionEntries(ranked, query)
+    if (matched.length === 0) return `No cognition entries match "${query}" (${ranked.length} stored).`
+    const rawOffset = input?.offset ?? 0
+    if (!Number.isFinite(rawOffset) || rawOffset < 0) throw new DotError('dot/invalid', 'offset must be a non-negative integer')
+    const offset = Math.trunc(rawOffset)
+    const rawLimit = input?.limit ?? 40
+    if (!Number.isFinite(rawLimit) || rawLimit < 1) throw new DotError('dot/invalid', 'limit must be a positive integer')
+    const limit = Math.min(100, Math.trunc(rawLimit))
+    const page = matched.slice(offset, offset + limit)
+    if (page.length === 0) return `No cognition entries at offset ${offset} (${matched.length} matched).`
+    const start = offset + 1
+    const end = offset + page.length
+    const scope = query
+      ? `Matching cognition entries for "${query}" (${start}–${end} of ${matched.length}; ${ranked.length} total)`
+      : `Cognition entries (${start}–${end} of ${matched.length}; prompt limit ${this.cognitionPromptEntries})`
+    const lines = page.map(entry => `- [${entry.pinned === true ? 'pinned' : entry.active ? 'active' : 'dormant'}] ${entry.text}`)
+    const next = offset + page.length < matched.length ? `\nMore entries remain; pass offset=${offset + page.length} to continue.` : ''
+    return `${scope}:\n${lines.join('\n')}${next}`
   }
 
   /** dot_settings proposal approval carries bulk text: identical lines reuse their stored entry. */

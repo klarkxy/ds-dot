@@ -1149,6 +1149,37 @@ describe('DotService knowledge', () => {
     expect((await h.service.knowledgeView()).cognition.history).toHaveLength(versions)
   })
 
+  it('lists, searches, and pages stored cognition entries including dormant ones beyond 40', async () => {
+    const h = setup(undefined, undefined, undefined, { cognitionPromptEntries: 2 })
+    await h.service.ensureDot()
+    await h.service.cognitionAdd('dormant jasmine tea habit')
+    h.advance(10)
+    await h.service.editCognition({ op: 'pin', id: 'c1', pinned: true })
+    // Add 44 more entries so c1 stays pinned and c2..c43 go dormant beyond index 40.
+    for (let i = 2; i <= 45; i += 1) {
+      h.advance(10)
+      await h.service.cognitionAdd(i === 3 ? 'dormant oolong preference' : `routine entry ${i}`)
+    }
+    const page1 = await h.service.cognitionList({ limit: 40, offset: 0 })
+    expect(page1).toContain('1–40 of 45; prompt limit 2')
+    expect(page1).toContain('- [pinned] dormant jasmine tea habit')
+    expect(page1).toContain('- [active] routine entry 45')
+    expect(page1).toContain('pass offset=40')
+    expect(page1).not.toContain('dormant oolong preference')
+
+    const page2 = await h.service.cognitionList({ limit: 40, offset: 40 })
+    expect(page2).toContain('41–45 of 45')
+    expect(page2).toContain('- [dormant] dormant oolong preference')
+    expect(page2).not.toContain('pass offset=')
+
+    const filtered = await h.service.cognitionList({ query: 'preference oolong' })
+    expect(filtered).toContain('Matching cognition entries for "preference oolong" (1–1 of 1; 45 total)')
+    expect(filtered).toContain('- [dormant] dormant oolong preference')
+    expect(await h.service.cognitionList({ query: 'nonexistent-needle' })).toContain('No cognition entries match "nonexistent-needle" (45 stored).')
+    await expect(h.service.cognitionList({ offset: -1 })).rejects.toMatchObject({ code: 'dot/invalid' })
+    await expect(h.service.cognitionList({ limit: 0 })).rejects.toMatchObject({ code: 'dot/invalid' })
+  })
+
   it('rejects a string pinned flag instead of treating it as truthy', async () => {
     const h = setup()
     await h.service.cognitionAdd('one')

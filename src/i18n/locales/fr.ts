@@ -510,6 +510,7 @@ const frUi: UiText = {
   sMcpAbout_cloudflare: 'Documentation officielle de Cloudflare',
   sMcpAbout_huggingface: 'Index de modèles et de jeux de données',
   sMcpTokenHelp_github: 'Nécessite un fine-grained PAT en lecture seule : Contents, Issues, Pull requests, Actions, Metadata.',
+  sMcpConnectNoToken: 'Laisser vide pour connecter maintenant et ajouter le jeton plus tard',
   turnEnd: 'Tour terminé',
   reminderTag: 'Rappel',
   subagentTag: 'Sous-agent',

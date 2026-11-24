@@ -511,6 +511,7 @@ const enUi: UiText = {
   sMcpAbout_cloudflare: 'Official Cloudflare documentation',
   sMcpAbout_huggingface: 'Model and dataset index',
   sMcpTokenHelp_github: 'Requires a fine-grained PAT with read-only access: Contents, Issues, Pull requests, Actions, Metadata.',
+  sMcpConnectNoToken: 'Leave empty to connect now and add the token later',
   turnEnd: 'Turn done',
   reminderTag: 'Reminder',
   subagentTag: 'Subagent',

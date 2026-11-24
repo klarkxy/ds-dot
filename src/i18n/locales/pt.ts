@@ -510,6 +510,7 @@ const ptUi: UiText = {
   sMcpAbout_cloudflare: 'Documentação oficial da Cloudflare',
   sMcpAbout_huggingface: 'Índice de modelos e conjuntos de dados',
   sMcpTokenHelp_github: 'Requer um fine-grained PAT só de leitura: Contents, Issues, Pull requests, Actions, Metadata.',
+  sMcpConnectNoToken: 'Deixe vazio para conectar agora e adicionar o token depois',
   turnEnd: 'Turno concluído',
   reminderTag: 'Lembrete',
   subagentTag: 'Subagente',

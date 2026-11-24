@@ -510,6 +510,7 @@ const deUi: UiText = {
   sMcpAbout_cloudflare: 'Offizielle Cloudflare-Dokumentation',
   sMcpAbout_huggingface: 'Modell- und Datensatzindex',
   sMcpTokenHelp_github: 'Erfordert ein fine-grained PAT mit Read-only-Zugriff: Contents, Issues, Pull requests, Actions, Metadata.',
+  sMcpConnectNoToken: 'Leer lassen, um jetzt zu verbinden und das Token später hinzuzufügen',
   turnEnd: 'Zug abgeschlossen',
   reminderTag: 'Erinnerung',
   subagentTag: 'Subagent',

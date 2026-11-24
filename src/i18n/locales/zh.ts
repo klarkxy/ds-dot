@@ -511,6 +511,7 @@ export const zhUi = {
   sMcpAbout_cloudflare: 'Cloudflare 官方文档',
   sMcpAbout_huggingface: '模型与数据集索引',
   sMcpTokenHelp_github: '需要 fine-grained PAT，只读权限：Contents、Issues、Pull requests、Actions、Metadata。',
+  sMcpConnectNoToken: '留空则先接入，稍后再补令牌',
   turnEnd: '完成一轮',
   reminderTag: '提醒',
   subagentTag: '子代理',

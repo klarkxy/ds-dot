@@ -634,7 +634,7 @@ function McpPane({ locale, api, settings, grants, onPick }: {
         value={tokenDraft}
         onChange={event => setTokenDraft(event.target.value)}
       />
-      <Button variant="primary" size="sm" disabled={busy || tokenDraft.trim() === ''} onClick={() => void connect(entry, tokenDraft.trim())}>{t(locale, 'sMcpConnect')}</Button>
+      <Button variant="primary" size="sm" disabled={busy} title={tokenDraft.trim() === '' ? t(locale, 'sMcpConnectNoToken') : undefined} onClick={() => void connect(entry, tokenDraft.trim())}>{t(locale, 'sMcpConnect')}</Button>
       {entry.tokenUrl !== undefined ? <a className="dsh-dot-mcp-token-link" href={entry.tokenUrl} target="_blank" rel="noreferrer">{t(locale, 'sMcpTokenLink')}</a> : null}
       {entry.tokenHelp !== undefined ? <span className="dsh-dot-mcp-token-help">{t(locale, entry.tokenHelp as TextKey)}</span> : null}
     </div>

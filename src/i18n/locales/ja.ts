@@ -510,6 +510,7 @@ const jaUi: UiText = {
   sMcpAbout_cloudflare: 'Cloudflare 公式ドキュメント',
   sMcpAbout_huggingface: 'モデルとデータセットのインデックス',
   sMcpTokenHelp_github: 'fine-grained PAT が必要（読み取り専用：Contents、Issues、Pull requests、Actions、Metadata）。',
+  sMcpConnectNoToken: '空のまま接続し、トークンは後で追加できます',
   turnEnd: 'ターン完了',
   reminderTag: 'リマインダー',
   subagentTag: 'サブエージェント',

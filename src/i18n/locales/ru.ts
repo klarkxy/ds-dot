@@ -510,6 +510,7 @@ const ruUi: UiText = {
   sMcpAbout_cloudflare: 'Официальная документация Cloudflare',
   sMcpAbout_huggingface: 'Каталог моделей и датасетов',
   sMcpTokenHelp_github: 'Нужен fine-grained PAT с доступом только на чтение: Contents, Issues, Pull requests, Actions, Metadata.',
+  sMcpConnectNoToken: 'Оставьте пустым, чтобы подключить сейчас и добавить токен позже',
   turnEnd: 'Ход завершён',
   reminderTag: 'Напоминание',
   subagentTag: 'Субагент',

@@ -4,10 +4,18 @@
  * patches from the panel are checked strictly and refused as a whole.
  */
 import { z } from 'zod'
-import { DEFAULT_SETTINGS, SETTING_FIELDS, TASK_MODEL_LIST_MAX, type DotSettings, type SettingField, type TaskPermission } from './contracts.ts'
+import { DEFAULT_SETTINGS, SETTING_FIELDS, TASK_MODEL_LIST_MAX, isMcpServerHeaders, isMcpServerUrl, MCP_SERVER_NAME_PATTERN, type DotSettings, type SettingField, type TaskPermission } from './contracts.ts'
 import { type CopyLocale } from './i18n/index.ts'
 import { CACHE_TTL_MAX_ENTRIES, CACHE_TTL_MAX_MINUTES } from './keepalive.ts'
 import { ADDRESS_MAX_CHARS, PERSONA_MAX_CHARS, defaultAddress, defaultPersona } from './persona.ts'
+
+/** One stored `mcpServers` row; patches parse the record as a whole, stored reads drop bad rows. */
+const MCP_SERVER_ROW = z.object({
+  catalog: z.string().trim().min(1).max(100).optional(),
+  url: z.string().trim().min(1).max(2000).refine(isMcpServerUrl),
+  headers: z.record(z.string(), z.string().max(2000)).refine(isMcpServerHeaders).optional(),
+  enabled: z.boolean(),
+}).strict()
 
 const FIELDS = {
   model: z.object({
@@ -34,14 +42,21 @@ const FIELDS = {
     grants: z.record(z.string().trim().min(1).max(400), z.enum(['off', 'ask', 'auto']))
       .refine(map => Object.keys(map).length <= CAPABILITY_GRANTS_MAX),
   }).strict(),
+  mcpServers: z.record(
+    z.string().regex(MCP_SERVER_NAME_PATTERN),
+    MCP_SERVER_ROW,
+  ).refine(map => Object.keys(map).length <= MCP_SERVERS_MAX),
   locks: z.object(Object.fromEntries(SETTING_FIELDS.map(field => [field, z.boolean().optional()]))).strict(),
 } as const
 
 /** Selector rows the capabilities field may hold at once. */
 export const CAPABILITY_GRANTS_MAX = 500
 
+/** Dot-local MCP servers the settings field may hold at once. */
+export const MCP_SERVERS_MAX = 100
+
 /** Settings a patch may clear with null, going back to their defaults. */
-const CLEARABLE = new Set<string>(['model', 'persona', 'address'])
+const CLEARABLE = new Set<string>(['model', 'persona', 'address', 'mcpServers'])
 
 type Field = keyof typeof FIELDS
 
@@ -74,6 +89,16 @@ export function parseSettings(value: unknown): DotSettings {
         if (typeof row.locks[field] === 'boolean') locks[field] = row.locks[field] as boolean
       }
       out.locks = locks
+      continue
+    }
+    if (key === 'mcpServers' && isRecord(row.mcpServers)) {
+      const servers: Record<string, unknown> = {}
+      for (const [name, value] of Object.entries(row.mcpServers)) {
+        if (!MCP_SERVER_NAME_PATTERN.test(name)) continue
+        const parsed = MCP_SERVER_ROW.safeParse(value)
+        if (parsed.success) servers[name] = parsed.data
+      }
+      if (Object.keys(servers).length > 0) out.mcpServers = servers
       continue
     }
     const parsed = FIELDS[key].safeParse(row[key])

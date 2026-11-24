@@ -156,3 +156,35 @@ describe('DotStore settings', () => {
     expect(reloaded.settings.scope).toBe('tracked')
   })
 })
+
+describe('mcpServers setting', () => {
+  const deepwiki = { url: 'https://mcp.deepwiki.com/mcp', enabled: true }
+  it('accepts a valid remote row and a loopback http url', () => {
+    const next = patchSettings(DEFAULT_SETTINGS, { mcpServers: { deepwiki } })
+    expect(next.mcpServers?.deepwiki).toEqual(deepwiki)
+    for (const url of ['http://127.0.0.1:8080/mcp', 'http://localhost/mcp', 'http://[::1]/mcp']) {
+      expect(patchSettings(DEFAULT_SETTINGS, { mcpServers: { local: { url, enabled: true } } }).mcpServers?.local?.url).toBe(url)
+    }
+    expect(parseSettings({ mcpServers: { deepwiki } }).mcpServers?.deepwiki).toEqual(deepwiki)
+  })
+  it('rejects bad names, non-https non-loopback urls and malformed templates', () => {
+    expect(() => patchSettings(DEFAULT_SETTINGS, { mcpServers: { 'bad name!': deepwiki } })).toThrow(/invalid value/)
+    for (const url of ['http://example.com/mcp', 'ftp://x', 'notaurl', '']) {
+      expect(() => patchSettings(DEFAULT_SETTINGS, { mcpServers: { s: { url, enabled: true } } }), url).toThrow(/invalid value/)
+    }
+    for (const value of ['Bearer ${bad}', '${credential:}', 'x ${credential:1BAD}', '${credential:OK}${other}', 'unclosed ${credential:OK']) {
+      const row = { url: deepwiki.url, headers: { Authorization: value }, enabled: true }
+      expect(() => patchSettings(DEFAULT_SETTINGS, { mcpServers: { s: row } }), value).toThrow(/invalid value/)
+    }
+    const good = { url: deepwiki.url, headers: { Authorization: 'Bearer ${credential:DOT_MCP_GH_TOKEN}', 'X-Extra': 'plain' }, enabled: true }
+    expect(patchSettings(DEFAULT_SETTINGS, { mcpServers: { s: good } }).mcpServers?.s).toEqual(good)
+    expect(() => patchSettings(DEFAULT_SETTINGS, { mcpServers: { s: { ...good, headers: { 'bad header': 'x' } } } })).toThrow(/invalid value/)
+  })
+  it('drops bad stored rows one by one and clears on null', () => {
+    const parsed = parseSettings({ mcpServers: { deepwiki, 'bad name': deepwiki, bad: { url: 'http://x.com/mcp', enabled: true }, also_bad: 'junk' } })
+    expect(Object.keys(parsed.mcpServers ?? {})).toEqual(['deepwiki'])
+    expect(parseSettings({ mcpServers: 'junk' }).mcpServers).toBeUndefined()
+    const cleared = patchSettings({ ...DEFAULT_SETTINGS, mcpServers: { deepwiki } }, { mcpServers: null })
+    expect(cleared.mcpServers).toBeUndefined()
+  })
+})

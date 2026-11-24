@@ -552,6 +552,36 @@ describe('MCP servers page', () => {
     expect(saved).toEqual([{ mcpServers: { deepwiki: { catalog: 'deepwiki', url: 'https://mcp.deepwiki.com/mcp', enabled: true } } }])
     await act(async () => root.unmount())
   })
+
+  it('reflects a grant pick after the settings round-trip', async () => {
+    // Mirrors chat-panel's wiring: the panel owns settings state and onSaved
+    // replaces it, so the picker must show the new grant once the patch lands.
+    let current: DotSettings = { ...DEFAULT_SETTINGS }
+    const api = apiStub({
+      setSettings: async (patch: Record<string, unknown>) => {
+        current = { ...current, ...patch } as DotSettings
+        return current
+      },
+      mcpList: async () => ({
+        servers: [{ name: 'deepwiki', url: 'https://mcp.deepwiki.com/mcp', enabled: true, auth: 'none', status: { state: 'connected', toolCount: 3 } }],
+        catalog: [],
+      }),
+    })
+    const Harness = () => {
+      const [settings, setSettings] = useState<DotSettings>(current)
+      return <SettingsPanel locale="en" section="mcp" api={api as never} settings={settings} onSaved={next => { current = next; setSettings(next) }} />
+    }
+    const root = createRoot(document.getElementById('root')!)
+    await act(async () => root.render(<Harness />))
+    await act(async () => { await Promise.resolve() })
+    const row = document.querySelector('.dsh-dot-mcp-row')!
+    const auto = [...row.querySelectorAll<HTMLElement>('[role="tab"]')].find(node => node.textContent === 'Auto')!
+    await act(async () => auto.click())
+    await act(async () => { await Promise.resolve() })
+    expect(current.capabilities?.grants).toEqual({ 'mcp:deepwiki': 'auto' })
+    expect(row.querySelector('[aria-selected="true"]')?.textContent).toBe('Auto')
+    await act(async () => root.unmount())
+  })
 })
 
 describe('capabilities sections', () => {

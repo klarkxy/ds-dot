@@ -311,7 +311,7 @@ const GRANT_MODES: readonly [CapabilityGrant, CapabilityGrant, CapabilityGrant] 
  * The off/ask/auto control of one row. A row without its own grant row shows
  * the value it inherits, dimmed; the clear button removes its own override.
  */
-function GrantPicker({ locale, label, chain, grants, applied, onPick }: {
+function GrantPicker({ locale, label, chain, grants, applied, onPick, hideClear }: {
   locale: CopyLocale
   label: string
   /** Selectors this row answers to, most specific first; the first owns the write. */
@@ -319,6 +319,8 @@ function GrantPicker({ locale, label, chain, grants, applied, onPick }: {
   grants: Readonly<Record<string, CapabilityGrant>>
   /** Grant the live segment applied to this tool; compared for the next-segment badge. */
   applied?: CapabilityGrant | undefined
+  /** Drop the × reset slot (the MCP page manages grants without it). */
+  hideClear?: boolean
   onPick: (selector: string, grant: CapabilityGrant | undefined) => void
 }) {
   const own = chain[0]
@@ -330,10 +332,12 @@ function GrantPicker({ locale, label, chain, grants, applied, onPick }: {
   const hasOwn = own !== undefined && grants[own] !== undefined
   return (
     <span className="dsh-dot-cap-grant" data-inherited={hasOwn ? undefined : ''}>
-      <SegmentedChoice locale={locale} label={label} value={effective} options={GRANT_MODES} labelKeyOf={option => `sCap_${option}` as TextKey} onChange={next => { if (own !== undefined) onPick(own, next) }} />
-      <span className="dsh-dot-cap-clear-slot">{hasOwn ? (
-        <Button variant="ghost" size="sm" className="dsh-dot-cap-clear" title={t(locale, 'sCapClear')} aria-label={t(locale, 'sCapClear')} onClick={() => { if (own !== undefined) onPick(own, undefined) }}><IconCloseOutlineRegular size={12} /></Button>
-      ) : null}</span>
+      <SegmentedChoice locale={locale} label={label} value={effective} options={GRANT_MODES} labelKeyOf={option => `sCapShort_${option}` as TextKey} titleKeyOf={option => `sCap_${option}` as TextKey} onChange={next => { if (own !== undefined) onPick(own, next) }} />
+      {hideClear === true ? null : (
+        <span className="dsh-dot-cap-clear-slot">{hasOwn ? (
+          <Button variant="ghost" size="sm" className="dsh-dot-cap-clear" title={t(locale, 'sCapClear')} aria-label={t(locale, 'sCapClear')} onClick={() => { if (own !== undefined) onPick(own, undefined) }}><IconCloseOutlineRegular size={12} /></Button>
+        ) : null}</span>
+      )}
       {applied !== undefined && applied !== effective ? <span className="dsh-dot-cap-badge">{t(locale, 'sCapNext')}</span> : null}
     </span>
   )
@@ -390,7 +394,9 @@ function Capabilities({ locale, api, grants, onPick, onOpenMcp }: {
     group.kind === 'host' ? t(locale, 'sCapHostGroup')
     : group.id === 'builtin' ? t(locale, 'sCapBuiltinGroup')
     : group.id.startsWith('builtin:') ? t(locale, `sCapBuiltin_${group.id.slice('builtin:'.length)}` as TextKey) || group.label
-    : group.label
+    // `bundle / entry` labels and bare entry ids may carry an npm scope; drop it
+    // for display (the full id stays on `title`).
+    : group.label.split(' / ').map(part => part.startsWith('@') && part.includes('/') ? part.slice(part.indexOf('/') + 1) : part).join(' / ')
   const groupSelfHits = (group: CapabilityGroupView): boolean =>
     capNeedle !== '' && (displayedLabel(group).toLowerCase().includes(capNeedle) || group.id.toLowerCase().includes(capNeedle))
   const groupHits = (group: CapabilityGroupView): boolean =>
@@ -448,10 +454,11 @@ function Capabilities({ locale, api, grants, onPick, onOpenMcp }: {
             const soloNoOwnGrant = group.kind !== 'host' && group.id !== 'builtin'
               && group.tools.length === 1 && (group.children ?? []).length === 0
               && grants[`tool:${tool.name}`] === undefined
+            const toolLabel = group.kind === 'mcp' && tool.name.startsWith(`mcp__${group.label}__`) ? tool.name.slice(`mcp__${group.label}__`.length) : tool.name
             return (
               <div key={tool.name} className="dsh-dot-cap-row">
-                <span className="dsh-dot-cap-name dsh-dot-cap-tool">
-                  <code>{tool.name}</code>
+                <span className="dsh-dot-cap-name dsh-dot-cap-tool" title={tool.name}>
+                  <code>{toolLabel}</code>
                   {tool.description !== undefined ? <span className="dsh-dot-cap-desc">{tool.description}</span> : null}
                 </span>
                 {tool.missing === true ? <span className="dsh-dot-cap-badge">{t(locale, 'sCapMissing')}</span> : null}
@@ -656,23 +663,23 @@ function McpPane({ locale, api, settings, grants, onPick, onSaved }: {
                   <span className="dsh-dot-mcp-name" title={server.name}>{server.name}</span>
                   <span className="dsh-dot-mcp-status" title={server.status?.diagnostic}>{mcpStatusText(locale, server)}</span>
                   <span className="dsh-dot-mcp-actions">
-                    <GrantPicker locale={locale} label={server.name} chain={[`mcp:${server.name}`]} grants={grants} applied={undefined} onPick={onPick} />
-                    <span className="dsh-dot-mcp-menu">
-                      <Button variant="ghost" size="sm" disabled={busy} onClick={() => saveServers({ ...servers, [server.name]: { ...servers[server.name]!, enabled: !server.enabled } })}>
-                        {server.enabled ? t(locale, 'sMcpDisable') : t(locale, 'sMcpEnable')}
+                    <Button variant="ghost" size="sm" disabled={busy} onClick={() => saveServers({ ...servers, [server.name]: { ...servers[server.name]!, enabled: !server.enabled } })}>
+                      {server.enabled ? t(locale, 'sMcpDisable') : t(locale, 'sMcpEnable')}
+                    </Button>
+                    {server.auth === 'token' ? (
+                      <Button variant="ghost" size="sm" disabled={busy} onClick={() => { setTokenFor(tokenFor === server.name ? undefined : server.name); setTokenDraft('') }}>
+                        {t(locale, 'sMcpRetoken')}
                       </Button>
-                      {server.auth === 'token' ? (
-                        <Button variant="ghost" size="sm" disabled={busy} onClick={() => { setTokenFor(tokenFor === server.name ? undefined : server.name); setTokenDraft('') }}>
-                          {t(locale, 'sMcpRetoken')}
-                        </Button>
-                      ) : null}
-                      <Button variant="ghost" size="sm" disabled={busy} onClick={() => {
-                        const next = { ...servers }
-                        delete next[server.name]
-                        saveServers(next)
-                      }}>{t(locale, 'sMcpRemove')}</Button>
-                    </span>
+                    ) : null}
+                    <Button variant="ghost" size="sm" disabled={busy} onClick={() => {
+                      const next = { ...servers }
+                      delete next[server.name]
+                      saveServers(next)
+                    }}>{t(locale, 'sMcpRemove')}</Button>
                   </span>
+                </div>
+                <div className="dsh-dot-mcp-grant">
+                  <GrantPicker locale={locale} label={server.name} chain={[`mcp:${server.name}`]} grants={grants} applied={undefined} hideClear={true} onPick={onPick} />
                 </div>
                 {needsToken ? tokenField(server.name, server.tokenUrl, server.catalog === 'github' ? 'sMcpTokenHelp_github' : undefined) : null}
                 {tokenFor === server.name && !needsToken ? tokenField(server.name, server.tokenUrl) : null}
@@ -746,12 +753,13 @@ function IdleCheckInput({ locale, value, onCommit, label, unit }: { locale: Copy
   )
 }
 
-function SegmentedChoice<T extends string>({ locale, label, value, options, labelKeyOf, onChange }: {
+function SegmentedChoice<T extends string>({ locale, label, value, options, labelKeyOf, titleKeyOf, onChange }: {
   locale: CopyLocale
   label: string
   value: T
   options: readonly [T, ...T[]]
   labelKeyOf: (option: T) => TextKey
+  titleKeyOf?: (option: T) => TextKey
   onChange: (next: T) => void
 }) {
   const baseId = useId()
@@ -759,8 +767,8 @@ function SegmentedChoice<T extends string>({ locale, label, value, options, labe
     id: `${baseId}-${option}`,
     panelId: `${baseId}-${option}-panel`,
     value: option,
-    label: <span className="dsh-dot-seg-label">{t(locale, labelKeyOf(option))}</span>,
-  })) as unknown as readonly [SegmentedTab<T>, ...SegmentedTab<T>[]], [baseId, locale, options, labelKeyOf])
+    label: <span className="dsh-dot-seg-label" title={t(locale, titleKeyOf === undefined ? labelKeyOf(option) : titleKeyOf(option))}>{t(locale, labelKeyOf(option))}</span>,
+  })) as unknown as readonly [SegmentedTab<T>, ...SegmentedTab<T>[]], [baseId, locale, options, labelKeyOf, titleKeyOf])
   return (
     <SegmentedTabs<T>
       size="sm"
@@ -1363,12 +1371,11 @@ export const settingsCss = `
 .dsh-dot-chat .dsh-dot-cap-group > summary::-webkit-details-marker { display: none; }
 .dsh-dot-chat .dsh-dot-cap-toolbar { display: flex; align-items: center; gap: 12px; }
 .dsh-dot-chat .dsh-dot-cap-toolbar .dsh-dot-cap-search { flex: 1 1 auto; }
-.dsh-dot-chat .dsh-dot-cap-head { display: flex; align-items: center; flex-wrap: nowrap; gap: 4px 8px; padding: 8px 12px; cursor: pointer; }
-@media (max-width: 340px) { .dsh-dot-chat .dsh-dot-cap-head { flex-wrap: wrap; } }
+.dsh-dot-chat .dsh-dot-cap-head { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 8px; padding: 8px 12px; cursor: pointer; }
 .dsh-dot-chat .dsh-dot-cap-group--locked .dsh-dot-cap-head { cursor: pointer; }
 .dsh-dot-chat .dsh-dot-cap-chev { flex-shrink: 0; color: var(--dsw-alias-label-tertiary); transition: transform 0.12s ease; }
 .dsh-dot-chat .dsh-dot-cap-group[open] > summary .dsh-dot-cap-chev { transform: rotate(90deg); }
-.dsh-dot-chat .dsh-dot-cap-name { flex: 1 1 auto; min-width: 0; font-size: 13px; line-height: 20px; color: var(--dsw-alias-label-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dsh-dot-chat .dsh-dot-cap-name { flex: 1 1 120px; min-width: 120px; font-size: 13px; line-height: 20px; color: var(--dsw-alias-label-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .dsh-dot-chat .dsh-dot-cap-group[data-grant='off'] > summary .dsh-dot-cap-name { color: var(--dsw-alias-label-secondary); }
 .dsh-dot-chat .dsh-dot-cap-section { margin: 10px 4px 2px; font-size: 11px; line-height: 16px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; color: var(--dsw-alias-label-tertiary); }
 .dsh-dot-chat .dsh-dot-cap-section-wrap { display: flex; flex-direction: column; gap: 8px; }
@@ -1402,8 +1409,8 @@ export const settingsCss = `
 .dsh-dot-chat .dsh-dot-mcp-line { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 8px; min-width: 0; }
 .dsh-dot-chat .dsh-dot-mcp-name { flex-shrink: 0; font-size: 13px; line-height: 20px; font-weight: 500; color: var(--dsw-alias-label-primary); }
 .dsh-dot-chat .dsh-dot-mcp-status, .dsh-dot-chat .dsh-dot-mcp-about { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; line-height: 16px; color: var(--dsw-alias-label-tertiary); }
-.dsh-dot-chat .dsh-dot-mcp-actions { display: inline-flex; align-items: center; flex-wrap: wrap; justify-content: flex-end; gap: 2px 4px; margin-left: auto; flex-shrink: 1; min-width: 0; }
-.dsh-dot-chat .dsh-dot-mcp-menu { display: inline-flex; align-items: center; gap: 0; }
+.dsh-dot-chat .dsh-dot-mcp-actions { display: inline-flex; align-items: center; gap: 0; margin-left: auto; flex-shrink: 0; }
+.dsh-dot-chat .dsh-dot-mcp-grant { display: flex; align-items: center; }
 .dsh-dot-chat .dsh-dot-mcp-state { display: inline-block; width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
 .dsh-dot-chat .dsh-dot-mcp-state--ok { background: var(--dsw-alias-state-success-primary); }
 .dsh-dot-chat .dsh-dot-mcp-state--warn { background: var(--dsw-alias-state-warn-primary); }

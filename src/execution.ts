@@ -4,7 +4,7 @@
  */
 import type { DotHost } from './host.ts'
 import type { TaskPermission } from './contracts.ts'
-import { scopeWrites, type RunCursor, type RunPhase, type RunRecord, type WorkBook, type WorkRefusal } from './work.ts'
+import { onDiskPath, scopeWrites, type RunCursor, type RunPhase, type RunRecord, type WorkBook, type WorkRefusal } from './work.ts'
 
 export interface FoundSession { readonly cwd?: string; readonly preset?: string }
 export interface CreatedSession { readonly sessionId: string; readonly cwd?: string; readonly preset?: string }
@@ -71,7 +71,7 @@ export async function launchReservedRun(book: WorkBook, host: RunSessionHost, ru
       if (current?.creation === 'unknown') return { ok: false, code: 'unknown', message: `${runId} was not found; a second session was not created` }
       try {
         const pinned = book.run(runId)?.expectedPreset
-        const created = await host.createSession({ sessionId: run.requestedSessionId, cwd: run.cwd, ...(pinned !== undefined ? { preset: pinned } : {}) })
+        const created = await host.createSession({ sessionId: run.requestedSessionId, cwd: onDiskPath(run.cwd), ...(pinned !== undefined ? { preset: pinned } : {}) })
         actualId = created.sessionId
         cwd = created.cwd
         seenPreset = created.preset

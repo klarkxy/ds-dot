@@ -1,7 +1,7 @@
 import { execFileSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { describe, expect, it, vi } from 'vitest'
 import type { Timer } from './batcher.ts'
 import type { RawEvent } from './chat.ts'
@@ -16,7 +16,7 @@ import { agreementsSection } from './memory.ts'
 import { PACKAGE_NAME, type PluginManagerLike } from './auto-update.ts'
 import { DotStore, type DotDomainHandle } from './store.ts'
 import { TASK_BRANCH_PREFIX, TASK_WORKTREES_DIR, listTaskWorktrees, runGit } from './git-worktree.ts'
-import { canonicalPath } from './work.ts'
+import { canonicalPath, onDiskPath } from './work.ts'
 import { upsertRecipeOutcome } from './recipes.ts'
 
 /** Manual timer: tests fire scheduled callbacks explicitly. */
@@ -1489,6 +1489,79 @@ describe('DotService WorkBook sessions', () => {
     await expect(h.service.send(run.sessionId!, 'more')).rejects.toMatchObject({ code: 'dot/send-closed' })
     expect(h.relayed).toEqual([])
     await h.service.dispose()
+  })
+
+  it('creates the run session in the on-disk casing while the record stays canonical', async () => {
+    const dir = realpathSync.native(mkdtempSync(join(tmpdir(), 'dot-CaSiNg-')))
+    const h = setup()
+    try {
+      await h.service.ensureDot()
+      await h.service.manageTask({action: 'dispatch',  dir, title: 't', message: 'go', goal: 'g' })
+      const run = h.store.work.listRuns()[0]!
+      const created = h.calls.find(call => call.startsWith(`create ${run.sessionId} `))
+      // The host gets the real on-disk spelling, never the case-folded record.
+      expect(created).toBe(`create ${run.sessionId} ${dir}`)
+      expect(run.cwd).toBe(canonicalPath(dir))
+      if (process.platform === 'win32') expect(run.cwd).not.toBe(dir)
+      // confirmSession still matches, so the run is confirmed and owned.
+      expect(run.creation).toBe('confirmed')
+      expect(run.sessionId).toBe(run.requestedSessionId)
+      expect(h.store.task(run.sessionId!)?.cwd).toBe(dir)
+    } finally { await h.service.dispose(); rmSync(dir, { recursive: true, force: true }) }
+  })
+
+  it('dispatches through a Windows directory junction using the junction path rather than its target', async () => {
+    const rawBase = mkdtempSync(join(tmpdir(), 'dot-JuncSvc-'))
+    const base = onDiskPath(rawBase)
+    const real = join(base, 'RealTarget')
+    const junction = join(base, 'AppJunction')
+    const sub = join(junction, 'SubDir')
+    mkdirSync(join(real, 'SubDir'), { recursive: true })
+    symlinkSync(real, junction, process.platform === 'win32' ? 'junction' : 'dir')
+    const h = setup()
+    try {
+      await h.service.ensureDot()
+      const dirArg = process.platform === 'win32' ? junction.toLowerCase() : junction
+      await h.service.manageTask({ action: 'dispatch', dir: dirArg, title: 'junc', message: 'go', goal: 'g' })
+      const run = h.store.work.listRuns()[0]!
+      const created = h.calls.find(call => call.startsWith(`create ${run.sessionId} `))
+      expect(created).toBe(`create ${run.sessionId} ${junction}`)
+      expect(run.cwd).toBe(canonicalPath(junction))
+      expect(run.creation).toBe('confirmed')
+      expect(run.phase).toBe('active')
+      expect(h.calls.some(call => call.startsWith(`prompt ${run.sessionId} `))).toBe(true)
+      expect(h.store.task(run.sessionId!)?.cwd).toBe(junction)
+
+      const subArg = process.platform === 'win32' ? sub.toLowerCase() : sub
+      await h.service.manageTask({ action: 'dispatch', dir: subArg, title: 'junc-sub', message: 'go2', goal: 'g2' })
+      const subRun = h.store.work.listRuns()[1]!
+      const subCreated = h.calls.find(call => call.startsWith(`create ${subRun.sessionId} `))
+      expect(subCreated).toBe(`create ${subRun.sessionId} ${sub}`)
+      expect(subRun.creation).toBe('confirmed')
+      expect(h.calls.some(call => call.startsWith(`prompt ${subRun.sessionId} `))).toBe(true)
+    } finally {
+      await h.service.dispose()
+      rmSync(junction, { force: true })
+      rmSync(rawBase, { recursive: true, force: true })
+    }
+  })
+
+  it.skipIf(process.platform !== 'win32' || !existsSync('C:\\PROGRA~1'))('dispatches a Windows 8.3 short path and confirms the expanded on-disk session cwd', async () => {
+    const shortDir = 'C:\\PROGRA~1'
+    const longDir = realpathSync.native(shortDir)
+    const h = setup()
+    try {
+      await h.service.ensureDot()
+      await h.service.manageTask({ action: 'dispatch', dir: shortDir, title: 'short', message: 'go', goal: 'g' })
+      const run = h.store.work.listRuns()[0]!
+      const created = h.calls.find(call => call.startsWith(`create ${run.sessionId} `))
+      expect(created).toBe(`create ${run.sessionId} ${longDir}`)
+      expect(run.cwd).toBe(canonicalPath(shortDir))
+      expect(run.creation).toBe('confirmed')
+      expect(run.phase).toBe('active')
+      expect(h.calls.some(call => call.startsWith(`prompt ${run.sessionId} `))).toBe(true)
+      expect(h.store.task(run.sessionId!)?.cwd).toBe(longDir)
+    } finally { await h.service.dispose() }
   })
 
   it('refuses unavailable models and presets before creating a session', async () => {
@@ -4047,6 +4120,66 @@ describe.skipIf(!worktreeGitAvailable)('task worktree isolation', { timeout: 30_
       const kept = await h.service.integrateWork(created.id, 'keep')
       expect(kept).toMatchObject({ ok: true })
       expect(await runGit(['ls-tree', '-r', '--name-only', isolation.branch], repo)).toContain('made.ts')
+    } finally { await h.service.dispose(); cleanup() }
+  })
+
+  it('integrate refuses when a task commit or merge includes files outside the accepted delivery', async () => {
+    const { repo, home, cleanup } = makeSpecRepo('dot-iso-committed-')
+    const h = setup(undefined, undefined, home, { git: runGit })
+    try {
+      writeFileSync(join(repo, 'README.md'), 'old readme')
+      writeFileSync(join(repo, 'pnpm-lock.yaml'), 'lock-old')
+      await runGit(['add', '-A'], repo)
+      await runGit(['commit', '-m', 'add readme and lockfile'], repo)
+      // Upstream branch updates both README.md and pnpm-lock.yaml.
+      await runGit(['checkout', '-b', 'upstream-pr'], repo)
+      writeFileSync(join(repo, 'README.md'), 'new readme')
+      writeFileSync(join(repo, 'pnpm-lock.yaml'), 'lock-new')
+      await runGit(['add', '-A'], repo)
+      await runGit(['commit', '-m', 'upstream pr change'], repo)
+      await runGit(['checkout', 'main'], repo)
+
+      // Task 1: scoped to README.md only, but merges upstream-pr leaving a clean tree with pnpm-lock.yaml committed.
+      const created = JSON.parse(await h.service.manageTask({ action: 'create', title: 'Merge PR', goal: 'update readme', dir: repo, isolation: 'worktree', human_review: true })) as { id: string }
+      const wt = h.store.work.change(created.id)!.cwd
+      const dispatched = await h.service.manageTask({
+        action: 'dispatch', task_id: created.id, instruction: 'merge upstream-pr', access: 'write',
+        paths: JSON.stringify([{ path: 'README.md', type: 'file' }]),
+      })
+      const runId = /(?:started|reserved) (run-\d+)/.exec(dispatched)![1]!
+      await runGit(['merge', '--no-edit', 'upstream-pr'], wt)
+      expect(await runGit(['status', '--porcelain'], wt)).toBe('')
+      await h.service.manageTask({ action: 'finish', task_id: created.id, run_id: runId })
+      const current = h.store.work.change(created.id)!
+      const asked = await h.service.manageTask({
+        action: 'closeout', task_id: created.id, expected_input_ref: current.currentInputRef, expected_input_revision: current.currentRevision,
+        checks: [{ requirementRef: 'goal', applicability: 'applicable', verdict: 'pass', evidenceRefs: [`run:${runId}`], note: 'readme updated' }],
+      })
+      await h.service.answerWorkReview(/pending (\S+)/.exec(asked)![1]!, true)
+      expect(await h.service.manageTask({
+        action: 'closeout', task_id: created.id, expected_input_ref: current.currentInputRef, expected_input_revision: current.currentRevision,
+        checks: [{ requirementRef: 'goal', applicability: 'applicable', verdict: 'pass', evidenceRefs: [`run:${runId}`], note: 'readme updated' }],
+      })).toContain('accepted')
+
+      for (const mode of ['keep', 'merge'] as const) {
+        const refused = await h.service.integrateWork(created.id, mode)
+        expect(refused).toMatchObject({ ok: false, code: 'failed' })
+        expect(refused.ok ? '' : refused.message).toMatch(/unexpected committed changes outside the delivery.*pnpm-lock\.yaml/)
+      }
+      expect(h.store.work.change(created.id)!.isolation!.state).toBe('active')
+      expect(readFileSync(join(repo, 'README.md'), 'utf-8')).toBe('old readme')
+      expect(readFileSync(join(repo, 'pnpm-lock.yaml'), 'utf-8')).toBe('lock-old')
+
+      // Task 2: task commits only the accepted README.md change -> integrateWork merge succeeds.
+      const cleanTask = JSON.parse(await h.service.manageTask({ action: 'create', title: 'Commit accepted', goal: 'update readme', dir: repo, isolation: 'worktree', human_review: true })) as { id: string }
+      await finishIsolated(h, cleanTask.id, cwd => {
+        writeFileSync(join(cwd, 'README.md'), 'clean readme')
+        execFileSync('git', ['-C', cwd, 'add', 'README.md'], { stdio: 'ignore' })
+        execFileSync('git', ['-C', cwd, 'commit', '-m', 'agent commit'], { stdio: 'ignore' })
+      })
+      const merged = await h.service.integrateWork(cleanTask.id, 'merge')
+      expect(merged).toMatchObject({ ok: true })
+      expect(readFileSync(join(repo, 'README.md'), 'utf-8')).toBe('clean readme')
     } finally { await h.service.dispose(); cleanup() }
   })
 

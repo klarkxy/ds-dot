@@ -1,9 +1,10 @@
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, existsSync, rmSync, symlinkSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, existsSync, rmSync, symlinkSync, realpathSync } from 'node:fs'
+import { execFileSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { readSnapshot, saveSnapshot, sha256, baselineCaptures } from './artifacts.ts'
-import { WorkBook, judgeVerification, occupantsConflict, parseInput, workspaceIdentity, type ExternalOccupant, type WorkPersist } from './work.ts'
+import { WorkBook, canonicalPath, judgeVerification, occupantsConflict, onDiskPath, parseInput, workspaceIdentity, type ExternalOccupant, type WorkPersist } from './work.ts'
 
 function memoryPersist(fail?: () => boolean): { persist: WorkPersist; rows: Map<string, unknown> } {
   const rows = new Map<string, unknown>()
@@ -706,5 +707,82 @@ describe('run usage revision stability', () => {
     expect(book.revision).toBe(seen)
     const published = await book.publishBaseline(writer.run.id, seen, 'artifact-1', 6)
     expect(published).toMatchObject({ applied: true })
+  })
+})
+
+describe('onDiskPath and Windows session cwd matching', () => {
+  it('preserves directory junction and nested subdir casing without resolving to the target', async () => {
+    const rawBase = mkdtempSync(join(tmpdir(), 'dot-JuncCase-'))
+    const base = onDiskPath(rawBase)
+    const real = join(base, 'RealTarget')
+    const junction = join(base, 'MyJunction')
+    try {
+      mkdirSync(join(real, 'SubDir'), { recursive: true })
+      symlinkSync(real, junction, process.platform === 'win32' ? 'junction' : 'dir')
+      if (process.platform === 'win32') {
+        expect(onDiskPath(junction.toLowerCase(), 'win32')).toBe(junction)
+        expect(onDiskPath(join(junction, 'subdir').toLowerCase(), 'win32')).toBe(join(junction, 'SubDir'))
+      } else {
+        expect(onDiskPath(junction, 'linux')).toBe(junction)
+      }
+      const { book } = openBook()
+      const change = await book.createChange({ title: 'J', cwd: junction, goal: 'g', at: 1 })
+      const held = await book.reserveRun({ changeId: change.id, cwd: junction, writeScope: { kind: 'paths', paths: [] }, at: 2 })
+      if (!held.ok) throw new Error(held.message)
+      const ok = await book.confirmSession(held.run.id, { sessionId: held.run.requestedSessionId, cwd: junction }, 3)
+      expect(ok).toMatchObject({ ok: true, prompt: true })
+      expect(ok.ok && ok.run.creation).toBe('confirmed')
+    } finally {
+      rmSync(junction, { force: true })
+      rmSync(rawBase, { recursive: true, force: true })
+    }
+  })
+
+  it.skipIf(process.platform !== 'win32')('rejects a session cwd that resolved a junction to its target, and matches 8.3 short paths', async () => {
+    const rawBase = mkdtempSync(join(tmpdir(), 'dot-WinPath-'))
+    const base = onDiskPath(rawBase, 'win32')
+    const real = join(base, 'RealTarget')
+    const junction = join(base, 'LinkDir')
+    try {
+      mkdirSync(real, { recursive: true })
+      symlinkSync(real, junction, 'junction')
+
+      const { book } = openBook()
+      const jChange = await book.createChange({ title: 'J', cwd: junction, goal: 'g', at: 1 })
+      const jRun = await book.reserveRun({ changeId: jChange.id, cwd: junction, writeScope: { kind: 'paths', paths: [] }, at: 2 })
+      if (!jRun.ok) throw new Error(jRun.message)
+      const rejected = await book.confirmSession(jRun.run.id, { sessionId: jRun.run.requestedSessionId, cwd: real }, 3)
+      expect(rejected).toMatchObject({ ok: true, prompt: false })
+      expect(rejected.ok && rejected.run.creation).toBe('rejected')
+
+      // Exercise 8.3 short-path expansion and matching when the volume provides 8.3 aliases.
+      const shortProbe = existsSync('C:\\PROGRA~1') ? 'C:\\PROGRA~1' : undefined
+      if (shortProbe) {
+        const longProbe = realpathSync.native(shortProbe)
+        expect(onDiskPath(shortProbe.toLowerCase(), 'win32')).toBe(longProbe)
+        const sChange = await book.createChange({ title: 'S', cwd: shortProbe, goal: 'g', at: 4 })
+        const sRun = await book.reserveRun({ changeId: sChange.id, cwd: shortProbe, writeScope: { kind: 'paths', paths: [] }, at: 5 })
+        if (!sRun.ok) throw new Error(sRun.message)
+        expect(sRun.run.cwd).toBe(canonicalPath(shortProbe, 'win32'))
+        const confirmed = await book.confirmSession(sRun.run.id, { sessionId: sRun.run.requestedSessionId, cwd: longProbe }, 6)
+        expect(confirmed).toMatchObject({ ok: true, prompt: true })
+        expect(confirmed.ok && confirmed.run.creation).toBe('confirmed')
+      }
+
+      // If the temp dir volume itself generates 8.3 names (e.g. RUNNER~1 on CI), verify junction 8.3 names stay unfollowed.
+      const longJunc = join(base, 'My Long Junction')
+      symlinkSync(real, longJunc, 'junction')
+      try {
+        const shortJunc = execFileSync('cmd.exe', ['/c', `for %I in ("${longJunc}") do @echo %~sI`], { encoding: 'utf8', windowsVerbatimArguments: true }).trim()
+        if (shortJunc && shortJunc.toLowerCase() !== longJunc.toLowerCase()) {
+          expect(onDiskPath(shortJunc.toLowerCase(), 'win32')).toBe(longJunc)
+        }
+      } finally {
+        rmSync(longJunc, { force: true })
+      }
+    } finally {
+      rmSync(junction, { force: true })
+      rmSync(rawBase, { recursive: true, force: true })
+    }
   })
 })

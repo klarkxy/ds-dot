@@ -30,6 +30,7 @@ Remind me every weekday at 9:00 AM to check overnight builds.
 - **Clear safety boundaries:** Routine reversible checks run quietly; deletions, pushes, credentials, and gray areas pause with clear confirmation cards and sidebar/desktop alerts. File, command, and plugin-manager tools stay with dispatched tasks—Dorothy never uses them herself.
 - **Recipes & reminders:** Save repeatable workflows once, run them directly from plain-language schedules, and review restore suggestions if a tweaked recipe slips.
 - **Settings & optional companions:** Lock settings you want untouched, inspect context or trajectory anytime, and optionally pair with `@klarkxy/dsh-dev-index`, `@klarkxy/dsh-model-picker`, and `@deepseek-ai/dsh-webhook` (all off unless enabled).
+- **Dorothy-only MCP servers:** Connect remote MCP servers (DeepWiki, GitHub, Context7 and more, or your own) from the MCP page — they are mounted for Dorothy alone, and their tools still need an explicit grant before she calls them.
 
 ## More
 

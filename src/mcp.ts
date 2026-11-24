@@ -185,6 +185,10 @@ export async function apply(ctx: RowCtx) {
     for (const name of [...mounted.keys()]) void unmount(name)
   }) as never)
 
-  lastStatusSignature = await statusSignature()
+  // No apply-path work may go through agentPresets.acquireScope: activation
+  // waits on this row's apply, so awaiting the scope here would deadlock
+  // startup. The signature starts empty and the first debounced check (500 ms
+  // after the first publish/tools-change) computes it — an extra re-apply at
+  // startup is harmless.
   await reconcile()
 }

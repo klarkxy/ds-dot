@@ -161,6 +161,26 @@ describe('ds-dot/mcp preset row', () => {
     expect(toolsChanged).toHaveBeenCalledTimes(2)
   })
 
+  it('does not wait on the preset scope while applying', async () => {
+    // presetToolNames goes through agentPresets.acquireScope, which waits on
+    // this row's own activation; resolving it only after apply returns proves
+    // apply never awaits the preset scope (otherwise this deadlocks).
+    let releaseTools: (() => void) | undefined
+    sharedDotMcp().presetToolNames = () =>
+      new Promise(resolve => {
+        releaseTools = () => resolve(['mcp__deepwiki__ask'])
+      })
+    const run = harness({ deepwiki })
+    const outcome = await Promise.race([
+      run.done.then(() => 'resolved'),
+      new Promise(resolve => setTimeout(() => resolve('still-pending'), 5_000)),
+    ])
+    expect(outcome).toBe('resolved')
+    run.push('deepwiki', { state: 'connected', toolCount: 1 })
+    releaseTools?.()
+    await settleDebounce()
+  })
+
   it('fires when a same-count tool set trades one name for another', async () => {
     const run = harness({ deepwiki })
     const toolsChanged = vi.fn()

@@ -200,7 +200,7 @@
     },
     {
       slug: 'boundaries',
-      date: '2026.11.23',
+      date: '2026.11.24',
       category: 'rules',
       image: 'images/chibi-guard.jpg',
       aspect: 'square',
@@ -227,15 +227,15 @@
       paragraphs: {
         zh: [
           '查文件、列目录或者跑一轮平常的本地测试，照你平时的设置顺手放行就好，省得写正顺手时老被打断。就算只读任务期间借用了外部插件的工具，我也会卡住写操作，只让真正查资料的动作过去。',
-          '只要遇到删东西、往外推送、碰本地敏感凭据，或者超出了你原来交代的范围，动作会马上停下。面板会递上一张写清前因后果和建议的确认卡；你在别处处理了或者卡片过期了，它自己会收好。平时就算面板折起来了，有需要拍板的事侧栏红点和桌面提示都会轻声喊你。改我自己也算这一类：从插件市场装的那份我不动，想改请找维护者；开发时链接进来的那份，我先在旁边的临时分支里改，你点了合并才重新构建，旧版本也会先备份好。',
+          '只要遇到删东西、往外推送、碰本地敏感凭据，或者超出了你原来交代的范围，动作会马上停下。面板会递上一张写清前因后果和建议的确认卡；你在别处处理了或者卡片过期了，它自己会收好。平时就算面板折起来了，有需要拍板的事侧栏红点和桌面提示都会轻声喊你。改我自己也算这一类：从插件市场装的那份我不动，想改请找维护者；开发时链接进来的那份，我先在旁边的临时分支里改，你点了合并才重新构建，旧版本也会先备份好。重建要是没加载上，面板会告诉你上次备份在哪，把那份 lib 拷回去再重启就行。',
         ],
         en: [
           'Read-only checks, directory listings, and safe local tests go right through under your house defaults so nobody breaks your focus. Even when a read-only step borrows external plugin tools, anything that looks like a write stays blocked.',
-          'Deletes, outward pushes, secret access, or gray areas freeze immediately. You get one clean card stating what is waiting and what I recommend (settled or expired cards clean themselves up), and even with my panel closed, a sidebar badge and optional desktop alert call you in. Changing myself counts too: a copy installed from the plugin market stays untouched (ask the maintainers instead), and on a linked dev checkout I work on a side branch first, rebuilding only after you merge, with the old build backed up.',
+          'Deletes, outward pushes, secret access, or gray areas freeze immediately. You get one clean card stating what is waiting and what I recommend (settled or expired cards clean themselves up), and even with my panel closed, a sidebar badge and optional desktop alert call you in. Changing myself counts too: a copy installed from the plugin market stays untouched (ask the maintainers instead), and on a linked dev checkout I work on a side branch first, rebuilding only after you merge, with the old build backed up. If that rebuild fails to load, the panel points at the backup so you can copy it back onto lib/ and restart.',
         ],
         ja: [
           'ファイルの中身を見たりローカルテストを動かしたりといった日常の確認は、作業を止めないよう普段の基準どおり静かに通します。読み取り専用の作業中に外部ツールを使う場合も、参照系以外は通さないよう抑えています。',
-          '一方で、削除や外部へのプッシュ、機密ファイルへのアクセス、判断に迷う場面ではその場で止まります。理由と提案つきの確認カードを出して待ち（解決や期限切れで自動クローズ）、パネルを閉じていてもバッジやデスクトップ通知でお知らせします。自分自身を直す場合も同じで、プラグインマーケットから入れた本体には手を付けず（変更はメンテナーへ）、開発用にリンクした本体なら横の作業ブランチで直し、マージしてもらってから旧版を控えて組み直します。',
+          '一方で、削除や外部へのプッシュ、機密ファイルへのアクセス、判断に迷う場面ではその場で止まります。理由と提案つきの確認カードを出して待ち（解決や期限切れで自動クローズ）、パネルを閉じていてもバッジやデスクトップ通知でお知らせします。自分自身を直す場合も同じで、プラグインマーケットから入れた本体には手を付けず（変更はメンテナーへ）、開発用にリンクした本体なら横の作業ブランチで直し、マージしてもらってから旧版を控えて組み直します。組み直しが読み込めなかったときは、パネルがバックアップ場所を案内するので、その lib を戻して再起動してください。',
         ],
       },
     },

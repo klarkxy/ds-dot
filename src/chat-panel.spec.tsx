@@ -1387,6 +1387,28 @@ describe('backend health banners', () => {
     await act(async () => root.unmount())
   })
 
+  it('a later chat snapshot lastBackup refreshes the restore cache', async () => {
+    resetBackendOutdated()
+    dom.window.localStorage.removeItem(SELF_BACKUP_KEY)
+    let snap: ChatSnapshot = { ...empty, rev: 1 }
+    let pushed = false
+    const api = makeApi(empty)
+    api.chat = async () => snap
+    api.wait = async (_rev, _itemsRev, signal) => {
+      if (!pushed) {
+        pushed = true
+        snap = { ...empty, rev: 2, lastBackup: { dir: 'B2', lib: 'L2' } }
+        return snap
+      }
+      return new Promise(resolve => { signal.addEventListener('abort', () => resolve(undefined), { once: true }) })
+    }
+    const root = createRoot(document.getElementById('root')!)
+    await act(async () => { root.render(<ChatPanel locale="en" api={api} onOpenSession={() => {}} />) })
+    await act(async () => { await Promise.resolve(); await new Promise(resolve => setTimeout(resolve, 40)) })
+    expect(dom.window.localStorage.getItem(SELF_BACKUP_KEY)).toBe('{"dir":"B2","lib":"L2"}')
+    await act(async () => root.unmount())
+  })
+
   it('an old backend answering self.status not-found does not break the panel but flags the skew', async () => {
     resetBackendOutdated()
     const api = makeApi(empty)

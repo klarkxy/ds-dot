@@ -797,6 +797,8 @@ export interface ChatSnapshot {
   readonly itemsRev: number
   /** Monotonic watermark bumped whenever board/task/work/pending state changes. */
   readonly boardRev?: number
+  /** Newest kept self-upgrade backup, so the panel can cache a restore path after merge/deploy. */
+  readonly lastBackup?: { readonly dir: string; readonly lib: string }
   readonly items?: readonly ChatItem[]
   /** Answers to dot's cards by view id, for cards already answered. */
   readonly answers?: Readonly<Record<string, { readonly action: string; readonly values: Record<string, unknown> }>>

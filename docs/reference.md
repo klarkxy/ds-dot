@@ -80,6 +80,23 @@ Dorothy can follow pull requests, issues, comments, reviews, CI runs, default-br
 
 ---
 
+## Self-maintenance
+
+Dorothy never writes her own *running* copy.
+
+- **Installed package** (`node_modules/ds-dot`, typically from the plugin market): writes targeting that package are refused (`dot/self`). Change Dorothy herself upstream. A host project that merely *contains* `node_modules/ds-dot` is a normal write target.
+- **Linked checkout** (`dsh plugin add link:…`): create and write-dispatch into her tree always get a git worktree, even when isolation is `"none"`. Merge from the panel returns immediately; a serialized background deploy then:
+  1. Skips the rebuild when the live checkout has uncommitted tracked changes (commit or stash, run `pnpm build`, then restart).
+  2. Copies `lib/` to `~/.dsh/dot/self-upgrade/<timestamp>-<sha>/lib` (newest three kept; the path currently stored as the restore hint is never pruned).
+  3. Runs `pnpm build` in the live checkout. A failed or aborted build restores that backup, then drops the failed attempt's directory.
+  4. Persists a marker so the next start can report whether the running bundle matches the deployed hash.
+
+`self.status` (and the chat snapshot's `lastBackup` field) reports install mode, package root, and the newest kept backup. If the panel says the backend is not loaded after an upgrade, copy that backup directory back onto the checkout's `lib/` and restart DeepSeek Harness.
+
+Recipes saved from an isolated self-maintenance task store the original checkout plus `isolation: "worktree"`, so they still run after the temporary worktree is removed.
+
+---
+
 ## Upgrading from earlier versions
 
 Reminders, agreements, cognition, settings, and current task records carry over (storage domain v10 still opens v1–v9 rows; back up your profile before upgrading if you might roll back). The `memory` settings lock is now `agreements` (re-lock agreements once if previously locked). Legacy tickets, `memory.md`, old custom-policy text, and retired settings field names are no longer read or migrated.

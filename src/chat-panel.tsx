@@ -561,6 +561,11 @@ export function ChatPanel({ locale, api, Card, onOpenSession, renderFactorySlot 
     }, () => {})
     return () => life.abort()
   }, [api])
+  // Merge/deploy publishes lastBackup on the chat snapshot so an already-open
+  // panel caches the restore path without waiting for a remount.
+  useEffect(() => {
+    if (snapshot?.lastBackup) writeSelfBackup(snapshot.lastBackup)
+  }, [snapshot?.lastBackup?.dir, snapshot?.lastBackup?.lib])
   const backendOutdated = useSyncExternalStore(backendOutdatedStore.subscribe, backendOutdatedStore.getSnapshot)
   const { drawerTab, drawerWide, personaDirty, discardSignal, pendingDrawerAction, configOpen, requestDrawer, discardDrawerAction, cancelDrawerAction, setPersonaDirty, toggleDrawerWide } = useDrawerGuard()
   const labels = useMemo<MarkdownLabels>(() => {

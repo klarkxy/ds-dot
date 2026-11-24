@@ -229,8 +229,10 @@ export interface PendingView {
   readonly subject: string
   readonly detail?: string
   readonly questions?: readonly PendingQuestionItem[]
-  /** Set when this approval is high-risk or truncated. The model cannot settle it. */
+  /** Set when this approval is high-risk. The model cannot settle it. */
   readonly humanRequired?: boolean
+  /** Set when the notice clipped the requester text; a read must precede any allow. */
+  readonly truncated?: true
 }
 
 export interface PendingQuestionItem {

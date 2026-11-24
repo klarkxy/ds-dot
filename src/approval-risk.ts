@@ -1,8 +1,9 @@
 /**
  * Code gate for approvals. The model may judge routine requests when
- * approvals=dot; these cases are forced to the human and dot_answer cannot
- * override them. The notice fences requester-supplied text so a forged
- * "already authorized" line cannot leave the untrusted block.
+ * approvals=dot; hard cases are forced to the human and dot_answer cannot
+ * override them, while soft cases reach the model as cautions it must weigh.
+ * The notice fences requester-supplied text so a forged "already authorized"
+ * line cannot leave the untrusted block.
  */
 import { randomUUID } from 'node:crypto'
 import { APPROVAL_FENCE_PREFIX } from './contracts.ts'
@@ -79,7 +80,19 @@ export function mcpToolMayWrite(toolName: string): boolean {
 
 const SANDBOX = /danger-full-access|sandbox_permissions/i
 const PUBLISH = /\b(?:npm|pnpm|yarn|bun|cargo)(?:\s+--?[A-Za-z0-9-]+(?:=\S+|\s+(?!publish\b)[^-\s]\S*)?)*\s+publish\b|\bgit(?:\s+(?:-[Cc]\s+\S+|--?[A-Za-z0-9-]+(?:=\S+|\s+(?!push\b)[^-\s]\S*)?))*\s+push\b|\bgh(?:\s+--?[A-Za-z0-9-]+(?:=\S+|\s+(?!release\b|pr\b)[^-\s]\S*)?)*\s+(?:release\b|pr\s+merge\b)|\btwine\s+upload\b/i
-const DESTROY = /\brm\b[^;&|\n]{0,200}?(?:\s|^)(?:-[A-Za-z]*r[A-Za-z]*|--recursive)(?=\s|$|["'\\])|\bRemove-Item\b[\s\S]{0,160}?(?:\s|^)-(?:Recurse|Force|r)\b|\b(?:del|rmdir)\b[^;&|\n]{0,120}\/s\b|\bgit(?:\s+(?:-[Cc]\s+\S+|--?[A-Za-z0-9-]+(?:=\S+)?))*\s+(?:reset\s+--hard|clean\s+-[A-Za-z]*f[A-Za-z]*)\b|\bshutil\.rmtree\s*\(|\bfs\.(?:rmSync|rm|rmdirSync)\s*\([\s\S]{0,160}\brecursive\s*:\s*true\b|\brimraf\b|\bfind\b[^;&|\n]{0,200}?(?:\s|^)-delete\b|\bkubectl\b[^;&|\n]{0,80}\bdelete\b|\bdocker\s+system\s+prune\b|\bdocker\s+rm\b[^;&|\n]{0,120}(?:\s|^)(?:-[A-Za-z]*f[A-Za-z]*|--force)\b|\bdocker\s+volume\s+(?:rm|prune)\b|\bterraform\s+destroy\b|\bDROP\s+(?:TABLE|DATABASE|SCHEMA)\b|\bTRUNCATE\s+(?:TABLE\s+)?[A-Za-z_"]/i
+const SHELL_TOKEN = String.raw`\\"(?:[^"\\]|\\.)*\\"|"(?:[^"\\]|\\.)*"|'[^']*'|\S+`
+const NON_FLAG_VALUE = String.raw`\\"(?:[^"\\]|\\.)*\\"|"(?:[^"\\]|\\.)*"|'[^']*'|[^-\s]\S*`
+const GIT_OTHER_FLAG = String.raw`--[A-Za-z0-9-]+(?:=(?:${SHELL_TOKEN})|\s+(?!reset\b|clean\b)(?:${NON_FLAG_VALUE}))?|-[A-BD-Za-z0-9][A-Za-z0-9-]*(?:=(?:${SHELL_TOKEN})|\s+(?!reset\b|clean\b)(?:${NON_FLAG_VALUE}))?`
+const DESTROY_GIT = new RegExp(
+  String.raw`\bgit(?:\s+(?:-[Cc]\s*(?:${SHELL_TOKEN})|${GIT_OTHER_FLAG}))*\s+(?:reset\s+--hard|clean\s+-[A-Za-z]*f[A-Za-z]*)\b`,
+  'i',
+)
+const DESTROY = /\brm\b[^;&|\n]{0,200}?(?:\s|^)(?:-[A-Za-z]*r[A-Za-z]*|--recursive)(?=\s|$|["'\\])|\bRemove-Item\b[\s\S]{0,160}?(?:\s|^)-(?:Recurse|Force|r)\b|\b(?:del|rmdir)\b[^;&|\n]{0,120}\/s\b|\bshutil\.rmtree\s*\(|\bfs\.(?:rmSync|rm|rmdirSync)\s*\([\s\S]{0,160}\brecursive\s*:\s*true\b|\brimraf\b|\bfind\b[^;&|\n]{0,200}?(?:\s|^)-delete\b|\bkubectl\b[^;&|\n]{0,80}\bdelete\b|\bdocker\s+system\s+prune\b|\bdocker\s+rm\b[^;&|\n]{0,120}(?:\s|^)(?:-[A-Za-z]*f[A-Za-z]*|--force)\b|\bdocker\s+volume\s+(?:rm|prune)\b|\bterraform\s+destroy\b|\bDROP\s+(?:TABLE|DATABASE|SCHEMA)\b|\bTRUNCATE\s+(?:TABLE\s+)?[A-Za-z_"]/i
+/** A directory switch or git pointer aims the destructive command at another checkout. */
+const GIT_RETARGET = /(?:^|[\s;|&"'\\])--(?:git-dir|work-tree)(?:[\s=]|$)|(?<![-/\\.\w])GIT_(?:WORK_TREE|DIR)\s*=|(?<![-/\\.\w])(?:cd|pushd|Set-Location|Push-Location|sl|chdir)\b/i
+const GIT_C_FLAG = new RegExp(
+  String.raw`(?:^|[\s;|&"'(\\])-C(?=$|[\s"'./\\~])|\b[Gg][Ii][Tt](?:\s+${GIT_OTHER_FLAG})*\s+-C\S+`,
+)
 const CREDENTIAL = /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----|\b(?:AKIA[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9_]{36,}|github_pat_[A-Za-z0-9_]{22,}|sk-(?:live|proj)-[A-Za-z0-9_-]{20,}|npm_[A-Za-z0-9]{36})\b|(?:^|[\s"'=:/\\])(?:\.ssh[/\\]+id_(?:rsa|ed25519|ecdsa|dsa)|\.aws[/\\]+credentials|\.npmrc|\.pypirc|\.netrc|\.env(?:\.(?!example\b|sample\b|template\b|dist\b)[\w-]+)*)(?=$|[\s"'&;|/\\])/i
 const REMOTE_EXEC = /\b(?:curl|wget)\b[^;&|\n]{0,300}?\|\s*(?:sudo\s+)?(?:sh|bash|zsh|fish|python[0-9.]*|node|iex|pwsh|powershell)\b|\b(?:iwr|irm|Invoke-WebRequest|Invoke-RestMethod)\b[^;&|\n]{0,300}?\|\s*(?:iex|Invoke-Expression)\b/i
 const WRITE = /\b(?:Set-Content|Add-Content|Out-File|New-Item|Copy-Item|Move-Item|Remove-Item|mkdir|touch|cp|mv|rm|truncate|tee)\b|\b(?:sed|perl)\s+-[A-Za-z]*i\b|\bdd\b[^;&|\n]*\bof=|\bfs\.(?:writeFileSync|writeFile|appendFileSync|appendFile|unlinkSync|unlink|renameSync)\s*\(|\bshutil\.(?:copy|move)\s*\(|(?:^|[\s;|&])>{1,2}\s*\S/m
@@ -89,29 +102,44 @@ export function credentialLikePath(path: string): boolean {
   return CREDENTIAL.test(path)
 }
 
+/**
+ * Codes split into hard `reasons` (forced to the human) and soft `cautions`
+ * (advisory; the model judges by authority and impact). `forced` counts hard
+ * reasons only.
+ */
 export function assessApprovalRisk(input: {
   readonly toolName: string
   readonly reason?: string
   readonly arguments?: string
   readonly viaSubagent?: boolean
   readonly readOnly?: boolean
-}): { readonly forced: boolean; readonly reasons: readonly ApprovalRiskCode[] } {
+  /** The requester's run writes inside its own active task worktree. */
+  readonly ownWorktree?: boolean
+}): { readonly forced: boolean; readonly reasons: readonly ApprovalRiskCode[]; readonly cautions: readonly ApprovalRiskCode[] } {
   const normalizedTool = input.toolName.trim().toLowerCase()
   const haystack = [input.reason ?? '', input.arguments ?? ''].filter(Boolean).join('\n')
   const reasons: ApprovalRiskCode[] = []
+  const cautions: ApprovalRiskCode[] = []
   const sandbox = SANDBOX.test(haystack)
-  const destroy = DESTROY.test(haystack)
+  const destroyGit = DESTROY_GIT.test(haystack)
+  const destroyOther = DESTROY.test(haystack)
   const publish = PUBLISH.test(haystack)
-  if (sandbox) reasons.push('sandbox-escalation')
+  if (sandbox) cautions.push('sandbox-escalation')
   if (publish) reasons.push('publish')
-  if (destroy) reasons.push('destroy')
+  // A git reset/clean inside the run's own worktree is dot's call; a pointer at
+  // another checkout or any other destructive shape stays with the human.
+  if (destroyOther) reasons.push('destroy')
+  else if (destroyGit) {
+    const ownRepoOnly = input.ownWorktree === true && !GIT_RETARGET.test(haystack) && !GIT_C_FLAG.test(haystack)
+    ;(ownRepoOnly ? cautions : reasons).push('destroy')
+  }
   if (CREDENTIAL.test(haystack)) reasons.push('credential')
   if (REMOTE_EXEC.test(haystack)) reasons.push('remote-exec')
   if (input.viaSubagent === true && SHELLS.has(normalizedTool)) reasons.push('subagent-shell')
-  if (input.readOnly === true && (sandbox || destroy || publish || WRITE_TOOLS.has(normalizedTool) || WRITE.test(haystack) || mcpToolMayWrite(input.toolName))) {
+  if (input.readOnly === true && (sandbox || destroyOther || destroyGit || publish || WRITE_TOOLS.has(normalizedTool) || WRITE.test(haystack) || mcpToolMayWrite(input.toolName))) {
     reasons.push('read-only-write')
   }
-  return { forced: reasons.length > 0, reasons }
+  return { forced: reasons.length > 0, reasons, cautions }
 }
 
 /** Wrap requester text in a boundary the payload cannot close early. */
@@ -134,7 +162,8 @@ export function approvalNotice(input: {
   readonly arguments?: string
   readonly viaSubagent?: boolean
   readonly readOnly?: boolean
-}): { readonly text: string; readonly truncated: boolean; readonly forced: boolean; readonly reasons: readonly ApprovalRiskCode[] } {
+  readonly ownWorktree?: boolean
+}): { readonly text: string; readonly truncated: boolean; readonly forced: boolean; readonly reasons: readonly ApprovalRiskCode[]; readonly cautions: readonly ApprovalRiskCode[] } {
   const lines: string[] = []
   if (input.viaSubagent) lines.push('asked by a subagent')
   if (input.reason) lines.push(`reason: ${input.reason}`)
@@ -147,8 +176,9 @@ export function approvalNotice(input: {
     arguments: input.arguments ?? input.detail,
     ...(input.viaSubagent ? { viaSubagent: true } : {}),
     ...(input.readOnly ? { readOnly: true } : {}),
+    ...(input.ownWorktree ? { ownWorktree: true } : {}),
   })
-  const reasons = [...risk.reasons]
-  if (fenced.truncated && !reasons.includes('truncated')) reasons.unshift('truncated')
-  return { text: fenced.text, truncated: fenced.truncated, forced: reasons.length > 0, reasons }
+  const cautions = [...risk.cautions]
+  if (fenced.truncated && !cautions.includes('truncated')) cautions.unshift('truncated')
+  return { text: fenced.text, truncated: fenced.truncated, forced: risk.forced, reasons: risk.reasons, cautions }
 }

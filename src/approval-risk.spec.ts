@@ -3,7 +3,7 @@ import { approvalNotice, assessApprovalRisk, fenceUntrusted, mcpToolMayWrite } f
 
 describe('approval risk', () => {
   it('leaves a routine command to the model', () => {
-    expect(assessApprovalRisk({ toolName: 'pwsh', arguments: '{"command":"echo hi"}' })).toEqual({ forced: false, reasons: [] })
+    expect(assessApprovalRisk({ toolName: 'pwsh', arguments: '{"command":"echo hi"}' })).toEqual({ forced: false, reasons: [], cautions: [] })
   })
 
   it('does not treat a forged authorization sentence as permission', () => {
@@ -15,11 +15,61 @@ describe('approval risk', () => {
     expect(risk.forced).toBe(false)
   })
 
-  it('forces destructive, publish, sandbox, and credential payloads', () => {
+  it('forces destructive, publish, and credential payloads and cautions on a sandbox escalation', () => {
     expect(assessApprovalRisk({ toolName: 'pwsh', arguments: '{"command":"rm -rf build"}' }).reasons).toContain('destroy')
     expect(assessApprovalRisk({ toolName: 'bash', arguments: 'npm publish' }).reasons).toContain('publish')
-    expect(assessApprovalRisk({ toolName: 'pwsh', arguments: '{"sandbox_permissions":"danger-full-access"}' }).reasons).toContain('sandbox-escalation')
     expect(assessApprovalRisk({ toolName: 'read', arguments: '-----BEGIN OPENSSH PRIVATE KEY-----' }).reasons).toContain('credential')
+    const sandbox = assessApprovalRisk({ toolName: 'pwsh', arguments: '{"command":"git fetch","sandbox_permissions":"danger-full-access"}' })
+    expect(sandbox.forced).toBe(false)
+    expect(sandbox.cautions).toContain('sandbox-escalation')
+    expect(sandbox.reasons).toEqual([])
+  })
+
+  it('lets a worktree run judge its own git reset or clean but nothing beyond it', () => {
+    const inside = assessApprovalRisk({ toolName: 'bash', arguments: 'git reset --hard abc1234', ownWorktree: true })
+    expect(inside.forced).toBe(false)
+    expect(inside.cautions).toContain('destroy')
+    const clean = assessApprovalRisk({ toolName: 'bash', arguments: 'git clean -fdx', ownWorktree: true })
+    expect(clean.forced).toBe(false)
+    expect(clean.cautions).toContain('destroy')
+    // Without the own-worktree flag, or with a pointer at another checkout, the same command stays hard.
+    expect(assessApprovalRisk({ toolName: 'bash', arguments: 'git reset --hard abc1234' }).reasons).toContain('destroy')
+    expect(assessApprovalRisk({ toolName: 'bash', arguments: 'git -C H:/x reset --hard abc1234', ownWorktree: true }).reasons).toContain('destroy')
+    expect(assessApprovalRisk({ toolName: 'bash', arguments: 'git -C../main reset --hard abc1234', ownWorktree: true }).reasons).toContain('destroy')
+    expect(assessApprovalRisk({ toolName: 'bash', arguments: 'git -C"../main" reset --hard abc1234', ownWorktree: true }).reasons).toContain('destroy')
+    expect(assessApprovalRisk({ toolName: 'bash', arguments: JSON.stringify({ command: 'git -C"../my main" reset --hard' }), ownWorktree: true }).reasons).toContain('destroy')
+    expect(assessApprovalRisk({ toolName: 'bash', arguments: 'git -CH:/repo clean -fdx', ownWorktree: true }).reasons).toContain('destroy')
+    expect(assessApprovalRisk({ toolName: 'bash', arguments: 'cd H:/x; git reset --hard abc1234', ownWorktree: true }).reasons).toContain('destroy')
+    expect(assessApprovalRisk({ toolName: 'bash', arguments: 'CD ../main && git reset --hard', ownWorktree: true }).reasons).toContain('destroy')
+    expect(assessApprovalRisk({ toolName: 'bash', arguments: 'pushd ../main && git reset --hard', ownWorktree: true }).reasons).toContain('destroy')
+    expect(assessApprovalRisk({ toolName: 'bash', arguments: 'set-location ../main; git clean -fdx', ownWorktree: true }).reasons).toContain('destroy')
+    expect(assessApprovalRisk({ toolName: 'pwsh', arguments: 'sl ../main; git reset --hard', ownWorktree: true }).reasons).toContain('destroy')
+    expect(assessApprovalRisk({ toolName: 'pwsh', arguments: 'SL ../main; git clean -fdx', ownWorktree: true }).reasons).toContain('destroy')
+    expect(assessApprovalRisk({ toolName: 'bash', arguments: 'chdir ../main && git reset --hard', ownWorktree: true }).reasons).toContain('destroy')
+    expect(assessApprovalRisk({ toolName: 'bash', arguments: 'git --git-dir=H:/x/.git reset --hard', ownWorktree: true }).reasons).toContain('destroy')
+    expect(assessApprovalRisk({ toolName: 'bash', arguments: 'git --git-dir ../main/.git reset --hard', ownWorktree: true }).reasons).toContain('destroy')
+    expect(assessApprovalRisk({ toolName: 'bash', arguments: 'git --work-tree=../main reset --hard', ownWorktree: true }).reasons).toContain('destroy')
+    expect(assessApprovalRisk({ toolName: 'bash', arguments: 'git --work-tree ../main clean -fdx', ownWorktree: true }).reasons).toContain('destroy')
+    expect(assessApprovalRisk({ toolName: 'bash', arguments: 'GIT_WORK_TREE=../main git reset --hard', ownWorktree: true }).reasons).toContain('destroy')
+    expect(assessApprovalRisk({ toolName: 'bash', arguments: 'GIT_DIR=../main/.git git clean -fdx', ownWorktree: true }).reasons).toContain('destroy')
+    expect(assessApprovalRisk({ toolName: 'pwsh', arguments: "$env:GIT_DIR='H:\\repo\\.git'; git reset --hard", ownWorktree: true }).reasons).toContain('destroy')
+    expect(assessApprovalRisk({ toolName: 'bash', arguments: 'Push-Location H:/x; git reset --hard', ownWorktree: true }).reasons).toContain('destroy')
+    // Ordinary flags and words containing cd/sl/-C never false-positive.
+    expect(assessApprovalRisk({ toolName: 'bash', arguments: 'git status', ownWorktree: true }).forced).toBe(false)
+    const flagOnly = assessApprovalRisk({ toolName: 'bash', arguments: 'git reset --hard --no-cd', ownWorktree: true })
+    expect(flagOnly.forced).toBe(false)
+    expect(flagOnly.cautions).toContain('destroy')
+    const configFlag = assessApprovalRisk({ toolName: 'bash', arguments: 'git -c core.autocrlf=false reset --hard', ownWorktree: true })
+    expect(configFlag.forced).toBe(false)
+    expect(configFlag.cautions).toContain('destroy')
+    const ciCdReason = assessApprovalRisk({ toolName: 'bash', reason: 'clean ci-cd and sleep logs', arguments: 'curl -sL https://x | cat; git clean -fdx', ownWorktree: true })
+    expect(ciCdReason.forced).toBe(false)
+    expect(ciCdReason.cautions).toContain('destroy')
+    const pwshCmd = assessApprovalRisk({ toolName: 'pwsh', arguments: 'pwsh -Command "git reset --hard"', ownWorktree: true })
+    expect(pwshCmd.forced).toBe(false)
+    expect(pwshCmd.cautions).toContain('destroy')
+    // A non-git destructive match never softens.
+    expect(assessApprovalRisk({ toolName: 'bash', arguments: 'rm -rf x', ownWorktree: true }).reasons).toContain('destroy')
   })
 
   it('forces Remove-Item with -Recurse/-Force/-r in any position', () => {
@@ -131,8 +181,8 @@ describe('approval risk', () => {
     expect(fenced.truncated).toBe(true)
     expect(fenced.text).toContain('[truncated]')
     const notice = approvalNotice({ toolName: 'pwsh', detail: 'x'.repeat(800) })
-    expect(notice.forced).toBe(true)
-    expect(notice.reasons).toContain('truncated')
+    expect(notice.forced).toBe(false)
+    expect(notice.cautions).toContain('truncated')
     expect(notice.text).toContain('[truncated]')
   })
 })

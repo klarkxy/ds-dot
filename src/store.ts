@@ -139,9 +139,19 @@ export class DotStore {
 
   get cards(): readonly import('./card-state.ts').DotCardRecord[] { return this.state.cards ?? [] }
   get approvalDetails(): readonly import('./contracts.ts').ApprovalDetail[] { return this.state.approvalDetails ?? [] }
-  saveApprovalDetail(detail: import('./contracts.ts').ApprovalDetail): Promise<void> {
-    const next = [...this.approvalDetails.filter(row => row.requestId !== detail.requestId), detail].slice(-APPROVAL_DETAIL_LIMIT)
-    return this.setDot({ approvalDetails: next })
+  saveApprovalDetail(detail: import('./contracts.ts').ApprovalDetail, keepIds?: ReadonlySet<string>): Promise<void> {
+    const rest = this.approvalDetails.filter(row => row.requestId !== detail.requestId)
+    if (!keepIds) {
+      return this.setDot({ approvalDetails: [...rest, detail].slice(-APPROVAL_DETAIL_LIMIT) })
+    }
+    const openRows = rest.filter(row => keepIds.has(row.requestId))
+    const settledRows = rest.filter(row => !keepIds.has(row.requestId))
+    if (keepIds.has(detail.requestId)) {
+      const keptSettled = APPROVAL_DETAIL_LIMIT > 0 ? settledRows.slice(-APPROVAL_DETAIL_LIMIT) : []
+      return this.setDot({ approvalDetails: [...openRows, ...keptSettled, detail] })
+    }
+    const keptSettled = [...settledRows, detail].slice(-APPROVAL_DETAIL_LIMIT)
+    return this.setDot({ approvalDetails: [...openRows, ...keptSettled] })
   }
   replaceApprovalDetails(details: readonly import('./contracts.ts').ApprovalDetail[]): Promise<void> {
     const current = this.approvalDetails

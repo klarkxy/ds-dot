@@ -582,6 +582,103 @@ describe('MCP servers page', () => {
     expect(row.querySelector('[aria-selected="true"]')?.textContent).toBe('Auto')
     await act(async () => root.unmount())
   })
+
+  it('keeps the custom form and shows the error when the settings save fails', async () => {
+    const api = apiStub({
+      setSettings: async () => { throw new Error('store exploded') },
+      mcpList: async () => ({ servers: [], catalog: [] }),
+    })
+    const root = createRoot(document.getElementById('root')!)
+    await act(async () => root.render(<SettingsPanel locale="en" section="mcp" api={api as never} settings={DEFAULT_SETTINGS} onSaved={() => {}} />))
+    await act(async () => { await Promise.resolve() })
+    const [nameIn, urlIn] = [...document.querySelectorAll<HTMLInputElement>('.dsh-dot-mcp-custom-body input')]
+    await act(async () => { type(nameIn!, 'alpha'); type(urlIn!, 'https://a.example/mcp') })
+    const add = [...document.querySelectorAll('button')].find(button => button.textContent === 'Add')!
+    await act(async () => add.click())
+    await act(async () => { await Promise.resolve() })
+    expect(document.querySelector('.dsh-dot-mcp > .dsh-ui-error')?.textContent).toContain('store exploded')
+    expect(nameIn!.value).toBe('alpha')
+    expect(urlIn!.value).toBe('https://a.example/mcp')
+    await act(async () => root.unmount())
+  })
+
+  it('shows the error and keeps the form when storing the token fails', async () => {
+    const unset: string[] = []
+    const api = apiStub({
+      setSettings: async () => DEFAULT_SETTINGS,
+      mcpList: async () => ({ servers: [], catalog: [] }),
+      mcpCredentialSet: async () => { throw new Error('vault closed') },
+      mcpCredentialUnset: async (server: string) => { unset.push(server); return { configured: false } },
+    })
+    const root = createRoot(document.getElementById('root')!)
+    await act(async () => root.render(<SettingsPanel locale="en" section="mcp" api={api as never} settings={DEFAULT_SETTINGS} onSaved={() => {}} />))
+    await act(async () => { await Promise.resolve() })
+    const [nameIn, urlIn, tokenIn] = [...document.querySelectorAll<HTMLInputElement>('.dsh-dot-mcp-custom-body input')]
+    await act(async () => { type(nameIn!, 'alpha'); type(urlIn!, 'https://a.example/mcp'); type(tokenIn!, 'tok-1') })
+    const add = [...document.querySelectorAll('button')].find(button => button.textContent === 'Add')!
+    await act(async () => add.click())
+    await act(async () => { await Promise.resolve() })
+    expect(document.querySelector('.dsh-dot-mcp > .dsh-ui-error')?.textContent).toContain('vault closed')
+    expect(nameIn!.value).toBe('alpha')
+    expect(tokenIn!.value).toBe('tok-1')
+    expect(unset).toEqual([])
+    await act(async () => root.unmount())
+  })
+
+  it('unsets the credential when a new server row fails to save', async () => {
+    const unset: string[] = []
+    const api = apiStub({
+      setSettings: async () => { throw new Error('store exploded') },
+      mcpList: async () => ({ servers: [], catalog: [] }),
+      mcpCredentialSet: async () => ({ configured: true, masked: '••' }),
+      mcpCredentialUnset: async (server: string) => { unset.push(server); return { configured: false } },
+    })
+    const root = createRoot(document.getElementById('root')!)
+    await act(async () => root.render(<SettingsPanel locale="en" section="mcp" api={api as never} settings={DEFAULT_SETTINGS} onSaved={() => {}} />))
+    await act(async () => { await Promise.resolve() })
+    const [nameIn, urlIn, tokenIn] = [...document.querySelectorAll<HTMLInputElement>('.dsh-dot-mcp-custom-body input')]
+    await act(async () => { type(nameIn!, 'alpha'); type(urlIn!, 'https://a.example/mcp'); type(tokenIn!, 'tok-1') })
+    const add = [...document.querySelectorAll('button')].find(button => button.textContent === 'Add')!
+    await act(async () => add.click())
+    await act(async () => { await Promise.resolve() })
+    expect(unset).toEqual(['alpha'])
+    expect(document.querySelector('.dsh-dot-mcp > .dsh-ui-error')?.textContent).toContain('store exploded')
+    await act(async () => root.unmount())
+  })
+
+  it('removes a server together with its grants in one patch', async () => {
+    const saved: Array<Record<string, unknown>> = []
+    const settings: DotSettings = {
+      ...DEFAULT_SETTINGS,
+      mcpServers: {
+        deepwiki: { url: 'https://mcp.deepwiki.com/mcp', enabled: true },
+        github: { catalog: 'github', url: 'https://api.githubcopilot.com/mcp/readonly', enabled: true },
+      },
+      capabilities: { grants: { 'mcp:deepwiki': 'auto', 'tool:mcp__deepwiki__read_wiki_structure': 'auto', 'mcp:github': 'off', 'tool:mcp__github__repo': 'ask' } },
+    }
+    const api = apiStub({
+      setSettings: async (patch: Record<string, unknown>) => { saved.push(patch); return settings },
+      mcpList: async () => ({
+        servers: [
+          { name: 'deepwiki', url: 'https://mcp.deepwiki.com/mcp', enabled: true, auth: 'none', status: { state: 'connected', toolCount: 3 } },
+          { name: 'github', url: 'https://api.githubcopilot.com/mcp/readonly', enabled: true, auth: 'token', credential: { ref: 'DOT_MCP_GITHUB_TOKEN', configured: true }, status: { state: 'connected', toolCount: 1 } },
+        ],
+        catalog: [],
+      }),
+    })
+    const root = createRoot(document.getElementById('root')!)
+    await act(async () => root.render(<SettingsPanel locale="en" section="mcp" api={api as never} settings={settings} onSaved={() => {}} />))
+    await act(async () => { await Promise.resolve() })
+    const dw = [...document.querySelectorAll('.dsh-dot-mcp-row')].find(row => row.textContent?.includes('deepwiki'))!
+    const remove = [...dw.querySelectorAll('button')].find(button => button.textContent === 'Remove')!
+    await act(async () => remove.click())
+    await act(async () => { await Promise.resolve() })
+    expect(saved).toEqual([{
+      mcpServers: { github: settings.mcpServers!.github },
+      capabilities: { grants: { 'mcp:github': 'off', 'tool:mcp__github__repo': 'ask' } },
+    }])
+    await act(async () => root.unmount())
+  })
 })
 
 describe('capabilities sections', () => {
@@ -615,6 +712,29 @@ describe('capabilities sections', () => {
     expect(text()).not.toContain('exa')
     expect(text()).not.toContain('pt_tool')
     expect(text()).toContain('github')
+    await act(async () => root.unmount())
+  })
+
+  it('strips the normalized mcp prefix from tool names', async () => {
+    // 'srv.name' normalizes to mcp__srv_name__*, the same prefix the host
+    // derives; a prefix built from the raw label would not strip at all.
+    const hyphenGroups = [
+      { id: 'mcp:srv.name', kind: 'mcp' as const, label: 'srv.name', tools: [{ name: 'mcp__srv_name__ping', conditional: false }] },
+    ]
+    const api = {
+      models: async () => ({ groups: [] }),
+      settings: async () => DEFAULT_SETTINGS,
+      settingProposals: async () => [],
+      decideSetting: async () => 'ok',
+      setSettings: async () => DEFAULT_SETTINGS,
+      capabilities: async () => ({ locked: [], groups: hyphenGroups, grants: {}, applied: {} }),
+    }
+    const root = createRoot(document.getElementById('root')!)
+    await act(async () => root.render(<SettingsPanel locale="en" section="capabilities" api={api as never} settings={DEFAULT_SETTINGS} onSaved={() => {}} />))
+    await act(async () => { await Promise.resolve() })
+    const code = document.querySelector('.dsh-dot-cap-tool code')
+    expect(code?.textContent).toBe('ping')
+    expect(code?.closest('.dsh-dot-cap-tool')?.getAttribute('title')).toBe('mcp__srv_name__ping')
     await act(async () => root.unmount())
   })
 })

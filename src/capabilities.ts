@@ -4,8 +4,10 @@
  * registration attribution lives in ./attribution.ts, which also ships as an
  * early loader row; this module only reads its shared owners map.
  */
-import type { CapabilityGrant, CapabilityGroupView, CapabilityMcpStatus, CapabilityToolView, DotSettings } from './contracts.ts'
+import { mcpPrefix, type CapabilityGrant, type CapabilityGroupView, type CapabilityMcpStatus, type CapabilityToolView, type DotSettings } from './contracts.ts'
 import { installToolAttribution, SCOPED_COPY, sharedAttribution, type ToolOwner } from './attribution.ts'
+
+export { mcpPrefix } from './contracts.ts'
 import { sharedDotMcp } from './mcp-shared.ts'
 import { restrictInheritedTools } from './tool-scope.ts'
 
@@ -80,8 +82,6 @@ export function hostScheduleTargetsDot(args: unknown, sessionIds: ReadonlySet<st
  */
 export const HIGH_RISK_TOOLS: ReadonlySet<string> = new Set(['plugin_manager', 'bash', 'pwsh', 'write', 'edit', 'apply_patch'])
 
-/** DeepSeek function-name contract shared with the MCP public-name derivation. */
-const MCP_INVALID_CHARS = /[^A-Za-z0-9_-]/g
 /** Hashed MCP names keep the normalized prefix only up to this many characters. */
 const MCP_PREFIX_MAX = 64 - 12 - 1
 
@@ -137,11 +137,6 @@ export interface CapabilityDeps {
   readonly locked: readonly string[]
   /** Preset-scope tool defs (dot-local MCP tools live only there); absent when the host cannot expose them. */
   presetDefs?(): Promise<readonly CapabilityToolDef[]>
-}
-
-/** Normalize an MCP server name the way the harness does when it builds public tool names. */
-export function mcpPrefix(server: string): string {
-  return `mcp__${server.replace(MCP_INVALID_CHARS, '_')}__`
 }
 
 /**

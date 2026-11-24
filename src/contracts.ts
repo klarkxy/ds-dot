@@ -518,6 +518,14 @@ export function mcpCredentialRefs(server: Pick<DotMcpServer, 'headers'>): string
   return [...refs]
 }
 
+/** DeepSeek function-name contract shared with the MCP public-name derivation. */
+const MCP_INVALID_CHARS = /[^A-Za-z0-9_-]/g
+
+/** Normalize an MCP server name the way the harness does when it builds public tool names. */
+export function mcpPrefix(server: string): string {
+  return `mcp__${server.replace(MCP_INVALID_CHARS, '_')}__`
+}
+
 /** The credential name dot's panel allocates for one server: `DOT_MCP_<NAME>_TOKEN`. */
 export function mcpCredentialName(server: string): string {
   return `DOT_MCP_${server.toUpperCase().replace(/-/g, '_')}_TOKEN`

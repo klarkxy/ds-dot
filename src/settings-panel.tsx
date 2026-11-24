@@ -8,7 +8,7 @@ import { Button, Checkbox, IconCheckCircleFillRegular, IconChevronRightOutlineRe
 import { createContext, useCallback, useContext, useEffect, useId, useMemo, useRef, useState, type ReactNode } from 'react'
 import type { SettingsSection } from './chat-hooks.ts'
 export type { SettingsSection } from './chat-hooks.ts'
-import { mcpCredentialName, isMcpServerUrl, MCP_SERVER_NAME_PATTERN, type ApprovalMode, type CapabilityCatalogView, type CapabilityGrant, type CapabilityGroupView, type CapabilityToolView, type DotMcpCatalogEntry, type DotMcpListView, type DotMcpServer, type DotMcpServerView, type DotSettings, type FactoryResetPreview, type FactoryResetResult, type KeepaliveInfo, type ModelChoice, type SettingField, type SettingProposal, type TakeoverMode, type TaskModelRule, type TaskPermission } from './contracts.ts'
+import { mcpCredentialName, mcpPrefix, isMcpServerUrl, MCP_SERVER_NAME_PATTERN, type ApprovalMode, type CapabilityCatalogView, type CapabilityGrant, type CapabilityGroupView, type CapabilityToolView, type DotMcpCatalogEntry, type DotMcpListView, type DotMcpServer, type DotMcpServerView, type DotSettings, type FactoryResetPreview, type FactoryResetResult, type KeepaliveInfo, type ModelChoice, type SettingField, type SettingProposal, type TakeoverMode, type TaskModelRule, type TaskPermission } from './contracts.ts'
 import { DESKTOP_NOTIFY_KEY } from './attention-client.ts'
 import type { UpdateResult, UpdateStatus } from './auto-update.ts'
 import { factoryResetScope, formatWhen, t, type CopyLocale, type TextKey } from './ui-copy.ts'
@@ -454,7 +454,8 @@ function Capabilities({ locale, api, grants, onPick, onOpenMcp }: {
             const soloNoOwnGrant = group.kind !== 'host' && group.id !== 'builtin'
               && group.tools.length === 1 && (group.children ?? []).length === 0
               && grants[`tool:${tool.name}`] === undefined
-            const toolLabel = group.kind === 'mcp' && tool.name.startsWith(`mcp__${group.label}__`) ? tool.name.slice(`mcp__${group.label}__`.length) : tool.name
+            const toolPrefix = mcpPrefix(group.label)
+            const toolLabel = group.kind === 'mcp' && tool.name.startsWith(toolPrefix) ? tool.name.slice(toolPrefix.length) : tool.name
             return (
               <div key={tool.name} className="dsh-dot-cap-row">
                 <span className="dsh-dot-cap-name dsh-dot-cap-tool" title={tool.name}>
@@ -582,27 +583,54 @@ function McpPane({ locale, api, settings, grants, onPick, onSaved }: {
   if (view === undefined && !error) return <PaneSkeleton label={t(locale, 'settingsLoading')} />
 
   const servers = settings.mcpServers ?? {}
-  const saveServers = (next: Record<string, DotMcpServer>) => {
+  const fail = (failure: unknown) => setError(failure instanceof Error ? failure.message : String(failure))
+  const savePatch = async (patch: SettingsPatch): Promise<boolean> => {
     setBusy(true)
-    api.setSettings({ mcpServers: next }).then(saved => onSaved(saved), () => {}).finally(() => setBusy(false))
+    try {
+      const saved = await api.setSettings(patch)
+      onSaved(saved)
+      return true
+    } catch (failure) {
+      fail(failure)
+      return false
+    } finally { setBusy(false) }
   }
+  const saveServers = (next: Record<string, DotMcpServer>) => savePatch({ mcpServers: next })
   const catalogRow = (entry: DotMcpCatalogEntry): DotMcpServer => ({
     catalog: entry.id, url: entry.url, ...(entry.headers !== undefined ? { headers: entry.headers } : {}), enabled: true,
   })
   const connect = async (entry: DotMcpCatalogEntry, token?: string) => {
     setBusy(true)
+    let credentialStored = false
     try {
       if (entry.auth === 'token' && token !== undefined && token !== '' && api.mcpCredentialSet !== undefined) {
         await api.mcpCredentialSet(entry.id, token)
+        credentialStored = true
       }
-      saveServers({ ...servers, [entry.id]: catalogRow(entry) })
-      setTokenFor(undefined); setTokenDraft('')
-    } finally { setBusy(false) }
+      if (await saveServers({ ...servers, [entry.id]: catalogRow(entry) })) {
+        setTokenFor(undefined); setTokenDraft('')
+      } else if (credentialStored && servers[entry.id] === undefined) {
+        // The token landed but the new row did not; do not leave it orphaned.
+        await api.mcpCredentialUnset?.(entry.id).catch(() => {})
+      }
+    } catch (failure) { fail(failure) } finally { setBusy(false) }
   }
   const saveToken = async (server: string, value: string) => {
     if (api.mcpCredentialSet === undefined) return
     setBusy(true)
-    try { await api.mcpCredentialSet(server, value); setTokenFor(undefined); setTokenDraft('') } finally { setBusy(false) }
+    try {
+      await api.mcpCredentialSet(server, value)
+      setTokenFor(undefined); setTokenDraft('')
+    } catch (failure) { fail(failure) } finally { setBusy(false) }
+  }
+  const removeServer = (name: string) => {
+    const next = { ...servers }
+    delete next[name]
+    // Dropping a server drops its grants in the same patch: the server-level
+    // selector plus every tool: selector under its normalized prefix.
+    const toolPrefix = `tool:${mcpPrefix(name)}`
+    const cleaned = Object.fromEntries(Object.entries(grants).filter(([selector]) => selector !== `mcp:${name}` && !selector.startsWith(toolPrefix)))
+    void savePatch({ mcpServers: next, capabilities: { grants: cleaned } })
   }
   const addCustom = () => {
     const name = customName.trim()
@@ -614,11 +642,18 @@ function McpPane({ locale, api, settings, grants, onPick, onSaved }: {
     const headers = customToken === '' ? undefined : { Authorization: `Bearer \${credential:${mcpCredentialName(name)}}` }
     void (async () => {
       setBusy(true)
+      let credentialStored = false
       try {
-        if (customToken !== '' && api.mcpCredentialSet !== undefined) await api.mcpCredentialSet(name, customToken)
-        saveServers({ ...servers, [name]: { url, ...(headers !== undefined ? { headers } : {}), enabled: true } })
-        setCustomName(''); setCustomUrl(''); setCustomToken('')
-      } finally { setBusy(false) }
+        if (customToken !== '' && api.mcpCredentialSet !== undefined) {
+          await api.mcpCredentialSet(name, customToken)
+          credentialStored = true
+        }
+        if (await saveServers({ ...servers, [name]: { url, ...(headers !== undefined ? { headers } : {}), enabled: true } })) {
+          setCustomName(''); setCustomUrl(''); setCustomToken('')
+        } else if (credentialStored) {
+          await api.mcpCredentialUnset?.(name).catch(() => {})
+        }
+      } catch (failure) { fail(failure) } finally { setBusy(false) }
     })()
   }
   const tokenField = (server: string, tokenUrl?: string, tokenHelpKey?: string) => (
@@ -663,7 +698,7 @@ function McpPane({ locale, api, settings, grants, onPick, onSaved }: {
                   <span className="dsh-dot-mcp-name" title={server.name}>{server.name}</span>
                   <span className="dsh-dot-mcp-status" title={server.status?.diagnostic}>{mcpStatusText(locale, server)}</span>
                   <span className="dsh-dot-mcp-actions">
-                    <Button variant="ghost" size="sm" disabled={busy} onClick={() => saveServers({ ...servers, [server.name]: { ...servers[server.name]!, enabled: !server.enabled } })}>
+                    <Button variant="ghost" size="sm" disabled={busy} onClick={() => void saveServers({ ...servers, [server.name]: { ...servers[server.name]!, enabled: !server.enabled } })}>
                       {server.enabled ? t(locale, 'sMcpDisable') : t(locale, 'sMcpEnable')}
                     </Button>
                     {server.auth === 'token' ? (
@@ -671,11 +706,7 @@ function McpPane({ locale, api, settings, grants, onPick, onSaved }: {
                         {t(locale, 'sMcpRetoken')}
                       </Button>
                     ) : null}
-                    <Button variant="ghost" size="sm" disabled={busy} onClick={() => {
-                      const next = { ...servers }
-                      delete next[server.name]
-                      saveServers(next)
-                    }}>{t(locale, 'sMcpRemove')}</Button>
+                    <Button variant="ghost" size="sm" disabled={busy} onClick={() => removeServer(server.name)}>{t(locale, 'sMcpRemove')}</Button>
                   </span>
                 </div>
                 <div className="dsh-dot-mcp-grant">

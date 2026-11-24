@@ -109,6 +109,8 @@ export interface TaskIsolation {
   readonly worktree: string
   readonly branch: string
   readonly baseSha: string
+  /** Set when the branch was cut from a ref other than the checkout's HEAD. */
+  readonly base?: { readonly ref: string; readonly remote?: string }
   readonly state: 'active' | 'committed' | 'merged' | 'discarded'
   readonly commitSha?: string
   readonly mergedInto?: string
@@ -275,6 +277,7 @@ export const changeSchema = z.object({
   isolation: z.object({
     kind: z.literal('worktree'), repoRoot: z.string().min(1), worktree: z.string().min(1),
     branch: z.string().min(1), baseSha: z.string().min(1),
+    base: z.object({ ref: z.string().min(1), remote: z.string().min(1).optional() }).optional(),
     state: z.enum(['active', 'committed', 'merged', 'discarded']),
     commitSha: z.string().min(1).optional(), mergedInto: z.string().min(1).optional(), at: z.number(),
   }).optional(),

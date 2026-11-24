@@ -44,32 +44,67 @@ export interface TaskWorktree {
 
 const slug = (): string => randomBytes(3).toString('hex')
 
+/** A `base` ref or remote value is a refspec operand: never empty, never an option, never whitespace-bearing. */
+const checkRefToken = (value: string, what: string): string => {
+  const trimmed = value.trim()
+  if (trimmed === '' || trimmed !== value || trimmed.startsWith('-') || /[\s\x00]/.test(trimmed)) {
+    throw new GitWorktreeError(`invalid ${what} ${JSON.stringify(value)}`)
+  }
+  return trimmed
+}
+
 /**
- * Cut a `dot/task-<slug>` worktree for `dir` off the repo's current HEAD.
- * Refuses when `dir` is not inside a git checkout or HEAD is unborn, so the
- * caller can fall back to a plain change instead of leaving half a worktree.
+ * Cut a `dot/task-<slug>` worktree for `dir` off the repo's current HEAD — or
+ * off `base.ref`, optionally fetched from `base.remote` into a temporary
+ * `refs/dot/base/<slug>` first (for example a pull request head on the
+ * upstream remote). Refuses when `dir` is not inside a git checkout or HEAD
+ * is unborn, so the caller can fall back to a plain change instead of leaving
+ * half a worktree.
  */
-export async function createTaskWorktree(input: { readonly dir: string; readonly homeDir: string }, git: GitRunner = runGit): Promise<TaskWorktree> {
+export async function createTaskWorktree(input: { readonly dir: string; readonly homeDir: string; readonly base?: { readonly ref: string; readonly remote?: string } }, git: GitRunner = runGit): Promise<TaskWorktree> {
   // git reports the physical path (8.3 names expanded, symlinks resolved), so
   // both sides of the inside check go through realpath before comparing.
   const dir = realpathSync.native(resolve(input.dir))
   const repoRoot = await git(['rev-parse', '--show-toplevel'], dir).catch(failure => {
     throw new GitWorktreeError(`worktree isolation needs a git checkout: ${failure instanceof Error ? failure.message : String(failure)}`)
   })
-  const baseSha = await git(['rev-parse', '--verify', 'HEAD'], repoRoot).catch(() => {
-    throw new GitWorktreeError('worktree isolation needs a commit to branch from (the checkout has no HEAD yet)')
-  })
   const root = join(resolve(input.homeDir), TASK_WORKTREES_DIR)
   mkdirSync(root, { recursive: true })
-  // Branch and directory names share one slug; a collision retries with a new one.
+  // Branch, directory and fetch-side temp ref share one slug; a collision
+  // retries with a new one.
+  let name = slug()
+  let baseSha: string
+  const ref = input.base === undefined ? undefined : checkRefToken(input.base.ref, 'base ref')
+  const remote = input.base?.remote === undefined ? undefined : checkRefToken(input.base.remote, 'base remote')
+  if (ref === undefined) {
+    baseSha = await git(['rev-parse', '--verify', 'HEAD'], repoRoot).catch(() => {
+      throw new GitWorktreeError('worktree isolation needs a commit to branch from (the checkout has no HEAD yet)')
+    })
+  } else if (remote === undefined) {
+    baseSha = await git(['rev-parse', '--verify', `${ref}^{commit}`], repoRoot).catch(failure => {
+      throw new GitWorktreeError(`base ref ${ref} does not resolve to a commit: ${failure instanceof Error ? failure.message : String(failure)}`)
+    })
+  } else {
+    const remotes = new Set((await git(['remote'], repoRoot)).split('\n').map(line => line.trim()).filter(Boolean))
+    if (!remotes.has(remote) && !remote.startsWith('https://')) {
+      throw new GitWorktreeError(`base remote ${remote} is not a configured remote or an https URL`)
+    }
+    const tempRef = `refs/dot/base/${name}`
+    await git(['fetch', '--no-tags', '--no-write-fetch-head', remote, `+${ref}:${tempRef}`], repoRoot, { timeoutMs: 120_000 })
+    try {
+      baseSha = await git(['rev-parse', '--verify', `${tempRef}^{commit}`], repoRoot)
+    } finally {
+      // The sha is already in the object store; the temp ref is bookkeeping.
+      await git(['update-ref', '-d', tempRef], repoRoot).catch(() => '')
+    }
+  }
   for (let attempt = 0; attempt < 5; attempt += 1) {
-    const name = slug()
     const branch = `${TASK_BRANCH_PREFIX}${name}`
     const worktree = join(root, name)
     try {
       await git(['worktree', 'add', '-b', branch, worktree, baseSha], repoRoot)
     } catch (failure) {
-      if (attempt < 4 && /already exists/i.test(failure instanceof Error ? failure.message : '')) continue
+      if (attempt < 4 && /already exists/i.test(failure instanceof Error ? failure.message : '')) { name = slug(); continue }
       throw failure
     }
     // git reports forward slashes, expanded 8.3 names and resolved symlinks,

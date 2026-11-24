@@ -96,6 +96,13 @@ describe('renderBrief', () => {
     expect(renderBrief({ changeId: 'c-1', title: 'Ship', input, run: run() })).not.toContain('Isolation:')
   })
 
+  it('names the base ref a task branch was cut from', () => {
+    const remote = renderBrief({ changeId: 'c-1', title: 'Ship', input, run: run(), isolation: { branch: 'dot/task-c-1', baseSha: 'abc1234def', base: { ref: 'refs/pull/12/head', remote: 'upstream' } } })
+    expect(remote).toContain('on branch dot/task-c-1 based on refs/pull/12/head from upstream (commit abc1234)')
+    const local = renderBrief({ changeId: 'c-1', title: 'Ship', input, run: run(), isolation: { branch: 'dot/task-c-1', baseSha: 'abc1234def', base: { ref: 'release/1.0' } } })
+    expect(local).toContain('on branch dot/task-c-1 based on release/1.0 (commit abc1234)')
+  })
+
   it('keeps the original request byte for byte, even with spaces and backticks', () => {
     const request = '  indented line\n\n```code``` and ``` fences  '
     const text = renderBrief({ changeId: 'c-1', title: 'Ship', input: { ...input, userRequest: request }, run: run() })

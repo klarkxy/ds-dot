@@ -3570,6 +3570,49 @@ describe.skipIf(!worktreeGitAvailable)('task worktree isolation', { timeout: 30_
     } finally { await h.service.dispose(); cleanup() }
   })
 
+  it('creates an isolated change from a fetched base ref and validates the combo', async () => {
+    const { repo, home, cleanup } = makeSpecRepo('dot-iso-base-')
+    const calls: string[][] = []
+    const fake: typeof runGit = async (args) => {
+      calls.push([...args])
+      if (args[0] === 'rev-parse' && args[1] === '--show-toplevel') return repo
+      if (args[0] === 'remote') return 'upstream'
+      if (args[0] === 'rev-parse') return 'f00dcafe1234'
+      return ''
+    }
+    const h = setup(undefined, undefined, home, { git: fake })
+    try {
+      const created = JSON.parse(await h.service.manageTask({ action: 'create', title: 'PR fix', goal: 'land', dir: repo, isolation: 'worktree', base_ref: 'refs/pull/9/head', base_remote: 'upstream' })) as { id: string }
+      const isolation = h.store.work.change(created.id)!.isolation!
+      expect(isolation.base).toEqual({ ref: 'refs/pull/9/head', remote: 'upstream' })
+      expect(isolation.baseSha).toBe('f00dcafe1234')
+      expect(h.store.work.workView(created.id)?.isolation?.base).toEqual({ ref: 'refs/pull/9/head', remote: 'upstream' })
+      const fetch = calls.find(args => args[0] === 'fetch')
+      expect(fetch?.slice(0, 3)).toEqual(['fetch', '--no-tags', '--no-write-fetch-head'])
+      expect(fetch?.some(arg => arg.includes('+refs/pull/9/head:refs/dot/base/'))).toBe(true)
+      // The same ref/remote check rejects bad combinations before touching git.
+      await expect(h.service.manageTask({ action: 'create', title: 'x', goal: 'g', dir: repo, base_ref: 'main' })).rejects.toMatchObject({ code: 'dot/invalid' })
+      await expect(h.service.manageTask({ action: 'create', title: 'x', goal: 'g', dir: repo, isolation: 'none', base_ref: 'main' })).rejects.toMatchObject({ code: 'dot/invalid' })
+      await expect(h.service.manageTask({ action: 'create', title: 'x', goal: 'g', dir: repo, isolation: 'worktree', base_remote: 'upstream' })).rejects.toMatchObject({ code: 'dot/invalid' })
+      // A local ref needs no remote and no fetch.
+      calls.length = 0
+      const local = JSON.parse(await h.service.manageTask({ action: 'create', title: 'local base', goal: 'g', dir: repo, isolation: 'worktree', base_ref: 'release/1.0' })) as { id: string }
+      expect(h.store.work.change(local.id)!.isolation!.base).toEqual({ ref: 'release/1.0' })
+      expect(calls.some(args => args[0] === 'fetch')).toBe(false)
+      expect(calls.some(args => args[0] === 'rev-parse' && args.includes('release/1.0^{commit}'))).toBe(true)
+    } finally { await h.service.dispose(); cleanup() }
+  })
+
+  it('refuses to merge a change cut from a base ref into the checkout', async () => {
+    const h = setup()
+    try {
+      const change = await h.service.createWorkChange({ title: 'PR', cwd: 'H:\\wt', goal: 'g', isolation: { kind: 'worktree', repoRoot: 'H:\\repo', worktree: 'H:\\wt', branch: 'dot/task-x', baseSha: 'abc', base: { ref: 'refs/pull/12/head', remote: 'upstream' }, state: 'active', at: 1 } })
+      expect(await h.service.integrateWork(change.id, 'merge')).toMatchObject({ ok: false, code: 'invalid', message: `${change.id} was cut from refs/pull/12/head, not your checkout; keep the branch and integrate it yourself` })
+      // keep/discard still fail for an unaccepted change, not for the base.
+      expect(await h.service.integrateWork(change.id, 'keep')).toMatchObject({ ok: false, code: 'invalid', message: expect.stringContaining('not accepted') })
+    } finally { await h.service.dispose() }
+  })
+
   it('integrate merge reports conflicts and keeps the worktree for a retry', async () => {
     const { repo, home, cleanup } = makeSpecRepo('dot-iso-conflict-')
     const h = setup(undefined, undefined, home, { git: runGit })

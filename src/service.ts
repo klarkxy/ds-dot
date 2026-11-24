@@ -2847,6 +2847,7 @@ export class DotService {
     const isolation = change.isolation
     if (isolation?.kind !== 'worktree') return { ok: false, code: 'invalid', message: `${changeId} is not an isolated change` }
     if (isolation.state !== 'active') return { ok: false, code: 'invalid', message: `${changeId} was already ${isolation.state}` }
+    if (mode === 'merge' && isolation.base !== undefined) return { ok: false, code: 'invalid', message: `${changeId} was cut from ${isolation.base.ref}, not your checkout; keep the branch and integrate it yourself` }
     const view = this.store.work.workView(changeId)
     if (!change.closeout || view?.status !== 'done') return { ok: false, code: 'invalid', message: `${changeId} is not accepted yet` }
     const git = this.git()
@@ -3380,10 +3381,15 @@ export class DotService {
       throw new DotError('dot/invalid', 'isolation must be "none" or "worktree"')
     }
     const wantsWorktree = isolationArg === 'worktree' || (isolationArg === undefined && recipe?.isolation === 'worktree')
+    const baseRef = typeof args.base_ref === 'string' && args.base_ref.trim() !== '' ? args.base_ref.trim() : undefined
+    const baseRemote = typeof args.base_remote === 'string' && args.base_remote.trim() !== '' ? args.base_remote.trim() : undefined
+    if (baseRemote !== undefined && baseRef === undefined) throw new DotError('dot/invalid', 'base_remote needs base_ref')
+    if ((baseRef !== undefined || baseRemote !== undefined) && !wantsWorktree) throw new DotError('dot/invalid', 'base_ref and base_remote need isolation "worktree"')
+    const base = baseRef === undefined ? undefined : { ref: baseRef, ...(baseRemote !== undefined ? { remote: baseRemote } : {}) }
     let worktree: Awaited<ReturnType<typeof createTaskWorktree>> | undefined
     if (wantsWorktree) {
       try {
-        worktree = await createTaskWorktree({ dir: createDir, homeDir: this.options.homeDir }, this.git())
+        worktree = await createTaskWorktree({ dir: createDir, homeDir: this.options.homeDir, ...(base !== undefined ? { base } : {}) }, this.git())
       } catch (error) {
         throw new DotError('dot/invalid', `isolation "worktree" could not be prepared: ${messageOf(error)}`)
       }
@@ -3402,7 +3408,9 @@ export class DotService {
         ...(worktree !== undefined ? {
           isolation: {
             kind: 'worktree' as const, repoRoot: worktree.repoRoot, worktree: worktree.worktree,
-            branch: worktree.branch, baseSha: worktree.baseSha, state: 'active' as const, at: this.now(),
+            branch: worktree.branch, baseSha: worktree.baseSha,
+            ...(base !== undefined ? { base } : {}),
+            state: 'active' as const, at: this.now(),
           },
         } : {}),
         ...(maxConcurrentRuns !== undefined ? { maxConcurrentRuns } : {}),

@@ -1,7 +1,7 @@
 import { execFileSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { describe, expect, it, vi } from 'vitest'
 import type { Timer } from './batcher.ts'
 import type { RawEvent } from './chat.ts'
@@ -16,7 +16,7 @@ import { agreementsSection } from './memory.ts'
 import { PACKAGE_NAME, type PluginManagerLike } from './auto-update.ts'
 import { DotStore, type DotDomainHandle } from './store.ts'
 import { TASK_BRANCH_PREFIX, TASK_WORKTREES_DIR, listTaskWorktrees, runGit } from './git-worktree.ts'
-import { canonicalPath } from './work.ts'
+import { canonicalPath, onDiskPath } from './work.ts'
 import { upsertRecipeOutcome } from './recipes.ts'
 
 /** Manual timer: tests fire scheduled callbacks explicitly. */
@@ -1489,6 +1489,79 @@ describe('DotService WorkBook sessions', () => {
     await expect(h.service.send(run.sessionId!, 'more')).rejects.toMatchObject({ code: 'dot/send-closed' })
     expect(h.relayed).toEqual([])
     await h.service.dispose()
+  })
+
+  it('creates the run session in the on-disk casing while the record stays canonical', async () => {
+    const dir = realpathSync.native(mkdtempSync(join(tmpdir(), 'dot-CaSiNg-')))
+    const h = setup()
+    try {
+      await h.service.ensureDot()
+      await h.service.manageTask({action: 'dispatch',  dir, title: 't', message: 'go', goal: 'g' })
+      const run = h.store.work.listRuns()[0]!
+      const created = h.calls.find(call => call.startsWith(`create ${run.sessionId} `))
+      // The host gets the real on-disk spelling, never the case-folded record.
+      expect(created).toBe(`create ${run.sessionId} ${dir}`)
+      expect(run.cwd).toBe(canonicalPath(dir))
+      if (process.platform === 'win32') expect(run.cwd).not.toBe(dir)
+      // confirmSession still matches, so the run is confirmed and owned.
+      expect(run.creation).toBe('confirmed')
+      expect(run.sessionId).toBe(run.requestedSessionId)
+      expect(h.store.task(run.sessionId!)?.cwd).toBe(dir)
+    } finally { await h.service.dispose(); rmSync(dir, { recursive: true, force: true }) }
+  })
+
+  it('dispatches through a Windows directory junction using the junction path rather than its target', async () => {
+    const rawBase = mkdtempSync(join(tmpdir(), 'dot-JuncSvc-'))
+    const base = onDiskPath(rawBase)
+    const real = join(base, 'RealTarget')
+    const junction = join(base, 'AppJunction')
+    const sub = join(junction, 'SubDir')
+    mkdirSync(join(real, 'SubDir'), { recursive: true })
+    symlinkSync(real, junction, process.platform === 'win32' ? 'junction' : 'dir')
+    const h = setup()
+    try {
+      await h.service.ensureDot()
+      const dirArg = process.platform === 'win32' ? junction.toLowerCase() : junction
+      await h.service.manageTask({ action: 'dispatch', dir: dirArg, title: 'junc', message: 'go', goal: 'g' })
+      const run = h.store.work.listRuns()[0]!
+      const created = h.calls.find(call => call.startsWith(`create ${run.sessionId} `))
+      expect(created).toBe(`create ${run.sessionId} ${junction}`)
+      expect(run.cwd).toBe(canonicalPath(junction))
+      expect(run.creation).toBe('confirmed')
+      expect(run.phase).toBe('active')
+      expect(h.calls.some(call => call.startsWith(`prompt ${run.sessionId} `))).toBe(true)
+      expect(h.store.task(run.sessionId!)?.cwd).toBe(junction)
+
+      const subArg = process.platform === 'win32' ? sub.toLowerCase() : sub
+      await h.service.manageTask({ action: 'dispatch', dir: subArg, title: 'junc-sub', message: 'go2', goal: 'g2' })
+      const subRun = h.store.work.listRuns()[1]!
+      const subCreated = h.calls.find(call => call.startsWith(`create ${subRun.sessionId} `))
+      expect(subCreated).toBe(`create ${subRun.sessionId} ${sub}`)
+      expect(subRun.creation).toBe('confirmed')
+      expect(h.calls.some(call => call.startsWith(`prompt ${subRun.sessionId} `))).toBe(true)
+    } finally {
+      await h.service.dispose()
+      rmSync(junction, { force: true })
+      rmSync(rawBase, { recursive: true, force: true })
+    }
+  })
+
+  it.skipIf(process.platform !== 'win32' || !existsSync('C:\\PROGRA~1'))('dispatches a Windows 8.3 short path and confirms the expanded on-disk session cwd', async () => {
+    const shortDir = 'C:\\PROGRA~1'
+    const longDir = realpathSync.native(shortDir)
+    const h = setup()
+    try {
+      await h.service.ensureDot()
+      await h.service.manageTask({ action: 'dispatch', dir: shortDir, title: 'short', message: 'go', goal: 'g' })
+      const run = h.store.work.listRuns()[0]!
+      const created = h.calls.find(call => call.startsWith(`create ${run.sessionId} `))
+      expect(created).toBe(`create ${run.sessionId} ${longDir}`)
+      expect(run.cwd).toBe(canonicalPath(shortDir))
+      expect(run.creation).toBe('confirmed')
+      expect(run.phase).toBe('active')
+      expect(h.calls.some(call => call.startsWith(`prompt ${run.sessionId} `))).toBe(true)
+      expect(h.store.task(run.sessionId!)?.cwd).toBe(longDir)
+    } finally { await h.service.dispose() }
   })
 
   it('refuses unavailable models and presets before creating a session', async () => {

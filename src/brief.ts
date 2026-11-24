@@ -14,6 +14,7 @@
  * human, file contents and exact strings stay as written and are marked
  * verbatim; deliverables follow `deliverableLanguage`, not this language.
  */
+import { onDiskPath } from './work.ts'
 
 export interface BriefScenario {
   readonly scenarioRef: string
@@ -73,7 +74,7 @@ function scenarioLine(scenario: BriefScenario): string {
 }
 
 function scopeLines(run: BriefRun): string[] {
-  const lines = [`Working directory: ${run.cwd}`]
+  const lines = [`Working directory: ${process.platform === 'win32' ? onDiskPath(run.cwd) : run.cwd}`]
   if (run.kind === 'review') {
     lines.push('Access: read-only. The whole workspace is held for this review so writers cannot run concurrently, but this session cannot create, change or delete files. Inspect files and run verification checks that need no writes; a check that requires writing (for example a build) belongs in a writer run. Do not modify the delivery.')
     return lines

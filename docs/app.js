@@ -356,21 +356,21 @@
         ja: 'いくつか並行で進めても机が散らからない理由',
       },
       excerpt: {
-        zh: '不打架的事分头跑，大改动先在旁边的临时分支里做好；约定好稍后再接上的后续活，我也会记条提醒免得转头忘掉。真要派活的项目才登记工作区并顺嘴告诉你，交活前连改动和删掉的文件都先核过一遍。',
-        en: 'Independent tasks move side by side, larger edits wait in a spare branch, and any promised follow-up gets a reminder so it never slips between turns. I only register workspaces for projects we’re actually working in (and tell you when I do), then check deliverables and diffs myself first.',
-        ja: '重ならない作業は並行で進め、大きな修正は別ブランチに隔離します。あとで続ける約束にはすぐリマインダーを付け、ワークスペースも実際に作業する分だけ登録してお知らせしたうえで、提出前に自分の目で差分を確かめます。',
+        zh: '不打架的事分头跑，大改动或接着改某个 PR 时先在旁边的临时分支里做好；约定好稍后再接上的后续活，我也会记条提醒免得转头忘掉。真要派活的项目才登记工作区并顺嘴告诉你，交活前连改动和删掉的文件都先核过一遍。',
+        en: 'Independent tasks move side by side while larger edits—or follow-ups on an existing PR branch—wait in a spare branch, and any promised follow-up gets a reminder so it never slips between turns. I only register workspaces for projects we’re actually working in (and tell you when I do), then check deliverables and diffs myself first.',
+        ja: '重ならない作業は並行で進め、大きな修正や既存の PR の続きは別ブランチに隔離します。あとで続ける約束にはすぐリマインダーを付け、ワークスペースも実際に作業する分だけ登録してお知らせしたうえで、提出前に自分の目で差分を確かめます。',
       },
       paragraphs: {
         zh: [
-          '手头几件事如果互不打架，我会一起安排下去；要是你刚好也在改同一批文件，或者这轮改动动静比较大，就等前面依赖的改动落稳再去临时分支里做好——合回来、留着还是丢掉，最后听你的。平时也只给真要派活的项目登记工作区，添完顺嘴告诉你一声，不会为了随便翻一翻就把整片上级目录都挂进来。',
+          '手头几件事如果互不打架，我会一起安排下去；要是你刚好也在改同一批文件，这轮改动动静比较大，或者想直接顺着外面某个 PR 分支继续补改，就等前面依赖的改动落稳再去旁边单开临时分支做好——从当前检出切出来的最后选合回来、留着或丢掉，而从别的 PR 或远端分支拉出来的只留“保留分支”和“丢弃”，免得误合进本地工作区。平时也只给真要派活的项目登记工作区，添完顺嘴告诉你一声，不会为了随便翻一翻就把整片上级目录都挂进来。',
           '要是约好了等你点完验收再接着往下做，我会立刻挂条对应着前置任务的提醒，哪怕关了空闲巡检也不会跨轮断掉；写要求前也会先核对仓库里实际有的脚本和分支，不凭印象瞎猜。每次交活前我自己先把改动和删掉的文件看一遍，你觉得哪几行不顺直接圈出来退回就行，同一处连卡三次就停下来找你商量，不瞎转圈。',
         ],
         en: [
-          'When requests don’t step on the same files, I move them forward together. If you’re mid-edit or the change is wide, I wait until any prerequisite commits have actually landed and then isolate the work in a spare branch—leaving merging, keeping, or discarding up to you. I also only register a workspace when we’re dispatching work into that project (and let you know right away), rather than adding broad parent folders just to browse.',
+          'When requests don’t step on the same files, I move them forward together. If you’re mid-edit, the change is wide, or you want to pick up directly from an existing PR or remote branch, I wait until any prerequisite commits have actually landed and then isolate the work in a spare branch from that starting point—leaving merge, keep, or discard up to you for local branches, and only keep or discard for foreign refs so outside work never gets merged straight onto your checkout by accident. I also only register a workspace when we’re dispatching work into that project (and let you know right away), rather than adding broad parent folders just to browse.',
           'Whenever we agree on a follow-up after you accept an earlier task, I set a reminder tied to it right away so the handoff doesn’t vanish between turns even with routine idle checks turned off, and I double-check the repo’s actual scripts and branches before naming them. Before handing anything back, I read the changed files myself, keep deleted files in the side-by-side diff so you can quote exact lines for another pass, and pause to ask if the same spot stalls three times.',
         ],
         ja: [
-          '同じファイルに触らない用事はまとめて進められますし、編集中の箇所と重なるときや大がかりな修正は、前提になる変更が落ち着いてから別ブランチで仕上げます。最後に「マージする・残す・破棄する」を選ぶだけで大丈夫です。ワークスペースも実際に作業を頼むプロジェクト分だけ登録してその場でお知らせし、中身を覗くためだけに親フォルダごと追加したりはしません。',
+          '同じファイルに触らない用事はまとめて進められますし、編集中の箇所と重なるときや大がかりな修正、あるいは既存の PR・別ブランチの続きを直したいときは、前提になる変更が落ち着いてからその参照を起点に別ブランチで仕上げます。手元から切ったブランチはマージ・保持・破棄を選べますが、別の参照から切ったブランチは誤って手元へ混ぜないよう保持と破棄だけを出しています。ワークスペースも実際に作業を頼むプロジェクト分だけ登録してその場でお知らせし、中身を覗くためだけに親フォルダごと追加したりはしません。',
           '先のタスクを承認してもらってから続きを進める約束をしたときは、定期チェックをオフにしていても見落とさないよう、元のタスクに紐づけたリマインダーをその場で入れておきます。リポジトリ内のスクリプトやブランチも推測せず事前に確認し、提出前には削除ファイルまで含めた差分を自分で確かめてから返します。気になる行があればそのまま指定して直せますし、同じ箇所で三度詰まったら手を止めて相談しますね。',
         ],
       },

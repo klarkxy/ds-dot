@@ -54,6 +54,15 @@ The **MCP servers** page connects remote MCP servers that only Dorothy can use â
 
 ---
 
+## Isolated worktree tasks
+
+When `dot_task(action="create", isolation="worktree")` is used, Dorothy cuts a `dot/task-<slug>` branch inside `<homeDir>/worktrees/<slug>` without touching your active checkout:
+
+- **Picking a base (`base_ref` & `base_remote`):** By default the task branch cuts from the checkout's `HEAD`. To continue an existing PR or branch (for example `refs/pull/123/head`), pass `base_ref` (local branch, tag, or commit) and optionally `base_remote` (a configured git remote name or a credential-free `https://` URL). Dorothy fetches into a temporary `refs/dot/base/<slug>` with `--no-tags --no-write-fetch-head --refmap=` and deletes the temp ref immediately after resolving the commit, leaving `FETCH_HEAD` and `refs/remotes/*` untouched.
+- **Integration actions:** Tasks cut from the checkout's `HEAD` offer **Merge into checkout**, **Keep branch**, and **Discard** on the board. Tasks cut from a `base_ref` only offer **Keep branch** and **Discard** (and `integrateWork(..., "merge")` refuses) so an unrelated PR or remote branch is never merged over your working checkout; keep the branch and push or merge it yourself where it belongs.
+
+---
+
 ## GitHub events (optional)
 
 Dorothy can follow pull requests, issues, comments, reviews, CI runs, default-branch pushes, and releases (filtering out pings, stars, forks, watches, check runs, and successful/skipped/neutral CI). Events land in a durable inbox, coalesce per PR/issue, link automatically to the task owning that PR or branch, and never grant authorization on their own.

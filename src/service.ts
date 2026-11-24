@@ -19,7 +19,7 @@ import { attentionItems } from './board-groups.ts'
 import { renderBrief, renderSupplement, runTitle } from './brief.ts'
 import { bindRunSession, cancelWork, countRelayInserts, finishWork, launchReservedRun, observeRun, reconcileRun, supplementRun } from './execution.ts'
 import { detectWorkspaceRoot } from './git-root.ts'
-import { commitDelivery, createTaskWorktree, listTaskWorktrees, mergeInto, removeTaskWorktree, runGit, taskWorktreeRoot, type GitRunner, type TaskWorktree } from './git-worktree.ts'
+import { commitDelivery, createTaskWorktree, listTaskWorktrees, mergeInto, removeTaskWorktree, runGit, sanitizeRemoteDisplay, taskWorktreeRoot, type GitRunner, type TaskWorktree } from './git-worktree.ts'
 import { defaultSelfBuild, insideOrEqual, libHashOf, realpathOrResolve, type SelfBackup, type SelfInstall, type SelfUpgradeMarker } from './self-root.ts'
 import {
   WRITE_PATHS_EXAMPLE, artifactName, constraintList, jsonArray,
@@ -1541,7 +1541,7 @@ export class DotService {
 
   manageTask(args: Record<string, unknown>): Promise<string> {
     const action = typeof args.action === 'string' ? args.action : ''
-    const awaitsHost = ['finish', 'cancel', 'supplement', 'dispatch', 'check', 'closeout', 'reject'].includes(action)
+    const awaitsHost = ['create', 'finish', 'cancel', 'supplement', 'dispatch', 'check', 'closeout', 'reject'].includes(action)
     const work = awaitsHost ? this.manageWorkAction(args) : this.serial(() => this.manageWorkAction(args))
     // Settling runs earn their token/wall cost whether or not the panel is open.
     return work.finally(() => this.scheduleRunUsage())
@@ -3168,6 +3168,7 @@ export class DotService {
     const isolation = change.isolation
     if (isolation?.kind !== 'worktree') return { ok: false, code: 'invalid', message: `${changeId} is not an isolated change` }
     if (isolation.state !== 'active') return { ok: false, code: 'invalid', message: `${changeId} was already ${isolation.state}` }
+    if (mode === 'merge' && isolation.base !== undefined) return { ok: false, code: 'invalid', message: `${changeId} was cut from ${isolation.base.ref}, not your checkout; keep the branch and integrate it yourself` }
     const view = this.store.work.workView(changeId)
     if (!change.closeout || view?.status !== 'done') return { ok: false, code: 'invalid', message: `${changeId} is not accepted yet` }
     const git = this.git()
@@ -3903,9 +3904,9 @@ export class DotService {
   }
 
   /** Open a dot/task-* worktree for `dir`; a git failure reads as dot/invalid like create reports it. */
-  private async taskWorktreeFor(dir: string): Promise<TaskWorktree> {
+  private async taskWorktreeFor(dir: string, base?: { readonly ref: string; readonly remote?: string }): Promise<TaskWorktree> {
     try {
-      return await createTaskWorktree({ dir, homeDir: this.options.homeDir }, this.git())
+      return await createTaskWorktree({ dir, homeDir: this.options.homeDir, ...(base !== undefined ? { base } : {}) }, this.git())
     } catch (error) {
       throw new DotError('dot/invalid', `isolation "worktree" could not be prepared: ${messageOf(error)}`)
     }
@@ -3913,6 +3914,7 @@ export class DotService {
 
   /** The create branch of dot_task: returns the created record so callers (recipe dispatch) need not parse the view JSON. */
   private async createChangeFromTool(args: Record<string, unknown>): Promise<{ readonly change: ChangeRecord; readonly forcedIsolation: boolean }> {
+    this.assertOpen()
     const text = (key: string) => typeof args[key] === 'string' ? args[key] as string : undefined
     const title = text('title')
     const goal = text('goal')
@@ -3942,8 +3944,20 @@ export class DotService {
     }
     const forcedIsolation = this.selfIsolation(createDir) === 'worktree'
     const wantsWorktree = forcedIsolation || isolationArg === 'worktree' || (isolationArg === undefined && recipe?.isolation === 'worktree')
+    const baseRef = typeof args.base_ref === 'string' && args.base_ref.trim() !== '' ? args.base_ref.trim() : undefined
+    const baseRemote = typeof args.base_remote === 'string' && args.base_remote.trim() !== '' ? args.base_remote.trim() : undefined
+    if (baseRemote !== undefined && baseRef === undefined) throw new DotError('dot/invalid', 'base_remote needs base_ref')
+    if ((baseRef !== undefined || baseRemote !== undefined) && !wantsWorktree) throw new DotError('dot/invalid', 'base_ref and base_remote need isolation "worktree"')
+    const base = baseRef === undefined ? undefined : { ref: baseRef, ...(baseRemote !== undefined ? { remote: baseRemote } : {}) }
+    const storedBase = base === undefined ? undefined : { ref: base.ref, ...(base.remote !== undefined ? { remote: sanitizeRemoteDisplay(base.remote) } : {}) }
     let worktree: TaskWorktree | undefined
-    if (wantsWorktree) worktree = await this.taskWorktreeFor(createDir)
+    if (wantsWorktree) {
+      worktree = await this.taskWorktreeFor(createDir, base)
+      if (this.closing) {
+        await removeTaskWorktree({ repoRoot: worktree.repoRoot, worktree: worktree.worktree, branch: worktree.branch, baseSha: worktree.baseSha }, this.git()).catch(() => undefined)
+        throw new DotError('dot/disposed', 'dot is shutting down')
+      }
+    }
     let change: ChangeRecord
     try {
       change = await this.store.work.createChange({
@@ -3958,7 +3972,9 @@ export class DotService {
         ...(worktree !== undefined ? {
           isolation: {
             kind: 'worktree' as const, repoRoot: worktree.repoRoot, worktree: worktree.worktree,
-            branch: worktree.branch, baseSha: worktree.baseSha, state: 'active' as const, at: this.now(),
+            branch: worktree.branch, baseSha: worktree.baseSha,
+            ...(storedBase !== undefined ? { base: storedBase } : {}),
+            state: 'active' as const, at: this.now(),
           },
         } : {}),
         ...(maxConcurrentRuns !== undefined ? { maxConcurrentRuns } : {}),

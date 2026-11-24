@@ -5,7 +5,7 @@
  * delivery from the panel; nothing here touches a checkout dot did not create.
  */
 import { execFile } from 'node:child_process'
-import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, statSync } from 'node:fs'
 import { createHash, randomBytes } from 'node:crypto'
 import path, { isAbsolute, join, relative, resolve } from 'node:path'
 import { HarnessError } from '@deepseek-ai/dsh-llm'
@@ -26,7 +26,7 @@ export const runGit: GitRunner = (args, cwd, opts = {}) =>
     execFile('git', ['-C', cwd, ...args], { timeout: opts.timeoutMs ?? 60_000, windowsHide: true, maxBuffer: 8 * 1024 * 1024 }, (error, stdout, stderr) => {
       if (error) {
         const detail = (typeof stderr === 'string' ? stderr : '').trim() || error.message
-        reject(new GitWorktreeError(`git ${args.join(' ')} failed: ${detail}`))
+        reject(new GitWorktreeError(`git ${args.map(sanitizeRemoteDisplay).join(' ')} failed: ${detail}`))
         return
       }
       resolvePromise(opts.raw === true ? stdout : stdout.trim())
@@ -44,32 +44,92 @@ export interface TaskWorktree {
 
 const slug = (): string => randomBytes(3).toString('hex')
 
+/** Strip inline userinfo from an http(s) URL so credentials are never persisted, logged, or rendered. */
+export function sanitizeRemoteDisplay(remote: string): string {
+  if (!/^https?:\/\//i.test(remote)) return remote
+  try {
+    const parsed = new URL(remote)
+    if (!parsed.username && !parsed.password && !/^https?:\/\/[^/?#]*@/i.test(remote)) return remote
+    parsed.username = ''
+    parsed.password = ''
+    return parsed.toString()
+  } catch {
+    return remote.replace(/^(https?:\/\/)[^/?#]*@/i, '$1')
+  }
+}
+
+/** A `base` ref or remote value is a refspec operand: never empty, never an option, never whitespace-bearing. */
+const checkRefToken = (value: string, what: string): string => {
+  const trimmed = value.trim()
+  if (trimmed === '' || trimmed !== value || trimmed.startsWith('-') || /[\s\x00]/.test(trimmed)) {
+    throw new GitWorktreeError(`invalid ${what} ${JSON.stringify(sanitizeRemoteDisplay(value))}`)
+  }
+  return trimmed
+}
+
 /**
- * Cut a `dot/task-<slug>` worktree for `dir` off the repo's current HEAD.
- * Refuses when `dir` is not inside a git checkout or HEAD is unborn, so the
- * caller can fall back to a plain change instead of leaving half a worktree.
+ * Cut a `dot/task-<slug>` worktree for `dir` off the repo's current HEAD — or
+ * off `base.ref`, optionally fetched from `base.remote` into a temporary
+ * `refs/dot/base/<slug>` first (for example a pull request head on the
+ * upstream remote). Refuses when `dir` is not inside a git checkout or HEAD
+ * is unborn, so the caller can fall back to a plain change instead of leaving
+ * half a worktree.
  */
-export async function createTaskWorktree(input: { readonly dir: string; readonly homeDir: string }, git: GitRunner = runGit): Promise<TaskWorktree> {
+export async function createTaskWorktree(input: { readonly dir: string; readonly homeDir: string; readonly base?: { readonly ref: string; readonly remote?: string } }, git: GitRunner = runGit): Promise<TaskWorktree> {
   // git reports the physical path (8.3 names expanded, symlinks resolved), so
   // both sides of the inside check go through realpath before comparing.
   const dir = realpathSync.native(resolve(input.dir))
   const repoRoot = await git(['rev-parse', '--show-toplevel'], dir).catch(failure => {
     throw new GitWorktreeError(`worktree isolation needs a git checkout: ${failure instanceof Error ? failure.message : String(failure)}`)
   })
-  const baseSha = await git(['rev-parse', '--verify', 'HEAD'], repoRoot).catch(() => {
-    throw new GitWorktreeError('worktree isolation needs a commit to branch from (the checkout has no HEAD yet)')
-  })
   const root = join(resolve(input.homeDir), TASK_WORKTREES_DIR)
   mkdirSync(root, { recursive: true })
-  // Branch and directory names share one slug; a collision retries with a new one.
+  // Branch, directory and fetch-side temp ref share one slug; a collision
+  // retries with a new one.
+  let name = slug()
+  let baseSha: string
+  const ref = input.base === undefined ? undefined : checkRefToken(input.base.ref, 'base ref')
+  const remote = input.base?.remote === undefined ? undefined : checkRefToken(input.base.remote, 'base remote')
+  if (ref === undefined) {
+    baseSha = await git(['rev-parse', '--verify', 'HEAD'], repoRoot).catch(() => {
+      throw new GitWorktreeError('worktree isolation needs a commit to branch from (the checkout has no HEAD yet)')
+    })
+  } else if (remote === undefined) {
+    baseSha = await git(['rev-parse', '--verify', `${ref}^{commit}`], repoRoot).catch(failure => {
+      throw new GitWorktreeError(`base ref ${ref} does not resolve to a commit: ${failure instanceof Error ? failure.message : String(failure)}`)
+    })
+  } else {
+    const remotes = new Set((await git(['remote'], repoRoot)).split('\n').map(line => line.trim()).filter(Boolean))
+    if (!remotes.has(remote)) {
+      if (!/^https:\/\//i.test(remote)) {
+        throw new GitWorktreeError(`base remote ${sanitizeRemoteDisplay(remote)} is not a configured remote or an https URL`)
+      }
+      let parsed: URL
+      try {
+        parsed = new URL(remote)
+      } catch {
+        throw new GitWorktreeError(`invalid base remote ${sanitizeRemoteDisplay(remote)}`)
+      }
+      if (parsed.protocol !== 'https:' || parsed.username !== '' || parsed.password !== '' || /^https:\/\/[^/?#]*@/i.test(remote)) {
+        throw new GitWorktreeError('base remote https URL must not contain credentials; use a configured git remote or credential helper instead')
+      }
+    }
+    const tempRef = `refs/dot/base/${name}`
+    await git(['fetch', '--no-tags', '--no-write-fetch-head', '--refmap=', remote, `+${ref}:${tempRef}`], repoRoot, { timeoutMs: 120_000 })
+    try {
+      baseSha = await git(['rev-parse', '--verify', `${tempRef}^{commit}`], repoRoot)
+    } finally {
+      // The sha is already in the object store; the temp ref is bookkeeping.
+      await git(['update-ref', '-d', tempRef], repoRoot).catch(() => '')
+    }
+  }
   for (let attempt = 0; attempt < 5; attempt += 1) {
-    const name = slug()
     const branch = `${TASK_BRANCH_PREFIX}${name}`
     const worktree = join(root, name)
     try {
       await git(['worktree', 'add', '-b', branch, worktree, baseSha], repoRoot)
     } catch (failure) {
-      if (attempt < 4 && /already exists/i.test(failure instanceof Error ? failure.message : '')) continue
+      if (attempt < 4 && /already exists/i.test(failure instanceof Error ? failure.message : '')) { name = slug(); continue }
       throw failure
     }
     // git reports forward slashes, expanded 8.3 names and resolved symlinks,
@@ -77,9 +137,19 @@ export async function createTaskWorktree(input: { readonly dir: string; readonly
     // of slicing the repoRoot prefix off the raw string.
     const inside = relative(realpathSync.native(repoRoot), dir)
     if (inside === '..' || inside.startsWith(`..${path.sep}`) || isAbsolute(inside)) {
+      await removeTaskWorktree({ repoRoot, worktree, branch, baseSha }, git).catch(() => undefined)
       throw new GitWorktreeError(`${input.dir} resolves outside ${repoRoot}`)
     }
-    return { repoRoot, worktree, cwd: inside ? join(worktree, inside) : worktree, branch, baseSha }
+    const cwd = inside ? join(worktree, inside) : worktree
+    if (inside || existsSync(worktree)) {
+      let isDir = false
+      try { isDir = statSync(cwd).isDirectory() } catch { isDir = false }
+      if (!isDir) {
+        await removeTaskWorktree({ repoRoot, worktree, branch, baseSha }, git).catch(() => undefined)
+        throw new GitWorktreeError(`directory ${inside.replaceAll('\\', '/')} does not exist as a directory in the target worktree; create the task from the repository root instead`)
+      }
+    }
+    return { repoRoot, worktree, cwd, branch, baseSha }
   }
   throw new GitWorktreeError('could not allocate a unique task worktree name')
 }
@@ -316,15 +386,24 @@ export async function mergeInto(input: { readonly repoRoot: string; readonly bra
  * anything else stays for the human. `force` uses -D for explicit discards.
  */
 export async function removeTaskWorktree(input: { readonly repoRoot: string; readonly worktree: string; readonly branch?: string; readonly baseSha?: string; readonly force?: boolean }, git: GitRunner = runGit): Promise<void> {
-  await git(['worktree', 'remove', '--force', input.worktree], input.repoRoot).catch(() => {
+  const removed = await git(['worktree', 'remove', '--force', input.worktree], input.repoRoot).then(() => true, () => {
     // The dir may already be gone (a removed entry is not an error worth surfacing).
     rmSync(input.worktree, { recursive: true, force: true })
-    return git(['worktree', 'prune'], input.repoRoot).then(() => undefined, () => undefined)
+    return git(['worktree', 'prune'], input.repoRoot).then(() => true, () => false)
   })
   if (!input.branch) return
   if (input.force) {
     await git(['branch', '-D', input.branch], input.repoRoot).catch(() => undefined)
     return
+  }
+  if (removed && input.baseSha) {
+    const ref = `refs/heads/${input.branch}`
+    const listed = await git(['worktree', 'list', '--porcelain'], input.repoRoot).catch(() => undefined)
+    const checkedOutElsewhere = listed === undefined || listed.split(/\r?\n/).some(line => line === `branch ${ref}`)
+    if (!checkedOutElsewhere && await refAt(input.repoRoot, ref, git) === input.baseSha) {
+      const deleted = await git(['update-ref', '-d', ref, input.baseSha], input.repoRoot).then(() => true, () => false)
+      if (deleted) return
+    }
   }
   await git(['branch', '-d', input.branch], input.repoRoot).catch(() => undefined)
 }

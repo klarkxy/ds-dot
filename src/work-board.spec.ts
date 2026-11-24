@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { acceptPayload, groupWork, lookRequest, rejectPayload, resumePayload, workFactTone, workFailure, type WorkBoardItem } from './work-board.ts'
+import { acceptPayload, groupWork, integrateActions, lookRequest, rejectPayload, resumePayload, workFactTone, workFailure, type WorkBoardItem } from './work-board.ts'
 
 const item = (patch: Partial<WorkBoardItem> = {}): WorkBoardItem => ({
   id: 'c-1', title: 'Ship', priority: 2, revision: 4, inputRef: 'in-4', control: 'open', status: 'review',
@@ -25,6 +25,17 @@ describe('work board actions', () => {
     expect(rejectPayload(item())).toEqual({ id: 'c-1', reviewRunId: 'run-2', expectedInputRevision: 4 })
     expect(rejectPayload(item({ runs: [{ id: 'run-2', kind: 'review', phase: 'stopped', cwd: 'H:/repo' }] }))).toBeUndefined()
     expect(rejectPayload(item({ closeout: { verificationId: 'v-3', source: 'user' } }))).toBeUndefined()
+  })
+
+  it('offers keep and discard, never merge, for a branch cut from another ref', () => {
+    const isolated = item({
+      status: 'done', closeout: { verificationId: 'v-3', source: 'user' },
+      isolation: { kind: 'worktree', repoRoot: 'H:/repo', worktree: 'H:/wt/abc', branch: 'dot/task-abc', baseSha: 'abc1234', state: 'active' },
+    })
+    expect(integrateActions(isolated)).toEqual(['merge', 'keep', 'discard'])
+    expect(integrateActions({ ...isolated, isolation: { ...isolated.isolation!, base: { ref: 'refs/pull/12/head', remote: 'upstream' } } })).toEqual(['keep', 'discard'])
+    expect(integrateActions({ ...isolated, status: 'review' })).toEqual([])
+    expect(integrateActions(item())).toEqual([])
   })
 
   it('offers resume only while a stored closeout still holds a run', () => {

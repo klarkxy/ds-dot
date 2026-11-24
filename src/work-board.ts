@@ -129,6 +129,8 @@ export interface WorkIsolationView {
   readonly worktree: string
   readonly branch: string
   readonly baseSha: string
+  /** Set when the branch was cut from a ref other than the checkout's HEAD. */
+  readonly base?: { readonly ref: string; readonly remote?: string }
   readonly state: 'active' | 'committed' | 'merged' | 'discarded'
   readonly commitSha?: string
   readonly mergedInto?: string
@@ -180,11 +182,11 @@ export interface WorkIntegratePayload {
   readonly mode: 'merge' | 'keep' | 'discard'
 }
 
-/** The three human-only integrations an accepted isolated change offers. */
+/** The human-only integrations an accepted isolated change offers. A branch cut from another ref cannot merge into the checkout. */
 export function integrateActions(item: WorkBoardItem): readonly ('merge' | 'keep' | 'discard')[] {
   if (item.isolation?.kind !== 'worktree' || item.isolation.state !== 'active') return []
   if (item.status !== 'done' || !item.closeout) return []
-  return ['merge', 'keep', 'discard']
+  return item.isolation.base === undefined ? ['merge', 'keep', 'discard'] : ['keep', 'discard']
 }
 
 const TERMINAL = new Set(['completed', 'failed', 'stopped'])

@@ -74,7 +74,7 @@ For dark mode verification, pass `--color-scheme dark`.
 
 ## 3. PR Body Requirements Checklist (`ds-dot` `CONTRIBUTING.md`)
 
-When a pull request changes what users see or do in the panel in normal use (touching `src/**/*.tsx`, copy, or icons is not enough on its own; changes visible only in failure states are covered by tests instead, see `CONTRIBUTING.md`):
+When a pull request changes what users see or do in the panel in normal use (touching `src/**/*.tsx`, copy, or icons is not enough on its own; PR body: embed a live GIF, name the failure state and its tests, or write `No frontend changes`; see `CONTRIBUTING.md`):
 
 1. Record the real running `dsh web` interface built from the PR's exact `HEAD` commit (`git rev-parse --short HEAD`). Never substitute a static screenshot, HTML mockup, or synthetic animation for a frontend PR GIF.
 

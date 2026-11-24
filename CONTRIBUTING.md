@@ -3,7 +3,7 @@
 Thanks for helping make Dorothy (`ds-dot`) better! Whether you're fixing a typo, polishing docs, or building a new panel feature, this guide walks through how we develop, test, and land changes cleanly.
 
 > [!TIP]
-> **Quick PR checklist:** Branch from `dev` → run `pnpm typecheck && pnpm test && pnpm build` → sync GitHub Pages (`docs/`) and READMEs if adding/changing a user-facing feature → target `dev` with a [Conventional Commits](https://www.conventionalcommits.org/) PR title → attach a live `dsh web` GIF if users will see the change in the panel during normal use (or write `No frontend changes`).
+> **Quick PR checklist:** Branch from `dev` → run `pnpm typecheck && pnpm test && pnpm build` → sync GitHub Pages (`docs/`) and READMEs if adding/changing a user-facing feature → target `dev` with a [Conventional Commits](https://www.conventionalcommits.org/) PR title → attach a live `dsh web` GIF if users will see the change in the panel during normal use (otherwise name the failure state and its tests, or write `No frontend changes`; see [Frontend changes](#frontend-changes)).
 
 ---
 
@@ -57,7 +57,7 @@ Feature and fix PRs merge into `dev` with a **merge commit** so feature history 
    - Format the PR title as a [Conventional Commit](https://www.conventionalcommits.org/) (e.g., `feat(work): render English work orders`). Allowed types: `feat`, `fix`, `perf`, `refactor`, `docs`, `test`, `build`, `ci`, `chore`, `revert`, `release` (append `!` for breaking changes, e.g., `feat(api)!: ...`).
    - Reference the issue with `Closes #123` in the PR description.
    - Keep PRs focused — small, reviewable changes beat monolithic diffs.
-   - Include a live interaction GIF whenever users will see the change in the panel during normal use (see [Frontend changes](#frontend-changes)).
+   - Include a live interaction GIF whenever users will see the change in the panel during normal use (otherwise name the failure state and its tests, or write `No frontend changes`; see [Frontend changes](#frontend-changes)).
    - Sync the GitHub Pages showcase (`docs/`) and READMEs whenever your PR adds or changes a user-facing feature (see [GitHub Pages and documentation sync](#github-pages-and-documentation-sync)).
 4. **Pass CI and review:** Both `CI result` (typecheck, test, build, and pack across Linux and Windows) and `PR title` must pass, all review threads must be resolved, any required frontend GIF must be in the PR body, and any user-facing feature must be synced to GitHub Pages before merging.
 5. **Merge with a merge commit**, then delete the feature branch.

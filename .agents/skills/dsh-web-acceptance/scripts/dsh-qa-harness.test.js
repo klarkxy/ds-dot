@@ -27,6 +27,7 @@ import {
   releaseIsolatedHome,
   removeIsolatedHome,
   resolveArtifactPath,
+  resolveWindowsExecutable,
   runIsolatedAcceptance,
   selectLaunchUrl,
   splitCommandLine,
@@ -395,6 +396,9 @@ test('quoteWindowsCmdArg quotes cmd metacharacters', () => {
   assert.equal(quoteWindowsCmdArg('%PATH%'), '"%%PATH%%"')
   assert.equal(quoteWindowsCmdArg('calc()'), '"calc()"')
   assert.equal(quoteWindowsCmdArg('a!b'), '"a!b"')
+  assert.equal(quoteWindowsCmdArg('a,b'), '"a,b"')
+  assert.equal(quoteWindowsCmdArg('C:\\work;1\\node.exe'), '"C:\\work;1\\node.exe"')
+  assert.equal(quoteWindowsCmdArg('--flag=value'), '"--flag=value"')
   assert.throws(() => quoteWindowsCmdArg('a\nb'), /newlines or NUL/)
   assert.throws(() => quoteWindowsCmdArg('a\0b'), /newlines or NUL/)
 })
@@ -425,6 +429,18 @@ test('splitCommandLine respects quoting and spaced paths', () => {
   assert.deepEqual(
     splitCommandLine('node --require="/home/qa tools/preload.cjs" /home/qa/dsh.js'),
     ['node', '--require=/home/qa tools/preload.cjs', '/home/qa/dsh.js'],
+  )
+  assert.deepEqual(
+    splitCommandLine("node --require='/home/qa tools/preload.cjs' --mode:'fast run' /home/qa/dsh.js"),
+    ['node', '--require=/home/qa tools/preload.cjs', '--mode:fast run', '/home/qa/dsh.js'],
+  )
+  assert.deepEqual(
+    splitCommandLine("node --user=o'connor /home/o'connor/bin/dsh"),
+    ['node', "--user=o'connor", "/home/o'connor/bin/dsh"],
+  )
+  assert.deepEqual(
+    splitCommandLine('node "" \'\' --flag="" --flag=\'\' tail'),
+    ['node', '', '', '--flag=', '--flag=', 'tail'],
   )
   assert.deepEqual(
     splitCommandLine('"say ""hello"" there"'),
@@ -475,6 +491,41 @@ test('windows native argv quoting doubles trailing backslashes before the closer
   )
   const batchInner = 'npm.cmd pack "C:\\QA Tools\\preload\\"'
   assert.equal(batch.args[4], `"${batchInner}"`)
+
+  const internalQuotes = windowsCmdInvocation(
+    'C:\\Program Files\\nodejs\\node.exe',
+    ['{"dir":"C:\\qa\\"}', '100%', 'a,b;c=d'],
+    { COMSPEC: 'C:\\Windows\\System32\\cmd.exe' },
+  )
+  assert.equal(
+    internalQuotes.args[4],
+    '"\"C:\\Program Files\\nodejs\\node.exe\" \"{""dir"":""C:\\qa\\\\""}\" \"100%%\" \"a,b;c=d\""',
+  )
+})
+
+test('resolveWindowsExecutable resolves extensionless commands via cwd, PATH, and PATHEXT', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'dsh-qa-winpath-'))
+  const cwdDir = path.join(root, 'cwd')
+  const binDir = path.join(root, 'bin')
+  await fs.mkdir(cwdDir)
+  await fs.mkdir(binDir)
+  try {
+    const dshExe = path.join(binDir, 'dsh.exe')
+    const npmPosix = path.join(binDir, 'npm')
+    const npmCmd = path.join(binDir, 'npm.cmd')
+    const localExe = path.join(cwdDir, 'local.exe')
+    await fs.writeFile(dshExe, '')
+    await fs.writeFile(npmPosix, '#!/bin/sh\n')
+    await fs.writeFile(npmCmd, '@echo off\r\n')
+    await fs.writeFile(localExe, '')
+    const env = { PATH: binDir, PATHEXT: '.COM;.EXE;.BAT;.CMD' }
+    assert.equal(resolveWindowsExecutable('dsh', env, cwdDir), dshExe)
+    assert.equal(resolveWindowsExecutable('npm', env, cwdDir), npmCmd)
+    assert.equal(resolveWindowsExecutable('local', env, cwdDir), localExe)
+    assert.equal(resolveWindowsExecutable('missing-bin', env, cwdDir), null)
+  } finally {
+    await fs.rm(root, { recursive: true, force: true })
+  }
 })
 
 test('windows native spawn keeps a trailing-backslash directory as one argv', {
@@ -486,14 +537,38 @@ test('windows native spawn keeps a trailing-backslash directory as one argv', {
     await fs.mkdir(path.join(root, 'preload'))
     const printer = path.join(root, 'print-argv.js')
     await fs.writeFile(printer, 'process.stdout.write(JSON.stringify(process.argv.slice(2)))\n')
-    const spec = windowsCmdInvocation(process.execPath, [printer, dir, 'NEXT'], process.env)
+    const spec = windowsCmdInvocation(process.execPath, [printer, dir, 'NEXT', '{"dir":"C:\\qa\\"}'], process.env)
     const res = spawnSync(spec.file, spec.args, {
       encoding: 'utf8',
       windowsVerbatimArguments: true,
       windowsHide: true,
     })
     assert.equal(res.status, 0, `${res.stderr}${res.stdout}`)
-    assert.deepEqual(JSON.parse(res.stdout), [dir, 'NEXT'])
+    assert.deepEqual(JSON.parse(res.stdout), [dir, 'NEXT', '{"dir":"C:\\qa\\"}'])
+  } finally {
+    await fs.rm(root, { recursive: true, force: true })
+  }
+})
+
+test('windows direct spawn preserves %, quotes, backslashes, and delimiters for extensionless node', {
+  skip: process.platform !== 'win32' ? 'Windows-only native direct spawn' : false,
+}, async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'dsh qa direct '))
+  try {
+    const printer = path.join(root, 'print-argv.js')
+    await fs.writeFile(printer, 'process.stdout.write(JSON.stringify(process.argv.slice(2)))\n')
+    const args = [printer, '%TEMP%', '100%', '{"dir":"C:\\qa\\"}', 'C:\\QA Tools\\preload\\', 'a,b;c=d', '']
+    const spec = commandSpawnInvocation('node', args, process.env, root)
+    assert.equal(path.basename(spec.file).toLowerCase(), 'node.exe')
+    assert.equal(spec.windowsVerbatimArguments, undefined)
+    assert.equal(spec.shell, undefined)
+    const res = spawnSync(spec.file, spec.args, {
+      encoding: 'utf8',
+      shell: false,
+      windowsHide: true,
+    })
+    assert.equal(res.status, 0, `${res.stderr}${res.stdout}`)
+    assert.deepEqual(JSON.parse(res.stdout), args.slice(1))
   } finally {
     await fs.rm(root, { recursive: true, force: true })
   }

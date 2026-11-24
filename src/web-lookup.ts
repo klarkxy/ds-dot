@@ -287,44 +287,64 @@ export function compactGitHubJson(value: unknown): unknown {
 
 const GITHUB_NOISE_KEYS = new Set(['node_id', 'gravatar_id', '_links', 'reactions', 'performed_via_github_app'])
 const GITHUB_API_HOST = 'api.github.com'
+const GITHUB_DIRECT_TIMEOUT_MS = 8_000
+
+/**
+ * `cooldown` marks failures that will keep failing — GitHub unreachable or
+ * rate-limiting us — so the caller can skip direct attempts for a while.
+ * Other non-2xx responses and non-JSON bodies are one-call misses.
+ */
+export type GitHubDirectAttempt = { ok: true; result: WebFetchResult } | { ok: false; cooldown: boolean }
 
 /**
  * Fetch the GitHub API directly — Jina renders the JSON as a wall of text —
- * and compact it. Returns undefined on any failure so the caller falls back
- * to the configured path unchanged.
+ * and compact it, with a short timeout of its own. Returns undefined when the
+ * URL is not api.github.com; a caller abort propagates like the normal path.
  */
 export async function gitHubApiFetch(rawUrl: string, options: {
   fetch: LookupFetch
   signal?: AbortSignal
   timeoutMs?: number
   maxChars?: number
-}): Promise<WebFetchResult | undefined> {
+}): Promise<GitHubDirectAttempt | undefined> {
   let target: URL
   try { target = new URL(rawUrl) } catch { return undefined }
   if ((target.protocol !== 'http:' && target.protocol !== 'https:') || target.hostname !== GITHUB_API_HOST) return undefined
-  const signal = combineSignal(options.signal, options.timeoutMs ?? DEFAULT_TIMEOUT_MS)
+  if (options.signal?.aborted) {
+    throw new WebError('the lookup was cancelled', 'WEB_ABORTED', { cause: options.signal.reason })
+  }
+  const signal = combineSignal(options.signal, options.timeoutMs ?? GITHUB_DIRECT_TIMEOUT_MS)
   const maxChars = options.maxChars ?? DEFAULT_MAX_CHARS
+  let response: Response
+  let body: { content: string; truncated: boolean }
   try {
-    const response = await options.fetch(target.toString(), {
+    response = await options.fetch(target.toString(), {
       method: 'GET',
       redirect: 'follow',
       signal,
       headers: { accept: 'application/vnd.github+json', 'user-agent': 'dsh-dot' },
     })
-    if (!response.ok) {
-      await response.body?.cancel().catch(() => {})
-      return undefined
-    }
-    const body = await readBounded(response, maxChars, signal)
-    const parsed: unknown = JSON.parse(body.content)
-    return {
+    if (response.ok) body = await readBounded(response, maxChars, signal)
+  } catch (error) {
+    // A caller abort is a cancellation, not a GitHub failure: propagate it.
+    if (options.signal?.aborted) throw asWebError(error, 'the lookup was cancelled', options.signal)
+    return { ok: false, cooldown: true }
+  }
+  if (!response.ok) {
+    await response.body?.cancel().catch(() => {})
+    // Forbidden or rate-limited keeps failing; a 404 or other miss does not.
+    return { ok: false, cooldown: response.status === 403 || response.status === 429 }
+  }
+  let parsed: unknown
+  try { parsed = JSON.parse(body!.content) } catch { return { ok: false, cooldown: false } }
+  return {
+    ok: true,
+    result: {
       url: target.toString(),
       statusCode: response.status,
       body: { kind: 'text', content: JSON.stringify(compactGitHubJson(parsed), null, 1) },
-      truncated: body.truncated,
-    }
-  } catch {
-    return undefined
+      truncated: body!.truncated,
+    },
   }
 }
 

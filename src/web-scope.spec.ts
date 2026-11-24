@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { WebRuntime } from '@deepseek-ai/dsh-web'
-import { installDotWeb } from './web-scope.ts'
+import { dotFetchProvider, installDotWeb } from './web-scope.ts'
+import type { LookupFetch } from './web-lookup.ts'
 
 const html = '<a class="result__a" href="https://example.com/docs">Example</a>'
 
@@ -224,6 +225,64 @@ describe('dot web scope', () => {
       } finally {
         globalThis.fetch = original
       }
+    })
+  })
+
+  it('skips the direct GitHub attempt during the cooldown after a 403, then retries', async () => {
+    await withPins(undefined, undefined, async () => {
+      let time = 1_000_000
+      const calls: string[] = []
+      const fetch: LookupFetch = async input => {
+        calls.push(input)
+        if (input.startsWith('https://api.github.com/')) return new Response('forbidden', { status: 403 })
+        return new Response('Title: Page\n\nMarkdown Content:\nbody', { status: 200, headers: { 'content-type': 'text/plain' } })
+      }
+      const provider = dotFetchProvider(undefined, fetch, () => time)!
+      const first = await provider.fetch({ url: 'https://api.github.com/rate_limit' }, undefined)
+      expect(first.body).toEqual({ kind: 'text', content: 'Title: Page\n\nMarkdown Content:\nbody' })
+      expect(calls).toEqual(['https://api.github.com/rate_limit', 'https://r.jina.ai/https://api.github.com/rate_limit'])
+
+      calls.length = 0
+      const second = await provider.fetch({ url: 'https://api.github.com/cooled' }, undefined)
+      expect(second.body).toEqual({ kind: 'text', content: 'Title: Page\n\nMarkdown Content:\nbody' })
+      expect(calls).toEqual(['https://r.jina.ai/https://api.github.com/cooled'])
+
+      time += 10 * 60_000 + 1
+      calls.length = 0
+      await provider.fetch({ url: 'https://api.github.com/again' }, undefined)
+      expect(calls[0]).toBe('https://api.github.com/again')
+    })
+  })
+
+  it('tries the direct GitHub attempt again after a one-off miss like a 404', async () => {
+    await withPins(undefined, undefined, async () => {
+      const calls: string[] = []
+      const fetch: LookupFetch = async input => {
+        calls.push(input)
+        if (input.startsWith('https://api.github.com/')) return new Response('not found', { status: 404 })
+        return new Response('Title: Page\n\nMarkdown Content:\nbody', { status: 200 })
+      }
+      const provider = dotFetchProvider(undefined, fetch, () => 0)!
+      await provider.fetch({ url: 'https://api.github.com/missing' }, undefined)
+      calls.length = 0
+      await provider.fetch({ url: 'https://api.github.com/also-missing' }, undefined)
+      expect(calls).toEqual(['https://api.github.com/also-missing', 'https://r.jina.ai/https://api.github.com/also-missing'])
+    })
+  })
+
+  it('propagates a caller abort without cooldown or fallback', async () => {
+    await withPins(undefined, undefined, async () => {
+      const calls: string[] = []
+      const fetch: LookupFetch = async input => {
+        calls.push(input)
+        return new Response('{}')
+      }
+      const provider = dotFetchProvider(undefined, fetch, () => 0)!
+      await expect(provider.fetch({ url: 'https://api.github.com/x' }, AbortSignal.abort())).rejects.toMatchObject({ code: 'WEB_ABORTED' })
+      expect(calls).toEqual([])
+      // No cooldown was armed: the next call still tries the direct path first.
+      await provider.fetch({ url: 'https://api.github.com/y' }, undefined)
+      expect(calls[0]).toBe('https://api.github.com/y')
     })
   })
 })

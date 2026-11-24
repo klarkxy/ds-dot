@@ -303,24 +303,61 @@ describe('dot web lookup', () => {
       seen.push({ url: input, headers: init.headers })
       return jsonResponse(JSON.stringify({ number: 5, title: 'Bug', node_id: 'I_x', url: 'https://api.github.com/repos/o/r/issues/5', html_url: 'https://github.com/o/r/issues/5', user: { login: 'octo', avatar_url: 'a', type: 'User' } }), 200, 'application/json')
     }
-    const result = await gitHubApiFetch('https://api.github.com/repos/o/r/issues/5', { fetch })
+    const attempt = await gitHubApiFetch('https://api.github.com/repos/o/r/issues/5', { fetch })
     expect(seen).toEqual([{ url: 'https://api.github.com/repos/o/r/issues/5', headers: { accept: 'application/vnd.github+json', 'user-agent': 'dsh-dot' } }])
+    expect(attempt?.ok).toBe(true)
+    if (!attempt?.ok) throw new Error('expected a direct result')
+    const result = attempt.result
     expect(result).toMatchObject({ url: 'https://api.github.com/repos/o/r/issues/5', statusCode: 200, truncated: false })
-    expect(result?.body).toEqual({ kind: 'text', content: JSON.stringify({ number: 5, title: 'Bug', html_url: 'https://github.com/o/r/issues/5', user: 'octo' }, null, 1) })
+    expect(result.body).toEqual({ kind: 'text', content: JSON.stringify({ number: 5, title: 'Bug', html_url: 'https://github.com/o/r/issues/5', user: 'octo' }, null, 1) })
   })
 
-  it('defers to the normal path on GitHub errors, non-JSON, and other hosts', async () => {
-    let calls = 0
-    const failing: LookupFetch = async () => { calls += 1; return jsonResponse('rate limited', 403) }
-    expect(await gitHubApiFetch('https://api.github.com/rate_limit', { fetch: failing })).toBeUndefined()
-    expect(calls).toBe(1)
+  it('marks rate limits and network failures as cooldown-worthy, other misses as one-off', async () => {
+    const status = (code: number): LookupFetch => async () => jsonResponse('no', code)
+    expect(await gitHubApiFetch('https://api.github.com/rate_limit', { fetch: status(403) })).toEqual({ ok: false, cooldown: true })
+    expect(await gitHubApiFetch('https://api.github.com/rate_limit', { fetch: status(429) })).toEqual({ ok: false, cooldown: true })
+    expect(await gitHubApiFetch('https://api.github.com/missing', { fetch: status(404) })).toEqual({ ok: false, cooldown: false })
+    expect(await gitHubApiFetch('https://api.github.com/broken', { fetch: status(500) })).toEqual({ ok: false, cooldown: false })
+    const network: LookupFetch = async () => { throw new TypeError('connect reset') }
+    expect(await gitHubApiFetch('https://api.github.com/', { fetch: network })).toEqual({ ok: false, cooldown: true })
     const notJson: LookupFetch = async () => jsonResponse('<html>no</html>', 200)
-    expect(await gitHubApiFetch('https://api.github.com/', { fetch: notJson })).toBeUndefined()
+    expect(await gitHubApiFetch('https://api.github.com/', { fetch: notJson })).toEqual({ ok: false, cooldown: false })
+  })
+
+  it('times the direct attempt out on its own short budget', async () => {
+    const hanging: LookupFetch = (_input, init) => new Promise((_resolve, reject) => {
+      init.signal?.addEventListener('abort', () => reject(Object.assign(new Error('timed out'), { name: 'TimeoutError' })))
+    })
+    expect(await gitHubApiFetch('https://api.github.com/slow', { fetch: hanging, timeoutMs: 20 })).toEqual({ ok: false, cooldown: true })
+  })
+
+  it('propagates a caller abort instead of falling back or cooling down', async () => {
+    const calls: string[] = []
+    const fetch: LookupFetch = async (input, init) => {
+      calls.push(input)
+      init.signal?.addEventListener('abort', () => {})
+      return jsonResponse('{}')
+    }
+    const already = AbortSignal.abort()
+    await expect(gitHubApiFetch('https://api.github.com/x', { fetch, signal: already })).rejects.toMatchObject({ code: 'WEB_ABORTED' })
+    expect(calls).toEqual([])
+
+    const controller = new AbortController()
+    const hanging: LookupFetch = (_input, init) => new Promise((_resolve, reject) => {
+      init.signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')))
+    })
+    const attempt = gitHubApiFetch('https://api.github.com/y', { fetch: hanging, signal: controller.signal, timeoutMs: 5_000 })
+    controller.abort()
+    await expect(attempt).rejects.toMatchObject({ code: 'WEB_ABORTED' })
+  })
+
+  it('defers to the normal path on other hosts and invalid URLs', async () => {
+    let calls = 0
     const other: LookupFetch = async () => { calls += 1; return jsonResponse('{}') }
     expect(await gitHubApiFetch('https://github.com/o/r', { fetch: other })).toBeUndefined()
     expect(await gitHubApiFetch('https://api.github.com.evil/x', { fetch: other })).toBeUndefined()
     expect(await gitHubApiFetch('not a url', { fetch: other })).toBeUndefined()
-    expect(calls).toBe(1)
+    expect(calls).toBe(0)
   })
 
   it('uses Jina URL Source only from the preamble, and otherwise keeps the requested URL', async () => {

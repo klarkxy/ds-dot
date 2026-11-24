@@ -22,10 +22,11 @@ import { registerHostRpc, type HostRpcContext } from '@klarkxy/dsh-plugin-kit/ho
 import { installPluginLogger } from '@klarkxy/dsh-plugin-kit/logger'
 import { approvalAuditId, raceApproval } from './approval-relay.ts'
 import type { RawEvent } from './chat.ts'
-import { COMPACTION_POLICY, dotOwnedCredentialRefs, mcpCredentialName, MCP_SERVER_NAME_PATTERN, PLUGIN_NAME, PRESET_ID, RPC_CHANNEL, SERVICE_NAME, type PendingQuestionItem, type TaskPermission, type TaskRecord } from './contracts.ts'
+import { COMPACTION_POLICY, dotOwnedCredentialRefs, mcpCredentialName, MCP_CREDENTIAL_VALUE_MAX, MCP_SERVER_NAME_PATTERN, PLUGIN_NAME, PRESET_ID, RPC_CHANNEL, SERVICE_NAME, validateMcpCredentialSet, type PendingQuestionItem, type TaskPermission, type TaskRecord } from './contracts.ts'
 import { CHAT_SAY_BODY_BYTES, checkChatImages } from './chat-images.ts'
 import { ChatFeed } from './feed.ts'
 import { hostImport } from './host-import.ts'
+import { MCP_CATALOG } from './mcp-catalog.ts'
 import { DotCapabilities, type CapabilityPluginManager, type CapabilityTools } from './capabilities.ts'
 import { bindHost } from './host.ts'
 import { InboxLedger } from './inbox.ts'
@@ -518,11 +519,17 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
         case 'mcp.credential.set': {
           const server = field(payload, 'server')
           const value = field(payload, 'value')
-          if (typeof server !== 'string' || !MCP_SERVER_NAME_PATTERN.test(server)) return { ok: false, error: { code: 'dot/mcp-bad-server', message: `invalid server name: ${String(server)}` } }
+          // The panel sets a catalog entry's token right before adding its
+          // server row, so a catalog id is valid even without a stored row.
+          const known = new Set([...Object.keys(store.settings.mcpServers ?? {}), ...MCP_CATALOG.map(entry => entry.id)])
+          const problem = validateMcpCredentialSet(server, value, known)
+          if (problem === 'bad-server') return { ok: false, error: { code: 'dot/mcp-bad-server', message: `invalid server name: ${String(server)}` } }
+          if (problem === 'unknown-server') return { ok: false, error: { code: 'dot/mcp-bad-server', message: `unknown MCP server: ${String(server)}` } }
+          if (problem === 'bad-credential') return { ok: false, error: { code: 'dot/mcp-bad-credential', message: `credential value must be a non-empty string of at most ${MCP_CREDENTIAL_VALUE_MAX} characters` } }
           const credentials = credentialsService()
           if (credentials?.set === undefined || credentials.describe === undefined) return { ok: false, error: { code: 'dot/mcp-unavailable', message: 'the host credentials service is unavailable' } }
-          const ref = await credentialRefFor(mcpCredentialName(server))
-          await credentials.set(ref, typeof value === 'string' ? value : '')
+          const ref = await credentialRefFor(mcpCredentialName(server as string))
+          await credentials.set(ref, value as string)
           const info = await credentials.describe(ref)
           return { ok: true, value: { configured: info?.configured === true, masked: info?.masked } }
         }

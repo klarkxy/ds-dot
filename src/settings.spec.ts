@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { DEFAULT_SETTINGS } from './contracts.ts'
+import { DEFAULT_SETTINGS, validateMcpCredentialSet } from './contracts.ts'
 import { DEFAULT_ADDRESS, DEFAULT_PERSONA, PERSONA_MAX_CHARS } from './persona.ts'
 import { parseSettings, patchSettings } from './settings.ts'
 import { DotStore } from './store.ts'
@@ -186,5 +186,20 @@ describe('mcpServers setting', () => {
     expect(parseSettings({ mcpServers: 'junk' }).mcpServers).toBeUndefined()
     const cleared = patchSettings({ ...DEFAULT_SETTINGS, mcpServers: { deepwiki } }, { mcpServers: null })
     expect(cleared.mcpServers).toBeUndefined()
+  })
+})
+
+describe('validateMcpCredentialSet', () => {
+  const known = new Set(['deepwiki', 'github'])
+  it('rejects bad servers and values, accepts the panel flow', () => {
+    expect(validateMcpCredentialSet('deepwiki', 'tok', known)).toBeUndefined()
+    expect(validateMcpCredentialSet('github', 'x'.repeat(4096), known)).toBeUndefined()
+    expect(validateMcpCredentialSet(1, 'tok', known)).toBe('bad-server')
+    expect(validateMcpCredentialSet('bad name!', 'tok', known)).toBe('bad-server')
+    expect(validateMcpCredentialSet('ghost', 'tok', known)).toBe('unknown-server')
+    expect(validateMcpCredentialSet('deepwiki', 5, known)).toBe('bad-credential')
+    expect(validateMcpCredentialSet('deepwiki', '', known)).toBe('bad-credential')
+    expect(validateMcpCredentialSet('deepwiki', '   ', known)).toBe('bad-credential')
+    expect(validateMcpCredentialSet('deepwiki', 'x'.repeat(4097), known)).toBe('bad-credential')
   })
 })

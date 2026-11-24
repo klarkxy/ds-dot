@@ -528,6 +528,23 @@ export function dotOwnedCredentialRefs(removed: readonly DotMcpServer[]): string
   return [...new Set(removed.flatMap(server => mcpCredentialRefs(server)).filter(ref => ref.startsWith('DOT_MCP_')))]
 }
 
+/** Upper bound for one stored MCP credential value; empty means "use unset". */
+export const MCP_CREDENTIAL_VALUE_MAX = 4096
+
+export type McpCredentialSetError = 'bad-server' | 'unknown-server' | 'bad-credential'
+
+/** Validate `mcp.credential.set` args: a known server name plus a non-empty, bounded value. */
+export function validateMcpCredentialSet(
+  server: unknown,
+  value: unknown,
+  knownServers: ReadonlySet<string>,
+): McpCredentialSetError | undefined {
+  if (typeof server !== 'string' || !MCP_SERVER_NAME_PATTERN.test(server)) return 'bad-server'
+  if (!knownServers.has(server)) return 'unknown-server'
+  if (typeof value !== 'string' || value.trim() === '' || value.length > MCP_CREDENTIAL_VALUE_MAX) return 'bad-credential'
+  return undefined
+}
+
 export const DEFAULT_SETTINGS: DotSettings = {
   approvals: 'dot',
   questions: 'dot',

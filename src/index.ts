@@ -699,7 +699,9 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
         }
         case 'settings.set': {
           const previous = store.settings
-          const next = patchSettings(previous, field(payload, 'patch'), service.locale)
+          let groups
+          try { groups = (await service.capabilitiesView()).groups } catch { groups = undefined }
+          const next = patchSettings(previous, field(payload, 'patch'), service.locale, groups)
           // A new dot-local server may not reuse a global server's name: its
           // mount would shadow the global group for dot and inherit grants
           // the human gave to the global row.

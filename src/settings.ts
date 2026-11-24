@@ -4,7 +4,8 @@
  * patches from the panel are checked strictly and refused as a whole.
  */
 import { z } from 'zod'
-import { DEFAULT_SETTINGS, SETTING_FIELDS, TASK_MODEL_LIST_MAX, isMcpServerHeaders, isMcpServerUrl, MCP_NEW_SERVER_NAME_PATTERN, MCP_SERVER_NAME_PATTERN, mcpServerOf, type DotSettings, type SettingField, type TaskPermission } from './contracts.ts'
+import { isTaskOnlySelector } from './capabilities.ts'
+import { DEFAULT_SETTINGS, SETTING_FIELDS, TASK_MODEL_LIST_MAX, isMcpServerHeaders, isMcpServerUrl, MCP_NEW_SERVER_NAME_PATTERN, MCP_SERVER_NAME_PATTERN, mcpServerOf, type CapabilityGroupView, type DotSettings, type SettingField, type TaskPermission } from './contracts.ts'
 import { type CopyLocale } from './i18n/index.ts'
 import { CACHE_TTL_MAX_ENTRIES, CACHE_TTL_MAX_MINUTES } from './keepalive.ts'
 import { ADDRESS_MAX_CHARS, PERSONA_MAX_CHARS, defaultAddress, defaultPersona } from './persona.ts'
@@ -112,7 +113,7 @@ export function parseSettings(value: unknown): DotSettings {
 }
 
 /** Apply a patch from the settings view; null on model, persona or address goes back to the default. */
-export function patchSettings(current: DotSettings, patch: unknown, locale: CopyLocale = 'zh'): DotSettings {
+export function patchSettings(current: DotSettings, patch: unknown, locale: CopyLocale = 'zh', groups?: readonly CapabilityGroupView[]): DotSettings {
   if (!isRecord(patch)) throw new SettingsError('settings patch must be an object')
   const defaults: Record<string, string> = { persona: defaultPersona(locale), address: defaultAddress(locale) }
   const next: Record<string, unknown> = { ...current }
@@ -127,6 +128,19 @@ export function patchSettings(current: DotSettings, patch: unknown, locale: Copy
       for (const name of Object.keys(parsed.data as Record<string, unknown>)) {
         if (!(name in (current.mcpServers ?? {})) && !MCP_NEW_SERVER_NAME_PATTERN.test(name)) {
           throw new SettingsError(`invalid value for ${key}`)
+        }
+      }
+    }
+    // Task-run tools (and all-task-only groups) are never granted to dot; a
+    // grant row on one is a dead write. A patch carrying a stored row
+    // unchanged is a carry-along, not a new grant, and deleting the row stays
+    // allowed.
+    if (key === 'capabilities') {
+      const stored = current.capabilities?.grants ?? {}
+      for (const [sel, grant] of Object.entries((parsed.data as { grants: Record<string, 'off' | 'ask' | 'auto'> }).grants)) {
+        if (isTaskOnlySelector(sel, groups) && stored[sel] !== grant) {
+          const name = sel.startsWith('tool:') ? sel.slice(5) : sel
+          throw new SettingsError(`${name} belongs to task runs and cannot be granted to Dorothy; remove the selector instead`)
         }
       }
     }

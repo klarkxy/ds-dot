@@ -367,6 +367,192 @@ describe('sectioned settings, switches, and help tips', () => {
     await act(async () => root.unmount())
   })
 
+  it('marks a task-only tool with a badge and no picker, and no auto-confirm exists', async () => {
+    let current: DotSettings = { ...DEFAULT_SETTINGS }
+    const api = {
+      models: async () => ({ groups: [] }),
+      settings: async () => current,
+      settingProposals: async () => [],
+      decideSetting: async () => 'ok',
+      capabilities: async () => ({
+        locked: [],
+        groups: [{
+          id: 'host', kind: 'host', label: 'Unattributed',
+          tools: [
+            { name: 'bash', conditional: false, taskOnly: true },
+            { name: 'extra_tool', conditional: false },
+          ],
+        }],
+        applied: {},
+      }),
+      setSettings: async (patch: Partial<DotSettings>) => { current = { ...current, ...patch } as DotSettings; return current },
+    }
+    function Harness() {
+      const [settings, setSettings] = useState<DotSettings>(current)
+      return <SettingsPanel locale="en" api={api as never} section="capabilities" settings={settings} onSaved={setSettings} />
+    }
+    const root = createRoot(document.getElementById('root')!)
+    await act(async () => root.render(<Harness />))
+    await act(async () => { await Promise.resolve() })
+    const rows = [...document.querySelectorAll('.dsh-dot-cap-row')]
+    const bash = rows.find(row => row.textContent?.includes('bash'))!
+    const badge = bash.querySelector('.dsh-dot-cap-badge--warn')!
+    expect(badge.textContent).toBe('Tasks only')
+    expect(badge.getAttribute('title')).toContain('dispatches a task')
+    expect(bash.querySelector('[role="tablist"]')).toBeNull()
+    const extra = rows.find(row => row.textContent?.includes('extra_tool'))!
+    expect(extra.querySelector('[role="tablist"]')).not.toBeNull()
+    expect(document.querySelector('.dsh-dot-cap-confirm')).toBeNull()
+    await act(async () => root.unmount())
+  })
+
+  it('hides the group picker when every tool in the group is task-only, but keeps it for mixed groups', async () => {
+    let current: DotSettings = { ...DEFAULT_SETTINGS }
+    const api = {
+      models: async () => ({ groups: [] }),
+      settings: async () => current,
+      settingProposals: async () => [],
+      decideSetting: async () => 'ok',
+      capabilities: async () => ({
+        locked: [],
+        groups: [
+          {
+            id: 'plugin:manage', kind: 'plugin', label: 'Manage',
+            tools: [{ name: 'plugin_manager', conditional: false, taskOnly: true }],
+          },
+          {
+            id: 'plugin:mixed', kind: 'plugin', label: 'Mixed',
+            tools: [
+              { name: 'bash', conditional: false, taskOnly: true },
+              { name: 'extra_tool', conditional: false },
+            ],
+          },
+        ],
+        applied: {},
+      }),
+      setSettings: async (patch: Partial<DotSettings>) => { current = { ...current, ...patch } as DotSettings; return current },
+    }
+    function Harness() {
+      const [settings, setSettings] = useState<DotSettings>(current)
+      return <SettingsPanel locale="en" api={api as never} section="capabilities" settings={settings} onSaved={setSettings} />
+    }
+    const root = createRoot(document.getElementById('root')!)
+    await act(async () => root.render(<Harness />))
+    await act(async () => { await Promise.resolve() })
+    const groups = [...document.querySelectorAll('.dsh-dot-cap-group')]
+    const manage = groups.find(group => group.textContent?.includes('plugin_manager'))!
+    expect(manage.querySelector(':scope > summary [role="tablist"]')).toBeNull()
+    const mixed = groups.find(group => group.textContent?.includes('extra_tool'))!
+    expect(mixed.querySelector(':scope > summary [role="tablist"]')).not.toBeNull()
+    await act(async () => root.unmount())
+  })
+
+  it('resets a leftover task-only grant and keeps the other grants', async () => {
+    let current: DotSettings = {
+      ...DEFAULT_SETTINGS,
+      capabilities: { grants: { 'tool:bash': 'ask', 'tool:extra_tool': 'auto', 'plugin:manage': 'ask' } },
+    }
+    const api = {
+      models: async () => ({ groups: [] }),
+      settings: async () => current,
+      settingProposals: async () => [],
+      decideSetting: async () => 'ok',
+      capabilities: async () => ({
+        locked: [],
+        groups: [
+          {
+            id: 'host', kind: 'host', label: 'Unattributed',
+            tools: [
+              { name: 'bash', conditional: false, taskOnly: true },
+              { name: 'extra_tool', conditional: false },
+            ],
+          },
+          {
+            id: 'plugin:manage', kind: 'plugin', label: 'Manage',
+            tools: [{ name: 'plugin_manager', conditional: false, taskOnly: true }],
+          },
+        ],
+        applied: { extra_tool: 'auto' as const },
+      }),
+      setSettings: async (patch: Partial<DotSettings>) => { current = { ...current, ...patch } as DotSettings; return current },
+    }
+    function Harness() {
+      const [settings, setSettings] = useState<DotSettings>(current)
+      return <SettingsPanel locale="en" api={api as never} section="capabilities" settings={settings} onSaved={next => { current = next; setSettings(next) }} />
+    }
+    const root = createRoot(document.getElementById('root')!)
+    await act(async () => root.render(<Harness />))
+    await act(async () => { await Promise.resolve() })
+    const rows = [...document.querySelectorAll('.dsh-dot-cap-row')]
+    const bash = rows.find(row => row.textContent?.includes('bash'))!
+    expect(bash.querySelector('[role="tablist"]')).toBeNull()
+    const bashReset = bash.querySelector<HTMLButtonElement>('.dsh-dot-cap-clear')!
+    expect(bashReset.textContent).toBe('Reset to inherited')
+    await act(async () => bashReset.click())
+    await act(async () => { await Promise.resolve() })
+    expect(current.capabilities.grants['tool:bash']).toBeUndefined()
+    expect(current.capabilities.grants['tool:extra_tool']).toBe('auto')
+    expect(current.capabilities.grants['plugin:manage']).toBe('ask')
+
+    const groups = [...document.querySelectorAll('.dsh-dot-cap-group')]
+    const manage = groups.find(group => group.querySelector(':scope > summary')?.textContent?.includes('Manage'))!
+    expect(manage.querySelector(':scope > summary [role="tablist"]')).toBeNull()
+    const groupReset = manage.querySelector<HTMLButtonElement>(':scope > summary .dsh-dot-cap-clear')!
+    expect(groupReset.textContent).toBe('Reset to inherited')
+    await act(async () => groupReset.click())
+    await act(async () => { await Promise.resolve() })
+    expect(current.capabilities.grants['plugin:manage']).toBeUndefined()
+    expect(current.capabilities.grants['tool:extra_tool']).toBe('auto')
+    await act(async () => root.unmount())
+  })
+
+  it('skips task-only tools when computing group next-segment badges and expansion', async () => {
+    let current: DotSettings = {
+      ...DEFAULT_SETTINGS,
+      capabilities: { grants: { 'plugin:mixed': 'auto', 'plugin:manage': 'ask' } },
+    }
+    const api = {
+      models: async () => ({ groups: [] }),
+      settings: async () => current,
+      settingProposals: async () => [],
+      decideSetting: async () => 'ok',
+      capabilities: async () => ({
+        locked: [],
+        groups: [
+          {
+            id: 'plugin:mixed', kind: 'plugin', label: 'Mixed',
+            tools: [
+              { name: 'plugin_manager', conditional: false, taskOnly: true },
+              { name: 'extra_tool', conditional: false },
+            ],
+          },
+          {
+            id: 'plugin:manage', kind: 'plugin', label: 'Manage',
+            tools: [{ name: 'plugin_manager_only', conditional: false, taskOnly: true }],
+          },
+        ],
+        applied: { extra_tool: 'auto' as const },
+      }),
+      setSettings: async (patch: Partial<DotSettings>) => { current = { ...current, ...patch } as DotSettings; return current },
+    }
+    function Harness() {
+      const [settings, setSettings] = useState<DotSettings>(current)
+      return <SettingsPanel locale="en" api={api as never} section="capabilities" settings={settings} onSaved={setSettings} />
+    }
+    const root = createRoot(document.getElementById('root')!)
+    await act(async () => root.render(<Harness />))
+    await act(async () => { await Promise.resolve() })
+    const groups = [...document.querySelectorAll('.dsh-dot-cap-group')]
+    const mixed = groups.find(group => group.querySelector(':scope > summary')?.textContent?.includes('Mixed'))!
+    expect(mixed.querySelector(':scope > summary')!.textContent).not.toContain('Applies next segment')
+    expect(mixed.querySelector(':scope > summary [role="tablist"]')).not.toBeNull()
+    const manage = groups.find(group => group.querySelector(':scope > summary')?.textContent?.includes('Manage'))!
+    expect(manage.querySelector(':scope > summary')!.textContent).not.toContain('Applies next segment')
+    expect((manage as HTMLDetailsElement).open).toBe(false)
+    expect(manage.querySelector(':scope > summary .dsh-dot-cap-clear')).not.toBeNull()
+    await act(async () => root.unmount())
+  })
+
   it('keeps model-load failure warnings inline instead of hiding them in tooltips', async () => {
     const api = {
       models: async () => { throw new Error('offline') },

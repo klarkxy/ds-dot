@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { DEFAULT_SETTINGS, type CapabilityGroupView, type DotSettings } from './contracts.ts'
 import { parseSettings, patchSettings, CAPABILITY_GRANTS_MAX } from './settings.ts'
-import { buildCatalog, capabilitiesSignature, DotCapabilities, HIGH_RISK_TOOLS, hostScheduleTargetsDot, installToolAttribution, mcpServerOf, resolveGrants, SCOPED_COPY, type CapabilityPluginManager, type CapabilityTools, type CapabilityToolDef } from './capabilities.ts'
+import { buildCatalog, capabilitiesSignature, DotCapabilities, hostScheduleTargetsDot, installToolAttribution, isTaskOnlySelector, mcpServerOf, resolveGrants, SCOPED_COPY, TASK_ONLY_TOOLS, type CapabilityPluginManager, type CapabilityTools, type CapabilityToolDef } from './capabilities.ts'
 import { sharedAttribution } from './attribution.ts'
 import { reasonBeforeDelivery } from './segments.ts'
 import { gateToolExecution } from './tool-scope.ts'
@@ -26,6 +26,27 @@ describe('capabilities setting', () => {
     expect(() => patchSettings(settingsWith({}), { capabilities: { grants: { 'tool:x': 'later' } } })).toThrow(/invalid value/)
     const oversized = Object.fromEntries(Array.from({ length: CAPABILITY_GRANTS_MAX + 1 }, (_, i) => [`tool:t${i}`, 'auto']))
     expect(() => patchSettings(settingsWith({}), { capabilities: { grants: oversized } })).toThrow(/invalid value/)
+    // A grant on a task-only tool is refused; an already-stored row carried
+    // unchanged is a no-op, and removing it stays allowed.
+    expect(() => patchSettings(settingsWith({}), { capabilities: { grants: { 'tool:bash': 'auto' } } })).toThrow(/task runs/)
+    const stored = settingsWith({ 'tool:bash': 'auto' })
+    expect(patchSettings(stored, { capabilities: { grants: { 'tool:bash': 'auto', 'tool:x': 'ask' } } }).capabilities.grants).toEqual({ 'tool:bash': 'auto', 'tool:x': 'ask' })
+    expect(patchSettings(stored, { capabilities: { grants: {} } }).capabilities.grants).toEqual({})
+    expect(() => patchSettings(settingsWith({}), { capabilities: { grants: { 'builtin:plugin-manager': 'auto' } } })).toThrow(/task runs/)
+    const storedGroup = settingsWith({ 'builtin:plugin-manager': 'ask', 'tool:x': 'auto' })
+    expect(patchSettings(storedGroup, { capabilities: { grants: { 'builtin:plugin-manager': 'ask', 'tool:x': 'auto' } } }).capabilities.grants)
+      .toEqual({ 'builtin:plugin-manager': 'ask', 'tool:x': 'auto' })
+    expect(patchSettings(storedGroup, { capabilities: { grants: { 'tool:x': 'auto' } } }).capabilities.grants).toEqual({ 'tool:x': 'auto' })
+    const dynamic = buildCatalog(catalogInput({
+      defs: fakeTools(['plugin_manager']).defs,
+      owners: new Map([['plugin_manager', { entryId: 'e1' }]]),
+      bundles: [{ name: 'p', rows: [{ entryId: 'e1' }] }],
+    }))
+    expect(() => patchSettings(settingsWith({}), { capabilities: { grants: { 'plugin:p': 'auto' } } }, 'zh', dynamic.groups)).toThrow(/task runs/)
+    const storedDynamic = settingsWith({ 'plugin:p': 'ask', 'tool:x': 'auto' })
+    expect(patchSettings(storedDynamic, { capabilities: { grants: { 'plugin:p': 'ask', 'tool:x': 'auto' } } }, 'zh', dynamic.groups).capabilities.grants)
+      .toEqual({ 'plugin:p': 'ask', 'tool:x': 'auto' })
+    expect(patchSettings(storedDynamic, { capabilities: { grants: { 'tool:x': 'auto' } } }, 'zh', dynamic.groups).capabilities.grants).toEqual({ 'tool:x': 'auto' })
   })
 })
 
@@ -144,7 +165,7 @@ describe('capability catalog', () => {
     expect(view.groups.find(group => group.id === 'plugin:p')?.tools.map(tool => tool.name)).toEqual(['owned_tool'])
   })
 
-  it('marks high-risk tools and bubbles the flag onto their groups', () => {
+  it('marks task-only tools on their rows and never on the groups', () => {
     const defs = fakeTools(['bash', 'plugin_manager', 'plugin_market', 'plain_tool']).defs
     const view = buildCatalog(catalogInput({
       defs,
@@ -152,15 +173,35 @@ describe('capability catalog', () => {
       bundles: [{ name: 'p', rows: [{ entryId: 'e1' }] }],
     }))
     const plug = view.groups.find(group => group.id === 'plugin:p')
-    expect(plug?.tools[0]?.highRisk).toBe(true)
-    expect(plug?.highRisk).toBe(true)
+    expect(plug?.tools[0]?.taskOnly).toBe(true)
+    expect('taskOnly' in (plug ?? {})).toBe(false)
     const host = view.groups.find(group => group.id === 'host')
     const prefix = host?.children?.find(child => child.id === 'prefix:plugin')
-    expect(prefix?.highRisk).toBe(true)
-    expect(prefix?.tools.find(tool => tool.name === 'plugin_manager')?.highRisk).toBe(true)
-    expect(prefix?.tools.find(tool => tool.name === 'plugin_market')?.highRisk).toBeUndefined()
-    expect(host?.tools.find(tool => tool.name === 'plain_tool')?.highRisk).toBeUndefined()
-    expect(HIGH_RISK_TOOLS.has('apply_patch')).toBe(true)
+    expect('taskOnly' in (prefix ?? {})).toBe(false)
+    expect(prefix?.tools.find(tool => tool.name === 'plugin_manager')?.taskOnly).toBe(true)
+    expect(prefix?.tools.find(tool => tool.name === 'plugin_market')?.taskOnly).toBeUndefined()
+    expect(host?.tools.find(tool => tool.name === 'plain_tool')?.taskOnly).toBeUndefined()
+    expect(TASK_ONLY_TOOLS.has('apply_patch')).toBe(true)
+    expect(TASK_ONLY_TOOLS.has('plugin_market')).toBe(false)
+  })
+
+  it('treats tool names and all-task-only groups as task-only selectors', () => {
+    expect(isTaskOnlySelector('tool:bash')).toBe(true)
+    expect(isTaskOnlySelector('tool:plugin_manager')).toBe(true)
+    expect(isTaskOnlySelector('tool:extra_tool')).toBe(false)
+    expect(isTaskOnlySelector('builtin:plugin-manager')).toBe(true)
+    expect(isTaskOnlySelector('builtin:schedule')).toBe(false)
+    expect(isTaskOnlySelector('plugin:p')).toBe(false)
+    const dynamic = buildCatalog(catalogInput({
+      defs: fakeTools(['plugin_manager']).defs,
+      owners: new Map([['plugin_manager', { entryId: 'e1' }]]),
+      bundles: [{ name: 'p', rows: [{ entryId: 'e1' }] }],
+    }))
+    expect(isTaskOnlySelector('plugin:p', dynamic.groups)).toBe(true)
+    const mixed = buildCatalog(catalogInput({
+      defs: fakeTools(['plugin_manager', 'plugin_market']).defs,
+    }))
+    expect(isTaskOnlySelector('prefix:plugin', mixed.groups)).toBe(false)
   })
 
   it('keeps granted-but-absent selectors as missing rows', () => {
@@ -947,19 +988,69 @@ describe('service-level capability gate', () => {
     expect(text).toContain('applied=auto')
   })
 
-  it('marks high-risk tools in the list and warns on the proposal card for auto grants', async () => {
+  it('marks task-only tools in the list and refuses tool:<task-only> proposals outright', async () => {
     const { store, service, apply } = serviceHarness({}, undefined, ['bash', 'team_a', 'team_b'])
     await store0(service)
     await apply()
     const text = await service.listCapabilities()
-    expect(text).toContain('HIGH RISK')
-    // A tool: auto grant that would self-escalate carries the warning into the proposal card.
-    await service.proposeCapability({ selector: 'tool:bash', grant: 'auto', reason: 'run shell' })
-    expect(store.settingProposals.at(-1)?.reason).toMatch(/Warning:.*bash/)
-    await service.selfSettings.decide(store.settingProposals.at(-1)!.id, false)
-    // An ask grant, or an auto grant touching no high-risk tool, warns on nothing.
+    expect(text).toContain('task-only')
+    const before = store.settingProposals.length
+    await expect(service.proposeCapability({ selector: 'tool:bash', grant: 'auto', reason: 'run shell' }))
+      .rejects.toMatchObject({ code: 'dot/invalid', message: expect.stringContaining('task runs') })
+    expect(store.settingProposals).toHaveLength(before)
+    // An ordinary selector still queues the proposal unchanged.
     await service.proposeCapability({ selector: 'prefix:team', grant: 'auto', reason: 'cluster' })
-    expect(store.settingProposals.at(-1)?.reason).not.toContain('Warning')
+    expect(store.settingProposals.at(-1)?.reason).toBe('cluster')
+  })
+
+  it('lists a task-only tool as grant=off even when a parent group grant is auto', async () => {
+    const { service, apply } = serviceHarness({ 'prefix:plugin': 'auto' }, undefined, ['plugin_manager', 'plugin_market'])
+    await store0(service)
+    await apply()
+    const text = await service.listCapabilities()
+    expect(text).toContain('plugin_manager — grant=off (task-only: runs use it; never applied to dot)')
+    expect(text).not.toMatch(/plugin_manager — grant=auto/)
+    expect(text).toMatch(/plugin_market — grant=auto/)
+  })
+
+  it('refuses builtin:plugin-manager and a dynamic all-task-only group selector', async () => {
+    const { store, service, apply, caps } = serviceHarness(
+      {},
+      () => ({ listBundles: async () => [{ name: 'p', rows: [{ entryId: 'e1' }] }] }),
+      ['plugin_manager'],
+    )
+    caps.owners.set('plugin_manager', { entryId: 'e1' })
+    await store0(service)
+    await apply()
+    const before = store.settingProposals.length
+    await expect(service.proposeCapability({ selector: 'builtin:plugin-manager', grant: 'auto', reason: 'manage plugins' }))
+      .rejects.toMatchObject({ code: 'dot/invalid', message: expect.stringContaining('task runs') })
+    await expect(service.proposeCapability({ selector: 'plugin:p', grant: 'ask', reason: 'bundle' }))
+      .rejects.toMatchObject({ code: 'dot/invalid', message: expect.stringContaining('task runs') })
+    expect(store.settingProposals).toHaveLength(before)
+  })
+
+  it('keeps task-only tools out of the applied set under tool/prefix/builtin/plugin grants', async () => {
+    const { caps, apply } = serviceHarness(
+      { 'tool:bash': 'auto', 'plugin:p': 'auto', 'builtin:plugin-manager': 'auto', 'prefix:pwsh': 'auto' },
+      () => ({ listBundles: async () => [{ name: 'p', rows: [{ entryId: 'e1' }] }] }),
+      ['bash', 'plugin_manager', 'extra_tool', 'pwsh', 'pwsh_status'],
+    )
+    caps.owners.set('bash', { entryId: 'e1' })
+    caps.owners.set('extra_tool', { entryId: 'e1' })
+    const applied = await apply()
+    expect([...applied.keys()].sort()).toEqual(['extra_tool', 'pwsh_status'])
+    expect(applied.get('pwsh_status')?.grant).toBe('auto')
+    for (const name of ['bash', 'plugin_manager', 'pwsh']) expect(caps.appliedFor('dot-1')?.has(name)).toBe(false)
+  })
+
+  it('denies a task-only name at the gate with the run guidance, grant or not', async () => {
+    const { service, apply } = serviceHarness({ 'tool:bash': 'auto', 'tool:extra_tool': 'auto' }, undefined, ['bash', 'extra_tool'])
+    await store0(service)
+    await apply()
+    expect(await service.capabilityGate({ name: 'bash' })).toMatchObject({ kind: 'deny', reason: expect.stringContaining('task runs') })
+    expect(await service.capabilityGate({ name: 'bash' })).toMatchObject({ reason: expect.stringContaining('dot_task') })
+    expect(await service.capabilityGate({ name: 'extra_tool' })).toBe('next')
   })
 })
 

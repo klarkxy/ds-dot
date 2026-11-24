@@ -307,6 +307,15 @@ function Proposals({ locale, choices, state, showTitle }: { locale: CopyLocale; 
 
 const GRANT_MODES: readonly [CapabilityGrant, CapabilityGrant, CapabilityGrant] = ['off', 'ask', 'auto']
 
+/** Delete one stored grant row. Used by GrantPicker and leftover task-only Reset. */
+function GrantReset({ locale, selector, onPick }: {
+  locale: CopyLocale
+  selector: string
+  onPick: (selector: string, grant: CapabilityGrant | undefined) => void
+}) {
+  return <Button variant="ghost" size="sm" className="dsh-dot-cap-clear" onClick={() => onPick(selector, undefined)}>{t(locale, 'sCapClear')}</Button>
+}
+
 /**
  * The off/ask/auto control of one row. A row without its own grant row shows
  * the value it inherits, dimmed; the clear button removes its own override.
@@ -372,8 +381,6 @@ function Capabilities({ locale, api, grants, onPick, onOpenMcp }: {
   const [error, setError] = useState('')
   const [capFilter, setCapFilter] = useState('')
   const [onlyOn, setOnlyOn] = useState(false)
-  // Choosing `auto` on a self-escalating row takes one more explicit confirm.
-  const [confirmAuto, setConfirmAuto] = useState<{ selector: string; label: string } | undefined>()
   useEffect(() => {
     if (api.capabilities === undefined) return
     const life = new AbortController()
@@ -403,15 +410,19 @@ function Capabilities({ locale, api, grants, onPick, onOpenMcp }: {
     groupSelfHits(group) || group.tools.some(matchesTool) || (group.children ?? []).some(groupHits)
   const countTools = (group: CapabilityGroupView): number =>
     group.tools.length + (group.children ?? []).reduce((sum, child) => sum + countTools(child), 0)
+  const countTaskOnly = (group: CapabilityGroupView): number =>
+    group.tools.filter(tool => tool.taskOnly === true).length
+      + (group.children ?? []).reduce((sum, child) => sum + countTaskOnly(child), 0)
+  // A group grant can never apply to task-only tools, so a group whose tools
+  // are all task-only has nothing for the picker to do. Empty groups keep it.
+  const groupAllTaskOnly = (group: CapabilityGroupView): boolean =>
+    countTools(group) > 0 && countTaskOnly(group) === countTools(group)
+  const countsTowardGroup = (tool: CapabilityToolView): boolean => tool.taskOnly !== true && tool.missing !== true
   const kindLabel = (group: CapabilityGroupView): string =>
     group.kind === 'mcp' ? t(locale, 'sCapKind_mcp')
     : group.kind === 'builtin' ? t(locale, 'sCapKind_builtin')
     : group.kind === 'plugin' || group.kind === 'entry' ? t(locale, 'sCapKind_plugin')
     : t(locale, 'sCapKind_unknown')
-  const pick = (selector: string, grant: CapabilityGrant | undefined, label: string, highRisk: boolean) => {
-    if (grant === 'auto' && highRisk) { setConfirmAuto({ selector, label }); return }
-    onPick(selector, grant)
-  }
   const effectiveFor = (chain: readonly string[]): CapabilityGrant => {
     for (const selector of chain) { const grant = grants[selector]; if (grant !== undefined) return grant }
     return 'off'
@@ -419,9 +430,9 @@ function Capabilities({ locale, api, grants, onPick, onOpenMcp }: {
   const groupRows = (group: CapabilityGroupView, parents: readonly string[], showFull = false): ReactNode => {
     // The host and builtin groups are display-only: their tools grant one by one / via children.
     const chain = group.kind === 'host' || group.id === 'builtin' ? parents : [group.id, ...parents]
-    const changed = group.tools.some(tool => (applied[tool.name] ?? 'off') !== effectiveFor([`tool:${tool.name}`, ...chain]))
-    const granted = group.tools.some(tool => effectiveFor([`tool:${tool.name}`, ...chain]) !== 'off')
-      || (group.children ?? []).some(child => child.tools.some(tool => effectiveFor([`tool:${tool.name}`, child.id, ...chain]) !== 'off'))
+    const changed = group.tools.some(tool => countsTowardGroup(tool) && (applied[tool.name] ?? 'off') !== effectiveFor([`tool:${tool.name}`, ...chain]))
+    const granted = group.tools.some(tool => countsTowardGroup(tool) && effectiveFor([`tool:${tool.name}`, ...chain]) !== 'off')
+      || (group.children ?? []).some(child => child.tools.some(tool => countsTowardGroup(tool) && effectiveFor([`tool:${tool.name}`, child.id, ...chain]) !== 'off'))
     const label = displayedLabel(group)
     const selfHit = showFull || groupSelfHits(group)
     if (capNeedle !== '' && !selfHit && !groupHits(group)) return null
@@ -438,11 +449,18 @@ function Capabilities({ locale, api, grants, onPick, onOpenMcp }: {
             <span className="dsh-dot-cap-count">{t(locale, 'sCapToolCount').replace('{n}', String(countTools(group)))}</span>
           </span>
           {group.missing === true ? <span className="dsh-dot-cap-badge">{t(locale, 'sCapMissing')}</span> : null}
-          {group.highRisk === true ? <span className="dsh-dot-cap-badge dsh-dot-cap-badge--warn">{t(locale, 'sCapHighRisk')}</span> : null}
           {changed ? <span className="dsh-dot-cap-badge">{t(locale, 'sCapNext')}</span> : null}
-          {group.kind === 'host' || group.id === 'builtin' ? null : (
+          {group.kind === 'host' || group.id === 'builtin' ? null : groupAllTaskOnly(group) ? (
+            grants[group.id] !== undefined ? (
+              <span className="dsh-dot-cap-control" onClick={event => event.preventDefault()}>
+                <span className="dsh-dot-cap-grant">
+                  <GrantReset locale={locale} selector={group.id} onPick={onPick} />
+                </span>
+              </span>
+            ) : null
+          ) : (
             <span className="dsh-dot-cap-control" onClick={event => event.preventDefault()}>
-              <GrantPicker locale={locale} label={label} chain={chain} grants={grants} applied={undefined} onPick={(selector, grant) => pick(selector, grant, label, group.highRisk === true)} />
+              <GrantPicker locale={locale} label={label} chain={chain} grants={grants} applied={undefined} onPick={onPick} />
             </span>
           )}
         </summary>
@@ -464,8 +482,16 @@ function Capabilities({ locale, api, grants, onPick, onOpenMcp }: {
                 </span>
                 {tool.missing === true ? <span className="dsh-dot-cap-badge">{t(locale, 'sCapMissing')}</span> : null}
                 {tool.conditional ? <span className="dsh-dot-cap-badge">{t(locale, 'sCapConditional')}</span> : null}
-                {tool.highRisk === true ? <span className="dsh-dot-cap-badge dsh-dot-cap-badge--warn">{t(locale, 'sCapHighRisk')}</span> : null}
-                {soloNoOwnGrant ? null : <GrantPicker locale={locale} label={tool.name} chain={toolChain} grants={grants} applied={tool.missing === true ? undefined : (applied[tool.name] ?? 'off')} onPick={(selector, grant) => pick(selector, grant, tool.name, tool.highRisk === true)} />}
+                {tool.taskOnly === true ? <span className="dsh-dot-cap-badge dsh-dot-cap-badge--warn" title={t(locale, 'sCapTaskOnlyHint')}>{t(locale, 'sCapTaskOnly')}</span> : null}
+                {tool.taskOnly === true ? (
+                  grants[`tool:${tool.name}`] !== undefined ? (
+                    <span className="dsh-dot-cap-grant">
+                      <GrantReset locale={locale} selector={`tool:${tool.name}`} onPick={onPick} />
+                    </span>
+                  ) : null
+                ) : soloNoOwnGrant ? null : (
+                  <GrantPicker locale={locale} label={tool.name} chain={toolChain} grants={grants} applied={tool.missing === true ? undefined : (applied[tool.name] ?? 'off')} onPick={onPick} />
+                )}
               </div>
             )
           })}
@@ -477,7 +503,8 @@ function Capabilities({ locale, api, grants, onPick, onOpenMcp }: {
   /** A group counts as "on" when any tool in it resolves to a grant above off. */
   const groupGranted = (group: CapabilityGroupView, parents: readonly string[] = []): boolean => {
     const chain = group.kind === 'host' || group.id === 'builtin' ? parents : [group.id, ...parents]
-    return group.tools.some(tool => effectiveFor([`tool:${tool.name}`, ...chain]) !== 'off')
+    return group.tools.some(tool => tool.taskOnly !== true && effectiveFor([`tool:${tool.name}`, ...chain]) !== 'off')
+      || (group.tools.length === 0 && (group.children ?? []).length === 0 && group.kind !== 'host' && group.id !== 'builtin' && effectiveFor(chain) !== 'off')
       || (group.children ?? []).some(child => groupGranted(child, chain))
   }
   const sectionOf = (group: CapabilityGroupView): 'mcp' | 'plugin' | 'host' =>
@@ -500,13 +527,6 @@ function Capabilities({ locale, api, grants, onPick, onOpenMcp }: {
         <Checkbox checked={onlyOn} label={t(locale, 'sCapOnlyOn')} onChange={next => setOnlyOn(next)} />
       </div>
       {error ? <div className="dsh-ui-error" role="alert">{error}</div> : null}
-      {confirmAuto !== undefined ? (
-        <div className="dsh-dot-cap-confirm" role="alert">
-          <span className="dsh-dot-cap-confirm-text">{confirmAuto.label} — {t(locale, 'sCapConfirmAuto')}</span>
-          <Button variant="primary" size="sm" onClick={() => { onPick(confirmAuto.selector, 'auto'); setConfirmAuto(undefined) }}>{t(locale, 'sApprove')}</Button>
-          <Button variant="ghost" size="sm" onClick={() => setConfirmAuto(undefined)}>{t(locale, 'sDecline')}</Button>
-        </div>
-      ) : null}
       {view === undefined ? null : (
         <>
           <details className="dsh-dot-cap-group dsh-dot-cap-group--locked">
@@ -1443,10 +1463,9 @@ export const settingsCss = `
 }
 .dsh-dot-chat .dsh-dot-cap-badge--on { color: var(--dsw-alias-state-success-primary); }
 .dsh-dot-chat .dsh-dot-cap-badge--warn { color: var(--dsw-alias-state-warn-primary); }
-.dsh-dot-chat .dsh-dot-cap-confirm { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding: 8px 12px; border-radius: var(--dsw-radius-md); background: var(--dsw-alias-bg-layer-1); box-shadow: var(--dsw-elevation-stroke); }
-.dsh-dot-chat .dsh-dot-cap-confirm-text { flex: 1 1 240px; font-size: 12px; line-height: 18px; color: var(--dsw-alias-state-warn-primary); }
-.dsh-dot-chat .dsh-dot-cap-clear { flex-shrink: 0; padding: 2px; }
+.dsh-dot-chat .dsh-dot-cap-clear { flex-shrink: 0; }
 .dsh-dot-chat .dsh-dot-cap-clear-slot { display: inline-flex; align-items: center; justify-content: center; width: 24px; flex-shrink: 0; }
+.dsh-dot-chat .dsh-dot-cap-clear-slot .dsh-dot-cap-clear { padding: 2px; }
 .dsh-dot-chat .dsh-dot-cap-locked { flex-direction: row; flex-wrap: wrap; gap: 4px; }
 .dsh-dot-chat .dsh-dot-cap-locked-name { padding: 1px 6px; border-radius: var(--dsw-radius-sm); background: var(--dsw-alias-bg-layer-2); font-size: 11px; font-family: var(--ds-font-family-code); color: var(--dsw-alias-label-secondary); }
 .dsh-dot-chat .dsh-dot-mcp { display: flex; flex-direction: column; gap: 8px; margin-top: 4px; }

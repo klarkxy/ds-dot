@@ -15,6 +15,7 @@ describe('coordinator prompt contract', () => {
     for (const action of ['create', 'dispatch', 'check', 'finish', 'closeout', 'reject', 'revise', 'supplement']) expect(mentioned.has(action), action).toBe(true)
     expect(DOT_INSTRUCTIONS).toContain(TOOL.task)
     expect(DOT_INSTRUCTIONS).toContain(TOOL.workspace)
+    expect(DOT_INSTRUCTIONS).toContain('mcp__github__*')
     expect(DOT_INSTRUCTIONS).not.toContain('${TOOL.')
   })
   it('keeps model recommendations subordinate to explicit human and dot choices', () => {

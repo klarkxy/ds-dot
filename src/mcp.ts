@@ -28,11 +28,9 @@ interface RowCtx {
   baseUrl?: string
   plugin(plugin: unknown, config?: unknown): FiberLike
   on(event: string, listener: (...args: never[]) => void): unknown
-  get(name: string): { definitions?(): readonly { name: string }[] } | undefined
   logger?: { debug?(...args: unknown[]): void; info?(...args: unknown[]): void; warn?(...args: unknown[]): void }
 }
 
-const toolPrefix = (server: string) => `mcp__${server}__`
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
 
 /** What decides whether an enabled server's mount is still current. */
@@ -42,26 +40,28 @@ export async function apply(ctx: RowCtx) {
   const shared = sharedDotMcp()
   const mounted = new Map<string, { fiber: FiberLike; signature: string; unwatch?: () => void }>()
   let client: McpClientModule | undefined
-  let lastToolNames = ''
+  let lastStatusSignature = ''
 
   const log = (message: string) => ctx.logger?.info?.(`dsh-dot/mcp: ${message}`)
 
-  const toolNames = () => {
-    const servers = shared.settings?.().mcpServers ?? {}
-    const defs = ctx.get('tools')?.definitions?.() ?? []
-    return defs.map(def => def.name).filter(name =>
-      Object.keys(servers).some(server => name.startsWith(toolPrefix(server))),
-    ).sort().join('\n')
-  }
+  // The preset layer's tool additions are what a granted-but-restricted dot
+  // agent picks up, and they are exactly what the published per-server status
+  // reports (connected + toolCount). An unscoped definitions() view would be
+  // the global layer, which never changes here.
+  const statusSignature = () =>
+    [...shared.servers.entries()]
+      .map(([server, status]) => `${server}:${status.state}:${status.toolCount ?? ''}`)
+      .sort()
+      .join('\n')
 
   let toolsTimer: ReturnType<typeof setTimeout> | undefined
   const noteToolsChanged = () => {
     if (toolsTimer !== undefined) clearTimeout(toolsTimer)
     toolsTimer = setTimeout(() => {
       toolsTimer = undefined
-      const next = toolNames()
-      if (next === lastToolNames) return
-      lastToolNames = next
+      const next = statusSignature()
+      if (next === lastStatusSignature) return
+      lastStatusSignature = next
       shared.onToolsChanged?.()
     }, 500)
   }
@@ -131,29 +131,48 @@ export async function apply(ctx: RowCtx) {
     noteToolsChanged()
   }
 
-  let reconciling: Promise<void> | undefined
-  const reconcile = () => {
-    const servers = shared.settings?.().mcpServers ?? {}
-    reconciling = (async () => {
-      for (const name of [...mounted.keys()]) {
-        const next = servers[name]
-        if (next === undefined || !next.enabled || signatureOf(next) !== mounted.get(name)?.signature) await unmount(name)
-      }
-      for (const [name, config] of Object.entries(servers)) {
-        if (config.enabled && !mounted.has(name)) await mount(name, config)
-      }
-    })().catch(error => log(`reconcile failed: ${error instanceof Error ? error.message : String(error)}`))
-    return reconciling
+  // Serialize reconciles: a second settings change (or the first mount's
+  // awaited host import) must not race a running pass — two concurrent passes
+  // would mount the same server twice and the duplicate serverName apply would
+  // throw. Settings are re-read inside each pass so a queued rerun sees the
+  // latest snapshot.
+  let reconciling = false
+  let reconcileAgain = false
+  const reconcile = async () => {
+    if (reconciling) {
+      reconcileAgain = true
+      return
+    }
+    reconciling = true
+    try {
+      do {
+        reconcileAgain = false
+        const servers = shared.settings?.().mcpServers ?? {}
+        for (const name of [...mounted.keys()]) {
+          const next = servers[name]
+          if (next === undefined || !next.enabled || signatureOf(next) !== mounted.get(name)?.signature) await unmount(name)
+        }
+        for (const [name, config] of Object.entries(servers)) {
+          if (config.enabled && !mounted.has(name)) await mount(name, config)
+        }
+      } while (reconcileAgain)
+    } catch (error) {
+      log(`reconcile failed: ${error instanceof Error ? error.message : String(error)}`)
+    } finally {
+      reconciling = false
+    }
   }
 
-  shared.onSettingsChanged = () => { void reconcile() }
+  const onSettingsChanged = () => { void reconcile() }
+  shared.onSettingsChanged = onSettingsChanged
   try { ctx.on('tools/change' as never, (() => noteToolsChanged()) as never) } catch { /* event may not reach this scope */ }
   ctx.on('dispose' as never, (() => {
     if (toolsTimer !== undefined) clearTimeout(toolsTimer)
-    if (shared.onSettingsChanged !== undefined) shared.onSettingsChanged = undefined
+    // A newer preset generation's row may already have installed its handler.
+    if (shared.onSettingsChanged === onSettingsChanged) shared.onSettingsChanged = undefined
     for (const name of [...mounted.keys()]) void unmount(name)
   }) as never)
 
-  lastToolNames = toolNames()
+  lastStatusSignature = statusSignature()
   await reconcile()
 }

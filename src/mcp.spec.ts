@@ -12,13 +12,12 @@ interface FakeFiber {
   dispose: ReturnType<typeof vi.fn>
 }
 
-function harness(initial: Readonly<Record<string, DotMcpServer>>, options: { statusDelayCalls?: number } = {}) {
+function harness(initial: Readonly<Record<string, DotMcpServer>>, options: { statusDelayCalls?: number; importDelayMs?: number } = {}) {
   const shared = sharedDotMcp()
   const settings: DotSettings = { ...DEFAULT_SETTINGS, mcpServers: { ...initial } }
   shared.settings = () => settings
   const mounts: Array<Record<string, unknown>> = []
   const fibers: FakeFiber[] = []
-  const defs = { list: [] as { name: string }[] }
   let statusCalls = 0
   const clientModule = {
     connectionStatusOf(fiber: FakeFiber) {
@@ -35,7 +34,10 @@ function harness(initial: Readonly<Record<string, DotMcpServer>>, options: { sta
   }
   const ctx = {
     baseUrl: 'file:///plugin/lib/',
-    loader: { internal: { import: async (name: string) => name === '@deepseek-ai/dsh-mcp-client' ? clientModule : {} } },
+    loader: { internal: { import: async (name: string) => {
+      if (options.importDelayMs) await new Promise(resolve => setTimeout(resolve, options.importDelayMs))
+      return name === '@deepseek-ai/dsh-mcp-client' ? clientModule : {}
+    } } },
     plugin(_plugin: unknown, config: Record<string, unknown>) {
       if (config.url === 'https://fail.example/mcp') throw new Error('mount boom')
       mounts.push(config)
@@ -44,7 +46,6 @@ function harness(initial: Readonly<Record<string, DotMcpServer>>, options: { sta
       return fiber
     },
     on() { return () => {} },
-    get(name: string) { return name === 'tools' ? { definitions: () => defs.list } : undefined },
   }
   const done = apply(ctx as never)
   const push = (name: string, status: { state: string; toolCount?: number }) => {
@@ -52,7 +53,7 @@ function harness(initial: Readonly<Record<string, DotMcpServer>>, options: { sta
     fiber._status = status
     for (const watcher of fiber._watchers) watcher(status)
   }
-  return { shared, settings, mounts, fibers, defs, push, done }
+  return { shared, settings, mounts, fibers, push, done }
 }
 
 const settle = () => new Promise(resolve => setTimeout(resolve, 0))
@@ -116,30 +117,46 @@ describe('ds-dot/mcp preset row', () => {
     expect(run.shared.servers.get('bad')?.state).toBe('failed')
   })
 
+  it('serializes reconciles so overlapping settings changes cannot double-mount', async () => {
+    // The first mount is stuck inside its host import while two quick
+    // settings saves arrive; the queued rerun must read the latest snapshot.
+    const run = harness({ deepwiki }, { importDelayMs: 60 })
+    Object.assign(run.settings, { mcpServers: { deepwiki, exa } })
+    run.shared.onSettingsChanged?.()
+    run.shared.onSettingsChanged?.()
+    await run.done
+    const counts = new Map<string, number>()
+    for (const config of run.mounts) counts.set(String(config.serverName), (counts.get(String(config.serverName)) ?? 0) + 1)
+    expect(counts).toEqual(new Map([['deepwiki', 1], ['exa', 1]]))
+  })
+
   it('attaches the status handle when it registers after ctx.plugin returns', async () => {
     const run = harness({ deepwiki }, { statusDelayCalls: 2 })
     await run.done
     expect(run.shared.servers.get('deepwiki')?.state).toBe('connecting')
     await new Promise(resolve => setTimeout(resolve, 1300))
-    run.defs.list = [{ name: 'mcp__deepwiki__ask' }]
     run.push('deepwiki', { state: 'connected', toolCount: 1 })
     await settleDebounce()
     expect(run.shared.servers.get('deepwiki')).toEqual({ state: 'connected', toolCount: 1 })
   })
 
-  it('publishes status and notifies once the dot-local tool set changes', async () => {
+  it('notifies on published-status signature changes, not on an unscoped tool view', async () => {
     const run = harness({ deepwiki })
     const toolsChanged = vi.fn()
     run.shared.onToolsChanged = toolsChanged
     await run.done
-    run.defs.list = [{ name: 'mcp__deepwiki__ask' }, { name: 'web_search' }]
+    // connecting (from mount) already counted in the baseline signature.
     run.push('deepwiki', { state: 'connected', toolCount: 1 })
     await settleDebounce()
     expect(run.shared.servers.get('deepwiki')).toEqual({ state: 'connected', toolCount: 1 })
     expect(toolsChanged).toHaveBeenCalledTimes(1)
-    // Same names again: no second notification.
+    // Same signature again: no second notification.
     run.push('deepwiki', { state: 'connected', toolCount: 1 })
     await settleDebounce()
     expect(toolsChanged).toHaveBeenCalledTimes(1)
+    // A tool-count bump is a real signature change.
+    run.push('deepwiki', { state: 'connected', toolCount: 2 })
+    await settleDebounce()
+    expect(toolsChanged).toHaveBeenCalledTimes(2)
   })
 })

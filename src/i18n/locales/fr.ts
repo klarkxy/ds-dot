@@ -361,6 +361,14 @@ const frUi: UiText = {
   pCognitionVersionAt: '{time}',
   pKnowledgeLoading: 'Chargement…',
   pKnowledgeFailed: 'Impossible de charger : ',
+  pEntryAdd: 'Ajouter',
+  pEntryEdit: 'Modifier',
+  pEntryDelete: 'Supprimer',
+  pPin: 'Épingler',
+  pUnpin: 'Désépingler',
+  pDormant: 'en sommeil',
+  pPinned: 'épinglée',
+  pDormantHint: 'Les entrées en sommeil restent enregistrées mais ne sont pas montrées à Dorothy pour l’instant ; épinglez-les pour les garder visibles.',
   ctxTitle: 'Utilisation du contexte',
   ctxLoading: 'Lecture du contexte…',
   ctxIdle: 'L’utilisation du contexte apparaîtra ici après votre premier message.',
@@ -700,6 +708,7 @@ export const fr: LocalePack = {
   config: {
     homeDir: 'Dossier de l’espace de travail et de la session propres à Dorothy ; laissez vide pour utiliser le dossier dot du répertoire principal DSH. Les autres paramètres sont accessibles via l’engrenage du panneau de Dorothy.',
     approvalGraceMs: 'Délai de grâce des notifications d’approbation en millisecondes (10000 par défaut) ; les approbations réglées dans la session d’origine pendant cette fenêtre ne réveillent pas Dorothy.',
+    cognitionPromptEntries: 'Combien d’entrées de cognition Dorothy garde dans son prompt (30 par défaut) ; les épinglées passent d’abord et restent visibles même au-delà de ce nombre, les places restantes reviennent aux entrées confirmées le plus récemment.',
   },
   approvalCard: {
     title: 'Approbation',

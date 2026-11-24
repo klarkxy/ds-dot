@@ -361,6 +361,14 @@ const jaUi: UiText = {
   pCognitionVersionAt: '{time}',
   pKnowledgeLoading: '読み込み中…',
   pKnowledgeFailed: '読み込めませんでした：',
+  pEntryAdd: '追加',
+  pEntryEdit: '編集',
+  pEntryDelete: '削除',
+  pPin: 'ピン留め',
+  pUnpin: 'ピン留め解除',
+  pDormant: '休眠',
+  pPinned: 'ピン留め済み',
+  pDormantHint: '休眠中のエントリーは保存されたままですが、今はドロシーのプロンプトに表示されません。ピン留めすると常に表示されます。',
   ctxTitle: 'コンテキスト使用量',
   ctxLoading: 'コンテキストを読み込み中…',
   ctxIdle: '最初のメッセージを送信すると、ここにコンテキスト使用量が表示されます。',
@@ -700,6 +708,7 @@ export const ja: LocalePack = {
   config: {
     homeDir: 'ドロシー専用のワークスペースとセッションを保存するディレクトリです。空欄の場合は DSH ホーム配下の dot フォルダを使用します。その他の設定はドロシーパネル右上の歯車アイコンから変更できます。',
     approvalGraceMs: '承認通知の猶予時間（ミリ秒、既定値 10000）。この時間内に元のセッションで完了した承認はドロシーを起動しません。',
+    cognitionPromptEntries: '認識プロンプトのエントリー数（既定値 30）：ドロシーのプロンプトに入る認識エントリーの合計。ピン留め済みは先頭に並び、この数を超えても常に表示され、残りの枠は最近確認されたエントリーに使われます。',
   },
   approvalCard: {
     title: '承認',

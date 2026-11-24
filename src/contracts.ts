@@ -60,12 +60,41 @@ export interface SettingProposal {
 
 // ---- dot's knowledge: agreements and cognition -------------------------
 
-/** One earlier full text of dot's cognition, with the moment it was replaced. */
-export interface CognitionVersion {
+/** One of the human's standing rules, kept as its own entry in their exact words. */
+export interface AgreementEntry {
+  readonly id: string
   readonly text: string
+  readonly createdAt: number
+  readonly updatedAt: number
+}
+
+/**
+ * One entry of dot's own understanding. `seenAt` records when the text was last
+ * written or confirmed and drives prompt ranking; `pinned` entries always reach
+ * the prompt and only the human may change or remove them.
+ */
+export interface CognitionEntry {
+  readonly id: string
+  readonly text: string
+  readonly createdAt: number
+  readonly updatedAt: number
+  readonly seenAt: number
+  readonly pinned?: true
+}
+
+/** One earlier entry list of dot's cognition, with the moment it was replaced. */
+export interface CognitionVersion {
+  readonly entries: readonly CognitionEntry[]
   /** Unique, monotonically increasing; used to ask for that version back. */
   readonly at: number
 }
+
+/** One knowledge edit the human panel submits; `pin` is valid for cognition only. */
+export type KnowledgeEdit =
+  | { readonly op: 'add'; readonly text: string }
+  | { readonly op: 'edit'; readonly id: string; readonly text: string }
+  | { readonly op: 'remove'; readonly id: string }
+  | { readonly op: 'pin'; readonly id: string; readonly pinned: boolean }
 
 /**
  * One background reflection pass that was actually run as a session, kept so
@@ -82,17 +111,16 @@ export interface ReflectionRun {
 
 /** dot's agreements as the settings view shows them: the human's own standing requirements. */
 export interface AgreementView {
-  readonly text: string
-  readonly maxChars: number
-  /** Whether the change before the current text can be taken back. */
+  readonly entries: readonly AgreementEntry[]
+  /** Whether the change before the current entries can be taken back. */
   readonly canUndo: boolean
 }
 
 /** dot's cognition as the settings view shows it: its own understanding, with the versions it can return to. */
 export interface CognitionView {
-  readonly text: string
-  readonly maxChars: number
-  /** Newest first; at most COGNITION_HISTORY_MAX. The empty text is a version too. */
+  /** Ranked order: pinned first, then most recently confirmed; dormant entries are stored but not in dot's prompt. */
+  readonly entries: readonly (CognitionEntry & { readonly active: boolean })[]
+  /** Newest first; at most COGNITION_HISTORY_MAX. The empty list is a version too. */
   readonly history: readonly CognitionVersion[]
 }
 
@@ -102,12 +130,10 @@ export interface KnowledgeView {
   readonly cognition: CognitionView
 }
 
-/** Sizes of the two prompt blocks; the tools and the panel refuse to grow them past this. */
-export const AGREEMENTS_MAX_CHARS = 4000
-export const AGREEMENT_ENTRY_MAX_CHARS = 400
-export const COGNITION_MAX_CHARS = 4000
-/** How many earlier cognition texts are kept for rollback. */
+/** How many earlier cognition entry lists are kept for rollback. */
 export const COGNITION_HISTORY_MAX = 10
+/** How many cognition entries reach dot's prompt; pinned entries always do on top. */
+export const COGNITION_PROMPT_ENTRIES_DEFAULT = 30
 
 /**
  * First words of the one-time note the reflection pass leaves for dot's next

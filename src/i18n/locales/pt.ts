@@ -361,6 +361,14 @@ const ptUi: UiText = {
   pCognitionVersionAt: '{time}',
   pKnowledgeLoading: 'Carregando…',
   pKnowledgeFailed: 'Não foi possível carregar: ',
+  pEntryAdd: 'Adicionar',
+  pEntryEdit: 'Editar',
+  pEntryDelete: 'Excluir',
+  pPin: 'Fixar',
+  pUnpin: 'Desafixar',
+  pDormant: 'inativa',
+  pPinned: 'fixada',
+  pDormantHint: 'As entradas inativas ficam guardadas, mas não aparecem no prompt de Dorothy agora; fixe-as para mantê-las à vista.',
   ctxTitle: 'Uso de contexto',
   ctxLoading: 'Lendo contexto…',
   ctxIdle: 'O uso de contexto aparece aqui após você enviar sua primeira mensagem.',
@@ -700,6 +708,7 @@ export const pt: LocalePack = {
   config: {
     homeDir: 'Pasta do espaço de trabalho e da sessão próprios da Dorothy; deixe vazio para usar a pasta dot no diretório inicial do DSH. As demais configurações ficam no ícone de engrenagem no painel da Dorothy.',
     approvalGraceMs: 'Período de carência de notificação de aprovação em milissegundos (padrão 10000); aprovações resolvidas na sessão de origem durante essa janela não acordam a Dorothy.',
+    cognitionPromptEntries: 'Quantas entradas de cognição Dorothy mantém no prompt (padrão 30); as fixadas vêm primeiro e continuam visíveis mesmo além deste número, e os espaços restantes vão para as confirmadas mais recentemente.',
   },
   approvalCard: {
     title: 'Aprovação',

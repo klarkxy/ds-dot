@@ -176,9 +176,17 @@ describe('ds-dot/mcp preset row', () => {
       new Promise(resolve => setTimeout(() => resolve('still-pending'), 5_000)),
     ])
     expect(outcome).toBe('resolved')
+    const toolsChanged = vi.fn()
+    run.shared.onToolsChanged = toolsChanged
     run.push('deepwiki', { state: 'connected', toolCount: 1 })
-    releaseTools?.()
+    // The debounced check is now waiting on presetToolNames; releasing it
+    // after apply returned must still deliver the tool-change notification.
     await settleDebounce()
+    expect(releaseTools).toBeDefined()
+    expect(toolsChanged).not.toHaveBeenCalled()
+    releaseTools!()
+    await settle()
+    expect(toolsChanged).toHaveBeenCalledTimes(1)
   })
 
   it('fires when a same-count tool set trades one name for another', async () => {

@@ -1,5 +1,5 @@
 import { DotError, messageOf, type DotService } from './service.ts'
-import { SETTING_FIELDS, TOOL, type DotSettings, type SettingField, type SettingProposal } from './contracts.ts'
+import { SETTING_FIELDS, TOOL, type CapabilityGroupView, type DotSettings, type SettingField, type SettingProposal } from './contracts.ts'
 import { type CopyLocale } from './i18n/index.ts'
 import { lockedField, patchSettings } from './settings.ts'
 import { defaultAddress, defaultPersona } from './persona.ts'
@@ -44,6 +44,10 @@ export function settingsSnapshotBlock(settings: DotSettings): string {
 export class SelfSettings {
   constructor(private readonly dot: DotService) {}
 
+  private async capabilityGroups(): Promise<readonly CapabilityGroupView[] | undefined> {
+    try { return (await this.dot.capabilitiesView()).groups } catch { return undefined }
+  }
+
   async read(): Promise<string> {
     const knowledge = await this.dot.knowledgeView()
     const locale = this.dot.locale ?? 'zh'
@@ -72,7 +76,7 @@ export class SelfSettings {
     } else {
       const patch = { [field]: input.value }
       before = valueOf(this.dot.store.settings, field, '', locale)
-      after = valueOf(patchSettings(this.dot.store.settings, patch, locale), field, '', locale)
+      after = valueOf(patchSettings(this.dot.store.settings, patch, locale, await this.capabilityGroups()), field, '', locale)
     }
     if (this.dot.store.settingProposals.some(proposal => proposal.field === field)) throw new DotError('dot/proposal-exists', `a change to ${field} already waits for the human; ask them to review it before proposing another`)
     if (equal(before, after)) throw new DotError('dot/invalid', `${field} already has this value`)
@@ -106,7 +110,7 @@ export class SelfSettings {
     if (!equal(current, baseline)) throw new DotError('dot/proposal-stale', `${field} changed after this proposal. Decline it and ask Dorothy to propose the change again from the current value.`)
     try {
       if (field === 'agreements') await this.dot.setAgreements(proposal.after === null ? '' : String(proposal.after), 'human')
-      else await this.dot.store.setSettings(patchSettings(this.dot.store.settings, { [field]: proposal.after }, locale))
+      else await this.dot.store.setSettings(patchSettings(this.dot.store.settings, { [field]: proposal.after }, locale, await this.capabilityGroups()))
     } catch (error) {
       throw new DotError('dot/proposal-failed', messageOf(error))
     }

@@ -4,8 +4,9 @@
  * registration attribution lives in ./attribution.ts, which also ships as an
  * early loader row; this module only reads its shared owners map.
  */
-import type { CapabilityGrant, CapabilityGroupView, CapabilityToolView, DotSettings } from './contracts.ts'
+import type { CapabilityGrant, CapabilityGroupView, CapabilityMcpStatus, CapabilityToolView, DotSettings } from './contracts.ts'
 import { installToolAttribution, SCOPED_COPY, sharedAttribution, type ToolOwner } from './attribution.ts'
+import { sharedDotMcp } from './mcp-shared.ts'
 import { restrictInheritedTools } from './tool-scope.ts'
 
 export { installToolAttribution, SCOPED_COPY } from './attribution.ts'
@@ -134,6 +135,8 @@ export interface CapabilityDeps {
   pluginManager(): CapabilityPluginManager | undefined
   settings(): DotSettings
   readonly locked: readonly string[]
+  /** Preset-scope tool defs (dot-local MCP tools live only there); absent when the host cannot expose them. */
+  presetDefs?(): Promise<readonly CapabilityToolDef[]>
 }
 
 /** Normalize an MCP server name the way the harness does when it builds public tool names. */
@@ -227,6 +230,12 @@ interface CatalogInput {
   readonly builtinDescriptions?: ReadonlyMap<string, string>
   /** Names the last dot agent schema snapshot exposed; once known, builtin names outside it are missing. */
   readonly builtinVisible?: ReadonlySet<string>
+  /** Dot-local MCP servers mounted on the preset scope, with their tools and live status. */
+  readonly dotMcp?: {
+    readonly servers: readonly string[]
+    readonly defs: readonly CapabilityToolDef[]
+    readonly status: (server: string) => CapabilityMcpStatus | undefined
+  }
 }
 
 interface MutableTool extends CapabilityToolView { description?: string; missing?: boolean; conditional: boolean; highRisk?: boolean }
@@ -239,6 +248,8 @@ interface MutableGroup {
   highRisk?: boolean
   tools: CapabilityToolView[]
   children?: MutableGroup[]
+  scope?: 'dot'
+  status?: CapabilityMcpStatus
 }
 
 /** The first name segment a `prefix:` group shares, split at the first `_`, `-` or `.`. */
@@ -279,8 +290,25 @@ export function buildCatalog(input: CatalogInput): { readonly locked: readonly s
     mcpTools.set(server, list)
   }
   const groups: MutableGroup[] = [...mcpTools.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([server, tools]) => ({
-    id: mcpSelector(server), kind: 'mcp', label: server, tools,
+    id: mcpSelector(server), kind: 'mcp' as const, label: server, tools,
   }))
+  // Dot-local servers: every configured one gets a group even with no tools
+  // yet, so it can be pre-granted. Same-name global rows were filtered out by
+  // the caller (the preset layer shadows them for dot's agent).
+  if (input.dotMcp !== undefined) {
+    for (const server of [...input.dotMcp.servers].sort((a, b) => a.localeCompare(b))) {
+      const prefix = mcpPrefix(server)
+      const status = input.dotMcp.status(server)
+      const group: MutableGroup = {
+        id: mcpSelector(server), kind: 'mcp', label: server, scope: 'dot',
+        tools: input.dotMcp.defs.filter(def => def.name.startsWith(prefix)).map(row),
+        ...(status !== undefined ? { status } : {}),
+      }
+      groups.push(group)
+    }
+    // At this point groups only holds mcp entries; re-sort merges both kinds.
+    groups.sort((left, right) => left.id.localeCompare(right.id))
+  }
 
   // Entry id → bundle name, from the manager's live row mapping. An entry with
   // no bundle row is its own group keyed `plugin:<entryId>`.
@@ -554,9 +582,17 @@ export class DotCapabilities {
   /** The catalog the settings view and the dot_capabilities tool draw. */
   async catalog(options?: { readonly awaitBundles?: boolean; readonly grants?: Readonly<Record<string, CapabilityGrant>> }): Promise<{ readonly locked: readonly string[]; readonly groups: readonly CapabilityGroupView[] }> {
     const tools = this.deps.tools()
-    const defs = tools?.definitions() ?? []
+    const dotServers = this.deps.settings().mcpServers ?? {}
+    const dotNames = Object.keys(dotServers)
+    const shadowed = (name: string) => dotNames.some(server => name.startsWith(mcpPrefix(server)))
+    const defs = (tools?.definitions() ?? []).filter(def => !shadowed(def.name))
     let servers: string[] = []
     try { servers = (this.deps.mcpManager()?.list() ?? []).map(server => server.name) } catch { servers = [] }
+    servers = servers.filter(name => !(name in dotServers))
+    let dotDefs: readonly CapabilityToolDef[] = []
+    if (dotNames.length > 0 && this.deps.presetDefs !== undefined) {
+      try { dotDefs = (await this.deps.presetDefs()).filter(def => shadowed(def.name)) } catch { dotDefs = [] }
+    }
     return buildCatalog({
       defs,
       owners: this.owners,
@@ -567,6 +603,11 @@ export class DotCapabilities {
       conditional: name => tools !== undefined && tools.get(name) !== undefined && tools.executable(name) === undefined,
       builtinDescriptions: this.schemaDescriptions,
       builtinVisible: this.lastSchemaNames,
+      dotMcp: dotNames.length === 0 ? undefined : {
+        servers: dotNames,
+        defs: dotDefs,
+        status: name => sharedDotMcp().servers.get(name) ?? (dotServers[name]?.enabled === false ? { state: 'off' } : undefined),
+      },
     })
   }
 

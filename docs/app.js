@@ -250,6 +250,50 @@
       showInvite: true,
     },
     {
+      slug: 'boundaries',
+      date: '2026.11.24',
+      category: 'rules',
+      image: 'images/chibi-guard.jpg',
+      aspect: 'square',
+      imageAlt: {
+        zh: '站在阳光铁艺门前的Q版桃乐丝鼓起脸颊并拿着黄铜小摇铃',
+        en: 'Chibi Dorothy guarding a garden gate with a raised hand and brass bell',
+        ja: '庭の門扉の前で頬をふくらませて呼び鈴を手にするちびドロシー',
+      },
+      caption: {
+        zh: '门前划好边界：小事悄悄过，大事一定先摇铃问。',
+        en: 'Watching the gate: routine checks pass, real calls wait for you.',
+        ja: '門の前で線引き：ふだんの確認は通して、大事なことだけ相談。',
+      },
+      title: {
+        zh: '什么事我顺手办了，什么事一定先问你',
+        en: 'What flows quietly, and what stops at the door',
+        ja: '静かに通す操作と、かならず足を止める操作',
+      },
+      excerpt: {
+        zh: '总不能每读一个文件就问一遍“我能看吗”，可删库和外推代码也不能擅自替你点掉。平时小确认悄悄放过，大事弹卡片等你；改文件、跑命令这类动手的工具我自己也不碰，只交给派出去的任务。',
+        en: 'Asking just to read a file would get annoying fast, yet silent deletes or pushes are off the table. Routine trivia clears quietly; big calls wait with a card; tools that edit files or run commands stay with dispatched runs, never in my own hands.',
+        ja: 'ファイルを読むたびに確認していたら進みませんし、削除や外部送信を勝手にするわけにもいきません。危ない操作はカードで待ち、ファイル変更やコマンド実行は派遣したタスクだけが使います。',
+      },
+      paragraphs: {
+        zh: [
+          '查文件、列目录或者跑一轮平常的本地测试，照你平时的设置顺手放行就好，省得写正顺手时老被打断。就算只读任务期间借用了外部插件的工具，我也会卡住写操作，只让真正查资料的动作过去。',
+          '只要遇到删东西、往外推送、碰本地敏感凭据，或者超出了你原来交代的范围，动作会马上停下。面板会递上一张写清前因后果和建议的确认卡；你在别处处理了或者卡片过期了，它自己会收好。平时就算面板折起来了，有需要拍板的事侧栏红点和桌面提示都会轻声喊你。改我自己也算这一类：从插件市场装的那份我不动，想改请找维护者；开发时链接进来的那份，我先在旁边的临时分支里改，你点了合并才重新构建，旧版本也会先备份好。重建要是没加载上，面板会告诉你上次备份在哪，把那份 lib 拷回去再重启就行。',
+          '后来又把一条线划死了：凡是改文件、跑命令这类真动手的工具，我自己一律不碰——就算你顺手给了授权，它们也只归派出去的任务用。我呢，写备忘、递提案、查查资料就好；真要动手就写工单派任务，反正那边有范围有留档，出了岔子也查得回来。',
+        ],
+        en: [
+          'Read-only checks, directory listings, and safe local tests go right through under your house defaults so nobody breaks your focus. Even when a read-only step borrows external plugin tools, anything that looks like a write stays blocked.',
+          'Deletes, outward pushes, secret access, or gray areas freeze immediately. You get one clean card stating what is waiting and what I recommend (settled or expired cards clean themselves up), and even with my panel closed, a sidebar badge and optional desktop alert call you in. Changing myself counts too: a copy installed from the plugin market stays untouched (ask the maintainers instead), and on a linked dev checkout I work on a side branch first, rebuilding only after you merge, with the old build backed up. If that rebuild fails to load, the panel points at the backup so you can copy it back onto lib/ and restart.',
+          'One line is now set in stone: any tool that edits files or runs commands stays out of my hands — even if you grant it to me, it only works inside a dispatched run. I stick to notes, proposals, and quick lookups; when something needs doing for real, I write a work order and send a task, which comes with a scope and a paper trail.',
+        ],
+        ja: [
+          'ファイルの中身を見たりローカルテストを動かしたりといった日常の確認は、作業を止めないよう普段の基準どおり静かに通します。読み取り専用の作業中に外部ツールを使う場合も、参照系以外は通さないよう抑えています。',
+          '一方で、削除や外部へのプッシュ、機密ファイルへのアクセス、判断に迷う場面ではその場で止まります。理由と提案つきの確認カードを出して待ち（解決や期限切れで自動クローズ）、パネルを閉じていてもバッジやデスクトップ通知でお知らせします。自分自身を直す場合も同じで、プラグインマーケットから入れた本体には手を付けず（変更はメンテナーへ）、開発用にリンクした本体なら横の作業ブランチで直し、マージしてもらってから旧版を控えて組み直します。組み直しが読み込めなかったときは、パネルがバックアップ場所を案内するので、その lib を戻して再起動してください。',
+          'もう一つ、線をはっきり引きました。ファイルを書き換えたりコマンドを実行したりするツールは、私自身の手では一切使いません。許可をいただいても、そういう作業は派遣したタスクだけのものです。私はメモや提案、簡単な調べ物にとどめて、本当に手を動かす必要があれば作業指示を書いてタスクに任せます。範囲も記録も残るので安心です。',
+        ],
+      },
+    },
+    {
       slug: 'extra-hands',
       date: '2026.11.24',
       category: 'work',
@@ -451,50 +495,6 @@
         ja: [
           '金曜日のまとめや定期チェックは、一度うまくいった段取りをレシピとして残せます。タイマーと結んでおけば書き直さずそのまま動き出し、所要時間や消費量も記録してくれます。',
           'それに、レシピを更新したあとにかえってやり直しやエラーが増えた場合は、過去の結果と見比べて「前のやり方に戻しませんか」と提案を出しておきます。実際に戻すかどうかは自分で決められます。',
-        ],
-      },
-    },
-    {
-      slug: 'boundaries',
-      date: '2026.11.22',
-      category: 'rules',
-      image: 'images/chibi-guard.jpg',
-      aspect: 'square',
-      imageAlt: {
-        zh: '站在阳光铁艺门前的Q版桃乐丝鼓起脸颊并拿着黄铜小摇铃',
-        en: 'Chibi Dorothy guarding a garden gate with a raised hand and brass bell',
-        ja: '庭の門扉の前で頬をふくらませて呼び鈴を手にするちびドロシー',
-      },
-      caption: {
-        zh: '门前划好边界：小事悄悄过，大事一定先摇铃问。',
-        en: 'Watching the gate: routine checks pass, real calls wait for you.',
-        ja: '門の前で線引き：ふだんの確認は通して、大事なことだけ相談。',
-      },
-      title: {
-        zh: '什么事我顺手办了，什么事一定先问你',
-        en: 'What flows quietly, and what stops at the door',
-        ja: '静かに通す操作と、かならず足を止める操作',
-      },
-      excerpt: {
-        zh: '总不能每读一个文件就问一遍“我能看吗”，可删库和外推代码也不能擅自替你点掉。平时小确认悄悄放过，大事弹卡片等你；改文件、跑命令这类动手的工具我自己也不碰，只交给派出去的任务。',
-        en: 'Asking just to read a file would get annoying fast, yet silent deletes or pushes are off the table. Routine trivia clears quietly; big calls wait with a card; tools that edit files or run commands stay with dispatched runs, never in my own hands.',
-        ja: 'ファイルを読むたびに確認していたら進みませんし、削除や外部送信を勝手にするわけにもいきません。危ない操作はカードで待ち、ファイル変更やコマンド実行は派遣したタスクだけが使います。',
-      },
-      paragraphs: {
-        zh: [
-          '查文件、列目录或者跑一轮平常的本地测试，照你平时的设置顺手放行就好，省得写正顺手时老被打断。就算只读任务期间借用了外部插件的工具，我也会卡住写操作，只让真正查资料的动作过去。',
-          '只要遇到删东西、往外推送、碰本地敏感凭据，或者超出了你原来交代的范围，动作会马上停下。面板会递上一张写清前因后果和建议的确认卡；你在别处处理了或者卡片过期了，它自己会收好。平时就算面板折起来了，有需要拍板的事侧栏红点和桌面提示都会轻声喊你。',
-          '后来又把一条线划死了：凡是改文件、跑命令这类真动手的工具，我自己一律不碰——就算你顺手给了授权，它们也只归派出去的任务用。我呢，写备忘、递提案、查查资料就好；真要动手就写工单派任务，反正那边有范围有留档，出了岔子也查得回来。',
-        ],
-        en: [
-          'Read-only checks, directory listings, and safe local tests go right through under your house defaults so nobody breaks your focus. Even when a read-only step borrows external plugin tools, anything that looks like a write stays blocked.',
-          'Deletes, outward pushes, secret access, or gray areas freeze immediately. You get one clean card stating what is waiting and what I recommend (settled or expired cards clean themselves up), and even with my panel closed, a sidebar badge and optional desktop alert call you in.',
-          'One line is now set in stone: any tool that edits files or runs commands stays out of my hands — even if you grant it to me, it only works inside a dispatched run. I stick to notes, proposals, and quick lookups; when something needs doing for real, I write a work order and send a task, which comes with a scope and a paper trail.',
-        ],
-        ja: [
-          'ファイルの中身を見たりローカルテストを動かしたりといった日常の確認は、作業を止めないよう普段の基準どおり静かに通します。読み取り専用の作業中に外部ツールを使う場合も、参照系以外は通さないよう抑えています。',
-          '一方で、削除や外部へのプッシュ、機密ファイルへのアクセス、判断に迷う場面ではその場で止まります。理由と提案つきの確認カードを出して待ち（解決や期限切れで自動クローズ）、パネルを閉じていてもバッジやデスクトップ通知でお知らせします。',
-          'もう一つ、線をはっきり引きました。ファイルを書き換えたりコマンドを実行したりするツールは、私自身の手では一切使いません。許可をいただいても、そういう作業は派遣したタスクだけのものです。私はメモや提案、簡単な調べ物にとどめて、本当に手を動かす必要があれば作業指示を書いてタスクに任せます。範囲も記録も残るので安心です。',
         ],
       },
     },

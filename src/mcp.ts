@@ -1,0 +1,143 @@
+/**
+ * Preset-scope row `ds-dot/mcp`: mounts one `@deepseek-ai/dsh-mcp-client`
+ * child per enabled dot-local MCP server inside dot's preset scope, so the
+ * `mcp__<server>__*` tools land on the preset layer — visible to dot's agent
+ * (masked until granted) and to no other session. Reads dot's settings and
+ * publishes per-server status through the globalThis channel in
+ * mcp-shared.ts, since this entry is a separate bundle module.
+ */
+import type { DotMcpServer } from './contracts.ts'
+import { hostImport } from './host-import.ts'
+import { sharedDotMcp } from './mcp-shared.ts'
+
+export const name = 'ds-dot/mcp'
+
+interface McpClientModule {
+  connectionStatusOf(fiber: unknown): {
+    current(): { state: string }
+    onChange(callback: (status: unknown) => void): () => void
+  } | undefined
+}
+
+interface FiberLike {
+  dispose(): Promise<void> | void
+}
+
+interface RowCtx {
+  loader?: { internal?: { import(name: string, baseUrl: string, options?: object): Promise<unknown> } }
+  baseUrl?: string
+  plugin(plugin: unknown, config?: unknown): FiberLike
+  on(event: string, listener: (...args: never[]) => void): unknown
+  get(name: string): { definitions?(): readonly { name: string }[] } | undefined
+  logger?: { debug?(...args: unknown[]): void; info?(...args: unknown[]): void; warn?(...args: unknown[]): void }
+}
+
+const toolPrefix = (server: string) => `mcp__${server}__`
+
+/** What decides whether an enabled server's mount is still current. */
+const signatureOf = (server: DotMcpServer) => JSON.stringify([server.url, server.headers ?? {}])
+
+export async function apply(ctx: RowCtx) {
+  const shared = sharedDotMcp()
+  const mounted = new Map<string, { fiber: FiberLike; signature: string; unwatch?: () => void }>()
+  let client: McpClientModule | undefined
+  let lastToolNames = ''
+
+  const log = (message: string) => ctx.logger?.info?.(`dsh-dot/mcp: ${message}`)
+
+  const toolNames = () => {
+    const servers = shared.settings?.().mcpServers ?? {}
+    const defs = ctx.get('tools')?.definitions?.() ?? []
+    return defs.map(def => def.name).filter(name =>
+      Object.keys(servers).some(server => name.startsWith(toolPrefix(server))),
+    ).sort().join('\n')
+  }
+
+  let toolsTimer: ReturnType<typeof setTimeout> | undefined
+  const noteToolsChanged = () => {
+    if (toolsTimer !== undefined) clearTimeout(toolsTimer)
+    toolsTimer = setTimeout(() => {
+      toolsTimer = undefined
+      const next = toolNames()
+      if (next === lastToolNames) return
+      lastToolNames = next
+      shared.onToolsChanged?.()
+    }, 500)
+  }
+
+  const publish = (server: string, status: { state: string } & Record<string, unknown>) => {
+    const row: { state: string; toolCount?: number; diagnostic?: string } = { state: status.state }
+    if (typeof status.toolCount === 'number') row.toolCount = status.toolCount
+    const diagnostic = typeof status.lastError === 'string' ? status.lastError : undefined
+    if (diagnostic !== undefined) row.diagnostic = diagnostic
+    shared.servers.set(server, row)
+    noteToolsChanged()
+  }
+
+  const mount = async (server: string, config: DotMcpServer) => {
+    if (client === undefined) {
+      try { client = await hostImport(ctx, '@deepseek-ai/dsh-mcp-client') } catch (error) {
+        shared.servers.set(server, { state: 'failed', diagnostic: `host mcp-client unavailable: ${String(error)}` })
+        return
+      }
+    }
+    const signature = signatureOf(config)
+    try {
+      const fiber = ctx.plugin(client, {
+        serverName: server,
+        transport: 'streamable-http',
+        url: config.url,
+        headers: { ...config.headers },
+        expandTemplates: true,
+        startupTimeoutMs: 20_000,
+        reconnect: { enabled: true },
+        failOnStartupError: false,
+      })
+      const entry: { fiber: FiberLike; signature: string; unwatch?: () => void } = { fiber, signature }
+      const status = client.connectionStatusOf(fiber)
+      if (status !== undefined) entry.unwatch = status.onChange(next => publish(server, next as { state: string }))
+      mounted.set(server, entry)
+      publish(server, status?.current() ?? { state: 'connecting' })
+    } catch (error) {
+      // One bad server must not take the row (and its other servers) down.
+      shared.servers.set(server, { state: 'failed', diagnostic: `mount failed: ${error instanceof Error ? error.message : String(error)}` })
+      log(`mount of ${server} failed: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+
+  const unmount = async (server: string) => {
+    const entry = mounted.get(server)
+    if (entry === undefined) return
+    mounted.delete(server)
+    entry.unwatch?.()
+    try { await entry.fiber.dispose() } catch { /* scope disposal may have run already */ }
+    shared.servers.delete(server)
+    noteToolsChanged()
+  }
+
+  let reconciling: Promise<void> | undefined
+  const reconcile = () => {
+    const servers = shared.settings?.().mcpServers ?? {}
+    reconciling = (async () => {
+      for (const name of [...mounted.keys()]) {
+        const next = servers[name]
+        if (next === undefined || !next.enabled || signatureOf(next) !== mounted.get(name)?.signature) await unmount(name)
+      }
+      for (const [name, config] of Object.entries(servers)) {
+        if (config.enabled && !mounted.has(name)) await mount(name, config)
+      }
+    })().catch(error => log(`reconcile failed: ${error instanceof Error ? error.message : String(error)}`))
+    return reconciling
+  }
+
+  shared.onSettingsChanged = () => { void reconcile() }
+  try { ctx.on('tools/change' as never, (() => noteToolsChanged()) as never) } catch { /* event may not reach this scope */ }
+  ctx.on('dispose' as never, (() => {
+    if (toolsTimer !== undefined) clearTimeout(toolsTimer)
+    if (shared.onSettingsChanged !== undefined) shared.onSettingsChanged = undefined
+    for (const name of [...mounted.keys()]) void unmount(name)
+  }) as never)
+
+  lastToolNames = toolNames()
+  await reconcile()
+}

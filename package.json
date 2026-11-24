@@ -32,6 +32,11 @@
       "import": "./lib/attribution.js",
       "default": "./lib/attribution.js"
     },
+    "./mcp": {
+      "types": "./lib/mcp.d.ts",
+      "import": "./lib/mcp.js",
+      "default": "./lib/mcp.js"
+    },
     "./reflection": {
       "types": "./lib/reflection.d.ts",
       "import": "./lib/reflection.js",

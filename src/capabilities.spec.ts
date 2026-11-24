@@ -1060,7 +1060,7 @@ describe('service-level capability gate', () => {
     const text = await service.listCapabilities()
     expect(text).toContain('[builtin:schedule] grant=auto')
     expect(text).toContain('schedule_create — grant=auto (applied=auto)')
-    expect(text).toContain('(task-only: runs use it; never applied to dot)')
+    expect(text).toContain('plugin-manager (task-only: runs use it; never applied to dot)')
   })
 })
 

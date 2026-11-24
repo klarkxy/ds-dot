@@ -421,11 +421,11 @@
       paragraphs: {
         zh: [
           '说真的，要是每次新开对话都得重新解释“怎么称呼你”“平时放多松”，人烦我也记不过来。现在全都规规矩矩收在设置抽屉里，隔壁插件带过来的额外工具默认也都关着。哪项你觉得不用再动了，点一下旁边的小锁，以后我连修改建议也不会提。',
-          '选任务模型时我也多了份参考：`dot_list_models` 会结合固定的 LMArena 榜单快照对可用路由做只读排序推荐，但只要是你明确点名的模型我绝不会擅自替换。GitHub 那边也更清爽了：开着联动时 PR 新评论和构建失败会自己落回原任务底下；我去翻 PR、Issue 或仓库信息时只留正文、分支和状态，遇上限流再悄悄退回普通读取。平时只想先聊两句思路不建任务，也随时说就行。',
+          '选任务模型时我也多了份参考：我会结合固定的 LMArena 榜单快照对可用路由做只读排序推荐，但只要是你明确点名的模型我绝不会擅自替换。GitHub 那边也更清爽了：开着联动时 PR 新评论和构建失败会自己落回原任务底下；我去翻 PR、Issue 或仓库信息时只留正文、分支和状态，遇上限流再悄悄退回普通读取。平时只想先聊两句思路不建任务，也随时说就行。',
         ],
         en: [
           'Nobody wants to re-explain their preferred tone or permissions every week. Everything sits neatly in one settings drawer—with companion plugin tools turned off by default—and clicking the small lock beside any option keeps me from ever proposing edits to it.',
-          'For choosing task models, `dot_list_models` offers read-only rankings from a pinned LMArena snapshot while leaving any model you explicitly named untouched. The GitHub side is tidier too: optional PR comments and failing checks fold right back onto their originating task, and PR, issue, or repo lookups trim repetitive link boilerplate (falling back quietly if rate-limited). And if you just want to bounce ideas around without opening tasks, we can just talk.',
+          'For choosing task models, I also consult read-only rankings from a pinned LMArena snapshot while leaving any model you explicitly named untouched. The GitHub side is tidier too: optional PR comments and failing checks fold right back onto their originating task, and PR, issue, or repo lookups trim repetitive link boilerplate (falling back quietly if rate-limited). And if you just want to bounce ideas around without opening tasks, we can just talk.',
         ],
         ja: [
           '毎回「呼び方」や「任せる範囲」を言い直すのは大変ですよね。設定はひとつの引き出しにまとめて、他プラグインの追加機能も既定はオフにしてあります。決めた項目の横にある鍵を押せば、以後はわたしからの変更提案もしません。',
@@ -1271,7 +1271,7 @@
       state.pendingCatFocus = null;
       if (state.route.view !== 'post' && state.route.view !== 'clips' && state.route.view !== 'about') {
         const container = inFeed ? viewRoot.querySelector('.feed-filter') : sidebarCategories;
-        const escaped = typeof CSS !== 'undefined' && typeof CSS.escape === 'function' ? CSS.escape(cat) : cat;
+        const escaped = typeof CSS !== 'undefined' && typeof CSS.escape === 'function' ? CSS.escape(cat) : cat.replace(/["\\]/g, '\\$&');
         const target = container ? container.querySelector(`[data-cat="${escaped}"]`) : null;
         if (target) target.focus({ preventScroll: true });
       }

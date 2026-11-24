@@ -1,6 +1,6 @@
 # 收件箱：第一期刻意留白的部分
 
-第一期已落地范围：GitHub Webhook（经 `@deepseek-ai/dsh-webhook` 规则）→ dot 收件箱（持久化、去重、按对象合并）→ 空闲时唤醒 dot，以及已关联 PR 的后续事件（新提交、CI 结果、评论）通过 `autoLinkReport` 与持久化绑定自动归入对应任务。订阅范围由用户在 GitHub Webhook 中挑选事件与仓库，dot 侧仅执行固定噪声过滤。
+第一期已落地范围：GitHub Webhook（经 `@deepseek-ai/dsh-webhook` 规则）→ dot 收件箱（持久化、去重、按对象合并）→ 空闲时唤醒 dot，以及已关联 PR 的后续事件（新提交、CI 结果、评论）通过 `autoLinkReport` 与持久化绑定自动归入对应任务；接入配置说明已写入 [docs/reference.md](../docs/reference.md)。订阅范围由用户在 GitHub Webhook 中挑选事件与仓库，dot 侧仅执行固定噪声过滤。
 
 ## 后续候选
 
@@ -10,5 +10,4 @@
 - **更多事件源：** 接入 IM（见 [im.md](im.md)）及通用签名 Webhook（任意 JSON + HMAC 校验）。
 - **保留策略配置：** 第一期固定保留最近 N 条已投递事件。
 - **合并时保留事件类型历史：** 当前同一对象的待投递记录合并后仅保留最新事件的类型与摘要（例如 PR 先 `opened` 再收到评论，dot 只会看到 `issue_comment.created ×2`），后续可在合并记录中保留出现过的事件类型列表。
-- **补充专门的接入配置指南：** 第一期未单独展开高级配置文档；用户需安装 `@deepseek-ai/dsh-webhook` 与 `dsh-webhook-github`，并在 overlay 中挂载独立 WebServer 与适配器（可参考官方 `github-review` 示例并去掉其中的评审规则）。
 - **按时间保留去重窗口：** 当前仅保留最近 200 条已投递记录，且每条合并记录最多记录 50 个 `deliveryId`；手动点击 GitHub「Redeliver」重放较早投递时会按新事件入库，后续可考虑按时间窗口去重。

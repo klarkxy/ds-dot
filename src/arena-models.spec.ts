@@ -171,7 +171,7 @@ describe('Arena recommendation output', () => {
     expect(output).toContain('Recommendation only: no model was selected or dispatched')
     expect(output).toContain('a human-named model is a pin')
     expect(output).toContain('fixture/arena@12345678')
-    expect(output).toContain('(1 more ranked model(s) not shown')
+    expect(output).toContain('(1 more ranked model(s) not shown; use raw mode to inspect up to 80 eligible routes)')
   })
 
   it('keeps unmatched routes eligible without fabricating a score', () => {

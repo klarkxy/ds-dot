@@ -11,19 +11,19 @@ This page collects the deeper configuration, security guardrail, GitHub webhook,
 | Setting | Default | Options |
 |---|---|---|
 | **Scope** | **Her tasks** | **Her tasks** (only tasks dispatched by Dorothy) · **All** (watch all top-level DSH sessions) |
-| **Permission approvals** | **Dorothy** | **Dorothy** (auto-handles routine reversible calls; escalates risky/truncated ones) · **Me** (relays every card) · **Deny all** |
+| **Permission approvals** | **Dorothy** | **Dorothy** (auto-handles routine calls, reads truncated arguments via `dot_answer action=read` first, judges sandbox escalations and own-worktree `git reset --hard` / `clean -f`, and escalates hard risks) · **Me** (relays every card) · **Deny all** |
 | **Model questions** | **She decides** | **She decides** (picks routine reversible defaults within goal) · **Ask me** · **Hands off** (leaves in originating session) |
 
 Even in **Dorothy** mode, approvals matching these patterns **always** come straight to you:
 
-- Truncated approval requests
-- Sandbox escalation (`danger-full-access` / `sandbox_permissions`)
 - Publishing or pushing (`git push`, `npm/pnpm/yarn/bun/cargo publish`, `gh release` / `pr merge`, `twine upload`)
-- Recursive or destructive deletion (`rm -r`, `Remove-Item -Recurse/-Force`, `git reset --hard` / `clean -f`, `find -delete`, containers, `kubectl delete`, `terraform destroy`, SQL `DROP` / `TRUNCATE`)
+- Recursive or destructive deletion (`rm -r`, `Remove-Item -Recurse/-Force`, `find -delete`, containers, `kubectl delete`, `terraform destroy`, SQL `DROP` / `TRUNCATE`), and `git reset --hard` / `clean -f` aimed anywhere except the requesting run's own task worktree
 - Credential and `.env` access (private keys, tokens, `.ssh`, `.aws/credentials`, `.npmrc`, `.pypirc`, `.netrc`)
 - Remote downloads piped into a shell (`curl ... | sh`, `iwr ... | iex`)
 - Subagent shell calls
 - Writes inside a read-only run — which also refuses MCP tools whose names don't read as lookups (`get_…`, `list_…`, `search_…`, etc.)
+
+Two softer cases stay with Dorothy instead: a sandbox escalation (`danger-full-access` / `sandbox_permissions`) is approved when the command stays inside the work order's authority and the run's own worktree or workspace — her own task-worktree `git reset --hard` / `clean -f` included — and denied or asked about when it would change state outside the run. A truncated request shows her only part of the arguments, so she must read them in full via `dot_answer action=read` before allowing it (and relays it to you if full arguments are unavailable).
 
 The static check is pattern-based rather than exhaustive; silence is never treated as consent, write scopes coordinate Dorothy's own runs without OS file locks, and accepting a delivery closes the task without authorizing pushes, publishing, or spending.
 
@@ -51,6 +51,15 @@ The **MCP servers** page connects remote MCP servers that only Dorothy can use �
 - **GitHub token:** needs a [fine-grained PAT](https://github.com/settings/personal-access-tokens/new) with read-only access — Contents, Issues, Pull requests, Actions, Metadata. Tokens are stored in the host credential store (`DOT_MCP_<NAME>_TOKEN`) and never echoed back.
 - **Custom servers:** name plus URL with an optional token. Remote (streamable-http) endpoints only: `https` everywhere, `http` allowed for loopback addresses. No stdio/command entries — a browser panel must not define commands to spawn — and no OAuth flow (DSH has none), so token-auth and no-auth servers only.
 - Servers stay configured across restarts; a factory reset removes them together with their `DOT_MCP_*` credentials.
+
+---
+
+## Isolated worktree tasks
+
+When `dot_task(action="create", isolation="worktree")` is used, Dorothy cuts a `dot/task-<slug>` branch inside `<homeDir>/worktrees/<slug>` without touching your active checkout:
+
+- **Picking a base (`base_ref` & `base_remote`):** By default the task branch cuts from the checkout's `HEAD`. To continue an existing PR or branch (for example `refs/pull/123/head`), pass `base_ref` (local branch, tag, or commit) and optionally `base_remote` (a configured git remote name or a credential-free `https://` URL). Dorothy fetches into a temporary `refs/dot/base/<slug>` with `--no-tags --no-write-fetch-head --refmap=` and deletes the temp ref immediately after resolving the commit, leaving `FETCH_HEAD` and `refs/remotes/*` untouched.
+- **Integration actions:** Tasks cut from the checkout's `HEAD` offer **Merge into checkout**, **Keep branch**, and **Discard** on the board. Tasks cut from a `base_ref` only offer **Keep branch** and **Discard** (and `integrateWork(..., "merge")` refuses) so an unrelated PR or remote branch is never merged over your working checkout; keep the branch and push or merge it yourself where it belongs.
 
 ---
 

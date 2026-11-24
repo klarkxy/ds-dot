@@ -9,7 +9,7 @@ import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync,
 import { randomUUID } from 'node:crypto'
 import { HarnessError } from '@deepseek-ai/dsh-llm'
 import { mkdir } from 'node:fs/promises'
-import { dirname, isAbsolute, join, relative, sep } from 'node:path'
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { APPROVAL_DETAIL_LIMIT, approvalNotice } from './approval-risk.ts'
 import type { IntendedRunPermission } from './approval-safe-auto.ts'
 import { createTwoFilesPatch } from 'diff'
@@ -19,14 +19,14 @@ import { attentionItems } from './board-groups.ts'
 import { renderBrief, renderSupplement, runTitle } from './brief.ts'
 import { bindRunSession, cancelWork, countRelayInserts, finishWork, launchReservedRun, observeRun, reconcileRun, supplementRun } from './execution.ts'
 import { detectWorkspaceRoot } from './git-root.ts'
-import { commitDelivery, createTaskWorktree, listTaskWorktrees, mergeInto, removeTaskWorktree, runGit, taskWorktreeRoot, type GitRunner, type TaskWorktree } from './git-worktree.ts'
+import { commitDelivery, createTaskWorktree, listTaskWorktrees, mergeInto, removeTaskWorktree, runGit, sanitizeRemoteDisplay, taskWorktreeRoot, type GitRunner, type TaskWorktree } from './git-worktree.ts'
 import { defaultSelfBuild, insideOrEqual, libHashOf, realpathOrResolve, type SelfBackup, type SelfInstall, type SelfUpgradeMarker } from './self-root.ts'
 import {
   WRITE_PATHS_EXAMPLE, artifactName, constraintList, jsonArray,
   occupantOf, pathScope, plannedOccupant, plannedScope, requirementList, samePathList,
   stepList, verifyRefusal,
 } from './work-actions.ts'
-import { absoluteScopePath, canonicalPath, onDiskPath, changeIsTerminal, MAX_COMPLETED_CHANGES, InputShapeError, inputContractError, occupantsConflict, runCostTotals, runIsTerminal, scopeWithinRoot, scopeWrites, type ChangeRecord, type Constraint, type Occupant, type Requirement, type RootHint, type RunRecord, type TaskIsolation, type WorkRefusal, type WriteScope } from './work.ts'
+import { absoluteScopePath, canonicalPath, onDiskPath, changeIsTerminal, MAX_COMPLETED_CHANGES, InputShapeError, inputContractError, isSameOrChildPath, occupantsConflict, runCostTotals, runIsTerminal, scopeWithinRoot, scopeWrites, type ChangeRecord, type Constraint, type Occupant, type Requirement, type RootHint, type RunRecord, type TaskIsolation, type WorkRefusal, type WriteScope } from './work.ts'
 import type { ShownView, ViewAnswer } from '@klarkxy/dsh-deep-view/contracts'
 import { DotCards, cardAnswerText, type DotCardRecord } from './card-state.ts'
 import { checkChatImages, type ChatImage } from './chat-images.ts'
@@ -171,6 +171,8 @@ export class DotService {
   private readonly openCapabilityAsks = new Map<string, { readonly chain: readonly string[]; readonly withdraw: () => void }>()
   /** Decision wakes already queued in this process. The durable mark is notifiedAt. */
   private readonly decisionWakes = new Set<string>()
+  /** Truncated approvals dot read in full; allowing one without a read is refused. */
+  private readonly readApprovals = new Set<string>()
   private readonly childRefreshers = new Set<() => void>()
   private readonly childReleases = new Map<string, () => void>()
   private resetArmed?: { readonly token: string; readonly expiresAt: number }
@@ -458,14 +460,30 @@ export class DotService {
     })
   }
 
+  private openApprovalIds(): Set<string> {
+    return new Set(this.pending.list().filter(row => row.kind === 'approval').map(row => row.id))
+  }
+
   saveApprovalDetail(detail: import('./contracts.ts').ApprovalDetail): Promise<void> {
-    return this.track(() => this.store.saveApprovalDetail(detail))
+    if (this.closing) return Promise.reject(new DotError('dot/disposed', 'dot is shutting down'))
+    // Update store.approvalDetails synchronously before async persistence so
+    // dot_answer action=read never races with a newly arrived request.
+    const run = this.store.saveApprovalDetail(detail, this.openApprovalIds())
+    this.inFlight.add(run)
+    void run.then(() => this.inFlight.delete(run), () => this.inFlight.delete(run))
+    return run
   }
 
   readApprovalDetail(id: string): string {
     const detail = this.store.approvalDetails.find(row => row.requestId === id)
-    if (!detail) throw new DotError('dot/unknown-request', `no recorded approval ${id}`)
-    return JSON.stringify(detail)
+    if (detail) {
+      this.readApprovals.add(id)
+      return JSON.stringify(detail)
+    }
+    if (this.pending.get(id)?.kind === 'approval') {
+      throw new DotError('dot/human-required', `full arguments for approval ${id} are unavailable; relay it to the human for a direct decision`)
+    }
+    throw new DotError('dot/unknown-request', `no recorded approval ${id}`)
   }
 
   /**
@@ -1528,7 +1546,7 @@ export class DotService {
 
   manageTask(args: Record<string, unknown>): Promise<string> {
     const action = typeof args.action === 'string' ? args.action : ''
-    const awaitsHost = ['finish', 'cancel', 'supplement', 'dispatch', 'check', 'closeout', 'reject'].includes(action)
+    const awaitsHost = ['create', 'finish', 'cancel', 'supplement', 'dispatch', 'check', 'closeout', 'reject'].includes(action)
     const work = awaitsHost ? this.manageWorkAction(args) : this.serial(() => this.manageWorkAction(args))
     // Settling runs earn their token/wall cost whether or not the panel is open.
     return work.finally(() => this.scheduleRunUsage())
@@ -1698,6 +1716,12 @@ export class DotService {
     }
     // A model-generated tool call is not evidence of a human decision.
     if (view.kind === 'approval' && answer.kind === 'approval' && (view.humanRequired === true || this.rules.approvals === 'human')) throw new DotError('dot/human-required', `approval ${id} requires a direct human decision`)
+    if (view.kind === 'approval' && answer.kind === 'approval' && answer.allow === true && view.truncated === true && !this.readApprovals.has(id)) {
+      if (!this.store.approvalDetails.some(row => row.requestId === id)) {
+        throw new DotError('dot/human-required', `approval ${id} was truncated and its full arguments are unavailable; relay it to the human for a direct decision`)
+      }
+      throw new DotError('dot/read-required', `approval ${id} was truncated; read it with ${TOOL.answerPending} action=read before allowing`)
+    }
     if (view.kind === 'question' && this.rules.questions === 'human') throw new DotError('dot/human-required', `question ${id} requires a direct human answer in the original session`)
     // The human may switch to deny while dot is still judging a delivered request.
     const denied = view.kind === 'approval' && answer.kind === 'approval' && this.rules.approvals === 'deny'
@@ -1716,8 +1740,9 @@ export class DotService {
   }
 
   private pruneApprovalDetails(): Promise<void> {
-    const open = new Set(this.pending.list().filter(row => row.kind === 'approval').map(row => row.id))
-    const kept = this.store.approvalDetails.filter(row => open.has(row.requestId)).slice(-APPROVAL_DETAIL_LIMIT)
+    const open = this.openApprovalIds()
+    for (const id of [...this.readApprovals]) if (!open.has(id)) this.readApprovals.delete(id)
+    const kept = this.store.approvalDetails.filter(row => open.has(row.requestId))
     return this.store.replaceApprovalDetails(kept)
   }
 
@@ -2685,6 +2710,19 @@ export class DotService {
     const route = routeRequest(this.rules, input.kind)
     if (route.action === 'skip' || route.action === 'deny') return { decided: route.action }
     const run = this.store.work.sessionRun(input.sessionId)
+    const runChange = run ? this.store.work.change(run.changeId) : undefined
+    // A git reset/clean is dot's call only when the requester's write run lives
+    // inside its own active task worktree and the command points nowhere else.
+    const isolation = runChange?.isolation
+    const argCwds = approvalArgCwds(input.arguments, input.cwd ?? run?.cwd)
+    const ownWorktree = input.viaSubagent !== true
+      && run?.access === 'write'
+      && isolation?.kind === 'worktree'
+      && isolation.state === 'active'
+      && isSameOrChildPath(isolation.worktree, run.cwd)
+      && (input.cwd === undefined || isSameOrChildPath(isolation.worktree, input.cwd))
+      && argCwds !== null
+      && argCwds.every(dir => isSameOrChildPath(isolation.worktree, dir))
     const notice = input.kind === 'approval'
       ? approvalNotice({
           toolName: input.toolName ?? input.subject,
@@ -2693,6 +2731,7 @@ export class DotService {
           ...(input.arguments !== undefined ? { arguments: input.arguments } : {}),
           ...(input.viaSubagent ? { viaSubagent: true } : {}),
           ...(run?.access === 'read' ? { readOnly: true } : {}),
+          ...(ownWorktree ? { ownWorktree: true } : {}),
         })
       : undefined
     const detail = notice?.text ?? input.detail
@@ -2705,12 +2744,14 @@ export class DotService {
       ...(input.questions !== undefined ? { questions: input.questions } : {}),
       ...(input.signal !== undefined ? { signal: input.signal } : {}),
       ...(humanRequired ? { humanRequired: true } : {}),
+      ...(notice?.truncated === true ? { truncated: true } : {}),
     })
-    const runChange = run ? this.store.work.change(run.changeId) : undefined
     const where = task ? `task "${task.title}"` : `untracked session${input.cwd ? ` in ${input.cwd}` : ''}`
     const lines = [runChange ? `${opened.id} for task ${runChange.id} "${runChange.title}": ${input.kind} · "${input.subject}"` : `${opened.id} · ${input.kind} from ${where} · "${input.subject}"`]
     if (detail) lines.push(`  detail: ${notice ? detail : clip(detail, 600)}`)
     if (humanRequired && notice) lines.push(`  human-required: ${notice.reasons.join(', ')}; do not use dot_answer.`)
+    if (notice && notice.cautions.length > 0) lines.push(`  caution: ${notice.cautions.join(', ')}; judge by authority and impact.`)
+    if (notice?.truncated === true) lines.push(`  truncated: read the full arguments with ${TOOL.answerPending} action=read before allowing.`)
     if (input.kind === 'question' && route.action === 'human') lines.push('  The human must answer the original question in its session; do not use dot_answer.')
     for (const q of input.questions ?? []) {
       lines.push(`  [${q.id}] ${q.question}${q.options?.length ? ' options: ' + q.options.map(o => o.label).join(' | ') : ''}${q.multiSelect ? ' (multi)' : ''}`)
@@ -2718,6 +2759,15 @@ export class DotService {
     // Decisions live in the system prompt and agreements, never repeated in each notice.
     // An already-aborted request is not queued at all.
     if (this.pending.get(opened.id)) {
+      if (input.kind === 'approval' && (input.arguments !== undefined || input.reason !== undefined || input.detail !== undefined)) {
+        void this.saveApprovalDetail({
+          requestId: opened.id,
+          sessionId: input.sessionId,
+          toolName: input.toolName ?? input.subject,
+          ...(input.reason !== undefined ? { reason: input.reason } : {}),
+          ...(input.arguments !== undefined ? { arguments: input.arguments } : input.detail !== undefined ? { arguments: input.detail } : {}),
+        }).catch(() => undefined)
+      }
       this.emit({ event: DOT_TRACE.approvalOpened, message: `Opened ${input.kind} ${opened.id}.`, sessionId: input.sessionId, ...(run ? { changeId: run.changeId } : {}), data: { requestId: opened.id, kind: input.kind } })
       this.notify({ sessionId: input.sessionId, kind: input.kind, requestId: opened.id, text: lines.join('\n'), at: this.now(), display: {
         ...approvalDisplay(input.arguments),
@@ -3123,6 +3173,7 @@ export class DotService {
     const isolation = change.isolation
     if (isolation?.kind !== 'worktree') return { ok: false, code: 'invalid', message: `${changeId} is not an isolated change` }
     if (isolation.state !== 'active') return { ok: false, code: 'invalid', message: `${changeId} was already ${isolation.state}` }
+    if (mode === 'merge' && isolation.base !== undefined) return { ok: false, code: 'invalid', message: `${changeId} was cut from ${isolation.base.ref}, not your checkout; keep the branch and integrate it yourself` }
     const view = this.store.work.workView(changeId)
     if (!change.closeout || view?.status !== 'done') return { ok: false, code: 'invalid', message: `${changeId} is not accepted yet` }
     const git = this.git()
@@ -3858,9 +3909,9 @@ export class DotService {
   }
 
   /** Open a dot/task-* worktree for `dir`; a git failure reads as dot/invalid like create reports it. */
-  private async taskWorktreeFor(dir: string): Promise<TaskWorktree> {
+  private async taskWorktreeFor(dir: string, base?: { readonly ref: string; readonly remote?: string }): Promise<TaskWorktree> {
     try {
-      return await createTaskWorktree({ dir, homeDir: this.options.homeDir }, this.git())
+      return await createTaskWorktree({ dir, homeDir: this.options.homeDir, ...(base !== undefined ? { base } : {}) }, this.git())
     } catch (error) {
       throw new DotError('dot/invalid', `isolation "worktree" could not be prepared: ${messageOf(error)}`)
     }
@@ -3868,6 +3919,7 @@ export class DotService {
 
   /** The create branch of dot_task: returns the created record so callers (recipe dispatch) need not parse the view JSON. */
   private async createChangeFromTool(args: Record<string, unknown>): Promise<{ readonly change: ChangeRecord; readonly forcedIsolation: boolean }> {
+    this.assertOpen()
     const text = (key: string) => typeof args[key] === 'string' ? args[key] as string : undefined
     const title = text('title')
     const goal = text('goal')
@@ -3897,8 +3949,20 @@ export class DotService {
     }
     const forcedIsolation = this.selfIsolation(createDir) === 'worktree'
     const wantsWorktree = forcedIsolation || isolationArg === 'worktree' || (isolationArg === undefined && recipe?.isolation === 'worktree')
+    const baseRef = typeof args.base_ref === 'string' && args.base_ref.trim() !== '' ? args.base_ref.trim() : undefined
+    const baseRemote = typeof args.base_remote === 'string' && args.base_remote.trim() !== '' ? args.base_remote.trim() : undefined
+    if (baseRemote !== undefined && baseRef === undefined) throw new DotError('dot/invalid', 'base_remote needs base_ref')
+    if ((baseRef !== undefined || baseRemote !== undefined) && !wantsWorktree) throw new DotError('dot/invalid', 'base_ref and base_remote need isolation "worktree"')
+    const base = baseRef === undefined ? undefined : { ref: baseRef, ...(baseRemote !== undefined ? { remote: baseRemote } : {}) }
+    const storedBase = base === undefined ? undefined : { ref: base.ref, ...(base.remote !== undefined ? { remote: sanitizeRemoteDisplay(base.remote) } : {}) }
     let worktree: TaskWorktree | undefined
-    if (wantsWorktree) worktree = await this.taskWorktreeFor(createDir)
+    if (wantsWorktree) {
+      worktree = await this.taskWorktreeFor(createDir, base)
+      if (this.closing) {
+        await removeTaskWorktree({ repoRoot: worktree.repoRoot, worktree: worktree.worktree, branch: worktree.branch, baseSha: worktree.baseSha }, this.git()).catch(() => undefined)
+        throw new DotError('dot/disposed', 'dot is shutting down')
+      }
+    }
     let change: ChangeRecord
     try {
       change = await this.store.work.createChange({
@@ -3913,7 +3977,9 @@ export class DotService {
         ...(worktree !== undefined ? {
           isolation: {
             kind: 'worktree' as const, repoRoot: worktree.repoRoot, worktree: worktree.worktree,
-            branch: worktree.branch, baseSha: worktree.baseSha, state: 'active' as const, at: this.now(),
+            branch: worktree.branch, baseSha: worktree.baseSha,
+            ...(storedBase !== undefined ? { base: storedBase } : {}),
+            state: 'active' as const, at: this.now(),
           },
         } : {}),
         ...(maxConcurrentRuns !== undefined ? { maxConcurrentRuns } : {}),
@@ -4835,6 +4901,25 @@ export class DotService {
     if (!sessionId.trim()) throw new DotError('dot/invalid', 'session_id must be non-empty')
     if (this.isDot(sessionId)) throw new DotError('dot/invalid', 'that is dot itself')
   }
+}
+
+/** Extract explicit working-directory overrides from JSON tool arguments so retargeted shell calls cannot masquerade as in-worktree commands. */
+function approvalArgCwds(rawArgs: string | undefined, baseCwd: string | undefined): readonly string[] | null {
+  if (!rawArgs) return []
+  let parsed: unknown
+  try { parsed = JSON.parse(rawArgs) } catch { return [] }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return []
+  const row = parsed as Record<string, unknown>
+  const dirs: string[] = []
+  for (const key of ['workdir', 'cwd', 'workingDirectory', 'working_directory']) {
+    if (!Object.hasOwn(row, key) || row[key] === undefined || row[key] === null) continue
+    const value = row[key]
+    if (typeof value !== 'string' || !value.trim()) return null
+    if (baseCwd) { dirs.push(resolve(baseCwd, value)); continue }
+    if (!isAbsolute(value)) return null
+    dirs.push(value)
+  }
+  return dirs
 }
 
 export function messageOf(error: unknown): string {

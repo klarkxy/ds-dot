@@ -110,6 +110,8 @@ export interface TaskIsolation {
   readonly worktree: string
   readonly branch: string
   readonly baseSha: string
+  /** Set when the branch was cut from a ref other than the checkout's HEAD. */
+  readonly base?: { readonly ref: string; readonly remote?: string }
   readonly state: 'active' | 'committed' | 'merged' | 'discarded'
   readonly commitSha?: string
   readonly mergedInto?: string
@@ -281,6 +283,7 @@ export const changeSchema = z.object({
   isolation: z.object({
     kind: z.literal('worktree'), repoRoot: z.string().min(1), worktree: z.string().min(1),
     branch: z.string().min(1), baseSha: z.string().min(1),
+    base: z.object({ ref: z.string().min(1), remote: z.string().min(1).optional() }).optional(),
     state: z.enum(['active', 'committed', 'merged', 'discarded']),
     commitSha: z.string().min(1).optional(), mergedInto: z.string().min(1).optional(), at: z.number(),
   }).optional(),
@@ -531,13 +534,20 @@ function sameSessionCwd(actual: string, expectedCanonical: string, platform: Nod
   return canonicalPath(onDiskPath(actual, platform), platform) === canonicalPath(onDiskPath(expectedCanonical, platform), platform)
 }
 
-export function pathsOverlap(left: string, right: string, platform: NodeJS.Platform = process.platform): boolean {
+function pathContains(parent: string, child: string, platform: NodeJS.Platform): boolean {
   const api = platform === 'win32' ? path.win32 : path.posix
-  const contains = (parent: string, child: string) => {
-    const relative = api.relative(parent, child)
-    return relative === '' || (relative !== '..' && !relative.startsWith(`..${api.sep}`) && !api.isAbsolute(relative))
-  }
-  return contains(left, right) || contains(right, left)
+  const relative = api.relative(parent, child)
+  return relative === '' || (relative !== '..' && !relative.startsWith(`..${api.sep}`) && !api.isAbsolute(relative))
+}
+
+/** True when `child` resolves to `parent` itself or a descendant inside `parent`. */
+export function isSameOrChildPath(parent: string, child: string, platform: NodeJS.Platform = process.platform): boolean {
+  if (!parent.trim() || !child.trim()) return false
+  return pathContains(canonicalPath(parent, platform), canonicalPath(child, platform), platform)
+}
+
+export function pathsOverlap(left: string, right: string, platform: NodeJS.Platform = process.platform): boolean {
+  return pathContains(left, right, platform) || pathContains(right, left, platform)
 }
 
 export interface RootHint { readonly workspaceRoot?: string; readonly gitCommonDir?: string; readonly uncertain?: boolean }
@@ -564,9 +574,7 @@ export function absoluteScopePath(root: string, scopePath: string, platform: Nod
 /** True when `scopePath` stays inside `root` after relative resolution. */
 export function scopeWithinRoot(root: string, scopePath: string, platform: NodeJS.Platform = process.platform): boolean {
   const absolute = absoluteScopePath(root, scopePath, platform)
-  const api = platform === 'win32' ? path.win32 : path.posix
-  const relative = api.relative(canonicalPath(root, platform), canonicalPath(absolute, platform))
-  return relative === '' || (relative !== '..' && !relative.startsWith(`..${api.sep}`) && !api.isAbsolute(relative))
+  return isSameOrChildPath(root, absolute, platform)
 }
 
 /**

@@ -5,8 +5,8 @@ import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { sha256 } from './artifacts.ts'
 import {
-  TASK_BRANCH_PREFIX, TASK_WORKTREES_DIR, commitAll, commitDelivery, createTaskWorktree, hasCommitsBeyond, listTaskWorktrees,
-  mergeInto, removeTaskWorktree, runGit, taskWorktreeRoot,
+  TASK_BRANCH_PREFIX, TASK_WORKTREES_DIR, commitAll, commitDelivery, createTaskWorktree, GitWorktreeError, hasCommitsBeyond, listTaskWorktrees,
+  mergeInto, removeTaskWorktree, runGit, sanitizeRemoteDisplay, taskWorktreeRoot, type GitRunner,
 } from './git-worktree.ts'
 
 let gitAvailable = true
@@ -342,6 +342,183 @@ describe.skipIf(!gitAvailable)('git worktrees (real git)', { timeout: 30_000 }, 
       expect(merged).toMatchObject({ ok: true })
       expect(readFileSync(join(repo, 'new.txt'), 'utf-8')).toBe('from the task')
     } finally { cleanup() }
+  })
+
+  it('cuts the task branch from a local ref instead of HEAD', async () => {
+    const { repo, home, cleanup } = makeRepo()
+    try {
+      writeFileSync(join(repo, 'pr.txt'), 'on the pr branch')
+      await runGit(['add', 'pr.txt'], repo)
+      await runGit(['commit', '-m', 'pr head'], repo)
+      const prSha = await runGit(['rev-parse', 'HEAD'], repo)
+      await runGit(['branch', 'pr-branch', prSha], repo)
+      // Put the checkout back on the earlier commit so HEAD ≠ base.
+      await runGit(['reset', '--hard', 'HEAD~1'], repo)
+      const created = await createTaskWorktree({ dir: repo, homeDir: home, base: { ref: 'pr-branch' } })
+      expect(created.baseSha).toBe(prSha)
+      expect(readFileSync(join(created.worktree, 'pr.txt'), 'utf-8')).toBe('on the pr branch')
+      expect(await runGit(['branch', '--show-current'], created.worktree)).toBe(created.branch)
+    } finally { cleanup() }
+  })
+
+  it('fetches a remote ref into a temp ref, cuts from it, and leaves no fetch residue or remote-tracking updates', async () => {
+    const { repo, home, cleanup } = makeRepo()
+    const upstream = makeRepo()
+    try {
+      const initialUpSha = (await runGit(['rev-parse', 'HEAD'], upstream.repo)).trim()
+      execFileSync('git', ['-C', repo, 'remote', 'add', 'upstream', upstream.repo], { stdio: 'ignore' })
+      execFileSync('git', ['-C', repo, 'fetch', '--no-write-fetch-head', 'upstream'], { stdio: 'ignore' })
+      expect(await runGit(['rev-parse', 'refs/remotes/upstream/main'], repo)).toBe(initialUpSha)
+
+      writeFileSync(join(upstream.repo, 'up.txt'), 'upstream head')
+      execFileSync('git', ['-C', upstream.repo, 'add', 'up.txt'], { stdio: 'ignore' })
+      execFileSync('git', ['-C', upstream.repo, 'commit', '-m', 'pr head'], { stdio: 'ignore' })
+      const upSha = (await runGit(['rev-parse', 'HEAD'], upstream.repo)).trim()
+      const created = await createTaskWorktree({ dir: repo, homeDir: home, base: { ref: 'main', remote: 'upstream' } })
+      expect(created.baseSha).toBe(upSha)
+      expect(readFileSync(join(created.worktree, 'up.txt'), 'utf-8')).toBe('upstream head')
+      // The temp ref is gone, --no-write-fetch-head left no FETCH_HEAD, and --refmap= left refs/remotes/upstream/main untouched.
+      expect(await runGit(['for-each-ref', 'refs/dot/base/'], repo)).toBe('')
+      expect(existsSync(join(repo, '.git', 'FETCH_HEAD'))).toBe(false)
+      expect(await runGit(['rev-parse', 'refs/remotes/upstream/main'], repo)).toBe(initialUpSha)
+    } finally { cleanup(); upstream.cleanup() }
+  })
+
+  it('cleans up worktree and branch when mapped subdir is missing or not a directory in base_ref', async () => {
+    const { repo, home, cleanup } = makeRepo()
+    try {
+      // Branch without sub/ and branch where sub is a regular file.
+      await runGit(['checkout', '-b', 'no-sub'], repo)
+      await runGit(['rm', '-r', 'sub'], repo)
+      await runGit(['commit', '-m', 'drop sub'], repo)
+      await runGit(['checkout', '-b', 'file-sub'], repo)
+      writeFileSync(join(repo, 'sub'), 'regular file')
+      await runGit(['add', 'sub'], repo)
+      await runGit(['commit', '-m', 'sub as file'], repo)
+      await runGit(['checkout', 'main'], repo)
+
+      for (const branchRef of ['no-sub', 'file-sub']) {
+        await expect(createTaskWorktree({ dir: join(repo, 'sub'), homeDir: home, base: { ref: branchRef } })).rejects.toThrow(/does not exist as a directory/)
+        expect(listTaskWorktrees(home)).toEqual([])
+        expect(await runGit(['branch', '--list', `${TASK_BRANCH_PREFIX}*`], repo)).toBe('')
+      }
+    } finally { cleanup() }
+  })
+
+  it('removeTaskWorktree deletes an unmodified branch even when baseSha is unmerged into HEAD, and keeps one with commits', async () => {
+    const { repo, home, cleanup } = makeRepo()
+    try {
+      await runGit(['checkout', '-b', 'pr-branch'], repo)
+      writeFileSync(join(repo, 'pr.txt'), 'on pr branch')
+      await runGit(['add', 'pr.txt'], repo)
+      await runGit(['commit', '-m', 'pr commit'], repo)
+      await runGit(['checkout', 'main'], repo)
+
+      // Unmodified task branch cut from unmerged pr-branch: deleted cleanly on remove.
+      const unmodified = await createTaskWorktree({ dir: repo, homeDir: home, base: { ref: 'pr-branch' } })
+      await removeTaskWorktree({ repoRoot: repo, worktree: unmodified.worktree, branch: unmodified.branch, baseSha: unmodified.baseSha })
+      expect(await runGit(['branch', '--list', unmodified.branch], repo)).toBe('')
+
+      // Task branch with an additional commit: still kept when not forced.
+      const committed = await createTaskWorktree({ dir: repo, homeDir: home, base: { ref: 'pr-branch' } })
+      writeFileSync(join(committed.worktree, 'extra.txt'), 'task commit')
+      await commitAll(committed.worktree, 'task commit')
+      await removeTaskWorktree({ repoRoot: repo, worktree: committed.worktree, branch: committed.branch, baseSha: committed.baseSha })
+      expect(await runGit(['branch', '--list', committed.branch], repo)).toBe(committed.branch)
+    } finally { cleanup() }
+  })
+})
+
+describe('createTaskWorktree base plumbing (fake git)', () => {
+  const makeDir = (prefix: string) => realpathSync.native(mkdtempSync(join(tmpdir(), prefix)))
+
+  it('records the fetch refspec and resolves then deletes the temp ref', async () => {
+    const repo = makeDir('dot-wt-repo-')
+    const home = makeDir('dot-wt-home-')
+    const calls: string[][] = []
+    const git: GitRunner = async (args) => {
+      calls.push([...args])
+      if (args[0] === 'rev-parse' && args[1] === '--show-toplevel') return repo
+      if (args[0] === 'remote') return 'origin\nupstream'
+      if (args[0] === 'rev-parse') return 'deadbeefcafe'
+      return ''
+    }
+    try {
+      const created = await createTaskWorktree({ dir: repo, homeDir: home, base: { ref: 'refs/pull/12/head', remote: 'upstream' } }, git)
+      const fetch = calls.find(args => args[0] === 'fetch')
+      const tempRef = /\+refs\/pull\/12\/head:(refs\/dot\/base\/[0-9a-f]+)/.exec(fetch?.join(' ') ?? '')?.[1]
+      expect(tempRef).toBeTruthy()
+      expect(fetch?.slice(0, 4)).toEqual(['fetch', '--no-tags', '--no-write-fetch-head', '--refmap='])
+      expect(fetch).toContain('upstream')
+      expect(calls.some(args => args[0] === 'rev-parse' && args.includes(`${tempRef}^{commit}`))).toBe(true)
+      expect(calls.some(args => args[0] === 'update-ref' && args[1] === '-d' && args[2] === tempRef)).toBe(true)
+      const added = calls.find(args => args[0] === 'worktree' && args[1] === 'add')
+      expect(added?.at(-1)).toBe('deadbeefcafe')
+      expect(created.baseSha).toBe('deadbeefcafe')
+    } finally { rmSync(repo, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }) }
+  })
+
+  it('deletes the temp ref even when worktree add fails', async () => {
+    const repo = makeDir('dot-wt-repo-')
+    const home = makeDir('dot-wt-home-')
+    const calls: string[][] = []
+    const git: GitRunner = async (args) => {
+      calls.push([...args])
+      if (args[0] === 'rev-parse' && args[1] === '--show-toplevel') return repo
+      if (args[0] === 'remote') return 'origin'
+      if (args[0] === 'rev-parse') return 'abc1234'
+      if (args[0] === 'worktree') throw new GitWorktreeError('worktree add exploded')
+      return ''
+    }
+    try {
+      await expect(createTaskWorktree({ dir: repo, homeDir: home, base: { ref: 'pr', remote: 'origin' } }, git)).rejects.toThrow(/exploded/)
+      const tempRef = /\+pr:(refs\/dot\/base\/[0-9a-f]+)/.exec(calls.find(args => args[0] === 'fetch')?.join(' ') ?? '')?.[1]
+      expect(calls.some(args => args[0] === 'update-ref' && args[1] === '-d' && args[2] === tempRef)).toBe(true)
+    } finally { rmSync(repo, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }) }
+  })
+
+  it('resolves a local ref without fetching and refuses unsafe base values', async () => {
+    const repo = makeDir('dot-wt-repo-')
+    const home = makeDir('dot-wt-home-')
+    const calls: string[][] = []
+    const git: GitRunner = async (args) => {
+      calls.push([...args])
+      if (args[0] === 'rev-parse' && args[1] === '--show-toplevel') return repo
+      if (args[0] === 'remote') return 'origin'
+      if (args[0] === 'rev-parse') return 'beadfeed'
+      return ''
+    }
+    try {
+      const created = await createTaskWorktree({ dir: repo, homeDir: home, base: { ref: 'v1.2.3' } }, git)
+      expect(created.baseSha).toBe('beadfeed')
+      expect(calls.some(args => args[0] === 'rev-parse' && args.includes('v1.2.3^{commit}'))).toBe(true)
+      expect(calls.some(args => args[0] === 'fetch')).toBe(false)
+      for (const bad of ['', '  ', '--mirror', 'bad ref', 'bad\tref']) {
+        await expect(createTaskWorktree({ dir: repo, homeDir: home, base: { ref: bad } }, git)).rejects.toThrow(/invalid base ref/)
+      }
+      // An https URL without inline credentials is allowed; credentials in URLs are rejected without echoing secrets.
+      await expect(createTaskWorktree({ dir: repo, homeDir: home, base: { ref: 'pr', remote: 'not-a-remote' } }, git)).rejects.toThrow(/not a configured remote/)
+      await expect(createTaskWorktree({ dir: repo, homeDir: home, base: { ref: 'pr', remote: 'ssh://git@x' } }, git)).rejects.toThrow(/not a configured remote/)
+      for (const secretUrl of [
+        'https://x-access-token:ghp_secret123@github.com/org/repo.git',
+        'https://user@github.com/org/repo.git',
+        'https://@github.com/org/repo.git',
+      ]) {
+        let message = ''
+        try {
+          await createTaskWorktree({ dir: repo, homeDir: home, base: { ref: 'pr', remote: secretUrl } }, git)
+        } catch (err) {
+          message = err instanceof Error ? err.message : String(err)
+        }
+        expect(message).toMatch(/must not contain credentials/)
+        expect(message).not.toContain('ghp_secret123')
+        expect(message).not.toContain('x-access-token')
+      }
+      expect(sanitizeRemoteDisplay('https://x-access-token:ghp_secret123@github.com/org/repo.git')).toBe('https://github.com/org/repo.git')
+      calls.length = 0
+      await createTaskWorktree({ dir: repo, homeDir: home, base: { ref: 'pr', remote: 'https://example.com/repo.git' } }, git)
+      expect(calls.some(args => args[0] === 'fetch' && args.includes('https://example.com/repo.git'))).toBe(true)
+    } finally { rmSync(repo, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }) }
   })
 })
 

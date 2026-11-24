@@ -14,6 +14,7 @@
  * human, file contents and exact strings stay as written and are marked
  * verbatim; deliverables follow `deliverableLanguage`, not this language.
  */
+import { sanitizeRemoteDisplay } from './git-worktree.ts'
 import { onDiskPath } from './work.ts'
 
 export interface BriefScenario {
@@ -117,7 +118,7 @@ export function renderBrief(input: {
   readonly input: BriefInput
   readonly run: BriefRun
   readonly notes?: string
-  readonly isolation?: { readonly branch: string; readonly baseSha: string }
+  readonly isolation?: { readonly branch: string; readonly baseSha: string; readonly base?: { readonly ref: string; readonly remote?: string } }
 }): string {
   const { changeId, title, run } = input
   const material = input.input
@@ -125,7 +126,11 @@ export function renderBrief(input: {
   out.push(`# Work order ${changeId} · ${material.id} (rev ${material.revision}) · ${run.id}`)
   out.push(`Title: ${title}`)
   if (input.isolation) {
-    out.push(`Isolation: you run in an isolated git worktree on branch ${input.isolation.branch} based on commit ${input.isolation.baseSha.slice(0, 7)}. Uncommitted changes in the original checkout are not present here; install dependencies if needed. This worktree shares its repository's .git with the human's checkout and other runs: never change git config, remotes, or any branch other than your task branch, and never push. Commit on your task branch only when the work order requires it (for example a merge); otherwise leave your changes uncommitted — Dorothy commits the accepted delivery.`)
+    const baseRemote = input.isolation.base?.remote !== undefined ? sanitizeRemoteDisplay(input.isolation.base.remote) : undefined
+    const base = input.isolation.base === undefined
+      ? `commit ${input.isolation.baseSha.slice(0, 7)}`
+      : `${input.isolation.base.ref}${baseRemote !== undefined ? ` from ${baseRemote}` : ''} (commit ${input.isolation.baseSha.slice(0, 7)})`
+    out.push(`Isolation: you run in an isolated git worktree on branch ${input.isolation.branch} based on ${base}. Uncommitted changes in the original checkout are not present here; install dependencies if needed. This worktree shares its repository's .git with the human's checkout and other runs: never change git config, remotes, or any branch other than your task branch, and never push. Commit on your task branch only when the work order requires it (for example a merge); otherwise leave your changes uncommitted — Dorothy commits the accepted delivery.`)
   }
   out.push('')
   out.push(roleLine(run))

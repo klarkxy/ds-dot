@@ -1,6 +1,6 @@
 import { execFileSync, spawn } from 'node:child_process'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { describe, expect, it, vi } from 'vitest'
 import type { Timer } from './batcher.ts'
@@ -1705,12 +1705,174 @@ describe('DotService.relayRequest', () => {
     const long = 'x'.repeat(900)
     const clipped = h.service.relayRequest({ kind: 'approval', sessionId: 's9', subject: 'pwsh', arguments: long })
     if (clipped.decided !== 'pending') throw new Error('expected a truncated approval')
-    expect(h.service.pending.get(clipped.id)?.humanRequired).toBe(true)
+    expect(h.service.pending.get(clipped.id)?.humanRequired).toBeUndefined()
+    expect(h.service.pending.get(clipped.id)?.truncated).toBe(true)
     await h.service.saveApprovalDetail({ requestId: clipped.id, sessionId: 's9', toolName: 'pwsh', arguments: long })
     expect(h.service.readApprovalDetail(clipped.id)).toContain(long)
     clipped.withdraw()
     await h.store.flush()
     expect(h.store.approvalDetails.some(row => row.requestId === clipped.id)).toBe(false)
+  })
+
+  it('lets dot judge a sandbox escalation and requires a full read before allowing a truncated approval', async () => {
+    const h = setup()
+    await h.service.ensureDot()
+    const routed = h.service.relayRequest({ kind: 'approval', sessionId: 's9', subject: 'pwsh', reason: 'needs repo metadata outside the sandbox', arguments: '{"command":"git fetch","sandbox_permissions":"danger-full-access"}' })
+    if (routed.decided !== 'pending') throw new Error('expected a pending relay')
+    expect(h.service.pending.get(routed.id)?.humanRequired).toBeUndefined()
+    await h.service.flushNotices()
+    const text = h.relayed.at(-1)!.text
+    expect(text).not.toContain('human-required')
+    expect(text).toContain('caution: sandbox-escalation')
+    h.service.answer(routed.id, { kind: 'approval', allow: true })
+    await expect(routed.settled).resolves.toEqual({ kind: 'approval', allow: true })
+
+    const long = 'y'.repeat(900)
+    const denied = h.service.relayRequest({ kind: 'approval', sessionId: 's9', subject: 'pwsh', arguments: long })
+    if (denied.decided !== 'pending') throw new Error('expected a truncated approval')
+    expect(h.service.pending.get(denied.id)?.truncated).toBe(true)
+    // Denying a truncated request needs no read.
+    h.service.answer(denied.id, { kind: 'approval', allow: false })
+
+    const clipped = h.service.relayRequest({ kind: 'approval', sessionId: 's9', subject: 'pwsh', arguments: long })
+    if (clipped.decided !== 'pending') throw new Error('expected a truncated approval')
+    expect(() => h.service.answer(clipped.id, { kind: 'approval', allow: true })).toThrow(/read it with dot_answer action=read/)
+    await h.service.flushNotices()
+    expect(h.relayed.at(-1)!.text).toContain('truncated: read the full arguments')
+    await h.service.saveApprovalDetail({ requestId: clipped.id, sessionId: 's9', toolName: 'pwsh', arguments: long })
+    h.service.readApprovalDetail(clipped.id)
+    h.service.answer(clipped.id, { kind: 'approval', allow: true })
+    await expect(clipped.settled).resolves.toEqual({ kind: 'approval', allow: true })
+  })
+
+  it('still forces a publish approval to the human', async () => {
+    const h = setup()
+    await h.service.ensureDot()
+    const routed = h.service.relayRequest({ kind: 'approval', sessionId: 's9', subject: 'bash', arguments: '{"command":"git push origin dev"}' })
+    if (routed.decided !== 'pending') throw new Error('expected a pending relay')
+    expect(h.service.pending.get(routed.id)?.humanRequired).toBe(true)
+    expect(() => h.service.answer(routed.id, { kind: 'approval', allow: true })).toThrow(/direct human decision/)
+    await h.service.flushNotices()
+    expect(h.relayed.at(-1)!.text).toContain('human-required: publish')
+    routed.withdraw()
+  })
+
+  it('lets a write run judge a git reset inside its own task worktree but forces one aimed elsewhere', async () => {
+    const h = setup()
+    await h.service.ensureDot()
+    const worktree = 'H:\\dot-worktrees\\c-1'
+    const change = await h.service.createWorkChange({ title: 'Iso', cwd: worktree, goal: 'g', isolation: { kind: 'worktree', repoRoot: 'H:\\repo', worktree, branch: 'dot/c-1', baseSha: 'abc', state: 'active', at: 1 } })
+    const reserved = await h.service.reserveWorkRun({ changeId: change.id, cwd: worktree, writeScope: { kind: 'paths', paths: [{ path: '.', type: 'directory' }] } })
+    if (!reserved.ok) throw new Error(reserved.message)
+    const sessionId = reserved.run.requestedSessionId
+    const routed = h.service.relayRequest({ kind: 'approval', sessionId, subject: 'bash', arguments: '{"command":"git reset --hard HEAD~1"}' })
+    if (routed.decided !== 'pending') throw new Error('expected a pending relay')
+    expect(h.service.pending.get(routed.id)?.humanRequired).toBeUndefined()
+    await h.service.flushNotices()
+    expect(h.relayed.at(-1)!.text).toContain('caution: destroy')
+    h.service.answer(routed.id, { kind: 'approval', allow: true })
+    await expect(routed.settled).resolves.toEqual({ kind: 'approval', allow: true })
+    const retargeted = h.service.relayRequest({ kind: 'approval', sessionId, subject: 'bash', arguments: '{"command":"git -C H:/repo reset --hard"}' })
+    if (retargeted.decided !== 'pending') throw new Error('expected a pending relay')
+    expect(h.service.pending.get(retargeted.id)?.humanRequired).toBe(true)
+    retargeted.withdraw()
+  })
+
+  it('requires input.cwd and tool workdir to stay strictly inside isolation.worktree', async () => {
+    const h = setup()
+    await h.service.ensureDot()
+    // Worktree nested inside repoRoot exposes ancestor vs child containment bugs.
+    const repoRoot = resolve('/repo')
+    const worktree = join(repoRoot, '.worktrees', 'c-1')
+    const childDir = join(worktree, 'packages', 'app')
+    const sibling = resolve('/other')
+    const change = await h.service.createWorkChange({ title: 'Nested', cwd: worktree, goal: 'g', isolation: { kind: 'worktree', repoRoot, worktree, branch: 'dot/c-1', baseSha: 'abc', state: 'active', at: 1 } })
+    const reserved = await h.service.reserveWorkRun({ changeId: change.id, cwd: worktree, writeScope: { kind: 'paths', paths: [{ path: '.', type: 'directory' }] } })
+    if (!reserved.ok) throw new Error(reserved.message)
+    const sessionId = reserved.run.requestedSessionId
+
+    const inside = h.service.relayRequest({ kind: 'approval', sessionId, subject: 'bash', cwd: childDir, arguments: '{"command":"git reset --hard HEAD~1"}' })
+    if (inside.decided !== 'pending') throw new Error('expected pending')
+    expect(h.service.pending.get(inside.id)?.humanRequired).toBeUndefined()
+    h.service.answer(inside.id, { kind: 'approval', allow: true })
+    await expect(inside.settled).resolves.toEqual({ kind: 'approval', allow: true })
+
+    const atRepoRoot = h.service.relayRequest({ kind: 'approval', sessionId, subject: 'bash', cwd: repoRoot, arguments: '{"command":"git reset --hard HEAD~1"}' })
+    if (atRepoRoot.decided !== 'pending') throw new Error('expected pending')
+    expect(h.service.pending.get(atRepoRoot.id)?.humanRequired).toBe(true)
+    expect(() => h.service.answer(atRepoRoot.id, { kind: 'approval', allow: true })).toThrow(/direct human decision/)
+    atRepoRoot.withdraw()
+
+    const outside = h.service.relayRequest({ kind: 'approval', sessionId, subject: 'bash', cwd: sibling, arguments: '{"command":"git clean -fdx"}' })
+    if (outside.decided !== 'pending') throw new Error('expected pending')
+    expect(h.service.pending.get(outside.id)?.humanRequired).toBe(true)
+    outside.withdraw()
+
+    const badWorkdir = h.service.relayRequest({ kind: 'approval', sessionId, subject: 'bash', cwd: worktree, arguments: JSON.stringify({ command: 'git reset --hard HEAD~1', workdir: repoRoot }) })
+    if (badWorkdir.decided !== 'pending') throw new Error('expected pending')
+    expect(h.service.pending.get(badWorkdir.id)?.humanRequired).toBe(true)
+    badWorkdir.withdraw()
+
+    const goodWorkdir = h.service.relayRequest({ kind: 'approval', sessionId, subject: 'bash', cwd: worktree, arguments: JSON.stringify({ command: 'git reset --hard HEAD~1', workdir: 'packages/app' }) })
+    if (goodWorkdir.decided !== 'pending') throw new Error('expected pending')
+    expect(h.service.pending.get(goodWorkdir.id)?.humanRequired).toBeUndefined()
+    goodWorkdir.withdraw()
+  })
+
+  it('keeps >40 pending truncated approval details readable synchronously and after backlog arrives', async () => {
+    const h = setup()
+    await h.service.ensureDot()
+    const long = 'z'.repeat(900)
+    const first = h.service.relayRequest({ kind: 'approval', sessionId: 's9', subject: 'pwsh', arguments: long })
+    if (first.decided !== 'pending') throw new Error('expected pending')
+    // Detail is available synchronously right after relayRequest before flush.
+    const rest: Array<Extract<ReturnType<typeof h.service.relayRequest>, { decided: 'pending' }>> = []
+    for (let i = 0; i < 45; i += 1) {
+      const next = h.service.relayRequest({ kind: 'approval', sessionId: 's9', subject: 'pwsh', arguments: `${long}-${i}` })
+      if (next.decided !== 'pending') throw new Error('expected pending')
+      await h.service.saveApprovalDetail({ requestId: next.id, sessionId: 's9', toolName: 'pwsh', arguments: `${long}-${i}` })
+      rest.push(next)
+    }
+    await h.store.flush()
+    expect(h.store.approvalDetails).toHaveLength(46)
+    expect(h.service.readApprovalDetail(first.id)).toContain(long)
+    h.service.answer(first.id, { kind: 'approval', allow: true })
+    await expect(first.settled).resolves.toEqual({ kind: 'approval', allow: true })
+    await h.store.flush()
+    expect(h.store.approvalDetails.some(row => row.requestId === first.id)).toBe(false)
+    expect(h.store.approvalDetails).toHaveLength(45)
+    for (const item of rest) item.withdraw()
+  })
+
+  it('escalates a truncated approval to the human when its stored detail is missing instead of deadlocking', async () => {
+    const h = setup()
+    await h.service.ensureDot()
+    const long = 'm'.repeat(900)
+    const clipped = h.service.relayRequest({ kind: 'approval', sessionId: 's9', subject: 'pwsh', arguments: long })
+    if (clipped.decided !== 'pending') throw new Error('expected pending')
+    await h.store.replaceApprovalDetails([])
+    expect(() => h.service.readApprovalDetail(clipped.id)).toThrow(/unavailable; relay it to the human/)
+    try {
+      h.service.readApprovalDetail(clipped.id)
+      throw new Error('expected human-required')
+    } catch (error) {
+      expect(error).toMatchObject({ code: 'dot/human-required' })
+    }
+    try {
+      h.service.answer(clipped.id, { kind: 'approval', allow: true })
+      throw new Error('expected human-required')
+    } catch (error) {
+      expect(error).toMatchObject({ code: 'dot/human-required' })
+    }
+    const card = await h.service.presentCard({ title: '', interactive: true, view: { type: 'confirm', id: 'x' } }, 'call-missing', clipped.id)
+    await h.service.answerCard(card.viewId!, 'approval', { confirmed: true })
+    await expect(clipped.settled).resolves.toEqual({ kind: 'approval', allow: true })
+
+    const denied = h.service.relayRequest({ kind: 'approval', sessionId: 's9', subject: 'pwsh', arguments: long })
+    if (denied.decided !== 'pending') throw new Error('expected pending')
+    await h.store.replaceApprovalDetails([])
+    h.service.answer(denied.id, { kind: 'approval', allow: false })
+    await expect(denied.settled).resolves.toEqual({ kind: 'approval', allow: false })
   })
 
   it('sends an image with the human message and rejects an unsupported type', async () => {
@@ -3870,6 +4032,99 @@ describe.skipIf(!worktreeGitAvailable)('task worktree isolation', { timeout: 30_
       // Integrating twice is refused.
       expect(await h.service.integrateWork(created.id, 'merge')).toMatchObject({ ok: false, code: 'invalid' })
     } finally { await h.service.dispose(); cleanup() }
+  })
+
+  it('creates an isolated change from a fetched base ref and validates the combo', async () => {
+    const { repo, home, cleanup } = makeSpecRepo('dot-iso-base-')
+    const calls: string[][] = []
+    const fake: typeof runGit = async (args) => {
+      calls.push([...args])
+      if (args[0] === 'rev-parse' && args[1] === '--show-toplevel') return repo
+      if (args[0] === 'remote') return 'upstream'
+      if (args[0] === 'rev-parse') return 'f00dcafe1234'
+      return ''
+    }
+    const h = setup(undefined, undefined, home, { git: fake })
+    try {
+      const created = JSON.parse(await h.service.manageTask({ action: 'create', title: 'PR fix', goal: 'land', dir: repo, isolation: 'worktree', base_ref: 'refs/pull/9/head', base_remote: 'upstream' })) as { id: string }
+      const isolation = h.store.work.change(created.id)!.isolation!
+      expect(isolation.base).toEqual({ ref: 'refs/pull/9/head', remote: 'upstream' })
+      expect(isolation.baseSha).toBe('f00dcafe1234')
+      expect(h.store.work.workView(created.id)?.isolation?.base).toEqual({ ref: 'refs/pull/9/head', remote: 'upstream' })
+      const fetch = calls.find(args => args[0] === 'fetch')
+      expect(fetch?.slice(0, 4)).toEqual(['fetch', '--no-tags', '--no-write-fetch-head', '--refmap='])
+      expect(fetch?.some(arg => arg.includes('+refs/pull/9/head:refs/dot/base/'))).toBe(true)
+      // Credential-bearing https base_remote URLs are rejected without echoing secrets.
+      await expect(h.service.manageTask({ action: 'create', title: 'x', goal: 'g', dir: repo, isolation: 'worktree', base_ref: 'main', base_remote: 'https://x-access-token:ghp_secret@github.com/org/repo.git' })).rejects.toSatisfy(
+        (err: Error) => /must not contain credentials/.test(err.message) && !err.message.includes('ghp_secret'),
+      )
+      // The same ref/remote check rejects bad combinations before touching git.
+      await expect(h.service.manageTask({ action: 'create', title: 'x', goal: 'g', dir: repo, base_ref: 'main' })).rejects.toMatchObject({ code: 'dot/invalid' })
+      await expect(h.service.manageTask({ action: 'create', title: 'x', goal: 'g', dir: repo, isolation: 'none', base_ref: 'main' })).rejects.toMatchObject({ code: 'dot/invalid' })
+      await expect(h.service.manageTask({ action: 'create', title: 'x', goal: 'g', dir: repo, isolation: 'worktree', base_remote: 'upstream' })).rejects.toMatchObject({ code: 'dot/invalid' })
+      // A local ref needs no remote and no fetch.
+      calls.length = 0
+      const local = JSON.parse(await h.service.manageTask({ action: 'create', title: 'local base', goal: 'g', dir: repo, isolation: 'worktree', base_ref: 'release/1.0' })) as { id: string }
+      expect(h.store.work.change(local.id)!.isolation!.base).toEqual({ ref: 'release/1.0' })
+      expect(calls.some(args => args[0] === 'fetch')).toBe(false)
+      expect(calls.some(args => args[0] === 'rev-parse' && args.includes('release/1.0^{commit}'))).toBe(true)
+    } finally { await h.service.dispose(); cleanup() }
+  })
+
+  it('does not hold the serial lane across remote git fetch during create', async () => {
+    const { repo, home, cleanup } = makeSpecRepo('dot-iso-fetch-lock-')
+    let releaseFetch!: () => void
+    const fetchGate = new Promise<void>(resolve => { releaseFetch = resolve })
+    const fake: typeof runGit = async (args) => {
+      if (args[0] === 'rev-parse' && args[1] === '--show-toplevel') return repo
+      if (args[0] === 'remote') return 'upstream'
+      if (args[0] === 'fetch') { await fetchGate; return '' }
+      if (args[0] === 'rev-parse') return 'f00dcafe1234'
+      return ''
+    }
+    const h = setup(undefined, undefined, home, { git: fake })
+    try {
+      await h.service.ensureDot()
+      await h.service.manageTask({ action: 'dispatch', dir: '/proj', title: 'run', message: 'go' })
+      const sessionId = h.store.work.listRuns()[0]!.sessionId!
+      const creating = h.service.manageTask({ action: 'create', title: 'PR fix', goal: 'land', dir: repo, isolation: 'worktree', base_ref: 'refs/pull/9/head', base_remote: 'upstream' })
+      await new Promise(resolve => setTimeout(resolve, 20))
+      // Remote fetch is still blocked; interrupt and serial-lane ops must not stall behind it.
+      const interrupted = await h.service.interrupt(sessionId)
+      expect(interrupted).toContain(sessionId)
+      expect(await h.service.serialSettings(async () => 'free')).toBe('free')
+      releaseFetch()
+      const created = JSON.parse(await creating) as { id: string }
+      expect(h.store.work.change(created.id)?.isolation?.base).toEqual({ ref: 'refs/pull/9/head', remote: 'upstream' })
+    } finally { await h.service.dispose(); cleanup() }
+  })
+
+  it('cancelling an unmodified PR-based isolated change deletes the branch even when unmerged into HEAD', async () => {
+    const { repo, home, cleanup } = makeSpecRepo('dot-iso-cancel-base-')
+    const h = setup(undefined, undefined, home, { git: runGit })
+    try {
+      await runGit(['checkout', '-b', 'pr-branch'], repo)
+      writeFileSync(join(repo, 'pr.ts'), 'pr change')
+      await runGit(['add', 'pr.ts'], repo)
+      await runGit(['commit', '-m', 'pr commit'], repo)
+      await runGit(['checkout', 'main'], repo)
+
+      const created = JSON.parse(await h.service.manageTask({ action: 'create', title: 'PR', goal: 'land', dir: repo, isolation: 'worktree', base_ref: 'pr-branch' })) as { id: string }
+      const isolation = h.store.work.change(created.id)!.isolation!
+      await h.service.manageTask({ action: 'cancel', task_id: created.id })
+      expect(existsSync(isolation.worktree)).toBe(false)
+      expect(await runGit(['branch', '--list', isolation.branch], repo)).toBe('')
+    } finally { await h.service.dispose(); cleanup() }
+  })
+
+  it('refuses to merge a change cut from a base ref into the checkout', async () => {
+    const h = setup()
+    try {
+      const change = await h.service.createWorkChange({ title: 'PR', cwd: 'H:\\wt', goal: 'g', isolation: { kind: 'worktree', repoRoot: 'H:\\repo', worktree: 'H:\\wt', branch: 'dot/task-x', baseSha: 'abc', base: { ref: 'refs/pull/12/head', remote: 'upstream' }, state: 'active', at: 1 } })
+      expect(await h.service.integrateWork(change.id, 'merge')).toMatchObject({ ok: false, code: 'invalid', message: `${change.id} was cut from refs/pull/12/head, not your checkout; keep the branch and integrate it yourself` })
+      // keep/discard still fail for an unaccepted change, not for the base.
+      expect(await h.service.integrateWork(change.id, 'keep')).toMatchObject({ ok: false, code: 'invalid', message: expect.stringContaining('not accepted') })
+    } finally { await h.service.dispose() }
   })
 
   it('integrate merge reports conflicts and keeps the worktree for a retry', async () => {

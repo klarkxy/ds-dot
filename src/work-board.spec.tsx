@@ -1062,6 +1062,27 @@ it('tags an isolated change and offers the three integrate actions after accepta
     expect(mergeButtons).toHaveLength(1)
     await act(async () => root.unmount())
   })
+
+  it('hides Merge into checkout when the isolated branch was cut from a base_ref', async () => {
+    const based: WorkBoardItem = {
+      ...item, id: 'c-base', status: 'done', humanAction: undefined,
+      closeout: { verificationId: 'v-4', source: 'run report' },
+      isolation: {
+        kind: 'worktree', repoRoot: 'H:/repo', worktree: 'H:/home/worktrees/ab12cd',
+        branch: 'dot/task-ab12cd', baseSha: 'sha', base: { ref: 'refs/pull/12/head', remote: 'upstream' }, state: 'active',
+      },
+    }
+    const root = createRoot(document.getElementById('root')!)
+    await act(async () => {
+      root.render(<WorkBoard locale="en" items={[based]} pending={[]} onAccept={vi.fn()} onReject={vi.fn()} onAnswer={vi.fn()} onResume={vi.fn()} onIntegrate={vi.fn(async () => {})} />)
+      await Promise.resolve()
+    })
+    await click('Finished · 1')
+    expect(buttonIncluding('Merge into checkout')).toBeUndefined()
+    expect(buttonIncluding('Keep branch')).toBeTruthy()
+    expect(buttonIncluding('Discard')).toBeTruthy()
+    await act(async () => root.unmount())
+  })
 })
 
 describe('WorkBoard link chips', () => {

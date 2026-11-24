@@ -288,24 +288,24 @@
         ja: '静かに通す操作と、かならず足を止める操作',
       },
       excerpt: {
-        zh: '总不能每读一个文件就问一遍“我能看吗”，可删库和外推代码也不能擅自替你点掉。平时小确认悄悄放过，大事弹卡片等你；改文件、跑命令这类动手的工具我自己也不碰，只交给派出去的任务。',
-        en: 'Asking just to read a file would get annoying fast, yet silent deletes or pushes are off the table. Routine trivia clears quietly; big calls wait with a card; tools that edit files or run commands stay with dispatched runs, never in my own hands.',
-        ja: 'ファイルを読むたびに確認していたら進みませんし、削除や外部送信を勝手にするわけにもいきません。危ない操作はカードで待ち、ファイル変更やコマンド実行は派遣したタスクだけが使います。',
+        zh: '总不能每读一个文件就问一遍“我能看吗”，在隔离工作树里做权限申请或本地重置也不用次次喊人；长参数请求我会先读完再决定。真要动主目录、删文件、外推或碰凭据照样停下等你点头，改文件、跑命令这类动手的工具我自己也不碰，只交给派出去的任务。',
+        en: 'Asking just to read a file gets old fast, and wider sandbox access or git cleanup inside an isolated task worktree doesn’t always need to wake you either; for extra-long requests I read the full arguments first. Real deletes, outward pushes, secrets, or anything touching your main checkout still wait on a card—and hands-on tools that edit files or run commands stay strictly with dispatched runs, never in my own hands.',
+        ja: 'ファイルを読むたび確認していたら進みませんし、隔離ワークツリー内での権限拡張や手元の作業整理、長すぎる引数の全文確認もまず自分で見てから判断します。元の作業フォルダに触れる操作や削除・外部送信・機密アクセスは変わらずカードで待ち、ファイル変更やコマンド実行のツールは派遣したタスクだけが使います。',
       },
       paragraphs: {
         zh: [
-          '查文件、列目录或者跑一轮平常的本地测试，照你平时的设置顺手放行就好，省得写正顺手时老被打断。就算只读任务期间借用了外部插件的工具，我也会卡住写操作，只让真正查资料的动作过去。',
-          '只要遇到删东西、往外推送、碰本地敏感凭据，或者超出了你原来交代的范围，动作会马上停下。面板会递上一张写清前因后果和建议的确认卡；你在别处处理了或者卡片过期了，它自己会收好。平时就算面板折起来了，有需要拍板的事侧栏红点和桌面提示都会轻声喊你。改我自己也算这一类：从插件市场装的那份我不动，想改请找维护者；开发时链接进来的那份，我先在旁边的临时分支里改，你点了合并才重新构建，旧版本也会先备份好。重建要是没加载上，面板会告诉你上次备份在哪，把那份 lib 拷回去再重启就行。',
+          '查文件、列目录或者跑平常的本地测试，照你的设置顺手放行就好，省得写正顺手时老被打断；只读任务借用外部工具时，也只让查资料的动作过去。任务跑在独立的临时工作树里时，像拉取分支或本地清理这类只在它自己目录里转的沙盒申请和 Git 重置，现在我会先对照任务目标自己掂量，免得老打断你；遇到参数太长被截断的请求，也会先翻完完整内容再决定批不批（万一拿不到全文，还是乖乖交回给你）。',
+          '不过门前的红线一点没松：只要命令带着目录切换或参数指回你的主目录和其他文件夹，或者遇到真删文件、往外推送发布、碰敏感凭据、拿不准边界的事，动作会立刻停下。面板会递上一张写清前因后果和建议的确认卡，你在别处处理了或卡片过期了它会自己收起；哪怕平时面板折起来，真需要你拍板时侧栏红点和桌面提示还是会叫你，你不点就绝不算答应。改我自己也算这一类：从插件市场装的那份我不动，想改请找维护者；开发时链接进来的那份，我先在旁边的临时分支里改，你点了合并才重新构建，旧版本也会先备份好。重建要是没加载上，面板会告诉你上次备份在哪，把那份 lib 拷回去再重启就行。',
           '后来又把一条线划死了：凡是改文件、跑命令这类真动手的工具，我自己一律不碰——就算你顺手给了授权，它们也只归派出去的任务用。我呢，写备忘、递提案、查查资料就好；真要动手就写工单派任务，反正那边有范围有留档，出了岔子也查得回来。',
         ],
         en: [
-          'Read-only checks, directory listings, and safe local tests go right through under your house defaults so nobody breaks your focus. Even when a read-only step borrows external plugin tools, anything that looks like a write stays blocked.',
-          'Deletes, outward pushes, secret access, or gray areas freeze immediately. You get one clean card stating what is waiting and what I recommend (settled or expired cards clean themselves up), and even with my panel closed, a sidebar badge and optional desktop alert call you in. Changing myself counts too: a copy installed from the plugin market stays untouched (ask the maintainers instead), and on a linked dev checkout I work on a side branch first, rebuilding only after you merge, with the old build backed up. If that rebuild fails to load, the panel points at the backup so you can copy it back onto lib/ and restart.',
-          'One line is now set in stone: any tool that edits files or runs commands stays out of my hands — even if you grant it to me, it only works inside a dispatched run. I stick to notes, proposals, and quick lookups; when something needs doing for real, I write a work order and send a task, which comes with a scope and a paper trail.',
+          'Read-only checks, directory listings, and ordinary local tests pass quietly under your defaults so nobody breaks your focus, and read-only tasks still block external write tools. When a task runs inside its own isolated worktree, though, things like wider sandbox access for a git fetch or a git reset/clean confined strictly to that worktree are things I now weigh against the task scope myself instead of waking you every time. For extra-long requests that get trimmed in summary, I read the full arguments first before allowing them—and if the full text isn’t available, I still hand it over to you.',
+          'Anything pointing back at your main checkout or another folder, real file deletions, outward pushes or publishes, secret access, or gray areas still freeze at the gate. You get one clean card stating what is waiting and what I suggest (settled or expired cards tidy themselves up), and even with my panel folded away, a sidebar badge and optional desktop ping call you in—silence never counts as yes. Changing myself counts too: a copy installed from the plugin market stays untouched (ask the maintainers instead), and on a linked dev checkout I work on a side branch first, rebuilding only after you merge, with the old build backed up. If that rebuild fails to load, the panel points at the backup so you can copy it back onto lib/ and restart.',
+          'One line is now set in stone: any tool that edits files or runs commands stays out of my hands—even if you grant it to me, it only works inside a dispatched run. I stick to notes, proposals, and quick lookups; when something needs doing for real, I write a work order and send a task, which comes with a scope and a paper trail.',
         ],
         ja: [
-          'ファイルの中身を見たりローカルテストを動かしたりといった日常の確認は、作業を止めないよう普段の基準どおり静かに通します。読み取り専用の作業中に外部ツールを使う場合も、参照系以外は通さないよう抑えています。',
-          '一方で、削除や外部へのプッシュ、機密ファイルへのアクセス、判断に迷う場面ではその場で止まります。理由と提案つきの確認カードを出して待ち（解決や期限切れで自動クローズ）、パネルを閉じていてもバッジやデスクトップ通知でお知らせします。自分自身を直す場合も同じで、プラグインマーケットから入れた本体には手を付けず（変更はメンテナーへ）、開発用にリンクした本体なら横の作業ブランチで直し、マージしてもらってから旧版を控えて組み直します。組み直しが読み込めなかったときは、パネルがバックアップ場所を案内するので、その lib を戻して再起動してください。',
+          'ファイル参照やローカルテストのような普段の確認はそのまま通して作業を止めず、読み取り専用の作業では外部ツールの書き込み系もしっかり抑えています。一方で、独立した一時ワークツリーの中で動くタスクが作業用の権限を広げたり、そのワークツリー内だけで git reset や clean を行う場合は、作業目的に沿っているか自分で確かめて判断するようにしました。引数が長くて省略されたリクエストも、まず全文を読み切ってから可否を決めます（全文が取れないときは無理せずお任せします）。',
+          'ただし元の作業フォルダや別ディレクトリへ向く指定、ファイル削除や外部へのプッシュ、機密情報へのアクセス、判断に迷う場面ではその場でピタッと止まります。理由と提案つきの確認カードを出して待ち（解決や期限切れで自動クローズ）、パネルを閉じていてもバッジやデスクトップ通知でお知らせするので、無言のまま進んでしまうことはありません。自分自身を直す場合も同じで、プラグインマーケットから入れた本体には手を付けず（変更はメンテナーへ）、開発用にリンクした本体なら横の作業ブランチで直し、マージしてもらってから旧版を控えて組み直します。組み直しが読み込めなかったときは、パネルがバックアップ場所を案内するので、その lib を戻して再起動してください。',
           'もう一つ、線をはっきり引きました。ファイルを書き換えたりコマンドを実行したりするツールは、私自身の手では一切使いません。許可をいただいても、そういう作業は派遣したタスクだけのものです。私はメモや提案、簡単な調べ物にとどめて、本当に手を動かす必要があれば作業指示を書いてタスクに任せます。範囲も記録も残るので安心です。',
         ],
       },
@@ -373,21 +373,21 @@
         ja: 'いくつか並行で進めても机が散らからない理由',
       },
       excerpt: {
-        zh: '不打架的事分头跑，大改动先在旁边的临时分支里做好；约定好稍后再接上的后续活，我也会记条提醒免得转头忘掉。真要派活的项目才登记工作区并顺嘴告诉你，交活前连改动和删掉的文件都先核过一遍。',
-        en: 'Independent tasks move side by side, larger edits wait in a spare branch, and any promised follow-up gets a reminder so it never slips between turns. I only register workspaces for projects we’re actually working in (and tell you when I do), then check deliverables and diffs myself first.',
-        ja: '重ならない作業は並行で進め、大きな修正は別ブランチに隔離します。あとで続ける約束にはすぐリマインダーを付け、ワークスペースも実際に作業する分だけ登録してお知らせしたうえで、提出前に自分の目で差分を確かめます。',
+        zh: '不打架的事分头跑，大改动或接着改某个 PR 时先在旁边的临时分支里做好；约定好稍后再接上的后续活，我也会记条提醒免得转头忘掉。真要派活的项目才登记工作区并顺嘴告诉你，交活前连改动和删掉的文件都先核过一遍。',
+        en: 'Independent tasks move side by side while larger edits—or follow-ups on an existing PR branch—wait in a spare branch, and any promised follow-up gets a reminder so it never slips between turns. I only register workspaces for projects we’re actually working in (and tell you when I do), then check deliverables and diffs myself first.',
+        ja: '重ならない作業は並行で進め、大きな修正や既存の PR の続きは別ブランチに隔離します。あとで続ける約束にはすぐリマインダーを付け、ワークスペースも実際に作業する分だけ登録してお知らせしたうえで、提出前に自分の目で差分を確かめます。',
       },
       paragraphs: {
         zh: [
-          '手头几件事如果互不打架，我会一起安排下去；要是你刚好也在改同一批文件，或者这轮改动动静比较大，就等前面依赖的改动落稳再去临时分支里做好——合回来、留着还是丢掉，最后听你的。平时也只给真要派活的项目登记工作区，添完顺嘴告诉你一声，不会为了随便翻一翻就把整片上级目录都挂进来。',
+          '手头几件事如果互不打架，我会一起安排下去；要是你刚好也在改同一批文件，这轮改动动静比较大，或者想直接顺着外面某个 PR 分支继续补改，就等前面依赖的改动落稳再去旁边单开临时分支做好——从当前检出切出来的最后选合回来、留着或丢掉，而从别的 PR 或远端分支拉出来的只留“保留分支”和“丢弃”，免得误合进本地工作区。平时也只给真要派活的项目登记工作区，添完顺嘴告诉你一声，不会为了随便翻一翻就把整片上级目录都挂进来。',
           '要是约好了等你点完验收再接着往下做，我会立刻挂条对应着前置任务的提醒，哪怕关了空闲巡检也不会跨轮断掉；写要求前也会先核对仓库里实际有的脚本和分支，不凭印象瞎猜。每次交活前我自己先把改动和删掉的文件看一遍，你觉得哪几行不顺直接圈出来退回就行，同一处连卡三次就停下来找你商量，不瞎转圈。',
         ],
         en: [
-          'When requests don’t step on the same files, I move them forward together. If you’re mid-edit or the change is wide, I wait until any prerequisite commits have actually landed and then isolate the work in a spare branch—leaving merging, keeping, or discarding up to you. I also only register a workspace when we’re dispatching work into that project (and let you know right away), rather than adding broad parent folders just to browse.',
+          'When requests don’t step on the same files, I move them forward together. If you’re mid-edit, the change is wide, or you want to pick up directly from an existing PR or remote branch, I wait until any prerequisite commits have actually landed and then isolate the work in a spare branch from that starting point—leaving merge, keep, or discard up to you for local branches, and only keep or discard for foreign refs so outside work never gets merged straight onto your checkout by accident. I also only register a workspace when we’re dispatching work into that project (and let you know right away), rather than adding broad parent folders just to browse.',
           'Whenever we agree on a follow-up after you accept an earlier task, I set a reminder tied to it right away so the handoff doesn’t vanish between turns even with routine idle checks turned off, and I double-check the repo’s actual scripts and branches before naming them. Before handing anything back, I read the changed files myself, keep deleted files in the side-by-side diff so you can quote exact lines for another pass, and pause to ask if the same spot stalls three times.',
         ],
         ja: [
-          '同じファイルに触らない用事はまとめて進められますし、編集中の箇所と重なるときや大がかりな修正は、前提になる変更が落ち着いてから別ブランチで仕上げます。最後に「マージする・残す・破棄する」を選ぶだけで大丈夫です。ワークスペースも実際に作業を頼むプロジェクト分だけ登録してその場でお知らせし、中身を覗くためだけに親フォルダごと追加したりはしません。',
+          '同じファイルに触らない用事はまとめて進められますし、編集中の箇所と重なるときや大がかりな修正、あるいは既存の PR・別ブランチの続きを直したいときは、前提になる変更が落ち着いてからその参照を起点に別ブランチで仕上げます。手元から切ったブランチはマージ・保持・破棄を選べますが、別の参照から切ったブランチは誤って手元へ混ぜないよう保持と破棄だけを出しています。ワークスペースも実際に作業を頼むプロジェクト分だけ登録してその場でお知らせし、中身を覗くためだけに親フォルダごと追加したりはしません。',
           '先のタスクを承認してもらってから続きを進める約束をしたときは、定期チェックをオフにしていても見落とさないよう、元のタスクに紐づけたリマインダーをその場で入れておきます。リポジトリ内のスクリプトやブランチも推測せず事前に確認し、提出前には削除ファイルまで含めた差分を自分で確かめてから返します。気になる行があればそのまま指定して直せますし、同じ箇所で三度詰まったら手を止めて相談しますね。',
         ],
       },

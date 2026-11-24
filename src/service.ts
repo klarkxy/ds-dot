@@ -45,7 +45,7 @@ import { ACCEPTED_DELIVERY_HINT, IDLE_SILENCE_HINT } from './task-hints.ts'
 import { AutoUpdater, type PluginManagerLike, type UpdateStatus } from './auto-update.ts'
 import { DOT_TRACE, emitDotTrace, type DotTraceInput } from './trace.ts'
 import type { RunAccess, RunKind, ChangePriority, TaskLink } from './contracts.ts'
-import { KnowledgeError, agreementEntriesFromText, agreementNotesBlock, agreementsSection, applyAgreementEdit, applyCognitionEdit, applyCognitionOps, cognitionSection, cognitionWithActive, matchEntry, parseCognitionOps, sameEntries } from './memory.ts'
+import { KnowledgeError, agreementEntriesFromText, agreementNotesBlock, agreementsSection, applyAgreementEdit, applyCognitionEdit, applyCognitionOps, cognitionSection, cognitionWithActive, matchEntry, parseCognitionOps, parseKnowledgeEdit, sameEntries } from './memory.ts'
 import { COGNITION_PROMPT_ENTRIES_DEFAULT, type AgreementEntry, type CognitionEntry, type KnowledgeEdit } from './contracts.ts'
 import { deliverPeer, guardRunWriteTool, PeerLedger, refreshChildSeals, sealChildSession, type PeerSendInput } from './peer.ts'
 import { PendingHub, type PendingAnswer } from './pending.ts'
@@ -2316,8 +2316,10 @@ export class DotService {
       }
       if (sameEntries(after, before)) return 'That is already in your cognition.'
       const added = after.find(entry => !before.some(earlier => earlier.id === entry.id))
+      const woken = added ? undefined : after.find(entry => before.some(earlier => earlier.id === entry.id && earlier.seenAt !== entry.seenAt))
       await this.store.setCognitionEntries(after, this.now())
-      await this.afterCognitionChange(before, after, 'dot', added?.id)
+      await this.afterCognitionChange(before, after, 'dot', added?.id ?? woken?.id)
+      if (!added) return 'That is already in your cognition.'
       return 'Recorded in your cognition. The [cognition] block of this session still shows what it showed when it started; your next session shows the new one.'
     })
   }
@@ -2327,7 +2329,7 @@ export class DotService {
     return this.withKnowledge(async () => {
       const before = this.store.cognitionEntries
       let target: CognitionEntry
-      try { target = matchEntry(before, match, 'cognition') } catch (error) {
+      try { target = matchEntry(before, match, 'cognition', 'match') } catch (error) {
         throw this.knowledgeError(error)
       }
       if (target.pinned === true) throw new DotError('dot/pinned', `"${target.text}" is pinned by the human; only the human can change it`)
@@ -2346,7 +2348,7 @@ export class DotService {
     return this.withKnowledge(async () => {
       const before = this.store.cognitionEntries
       let target: CognitionEntry
-      try { target = matchEntry(before, match, 'cognition') } catch (error) {
+      try { target = matchEntry(before, match, 'cognition', 'match') } catch (error) {
         throw this.knowledgeError(error)
       }
       if (target.pinned === true) throw new DotError('dot/pinned', `"${target.text}" is pinned by the human; only the human can remove it`)
@@ -2361,7 +2363,7 @@ export class DotService {
   async setAgreements(text: string, by: 'human' | 'dot' = 'human'): Promise<KnowledgeView> {
     return this.withKnowledge(async () => {
       const before = this.store.agreementEntries
-      const after = agreementEntriesFromText(text, before, this.now(), () => this.store.nextKnowledgeId('a'))
+      const after = agreementEntriesFromText(text, before, this.now(), () => this.store.nextKnowledgeId('a'), true)
       if (!sameEntries(after, before)) {
         await this.store.setAgreementEntries(after)
         await this.afterAgreementsChange(before, after, by)
@@ -2375,7 +2377,7 @@ export class DotService {
     return this.withKnowledge(async () => {
       const before = this.store.agreementEntries
       let after: readonly AgreementEntry[]
-      try { after = applyAgreementEdit(before, edit, this.now(), () => this.store.nextKnowledgeId('a')) } catch (error) {
+      try { after = applyAgreementEdit(before, parseKnowledgeEdit(edit, 'agreements'), this.now(), () => this.store.nextKnowledgeId('a')) } catch (error) {
         throw this.knowledgeError(error)
       }
       if (!sameEntries(after, before)) {
@@ -2401,7 +2403,7 @@ export class DotService {
     return this.withKnowledge(async () => {
       const before = this.store.cognitionEntries
       let after: readonly CognitionEntry[]
-      try { after = applyCognitionEdit(before, edit, this.now(), () => this.store.nextKnowledgeId('c')) } catch (error) {
+      try { after = applyCognitionEdit(before, parseKnowledgeEdit(edit, 'cognition'), this.now(), () => this.store.nextKnowledgeId('c')) } catch (error) {
         throw this.knowledgeError(error)
       }
       if (!sameEntries(after, before)) {

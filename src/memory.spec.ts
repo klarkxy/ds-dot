@@ -3,7 +3,7 @@ import type { AgreementEntry, CognitionEntry } from './contracts.ts'
 import {
   agreementEntriesFromText, agreementsSection, agreementsText, applyAgreementEdit, applyCognitionEdit, applyCognitionOps,
   cognitionEntriesFromText, cognitionSection, cognitionText, cognitionWithActive, matchEntry, maxEntrySuffix, migrateAgreementEntries,
-  migrateCognitionEntries, normalizeEntry, parseCognitionOps, rankCognition, sameEntries, splitEntryText,
+  migrateCognitionEntries, normalizeEntry, parseCognitionOps, parseKnowledgeEdit, rankCognition, sameCognitionContent, sameEntries, splitEntryText,
 } from './memory.ts'
 
 const agreement = (id: string, text: string, at = 0): AgreementEntry => ({ id, text, createdAt: at, updatedAt: at })
@@ -40,11 +40,24 @@ describe('entry text splitting', () => {
     expect(entries.map(entry => entry.id)).toEqual(['a1', 'a2', 'a3', 'a4'])
   })
 
-  it('migrates near-duplicate lines verbatim without deduping, and matching by key is ambiguous', () => {
+  it('migrates near-duplicate lines verbatim without deduping, and a unique literal still matches', () => {
     // Inner spacing is stored as written; the comparison key still equates them.
     const entries = migrateAgreementEntries('- A  B\n- A B\n', 5, ids('a'))
     expect(entries.map(entry => entry.text)).toEqual(['A  B', 'A B'])
-    expect(() => matchEntry(entries, 'A B', 'agreement')).toThrowError(expect.objectContaining({ code: 'dot/ambiguous-agreement' }))
+    // Quoting one row verbatim reaches that row even though the folded keys collide.
+    expect(matchEntry(entries, 'A B', 'agreement').text).toBe('A B')
+    expect(matchEntry(entries, 'A  B', 'agreement').text).toBe('A  B')
+    // A folded needle that is not a unique literal stays ambiguous.
+    expect(() => matchEntry(entries, 'a b', 'agreement')).toThrowError(expect.objectContaining({ code: 'dot/ambiguous-agreement' }))
+  })
+
+  it('dedups a proposal by entryKey while migration keeps historical near-duplicates', () => {
+    const existing = [agreement('a1', 'Likes tea', 5)]
+    const next = agreementEntriesFromText('- likes  tea\n- Likes tea\n- a new rule\n', existing, 9, ids('a', 1), true)
+    expect(next.map(entry => entry.id)).toEqual(['a1', 'a2'])
+    expect(next.map(entry => entry.text)).toEqual(['Likes tea', 'a new rule'])
+    const migrated = migrateAgreementEntries('- A  B\n- A B\n', 5, ids('a'))
+    expect(migrated.map(entry => entry.text)).toEqual(['A  B', 'A B'])
   })
 
   it('keeps double spaces and tabs verbatim through agreement and cognition migration', () => {
@@ -86,6 +99,15 @@ describe('knowledge edits', () => {
     expect(() => applyAgreementEdit(base, { op: 'pin', id: 'a1', pinned: true }, 1, ids('a', 2))).toThrow(/add, edit or remove/)
   })
 
+  it('dedups agreement add by entryKey and no-ops an edit that normalizes to the same text', () => {
+    const base = [agreement('a1', 'Likes tea', 1), agreement('a2', 'A  B', 2)]
+    expect(sameEntries(applyAgreementEdit(base, { op: 'add', text: 'likes  tea' }, 10, ids('a', 2)), base)).toBe(true)
+    expect(sameEntries(applyAgreementEdit(base, { op: 'add', text: 'A B' }, 10, ids('a', 2)), base)).toBe(true)
+    const noop = applyAgreementEdit(base, { op: 'edit', id: 'a1', text: '- Likes tea\n' }, 10, ids('a', 2))
+    expect(sameEntries(noop, base)).toBe(true)
+    expect(() => applyAgreementEdit(base, { op: 'edit', id: 'a2', text: 'likes tea' }, 10, ids('a', 2))).toThrow(/already has that text/)
+  })
+
   it('edits cognition entries: edit bumps seenAt, pin does not', () => {
     const base = [cognition('c1', 'one', 1, 3), cognition('c2', 'two', 2, 4, true)]
     const edited = applyCognitionEdit(base, { op: 'edit', id: 'c1', text: 'one v2' }, 20, ids('c', 2))
@@ -95,6 +117,19 @@ describe('knowledge edits', () => {
     const unpinned = applyCognitionEdit(pinned, { op: 'pin', id: 'c1', pinned: false }, 40, ids('c', 2))
     expect(unpinned[0]).not.toHaveProperty('pinned')
     expect(unpinned[0]!.seenAt).toBe(20)
+  })
+
+  it('refreshes seenAt when re-adding an existing cognition entry by entryKey', () => {
+    const base = [cognition('c1', 'Likes tea', 1, 3), cognition('c2', 'other', 2, 4)]
+    const woken = applyCognitionEdit(base, { op: 'add', text: 'likes  tea' }, 20, ids('c', 2))
+    expect(woken.map(entry => entry.id)).toEqual(['c1', 'c2'])
+    expect(woken[0]).toMatchObject({ text: 'Likes tea', createdAt: 1, updatedAt: 1, seenAt: 20 })
+    expect(woken[1]).toEqual(base[1])
+    expect(sameCognitionContent(woken, base)).toBe(true)
+    const leftover = [cognition('c1', 'A  B', 1, 3), cognition('c2', 'A B', 2, 4)]
+    expect(sameEntries(applyCognitionEdit(leftover, { op: 'add', text: 'A B' }, 20, ids('c', 2)), leftover)).toBe(true)
+    const noopEdit = applyCognitionEdit(base, { op: 'edit', id: 'c1', text: '- Likes tea\n' }, 20, ids('c', 2))
+    expect(sameEntries(noopEdit, base)).toBe(true)
   })
 
   it('matches one entry by exact text or a unique substring, whitespace-insensitive, with kind-specific errors', () => {
@@ -117,6 +152,28 @@ describe('knowledge edits', () => {
     expect(() => matchEntry(list, 'coffee', 'agreement')).toThrowError(expect.objectContaining({ code: 'dot/unknown-agreement' }))
     expect(() => matchEntry([cognition('c1', 'x')], 'y', 'cognition')).toThrowError(expect.objectContaining({ code: 'dot/unknown-entry' }))
     expect(() => matchEntry([cognition('c1', 'xa'), cognition('c2', 'xb')], 'x', 'cognition')).toThrowError(expect.objectContaining({ code: 'dot/ambiguous-entry' }))
+    expect(() => matchEntry(list, '', 'cognition', 'match')).toThrow(/match must be non-empty/)
+    expect(() => matchEntry(list, '', 'agreement')).toThrow(/text must be non-empty/)
+    const many = Array.from({ length: 45 }, (_, i) => cognition(`c${i + 1}`, `fact ${i + 1}`))
+    expect(() => matchEntry(many, 'missing', 'cognition')).toThrow(/… and 5 more/)
+    expect(() => matchEntry(many, 'missing', 'cognition')).toThrow(/cognition entries/)
+    expect(() => matchEntry(many, 'missing', 'cognition')).not.toThrow(/cognition entrys/)
+  })
+})
+
+describe('parseKnowledgeEdit', () => {
+  it('accepts well-typed edits and rejects bad field types including pinned: "false"', () => {
+    expect(parseKnowledgeEdit({ op: 'add', text: 'one' }, 'agreements')).toEqual({ op: 'add', text: 'one' })
+    expect(parseKnowledgeEdit({ op: 'edit', id: ' a1 ', text: 'two' }, 'agreements')).toEqual({ op: 'edit', id: 'a1', text: 'two' })
+    expect(parseKnowledgeEdit({ op: 'remove', id: 'a1' }, 'agreements')).toEqual({ op: 'remove', id: 'a1' })
+    expect(parseKnowledgeEdit({ op: 'pin', id: 'c1', pinned: true }, 'cognition')).toEqual({ op: 'pin', id: 'c1', pinned: true })
+    expect(parseKnowledgeEdit({ op: 'pin', id: 'c1', pinned: false }, 'cognition')).toEqual({ op: 'pin', id: 'c1', pinned: false })
+    expect(() => parseKnowledgeEdit({ op: 'pin', id: 'c1', pinned: 'false' }, 'cognition')).toThrowError(expect.objectContaining({ code: 'dot/invalid' }))
+    expect(() => parseKnowledgeEdit({ op: 'pin', id: 'c1', pinned: 'false' }, 'cognition')).toThrow(/pinned must be a boolean/)
+    expect(() => parseKnowledgeEdit({ op: 'add', text: 1 }, 'agreements')).toThrow(/edit.text must be a string/)
+    expect(() => parseKnowledgeEdit({ op: 'remove', id: 1 }, 'cognition')).toThrow(/edit.id must be a non-empty string/)
+    expect(() => parseKnowledgeEdit(null, 'agreements')).toThrow(/edit must be an object/)
+    expect(() => parseKnowledgeEdit({ op: 'pin', id: 'a1', pinned: true }, 'agreements')).toThrow(/add, edit or remove/)
   })
 })
 
@@ -130,6 +187,14 @@ describe('reflection ops', () => {
     expect(next[1]).toMatchObject({ text: 'two', seenAt: 50, updatedAt: 2 })
     expect(next[2]).toMatchObject({ text: 'three', createdAt: 50, seenAt: 50 })
     expect(applyCognitionOps(base, parseCognitionOps('[{"op":"remove","id":"c2"}]'), 9, ids('c', 2)).map(entry => entry.id)).toEqual(['c1'])
+  })
+
+  it('refreshes seenAt instead of duplicating when a reflection add hits an existing entryKey', () => {
+    const base = [cognition('c1', 'Likes tea', 1, 3)]
+    const next = applyCognitionOps(base, parseCognitionOps('[{"op":"add","text":"likes  tea"}]'), 50, ids('c', 1))
+    expect(next.map(entry => entry.id)).toEqual(['c1'])
+    expect(next[0]).toMatchObject({ text: 'Likes tea', seenAt: 50, updatedAt: 1 })
+    expect(sameCognitionContent(next, base)).toBe(true)
   })
 
   it('never hands a removed id out again: the counter decides, not the list', () => {

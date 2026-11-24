@@ -4,7 +4,7 @@
  * own cognition. Each part can be edited; changes apply from her next step.
  */
 import { Button, Input, Tag } from '@deepseek-ai/dsh-client-ui-primitives'
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import type { CognitionEntry, DotSettings, KnowledgeEdit, KnowledgeView, SettingField } from './contracts.ts'
 import { ADDRESS_MAX_CHARS, PERSONA_MAX_CHARS, defaultAddress, defaultPersona } from './persona.ts'
 import { HelpTip, LockToggle, PaneSkeleton, type SaveNotice, type SettingsApi, type SettingsPatch } from './settings-panel.tsx'
@@ -26,6 +26,7 @@ function EntryRow({
   dormant,
   canPin,
   editing,
+  busy,
   onStartEdit,
   onDoneEdit,
   onEdit,
@@ -37,6 +38,7 @@ function EntryRow({
   dormant?: boolean
   canPin?: boolean
   editing: boolean
+  busy?: boolean
   onStartEdit: () => void
   onDoneEdit: () => void
   onEdit: (id: string, text: string) => Promise<boolean>
@@ -56,7 +58,7 @@ function EntryRow({
           onChange={event => setDraft(event.target.value)}
         />
         <div className="dsh-ui-actions">
-          <Button variant="primary" size="sm" disabled={!draft.trim() || draft.trim() === entry.text}
+          <Button variant="primary" size="sm" disabled={busy || !draft.trim() || draft.trim() === entry.text}
             onClick={() => { void onEdit(entry.id, draft.trim()).then(saved => { if (saved) onDoneEdit() }) }}>
             {t(locale, 'pSave')}
           </Button>
@@ -73,10 +75,10 @@ function EntryRow({
         {dormant ? <Tag tone="quiet">{t(locale, 'pDormant')}</Tag> : null}
         <span className="dsh-dot-entry-tools">
           {canPin && onPin
-            ? <Button variant="ghost" size="sm" onClick={() => onPin(entry.id, entry.pinned !== true)}>{entry.pinned === true ? t(locale, 'pUnpin') : t(locale, 'pPin')}</Button>
+            ? <Button variant="ghost" size="sm" disabled={busy} onClick={() => onPin(entry.id, entry.pinned !== true)}>{entry.pinned === true ? t(locale, 'pUnpin') : t(locale, 'pPin')}</Button>
             : null}
-          <Button variant="ghost" size="sm" onClick={onStartEdit}>{t(locale, 'pEntryEdit')}</Button>
-          <Button variant="ghost" size="sm" onClick={() => onRemove(entry.id)}>{t(locale, 'pEntryDelete')}</Button>
+          <Button variant="ghost" size="sm" disabled={busy} onClick={onStartEdit}>{t(locale, 'pEntryEdit')}</Button>
+          <Button variant="ghost" size="sm" disabled={busy} onClick={() => onRemove(entry.id)}>{t(locale, 'pEntryDelete')}</Button>
         </span>
       </div>
     </div>
@@ -91,6 +93,7 @@ function EntryList({
   empty,
   dormantHint,
   canPin,
+  busy,
   discardSignal,
   onChanged,
   onEdit,
@@ -101,6 +104,7 @@ function EntryList({
   empty: string
   dormantHint?: string
   canPin?: boolean
+  busy?: boolean
   discardSignal?: number
   onChanged?: (changed: boolean) => void
   onEdit: (edit: KnowledgeEdit) => Promise<boolean>
@@ -131,6 +135,7 @@ function EntryList({
               dormant={entry.active === false}
               canPin={canPin}
               editing={editingId === entry.id}
+              busy={busy}
               onStartEdit={() => setEditingId(entry.id)}
               onDoneEdit={() => setEditingId(undefined)}
               onEdit={(id, text) => onEdit({ op: 'edit', id, text })}
@@ -149,16 +154,17 @@ function EntryList({
           onChange={event => setAddDraft(event.target.value)}
           onKeyDown={event => { if (event.key === 'Enter' && !event.nativeEvent.isComposing) submit() }}
         />
-        <Button variant="outline" size="sm" disabled={!addDraft.trim()} onClick={submit}>{t(locale, 'pEntryAdd')}</Button>
+        <Button variant="outline" size="sm" disabled={busy || !addDraft.trim()} onClick={submit}>{t(locale, 'pEntryAdd')}</Button>
       </div>
     </>
   )
 }
 
 /** The earlier versions of Dorothy's cognition, newest first, each restorable. */
-function CognitionHistory({ locale, knowledge, onRestore }: {
+function CognitionHistory({ locale, knowledge, busy, onRestore }: {
   locale: CopyLocale
   knowledge: KnowledgeView
+  busy?: boolean
   onRestore: (at: number) => void
 }) {
   const history = knowledge.cognition.history
@@ -172,7 +178,7 @@ function CognitionHistory({ locale, knowledge, onRestore }: {
               {t(locale, 'pCognitionVersionAt').replace('{time}', formatWhen(version.at))}
             </span>
             <span className="dsh-dot-spacer" />
-            <Button variant="outline" size="sm" onClick={() => onRestore(version.at)}>
+            <Button variant="outline" size="sm" disabled={busy} onClick={() => onRestore(version.at)}>
               {t(locale, 'pCognitionRestore')}
             </Button>
           </div>
@@ -202,6 +208,8 @@ function KnowledgeSection({ locale, api, onStatus, locked, onLock, discardSignal
   const [failed, setFailed] = useState<string>()
   const [agreementsDirty, setAgreementsDirty] = useState(false)
   const [cognitionDirty, setCognitionDirty] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const busyRef = useRef(false)
   useEffect(() => { onDirtyChange?.(agreementsDirty || cognitionDirty) }, [agreementsDirty, cognitionDirty, onDirtyChange])
   useEffect(() => () => { onDirtyChange?.(false) }, [onDirtyChange])
   useEffect(() => {
@@ -212,12 +220,15 @@ function KnowledgeSection({ locale, api, onStatus, locked, onLock, discardSignal
     )
     return () => lifetime.abort()
   }, [api])
-  const run = (work: Promise<KnowledgeView>): Promise<boolean> => {
+  const run = (work: () => Promise<KnowledgeView>): Promise<boolean> => {
+    if (busyRef.current) return Promise.resolve(false)
+    busyRef.current = true
+    setBusy(true)
     onStatus(undefined)
-    return work.then(
+    return work().then(
       next => { setKnowledge(next); setFailed(undefined); onStatus({ kind: 'saved' }); return true },
       failure => { onStatus({ kind: 'error', message: failure instanceof Error ? failure.message : String(failure) }); return false },
-    )
+    ).finally(() => { busyRef.current = false; setBusy(false) })
   }
   if (knowledge === undefined) {
     return (
@@ -245,7 +256,7 @@ function KnowledgeSection({ locale, api, onStatus, locked, onLock, discardSignal
                 <HelpTip locale={locale} fieldLabel={t(locale, 'pAgreements')} text={t(locale, 'pAgreementsHint')} />
               </span>
               <div className="dsh-dot-setting-tools">
-                {agreements.canUndo ? <Button variant="outline" size="sm" onClick={() => void run(api.undoAgreements())}>{t(locale, 'pAgreementsUndo')}</Button> : null}
+                {agreements.canUndo ? <Button variant="outline" size="sm" disabled={busy} onClick={() => void run(() => api.undoAgreements())}>{t(locale, 'pAgreementsUndo')}</Button> : null}
                 <LockToggle locale={locale} label={t(locale, 'pAgreements')} locked={locked} onLock={next => onLock('agreements', next)} />
               </div>
             </div>
@@ -254,9 +265,10 @@ function KnowledgeSection({ locale, api, onStatus, locked, onLock, discardSignal
               entries={agreements.entries}
               placeholder={t(locale, 'pAgreementsPlaceholder')}
               empty={t(locale, 'pAgreementsEmpty')}
+              busy={busy}
               {...discardSignal === undefined ? {} : { discardSignal }}
               onChanged={setAgreementsDirty}
-              onEdit={edit => run(api.editAgreements(edit))}
+              onEdit={edit => run(() => api.editAgreements(edit))}
             />
           </div>
         </div>
@@ -277,14 +289,15 @@ function KnowledgeSection({ locale, api, onStatus, locked, onLock, discardSignal
               empty={t(locale, 'pCognitionEmpty')}
               dormantHint={t(locale, 'pDormantHint')}
               canPin
+              busy={busy}
               {...discardSignal === undefined ? {} : { discardSignal }}
               onChanged={setCognitionDirty}
-              onEdit={edit => run(api.editCognition(edit))}
+              onEdit={edit => run(() => api.editCognition(edit))}
             />
             <div className="dsh-dot-setting-head dsh-dot-versions-head">
               <span className="dsh-ui-label">{t(locale, 'pCognitionHistory')}</span>
             </div>
-            <CognitionHistory locale={locale} knowledge={knowledge} onRestore={at => run(api.restoreCognition(at))} />
+            <CognitionHistory locale={locale} knowledge={knowledge} busy={busy} onRestore={at => run(() => api.restoreCognition(at))} />
           </div>
         </div>
       </div>

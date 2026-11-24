@@ -746,8 +746,10 @@ export function summarizeToolCall(item: ToolItem, locale: CopyLocale, tasks: Tas
       return { summary: [label, clipInline(text, 40)].filter(Boolean).join(' · ') }
     }
     case TOOL.cognition: {
+      const action = strOf(args.action)
       const text = strOf(args.text) ?? strOf(args.match)
-      return text ? { summary: clipInline(text, 42) } : {}
+      if (!text) return {}
+      return { summary: [action, clipInline(text, 40)].filter(Boolean).join(' · ') }
     }
     // The old note tools, kept so earlier conversations stay readable.
     case 'dot_remember':

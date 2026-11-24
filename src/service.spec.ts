@@ -1021,6 +1021,17 @@ describe('DotService knowledge', () => {
     expect(h.store.agreementEntries.map(entry => entry.text)).toEqual(['不要部署到 staging'])
   })
 
+  it('removes a leftover near-duplicate by unique literal text', async () => {
+    const h = setup()
+    await h.store.setAgreementEntries([
+      { id: 'a1', text: 'A  B', createdAt: 1, updatedAt: 1 },
+      { id: 'a2', text: 'A B', createdAt: 2, updatedAt: 2 },
+    ])
+    await expect(h.service.agreementRemove('a b')).rejects.toMatchObject({ code: 'dot/ambiguous-agreement' })
+    expect(await h.service.agreementRemove('A B')).toContain('Removed this agreement: "A B"')
+    expect(h.store.agreementEntries.map(entry => entry.text)).toEqual(['A  B'])
+  })
+
   it('stores a multi-line add as one entry, inner spacing kept verbatim', async () => {
     const h = setup()
     await h.service.cognitionAdd('line one\nline  two')
@@ -1099,6 +1110,60 @@ describe('DotService knowledge', () => {
     expect(h.store.dotSessionId).not.toBe(dot)
     expect(h.store.segment).toMatchObject({ reason: 'prompt-changed' })
     expect(h.store.segment!.cognition).toContain('B dormant')
+  })
+
+  it('does not overwrite agreements undo when an edit normalizes to the same text', async () => {
+    const h = setup()
+    await h.service.editAgreements({ op: 'add', text: 'one' })
+    await h.service.editAgreements({ op: 'add', text: 'two' })
+    const undo = h.store.agreementEntriesUndo
+    expect(undo?.map(entry => entry.text)).toEqual(['one'])
+    await h.service.editAgreements({ op: 'edit', id: 'a2', text: '- two\n' })
+    expect(h.store.agreementEntriesUndo).toEqual(undo)
+    expect(h.store.agreementEntries.map(entry => entry.text)).toEqual(['one', 'two'])
+  })
+
+  it('dedups a full agreements proposal by entryKey without dropping a stored original', async () => {
+    const h = setup()
+    await h.service.ensureDot()
+    await h.service.editAgreements({ op: 'add', text: 'Likes tea' })
+    await h.service.setAgreements('- likes  tea\n- Likes tea\n- A  B\n- A B\n')
+    expect(h.store.agreementEntries.map(entry => entry.text)).toEqual(['Likes tea', 'A  B'])
+    expect(h.store.agreementEntries[0]!.id).toBe('a1')
+  })
+
+  it('wakes a dormant cognition entry when the same fact is added again', async () => {
+    const h = setup(undefined, undefined, undefined, { cognitionPromptEntries: 1 })
+    await h.service.ensureDot()
+    await h.service.cognitionAdd('likes tea')
+    h.advance(500)
+    await h.service.cognitionAdd('other fact')
+    expect((await h.service.knowledgeView()).cognition.entries.find(entry => entry.text === 'likes tea')?.active).toBe(false)
+    const versions = (await h.service.knowledgeView()).cognition.history.length
+    h.advance(500)
+    expect(await h.service.cognitionAdd('Likes  tea')).toContain('already in your cognition')
+    const row = h.store.cognitionEntries.find(entry => entry.text === 'likes tea')!
+    expect(row.seenAt).toBe(2000)
+    expect(h.store.cognitionEntries).toHaveLength(2)
+    expect((await h.service.knowledgeView()).cognition.entries.find(entry => entry.text === 'likes tea')?.active).toBe(true)
+    expect((await h.service.knowledgeView()).cognition.history).toHaveLength(versions)
+  })
+
+  it('rejects a string pinned flag instead of treating it as truthy', async () => {
+    const h = setup()
+    await h.service.cognitionAdd('one')
+    await expect(h.service.editCognition({ op: 'pin', id: 'c1', pinned: 'false' } as never)).rejects.toMatchObject({ code: 'dot/invalid' })
+    expect(h.store.cognitionEntries[0]!.pinned).toBeUndefined()
+    await h.service.editCognition({ op: 'pin', id: 'c1', pinned: true })
+    expect(h.store.cognitionEntries[0]!.pinned).toBe(true)
+    await h.service.editCognition({ op: 'pin', id: 'c1', pinned: false })
+    expect(h.store.cognitionEntries[0]!.pinned).toBeUndefined()
+  })
+
+  it('reports match must be non-empty when cognition update omits match', async () => {
+    const h = setup()
+    await h.service.cognitionAdd('one')
+    await expect(h.service.cognitionUpdate('', 'two')).rejects.toMatchObject({ code: 'dot/invalid', message: expect.stringMatching(/match must be non-empty/) })
   })
 
   it('notes the seen snapshot when dot\'s own add takes an active slot', async () => {

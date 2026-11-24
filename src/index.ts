@@ -22,7 +22,7 @@ import { registerHostRpc, type HostRpcContext } from '@klarkxy/dsh-plugin-kit/ho
 import { installPluginLogger } from '@klarkxy/dsh-plugin-kit/logger'
 import { approvalAuditId, raceApproval } from './approval-relay.ts'
 import type { RawEvent } from './chat.ts'
-import { COGNITION_PROMPT_ENTRIES_DEFAULT, COMPACTION_POLICY, PLUGIN_NAME, PRESET_ID, RPC_CHANNEL, SERVICE_NAME, type KnowledgeEdit, type PendingQuestionItem, type TaskPermission, type TaskRecord } from './contracts.ts'
+import { COGNITION_PROMPT_ENTRIES_DEFAULT, COMPACTION_POLICY, PLUGIN_NAME, PRESET_ID, RPC_CHANNEL, SERVICE_NAME, type PendingQuestionItem, type TaskPermission, type TaskRecord } from './contracts.ts'
 import { CHAT_SAY_BODY_BYTES, checkChatImages } from './chat-images.ts'
 import { ChatFeed } from './feed.ts'
 import { DotCapabilities, type CapabilityPluginManager, type CapabilityTools } from './capabilities.ts'
@@ -35,6 +35,7 @@ import { PeerLedger } from './peer.ts'
 import { DOT_INSTRUCTIONS } from './prompt.ts'
 import { installPresetVisibility } from './preset-visibility.ts'
 import { REFLECTION_INSTRUCTIONS, REFLECTION_PRESET_ID } from './reflection.ts'
+import { KnowledgeError, parseKnowledgeEdit } from './memory.ts'
 import { APPROVAL_GRACE_MS, DotError, DotService, messageOf } from './service.ts'
 import { configI18n } from './i18n/index.ts'
 import { patchSettings } from './settings.ts'
@@ -591,13 +592,21 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
         // Panel edits of the agreements/cognition do not switch segments at once: the change is
         // picked up before the next message (prompt-changed), or folded in while the segment is untouched.
         case 'agreements.edit': {
-          const edit = field(payload, 'edit')
-          return { ok: true, value: await service.editAgreements(edit as KnowledgeEdit) }
+          try {
+            return { ok: true, value: await service.editAgreements(parseKnowledgeEdit(field(payload, 'edit'), 'agreements')) }
+          } catch (error) {
+            if (error instanceof KnowledgeError || error instanceof DotError) return { ok: false, error: { code: error.code, message: error.message } }
+            throw error
+          }
         }
         case 'agreements.undo': return { ok: true, value: await service.undoAgreements() }
         case 'cognition.edit': {
-          const edit = field(payload, 'edit')
-          return { ok: true, value: await service.editCognition(edit as KnowledgeEdit) }
+          try {
+            return { ok: true, value: await service.editCognition(parseKnowledgeEdit(field(payload, 'edit'), 'cognition')) }
+          } catch (error) {
+            if (error instanceof KnowledgeError || error instanceof DotError) return { ok: false, error: { code: error.code, message: error.message } }
+            throw error
+          }
         }
         case 'cognition.restore': {
           const at = field(payload, 'at')

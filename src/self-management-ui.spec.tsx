@@ -238,6 +238,42 @@ describe('Dorothy self-management controls', () => {
     await act(async () => root.unmount())
   })
 
+  it('ignores a second click while a knowledge edit is in flight', async () => {
+    let current: DotSettings = { ...DEFAULT_SETTINGS }
+    let knowledge = {
+      agreements: { entries: [{ id: 'a1', text: '先给结论', createdAt: 1, updatedAt: 1 }], canUndo: true },
+      cognition: { entries: [] as never[], history: [] },
+    }
+    const agreementEdits: KnowledgeEdit[] = []
+    let release!: (view: typeof knowledge) => void
+    const gate = new Promise<typeof knowledge>(resolve => { release = resolve })
+    function Harness() {
+      const [settings, setSettings] = useState<DotSettings>(current)
+      const api = {
+        setSettings: async () => current,
+        knowledge: async () => knowledge,
+        editAgreements: async (edit: KnowledgeEdit) => {
+          agreementEdits.push(edit)
+          knowledge = { ...knowledge, agreements: { entries: applyAgreementEdit(knowledge.agreements.entries, edit, 9, () => 'a2'), canUndo: true } }
+          return gate
+        },
+        undoAgreements: async () => knowledge,
+        editCognition: async () => knowledge,
+        restoreCognition: async () => knowledge,
+      }
+      return <PersonaPanel locale="zh" api={api} settings={settings} onSaved={setSettings} />
+    }
+    const root = createRoot(document.getElementById('root')!)
+    await act(async () => root.render(<Harness />))
+    await act(async () => { await Promise.resolve() })
+    const deleteBtn = [...document.querySelectorAll<HTMLButtonElement>('button')].find(btn => btn.textContent === '删除')!
+    await act(async () => { deleteBtn.click(); deleteBtn.click() })
+    expect(agreementEdits).toEqual([{ op: 'remove', id: 'a1' }])
+    expect(deleteBtn.disabled).toBe(true)
+    await act(async () => { release(knowledge); await gate })
+    await act(async () => root.unmount())
+  })
+
   it('switches directly from the context page and reports a refusal', async () => {
     const root = createRoot(document.getElementById('root')!)
     let view = {

@@ -10,6 +10,13 @@ export const SERVICE_NAME = 'dot'
 export const PRESET_ID = 'dot'
 export const RPC_CHANNEL = '/dsh-dot'
 
+/** What self.status reports about this install and its newest kept pre-upgrade backup. */
+export interface SelfStatusView {
+  readonly mode: 'linked' | 'installed' | 'unknown'
+  readonly root: string | null
+  readonly lastBackup?: { readonly dir: string; readonly lib: string }
+}
+
 export const TOOL = {
   overview: 'dot_overview',
   read: 'dot_read',
@@ -985,6 +992,8 @@ export interface ChatSnapshot {
   readonly itemsRev: number
   /** Monotonic watermark bumped whenever board/task/work/pending state changes. */
   readonly boardRev?: number
+  /** Newest kept self-upgrade backup, so the panel can cache a restore path after merge/deploy. */
+  readonly lastBackup?: { readonly dir: string; readonly lib: string }
   readonly items?: readonly ChatItem[]
   /** Answers to dot's cards by view id, for cards already answered. */
   readonly answers?: Readonly<Record<string, { readonly action: string; readonly values: Record<string, unknown> }>>

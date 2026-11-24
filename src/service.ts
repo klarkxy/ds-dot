@@ -5,11 +5,11 @@
  * entry wires host events into it; the preset child plugin exposes its
  * operations as model tools.
  */
-import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
+import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { randomUUID } from 'node:crypto'
 import { HarnessError } from '@deepseek-ai/dsh-llm'
 import { mkdir } from 'node:fs/promises'
-import { isAbsolute, join, relative, sep } from 'node:path'
+import { dirname, isAbsolute, join, relative, sep } from 'node:path'
 import { APPROVAL_DETAIL_LIMIT, approvalNotice } from './approval-risk.ts'
 import type { IntendedRunPermission } from './approval-safe-auto.ts'
 import { createTwoFilesPatch } from 'diff'
@@ -19,13 +19,14 @@ import { attentionItems } from './board-groups.ts'
 import { renderBrief, renderSupplement, runTitle } from './brief.ts'
 import { bindRunSession, cancelWork, countRelayInserts, finishWork, launchReservedRun, observeRun, reconcileRun, supplementRun } from './execution.ts'
 import { detectWorkspaceRoot } from './git-root.ts'
-import { commitDelivery, createTaskWorktree, listTaskWorktrees, mergeInto, removeTaskWorktree, runGit, taskWorktreeRoot, type GitRunner } from './git-worktree.ts'
+import { commitDelivery, createTaskWorktree, listTaskWorktrees, mergeInto, removeTaskWorktree, runGit, taskWorktreeRoot, type GitRunner, type TaskWorktree } from './git-worktree.ts'
+import { defaultSelfBuild, insideOrEqual, libHashOf, realpathOrResolve, type SelfBackup, type SelfInstall, type SelfUpgradeMarker } from './self-root.ts'
 import {
   WRITE_PATHS_EXAMPLE, artifactName, constraintList, jsonArray,
   occupantOf, pathScope, plannedOccupant, plannedScope, requirementList, samePathList,
   stepList, verifyRefusal,
 } from './work-actions.ts'
-import { absoluteScopePath, canonicalPath, onDiskPath, changeIsTerminal, MAX_COMPLETED_CHANGES, InputShapeError, inputContractError, occupantsConflict, runCostTotals, runIsTerminal, scopeWithinRoot, scopeWrites, type ChangeRecord, type Constraint, type Occupant, type Requirement, type RootHint, type RunRecord, type TaskIsolation, type WorkRefusal } from './work.ts'
+import { absoluteScopePath, canonicalPath, onDiskPath, changeIsTerminal, MAX_COMPLETED_CHANGES, InputShapeError, inputContractError, occupantsConflict, runCostTotals, runIsTerminal, scopeWithinRoot, scopeWrites, type ChangeRecord, type Constraint, type Occupant, type Requirement, type RootHint, type RunRecord, type TaskIsolation, type WorkRefusal, type WriteScope } from './work.ts'
 import type { ShownView, ViewAnswer } from '@klarkxy/dsh-deep-view/contracts'
 import { DotCards, cardAnswerText, type DotCardRecord } from './card-state.ts'
 import { checkChatImages, type ChatImage } from './chat-images.ts'
@@ -112,6 +113,10 @@ export interface DotServiceOptions {
   readonly globalMcpNames?: () => Iterable<string>
   /** Git runner for task-worktree isolation; tests inject a fake. */
   readonly git?: GitRunner
+  /** dot's own install, detected from the running module; write work inside it is guarded. */
+  readonly selfInstall?: SelfInstall
+  /** Rebuild run after a merged self-upgrade lands in the linked checkout; tests inject a fake. */
+  readonly selfBuild?: (root: string, signal?: AbortSignal) => Promise<{ readonly ok: boolean; readonly output: string }>
 }
 
 /** The history tools themselves: their calls and results are not part of the record they read. */
@@ -181,6 +186,12 @@ export class DotService {
   readonly cards: DotCards
   /** The single background reflection pass; the reminder clock ticks its gate. */
   readonly reflection: ReflectionRunner
+  /**
+   * The upgrade marker that was already on disk when this process started.
+   * Only that marker may be hashed, announced, and cleared; a marker this
+   * instance writes in deploySelfBuild stays until a new process starts.
+   */
+  private readonly startupSelfUpgrade: SelfUpgradeMarker | undefined
 
   constructor(private readonly options: DotServiceOptions) {
     this.currentLocale = options.locale ?? options.store.uiLocale
@@ -250,6 +261,7 @@ export class DotService {
       ...options.log ? { log: options.log } : {},
       emit: input => this.emit(input),
     })
+    this.startupSelfUpgrade = options.store.selfUpgrade
   }
 
   get store(): DotStore { return this.options.store }
@@ -1160,6 +1172,16 @@ export class DotService {
   updateStatus(): UpdateStatus | undefined { return this.store.updateStatus }
   checkUpdates(): Promise<UpdateStatus> { return this.updates.checkNow() }
 
+  /** What the panel shows about this install: where dot runs from and the newest kept pre-upgrade backup. */
+  selfStatus(): { readonly mode: 'linked' | 'installed' | 'unknown'; readonly root: string | null; readonly lastBackup?: SelfBackup } {
+    const self = this.options.selfInstall
+    return {
+      mode: self?.mode ?? 'unknown',
+      root: self?.root ?? null,
+      ...(this.store.selfBackup !== undefined ? { lastBackup: this.store.selfBackup } : {}),
+    }
+  }
+
   /**
    * Let reminders come due. Called once dot's preset is registered: a reminder
    * that fires earlier could not reopen dot's session and would take it for lost.
@@ -1168,7 +1190,36 @@ export class DotService {
     if (this.closing) return
     this.reminders.start()
     this.updates.start()
+    void this.resolveSelfUpgrade().catch(error => this.options.log?.(`dsh-dot: self-upgrade marker check failed: ${messageOf(error)}`))
     void this.reconcile().catch(error => this.options.log?.(`dsh-dot: reconciliation failed: ${messageOf(error)}`))
+  }
+
+  /**
+   * A self-upgrade that built under the previous process left a marker; hashing
+   * the bundle running now says whether the restart actually picked it up. The
+   * marker clears either way — the backup row stays for the restore hint.
+   * Only the marker captured at construction may be consumed: a later
+   * deploySelfBuild on this still-running process must not look like a restart.
+   */
+  private async resolveSelfUpgrade(): Promise<void> {
+    const marker = this.startupSelfUpgrade
+    if (!marker || this.closing) return
+    // A marker this instance just wrote is a different object; leave it for the next process.
+    if (this.store.selfUpgrade !== marker) return
+    const dot = this.store.dotSessionId
+    // Clearing before the session exists would drop the only notice of this upgrade.
+    if (!dot) return
+    try {
+      const hash = this.options.selfInstall ? libHashOf(this.options.selfInstall.root) : undefined
+      const text = hash !== undefined && hash === marker.libHash
+        ? `Self-upgrade to ${marker.commitSha} is running; the previous lib is kept at ${join(marker.backupDir, 'lib')}.`
+        : `Self-upgrade to ${marker.commitSha} was deployed, but the running build does not match it${hash === undefined ? ' (the bundle could not be read)' : ''}; the previous lib is kept at ${join(marker.backupDir, 'lib')}.`
+      this.notify({ sessionId: dot, kind: 'turn-end', text, at: this.now() })
+    } finally {
+      if (this.store.selfUpgrade === marker) {
+        await this.store.setSelfUpgrade(undefined).catch(error => this.options.log?.(`dsh-dot: self-upgrade marker was not cleared: ${messageOf(error)}`))
+      }
+    }
   }
 
   private canIdleCheck(): boolean {
@@ -1718,7 +1769,7 @@ export class DotService {
       if (inFlight) return { ok: false as const, reason: `previous run of ${recipe.id} "${recipe.name}" still in flight: ${inFlight.id}` }
       this.recipeStarting.add(recipe.id)
       try {
-        return { ok: true as const, change: await this.createChangeFromTool({ action: 'create', recipe: recipe.id, user_request: userRequest }) }
+        return { ok: true as const, change: (await this.createChangeFromTool({ action: 'create', recipe: recipe.id, user_request: userRequest })).change }
       } catch (error) {
         this.recipeStarting.delete(recipe.id)
         return { ok: false as const, reason: messageOf(error) }
@@ -1908,13 +1959,15 @@ export class DotService {
       const lastWork = this.store.work.listRuns()
         .filter(run => run.changeId === change.id && run.kind === 'work')
         .sort((a, b) => b.createdAt - a.createdAt || b.id.localeCompare(a.id))[0]
+      const fromChange = this.recipeDirFromChange(change)
       base = {
         goal: material?.goal ?? '',
         requirements: material?.requirements ?? [],
         ...(material?.requirementsFromGoal !== undefined ? { requirementsFromGoal: material.requirementsFromGoal } : {}),
         ...(material?.constraints ? { constraints: material.constraints } : {}),
         ...(material?.deliverableLanguage ? { deliverableLanguage: material.deliverableLanguage } : {}),
-        dir: change.cwd,
+        dir: fromChange.dir,
+        ...(fromChange.isolation !== undefined ? { isolation: fromChange.isolation } : {}),
         ...(lastWork?.expectedPreset ? { preset: lastWork.expectedPreset } : {}),
         ...(lastWork?.access ? { access: lastWork.access } : {}),
       }
@@ -2779,6 +2832,7 @@ export class DotService {
     this.releaseChildSeals()
     if (this.disposal) return this.disposal
     this.closing = true
+    this.selfDeployAbort.abort()
     this.batcher.dispose()
     this.idleChecker.cancel()
     this.cancelKeepalive()
@@ -2787,6 +2841,7 @@ export class DotService {
     this.updates.dispose()
     this.pending.dispose()
     this.disposal = (async () => {
+      await this.selfDeployChain
       await this.reflection.dispose()
       await this.lane
       await Promise.allSettled([...this.inFlight])
@@ -3116,7 +3171,105 @@ export class DotService {
     await withSha({ state: 'merged', ...(merged.mergedInto ? { mergedInto: merged.mergedInto } : {}) })
     // The branch is merged now, so -d succeeds and the worktree goes with it.
     await removeTaskWorktree({ repoRoot: isolation.repoRoot, worktree: isolation.worktree, branch: isolation.branch }, git)
-    return this.integrated(change, `merged ${isolation.branch} into ${merged.mergedInto}`)
+    let deploySha = commitSha
+    try {
+      const head = await git(['rev-parse', 'HEAD'], isolation.repoRoot)
+      if (head) deploySha = head
+    } catch { /* keep the worktree commit when HEAD cannot be read */ }
+    const deploying = this.queueSelfDeploy(isolation, deploySha, change)
+    return this.integrated(change, `merged ${isolation.branch} into ${merged.mergedInto}${deploying ? '; dot is rebuilding in the background, a notice follows when it finishes' : ''}`)
+  }
+
+  /**
+   * A merge landing in dot's own linked checkout is a self-upgrade. The build
+   * can take minutes, so it must not hold the panel's work.integrate RPC: the
+   * merge answers at once and the deploy runs behind selfDeployChain — one at
+   * a time, so two merges never build concurrently — reporting its outcome to
+   * dot's session through the same held-notice path integrated() uses.
+   */
+  private selfDeployChain: Promise<void> = Promise.resolve()
+  private selfDeployAbort = new AbortController()
+
+  /** Specs await queued self-upgrade deploys here; production never waits on them. */
+  selfDeploysSettled(): Promise<void> { return this.selfDeployChain }
+
+  private queueSelfDeploy(isolation: TaskIsolation, commitSha: string | undefined, change: ChangeRecord): boolean {
+    const self = this.options.selfInstall
+    if (self?.mode !== 'linked' || !this.sameRealPath(isolation.repoRoot, self.root)) return false
+    if (this.closing || this.selfDeployAbort.signal.aborted) return false
+    const root = self.root
+    const sha = commitSha ?? isolation.baseSha
+    const signal = this.selfDeployAbort.signal
+    this.selfDeployChain = this.selfDeployChain.then(async () => {
+      if (this.closing || signal.aborted) return
+      const text = await this.deploySelfBuild(root, sha, signal)
+      if (text === undefined) return
+      const dot = this.store.dotSessionId
+      if (dot) this.notify({ sessionId: dot, kind: 'turn-end', text: `Isolated task ${change.id} "${change.title}": ${text}.`, at: this.now() })
+    }).catch(error => this.options.log?.(`dsh-dot: self-upgrade deploy failed: ${messageOf(error)}`))
+    return true
+  }
+
+  /**
+   * Back the deployed lib up, rebuild it in place and roll the backup back on
+   * a failed build. A dirty live checkout ships whatever is uncommitted, so it
+   * is never built — the human commits or stashes first. The persisted marker
+   * lets the next start report whether the running bundle is the deployed one;
+   * lastBackup (the lib copy itself) stays for the panel's restore hint.
+   */
+  private async deploySelfBuild(root: string, sha: string, signal?: AbortSignal): Promise<string | undefined> {
+    // `git diff --quiet HEAD` semantics: staged or unstaged tracked changes
+    // count as dirty; untracked files and the gitignored lib/ do not.
+    if (signal?.aborted) return undefined
+    const dirty = await this.git()(['diff', '--quiet', 'HEAD'], root).then(() => false, () => true)
+    if (dirty) {
+      return `merged, but dot was not rebuilt because ${root} has uncommitted tracked changes that would ship in the build. Commit or stash them, run pnpm build there, then restart DeepSeek Harness.`
+    }
+    const backupDir = join(this.options.homeDir, 'self-upgrade', `${Math.floor(this.now())}-${sha.slice(0, 8)}`)
+    try {
+      cpSync(join(root, 'lib'), join(backupDir, 'lib'), { recursive: true })
+    } catch (error) {
+      return `merged, but the previous lib could not be backed up so dot was not rebuilt: ${messageOf(error)}`
+    }
+    const build = await (this.options.selfBuild ?? defaultSelfBuild)(root, signal).catch(error => ({ ok: false as const, output: messageOf(error) }))
+    if (!build.ok) {
+      try {
+        rmSync(join(root, 'lib'), { recursive: true, force: true })
+        cpSync(join(backupDir, 'lib'), join(root, 'lib'), { recursive: true })
+        try { rmSync(backupDir, { recursive: true, force: true }) } catch { /* best-effort drop of the failed attempt */ }
+        return `merged, but the rebuild failed and the previous lib was restored from ${join(backupDir, 'lib')}. Build output: ${build.output}`
+      } catch (error) {
+        return `merged, but the rebuild failed and the previous lib could not be restored from ${join(backupDir, 'lib')}: ${messageOf(error)}. Build output: ${build.output}`
+      }
+    }
+    await this.store.setSelfUpgrade({ at: this.now(), commitSha: sha, backupDir, libHash: libHashOf(root) ?? '' })
+    await this.store.setSelfBackup({ dir: join(backupDir, 'lib'), lib: join(root, 'lib') })
+    this.pruneSelfUpgradeBackups()
+    return `merged and dot was rebuilt; the previous lib is kept at ${join(backupDir, 'lib')}. Restart DeepSeek Harness to load it.`
+  }
+
+  private sameRealPath(left: string, right: string): boolean {
+    try {
+      return canonicalPath(realpathSync.native(left)) === canonicalPath(realpathSync.native(right))
+    } catch {
+      return false
+    }
+  }
+
+  /** Keep only the newest backup directories under `<homeDir>/self-upgrade`. */
+  private pruneSelfUpgradeBackups(keep = 3): void {
+    const root = join(this.options.homeDir, 'self-upgrade')
+    const protectedDir = this.store.selfBackup?.dir ? dirname(this.store.selfBackup.dir) : undefined
+    try {
+      const rows = readdirSync(root, { withFileTypes: true })
+        .filter(row => row.isDirectory())
+        .map(row => ({ path: join(root, row.name), at: statSync(join(root, row.name)).mtimeMs }))
+        .sort((a, b) => b.at - a.at)
+      for (const row of rows.slice(keep)) {
+        if (protectedDir && canonicalPath(row.path) === canonicalPath(protectedDir)) continue
+        rmSync(row.path, { recursive: true, force: true })
+      }
+    } catch { /* pruning is best effort */ }
   }
 
   /** The integration result reaches dot as a held notice; the board row shows the same state. */
@@ -3525,10 +3678,15 @@ export class DotService {
       ...(deliverableLanguage !== undefined ? { deliverableLanguage } : {}),
     }
     if (action === 'create') {
-      const change = await this.createChangeFromTool(args)
+      const created = await this.createChangeFromTool(args)
+      const change = created.change
       const recipe = change.recipe ? this.store.recipe(change.recipe.id) : undefined
       const view = this.store.work.workView(change.id)
-      return JSON.stringify(recipe ? { ...view, recipe: { id: recipe.id, name: recipe.name, revision: recipe.revision } } : view)
+      return JSON.stringify({
+        ...view,
+        ...(created.forcedIsolation ? { isolationNote: "This directory is dot's own live checkout, so the task runs in a git worktree even though isolation was \"none\"." } : {}),
+        ...(recipe ? { recipe: { id: recipe.id, name: recipe.name, revision: recipe.revision } } : {}),
+      })
     }
     const changeId = text('task_id') ?? ''
     if (!changeId) throw new DotError('dot/invalid', 'task_id is required')
@@ -3540,10 +3698,11 @@ export class DotService {
       : previousInput ? requirementsFollowGoal(previousInput) : undefined
     const changesInput = goal !== undefined || explicitRequirements !== undefined || steps !== undefined || dir !== undefined
       || constraints !== undefined || userRequest !== undefined || deliverableLanguage !== undefined
+    const nextDir = dir !== undefined ? this.boundSelfDir(currentChange, dir) : undefined
     const revised = await this.store.work.reviseChange(changeId, {
       ...(title !== undefined ? { title } : {}),
       ...(goal !== undefined ? { goal } : {}),
-      ...(dir !== undefined ? { cwd: dir } : {}),
+      ...(nextDir !== undefined ? { cwd: nextDir } : {}),
       ...(requirements ? { requirements } : {}),
       ...(changesInput && requirementsFromGoal !== undefined ? { requirementsFromGoal } : {}),
       ...(steps ? { steps } : {}),
@@ -3572,8 +3731,138 @@ export class DotService {
     return detectWorkspaceRoot(cwd)
   }
 
+  /**
+   * dot's own checkout is never a plain write target. A linked checkout gets
+   * a git worktree whose merge rebuilds the bundle; the installed package is
+   * the plugin manager's, so editing it is refused outright.
+   */
+  private selfIsolation(dir: string): 'worktree' | undefined {
+    const self = this.options.selfInstall
+    if (!self || !insideOrEqual(self.root, realpathOrResolve(dir))) return undefined
+    if (self.mode === 'installed') {
+      throw new DotError('dot/self', `${dir} is dot's own installed package, managed by the plugin manager; dot does not edit it. Changes to dot itself go to the maintainers as an issue or PR draft; settings, agreements, cognition and recipes change through their own tools.`)
+    }
+    return 'worktree'
+  }
+
+  /**
+   * A change made before the self-checkout guard can still name dot's live
+   * checkout. Its write runs stop at the one point every dispatch passes
+   * between reservation and launch — a plain cwd has no merge step to rebuild
+   * the bundle, and a failed build could leave dot unloadable. Isolated
+   * changes merge through the worktree path and stay allowed, but only while
+   * the actual cwd still lives in that worktree.
+   */
+  private selfRunBlocked(change: ChangeRecord, run: RunRecord | undefined, scope: WriteScope): boolean {
+    const self = this.options.selfInstall
+    if (!self || !scopeWrites(scope)) return false
+    const root = self.root
+    const isolation = change.isolation
+    // Only a linked self-maintenance worktree gets cwd / workspace-exclusive
+    // exemption; explicit scope.paths are always checked against live self.root.
+    const selfWorktree = (() => {
+      if (isolation?.kind !== 'worktree' || !this.sameRealPath(isolation.repoRoot, root)) return false
+      try {
+        return insideOrEqual(realpathOrResolve(isolation.worktree), realpathOrResolve(change.cwd))
+      } catch {
+        // A missing worktree still must not authorize a live-checkout cwd.
+        return false
+      }
+    })()
+    if (!selfWorktree && insideOrEqual(root, realpathOrResolve(change.cwd))) return true
+    const scopeRoot = run?.workspaceRoot || change.cwd
+    const scopeRootReal = realpathOrResolve(scopeRoot)
+    if (self.mode === 'installed') {
+      // Only the package itself is off-limits. A host project that merely
+      // contains node_modules/ds-dot is a normal write target.
+      if (scope.kind === 'workspace-exclusive') return !selfWorktree && insideOrEqual(root, scopeRootReal)
+      return scope.paths.some(entry => {
+        try {
+          return insideOrEqual(root, realpathOrResolve(absoluteScopePath(scopeRoot, entry.path)))
+        } catch {
+          return false
+        }
+      })
+    }
+    if (scope.kind === 'workspace-exclusive') {
+      if (selfWorktree) return false
+      return insideOrEqual(scopeRootReal, root) || insideOrEqual(root, scopeRootReal)
+    }
+    return scope.paths.some(entry => {
+      try {
+        const absolute = realpathOrResolve(absoluteScopePath(scopeRoot, entry.path))
+        return insideOrEqual(root, absolute) || (entry.type === 'directory' && insideOrEqual(absolute, root))
+      } catch {
+        return false
+      }
+    })
+  }
+
+  /**
+   * Revise must not walk an isolated self task back onto the live checkout,
+   * and must not aim a normal task at an installed package. Linked live
+   * checkout paths remap into the existing worktree.
+   */
+  private boundSelfDir(change: ChangeRecord | undefined, dir: string): string {
+    if (!change) {
+      this.selfIsolation(dir)
+      return dir
+    }
+    const isolation = change.isolation
+    if (isolation?.kind === 'worktree') {
+      const requested = realpathOrResolve(dir)
+      const worktree = realpathOrResolve(isolation.worktree)
+      if (insideOrEqual(worktree, requested)) return dir
+      const repoRoot = realpathOrResolve(isolation.repoRoot)
+      if (insideOrEqual(repoRoot, requested)) {
+        const rel = relative(repoRoot, requested)
+        return rel && rel !== '.' ? join(isolation.worktree, rel) : isolation.worktree
+      }
+      throw new DotError('dot/self', `${dir} leaves the isolated worktree for this task; stay inside ${isolation.worktree} or the original checkout at ${isolation.repoRoot}.`)
+    }
+    this.selfIsolation(dir)
+    return dir
+  }
+
+  /** Persist the original checkout, not the ephemeral worktree path, when saving a recipe from an isolated task. */
+  private recipeDirFromChange(change: ChangeRecord): { dir: string; isolation?: 'worktree' } {
+    const isolation = change.isolation
+    if (isolation?.kind !== 'worktree') return { dir: change.cwd }
+    const rel = relative(isolation.worktree, change.cwd)
+    const inside = rel === '' || (rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel))
+    const dir = inside && rel && rel !== '.' ? join(isolation.repoRoot, rel) : isolation.repoRoot
+    return { dir, isolation: 'worktree' }
+  }
+
+  /** Map in-checkout absolute write paths onto the worktree; keep paths already in the worktree and relative paths; reject anything outside both. */
+  private remapSelfScopePaths(fromRoot: string, toRoot: string, paths: string): string {
+    const listed = pathScope(paths)
+    if (!listed) return paths
+    const from = realpathOrResolve(fromRoot)
+    const to = realpathOrResolve(toRoot)
+    return JSON.stringify(listed.map(entry => {
+      if (!isAbsolute(entry.path)) return entry
+      const absolute = realpathOrResolve(entry.path)
+      if (insideOrEqual(to, absolute)) return entry
+      if (!insideOrEqual(from, absolute)) {
+        throw new DotError('dot/invalid', `scope ${entry.path} is outside ${fromRoot}`)
+      }
+      const rel = relative(from, absolute)
+      return { path: rel && rel !== '.' ? join(toRoot, rel) : toRoot, type: entry.type }
+    }))
+  }
+
+  /** Open a dot/task-* worktree for `dir`; a git failure reads as dot/invalid like create reports it. */
+  private async taskWorktreeFor(dir: string): Promise<TaskWorktree> {
+    try {
+      return await createTaskWorktree({ dir, homeDir: this.options.homeDir }, this.git())
+    } catch (error) {
+      throw new DotError('dot/invalid', `isolation "worktree" could not be prepared: ${messageOf(error)}`)
+    }
+  }
+
   /** The create branch of dot_task: returns the created record so callers (recipe dispatch) need not parse the view JSON. */
-  private async createChangeFromTool(args: Record<string, unknown>): Promise<ChangeRecord> {
+  private async createChangeFromTool(args: Record<string, unknown>): Promise<{ readonly change: ChangeRecord; readonly forcedIsolation: boolean }> {
     const text = (key: string) => typeof args[key] === 'string' ? args[key] as string : undefined
     const title = text('title')
     const goal = text('goal')
@@ -3601,15 +3890,10 @@ export class DotService {
     if (isolationArg !== undefined && isolationArg !== 'none' && isolationArg !== 'worktree') {
       throw new DotError('dot/invalid', 'isolation must be "none" or "worktree"')
     }
-    const wantsWorktree = isolationArg === 'worktree' || (isolationArg === undefined && recipe?.isolation === 'worktree')
-    let worktree: Awaited<ReturnType<typeof createTaskWorktree>> | undefined
-    if (wantsWorktree) {
-      try {
-        worktree = await createTaskWorktree({ dir: createDir, homeDir: this.options.homeDir }, this.git())
-      } catch (error) {
-        throw new DotError('dot/invalid', `isolation "worktree" could not be prepared: ${messageOf(error)}`)
-      }
-    }
+    const forcedIsolation = this.selfIsolation(createDir) === 'worktree'
+    const wantsWorktree = forcedIsolation || isolationArg === 'worktree' || (isolationArg === undefined && recipe?.isolation === 'worktree')
+    let worktree: TaskWorktree | undefined
+    if (wantsWorktree) worktree = await this.taskWorktreeFor(createDir)
     let change: ChangeRecord
     try {
       change = await this.store.work.createChange({
@@ -3641,7 +3925,7 @@ export class DotService {
     const humanReview = args.human_review !== undefined ? args.human_review === true : recipe?.humanReview === true
     if (humanReview) await this.store.work.requestOversight(change.id, this.now())
     void this.pruneWorkArtifactsIfNeeded()
-    return change
+    return { change, forcedIsolation }
   }
 
   private async reserveFromTool(args: Record<string, unknown>): Promise<{ changeId: string; runId: string; phase: RunRecord['phase']; requestedSessionId: string }> {
@@ -4016,6 +4300,9 @@ export class DotService {
   /** A version-matched user decision wakes dot once. It does not call decide, accept, or reject, and it does not open a session. */
   private openedDot(sessionId: string): string {
     this.recoverDecisionWakes()
+    if (this.store.selfUpgrade) {
+      void this.resolveSelfUpgrade().catch(error => this.options.log?.(`dsh-dot: self-upgrade marker check failed: ${messageOf(error)}`))
+    }
     return sessionId
   }
 
@@ -4156,22 +4443,46 @@ export class DotService {
       const candidate = plannedOccupant(cwd, plannedScope(role, input.access, input.paths, cwd), this.rootHint(cwd))
       return (await this.scopeReport(cwd, change?.id ?? '', candidate)).text
     }
+    let paths = input.paths
     if (!change) {
       const cwd = workspace?.path ?? input.cwd ?? (await this.homeWorkspace()).path
       if (!cwd || !isAbsolute(cwd)) throw new DotError('dot/invalid', 'directory must be absolute')
       const goal = input.goal?.trim() || input.instruction.trim()
       if (!goal) throw new DotError('dot/invalid', 'instruction must be non-empty')
-      change = await this.store.work.createChange({
-        title: input.title,
-        cwd,
-        goal,
-        requirements: [{ requirementRef: 'goal', text: goal, required: true }],
-        requirementsFromGoal: true,
-        ...(input.priority !== undefined ? { priority: input.priority } : {}),
-        at: this.now(),
-      })
+      // A write dispatch gets the same forced isolation an explicit create does.
+      const worktree = input.access === 'write' && this.selfIsolation(cwd) === 'worktree'
+        ? await this.taskWorktreeFor(cwd)
+        : undefined
+      try {
+        if (worktree !== undefined && paths) paths = this.remapSelfScopePaths(cwd, worktree.cwd, paths)
+        change = await this.store.work.createChange({
+          title: input.title,
+          cwd: worktree?.cwd ?? cwd,
+          goal,
+          requirements: [{ requirementRef: 'goal', text: goal, required: true }],
+          requirementsFromGoal: true,
+          ...(worktree !== undefined ? {
+            isolation: {
+              kind: 'worktree' as const, repoRoot: worktree.repoRoot, worktree: worktree.worktree,
+              branch: worktree.branch, baseSha: worktree.baseSha, state: 'active' as const, at: this.now(),
+            },
+          } : {}),
+          ...(input.priority !== undefined ? { priority: input.priority } : {}),
+          at: this.now(),
+        })
+      } catch (error) {
+        if (worktree !== undefined) {
+          await removeTaskWorktree({ repoRoot: worktree.repoRoot, worktree: worktree.worktree, branch: worktree.branch, baseSha: worktree.baseSha }, this.git()).catch(() => undefined)
+        }
+        throw error
+      }
       changeId = change.id
       void this.pruneWorkArtifactsIfNeeded()
+    } else if (paths && role !== 'review' && input.access === 'write' && change.isolation?.kind === 'worktree') {
+      const self = this.options.selfInstall
+      if (self?.mode === 'linked' && this.sameRealPath(change.isolation.repoRoot, self.root)) {
+        paths = this.remapSelfScopePaths(change.isolation.repoRoot, change.isolation.worktree, paths)
+      }
     }
     // Three failed rounds on this input revision is a sign to stop, not retry.
     if (role !== 'review') {
@@ -4186,17 +4497,24 @@ export class DotService {
     if (selected && input.access === 'write' && !scopeWrites(selected.writeScope)) {
       throw new DotError('dot/invalid', `${selected.id} is read-only, so access "write" does not start it. Reserve a write run with access "write" and paths covering the files. Example: paths ${WRITE_PATHS_EXAMPLE}. This run was not started.`)
     }
-    if (!selected && role !== 'review' && input.access !== 'write' && input.paths && pathScope(input.paths)?.length) {
+    if (!selected && role !== 'review' && input.access !== 'write' && paths && pathScope(paths)?.length) {
       throw new DotError('dot/invalid', `these paths are a write scope, so access must be "write", not "${input.access ?? 'read'}". Example: access "write", paths ${WRITE_PATHS_EXAMPLE}. The run was not started.`)
     }
-    const scope = selected ? selected.writeScope : plannedScope(role, input.access, input.paths, change.cwd)
+    const scope = selected ? selected.writeScope : plannedScope(role, input.access, paths, change.cwd)
+    // Changes older than the self-checkout guard can still name dot's live
+    // checkout; their write runs stop here, before any reservation is taken.
+    if (role !== 'review' && this.selfRunBlocked(change, selected, scope)) {
+      throw new DotError('dot/self', change.isolation?.kind === 'worktree'
+        ? `${change.id} targets dot's own live checkout in its write scope, so no write run starts on it.`
+        : `${change.id} targets dot's own live checkout without isolation, so no write run starts on it. Create a new task for this work; it runs in a git worktree.`)
+    }
     const report = await this.scopeReport(change.cwd, change.id, selected ? occupantOf(selected) : plannedOccupant(change.cwd, scope, this.rootHint(change.cwd)))
     if (scopeWrites(scope) && report.blocked) throw new DotError('dot/locked', report.text)
     const note = report.text === 'Directory lock is available.' ? '' : `\n${report.text}`
     let createdHere = false
     let runId = selected?.id
     if (!runId) {
-      const reserved = await this.reserveFromTool({ task_id: changeId, role, access: input.access ?? 'read', ...(input.paths ? { paths: input.paths } : {}), ...(input.stepRefs ? { step_refs: input.stepRefs } : {}) })
+      const reserved = await this.reserveFromTool({ task_id: changeId, role, access: input.access ?? 'read', ...(paths ? { paths } : {}), ...(input.stepRefs ? { step_refs: input.stepRefs } : {}) })
       runId = reserved.runId
       createdHere = true
     }

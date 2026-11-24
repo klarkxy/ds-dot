@@ -1,4 +1,5 @@
 import { Button, StateDot, Tag, type StateDotState, type TagTone } from '@deepseek-ai/dsh-client-ui-primitives'
+import { backendMissingText } from './backend-state.ts'
 import { groupBoard, headerBoardCounts } from './board-groups.ts'
 import { groupWork } from './work-board.ts'
 import type { BoardView, TaskStatus } from './contracts.ts'
@@ -51,7 +52,7 @@ export function Board({ locale, view, error, filter = 'all', onOpen, onRetry, on
       <div className={BOARD_ROOT}>
         {error === undefined ? null : (
           <div className="dsh-ui-row">
-            <span className="dsh-ui-error">{t(locale, 'loadFailed')}: {error}</span>
+            <span className="dsh-ui-error" style={{ whiteSpace: 'pre-line' }}>{backendMissingText(locale, error) ?? `${t(locale, 'loadFailed')}: ${error}`}</span>
             <Button variant="ghost" onClick={onRetry}>{t(locale, 'retry')}</Button>
           </div>
         )}
@@ -67,7 +68,7 @@ export function Board({ locale, view, error, filter = 'all', onOpen, onRetry, on
   return (
     <div className={BOARD_ROOT}>
       <div className="dsh-ui-stack">
-        {error !== undefined ? <div className="dsh-ui-row" role="alert"><span className="dsh-ui-error">{t(locale, 'loadFailed')}: {error}</span><Button variant="ghost" onClick={onRetry}>{t(locale, 'retry')}</Button></div> : null}
+        {error !== undefined ? <div className="dsh-ui-row" role="alert"><span className="dsh-ui-error" style={{ whiteSpace: 'pre-line' }}>{backendMissingText(locale, error) ?? `${t(locale, 'loadFailed')}: ${error}`}</span><Button variant="ghost" onClick={onRetry}>{t(locale, 'retry')}</Button></div> : null}
         {empty ? <p className="dsh-ui-hint">{t(locale, 'empty')}</p> : null}
         {shows('waiting') && groups.requests.length > 0 ? (
           <section className="dsh-ui-stack" aria-label={t(locale, 'boardWaiting')}>

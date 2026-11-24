@@ -374,13 +374,13 @@ describe('UI locale wiring & client RPC sync', () => {
       }],
       decideSetting: async () => 'ok',
       knowledge: async () => ({
-        agreements: { text: '', maxChars: 4000, canUndo: false },
-        cognition: { text: '', maxChars: 4000, history: [] },
+        agreements: { entries: [], canUndo: false },
+        cognition: { entries: [], history: [] },
       }),
-      setAgreements: async () => ({ agreements: { text: '', maxChars: 4000, canUndo: false }, cognition: { text: '', maxChars: 4000, history: [] } }),
-      undoAgreements: async () => ({ agreements: { text: '', maxChars: 4000, canUndo: false }, cognition: { text: '', maxChars: 4000, history: [] } }),
-      setCognition: async () => ({ agreements: { text: '', maxChars: 4000, canUndo: false }, cognition: { text: '', maxChars: 4000, history: [] } }),
-      restoreCognition: async () => ({ agreements: { text: '', maxChars: 4000, canUndo: false }, cognition: { text: '', maxChars: 4000, history: [] } }),
+      editAgreements: async () => ({ agreements: { entries: [], canUndo: false }, cognition: { entries: [], history: [] } }),
+      undoAgreements: async () => ({ agreements: { entries: [], canUndo: false }, cognition: { entries: [], history: [] } }),
+      editCognition: async () => ({ agreements: { entries: [], canUndo: false }, cognition: { entries: [], history: [] } }),
+      restoreCognition: async () => ({ agreements: { entries: [], canUndo: false }, cognition: { entries: [], history: [] } }),
     }
     const { Card } = createDotCards(async () => null, {
       getSnapshot: () => ({ active: 'zh-CN' }),

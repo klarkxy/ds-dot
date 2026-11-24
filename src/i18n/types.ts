@@ -16,6 +16,7 @@ export type CardCopy = Record<CardTextKey, string>
 export type ConfigCopy = {
   readonly homeDir: string
   readonly approvalGraceMs: string
+  readonly cognitionPromptEntries: string
 }
 
 export type ApprovalCardCopy = {

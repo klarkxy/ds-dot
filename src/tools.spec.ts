@@ -10,6 +10,7 @@ import { formatTaskModels } from './task-models.ts'
 import { apply as applyReflection, REFLECTION_PROPOSE_TOOL, REFLECTION_SUBMIT_TOOL } from './reflection.ts'
 import { DEFAULT_SETTINGS, TOOL, type DotSettings } from './contracts.ts'
 import { DEFAULT_PERSONA } from './persona.ts'
+import { agreementEntriesFromText, cognitionEntriesFromText } from './memory.ts'
 import { settingsSnapshotBlock, SelfSettings } from './self-settings.ts'
 import { DotStore } from './store.ts'
 
@@ -27,21 +28,25 @@ const catalog = {
   ],
 }
 
+/** An id allocator standing in for the persisted counter. */
+const ids = (prefix: 'a' | 'c') => { let n = 0; return () => `${prefix}${++n}` }
+
 /** Load the preset row against a recording host: every definition must compile. */
 function load(settings: { current: DotSettings; segment?: Seg; notes?: string; cognition?: string } = { current: DEFAULT_SETTINGS }) {
   const registered: Array<Record<string, unknown>> = []
   const sections: Array<{ name: string; order: number; text: (context?: { agent?: { session?: { id?: string } } }) => string }> = []
   const store = new DotStore(undefined)
   const view = async () => ({
-    agreements: { text: settings.notes ?? '', maxChars: 4000, canUndo: false },
-    cognition: { text: settings.cognition ?? '', maxChars: 4000, history: [] },
+    agreements: { entries: agreementEntriesFromText(settings.notes ?? '', [], 0, ids('a')), canUndo: false },
+    cognition: { entries: cognitionEntriesFromText(settings.cognition ?? '', [], 0, ids('c')).map(entry => ({ ...entry, active: true })), history: [] },
   })
   // A real SelfSettings backed by a real DotStore so the locks guard works.
   const service = {
     store,
     knowledgeView: view,
     setAgreements: view,
-    setCognition: view,
+    editAgreements: view,
+    editCognition: view,
     undoAgreements: view,
     restoreCognition: view,
     settingsChanged: async () => {},
@@ -72,6 +77,7 @@ function load(settings: { current: DotSettings; segment?: Seg; notes?: string; c
       },
       currentAgreementsBlock: () => settings.notes ?? '',
       currentCognitionBlock: () => settings.cognition ?? '',
+      cognitionList: async (input?: { query?: string; offset?: number; limit?: number }) => JSON.stringify(input ?? {}),
       selfSettings: realSelf,
       answer: (id: string, answer: unknown) => JSON.stringify({ id, answer }),
       presentCard: async (shown: { title: string; view: Record<string, unknown>; interactive: boolean }, callId?: string) => {
@@ -330,9 +336,21 @@ describe('dot tools', () => {
     expect(agreement.action).toMatchObject({ type: 'string', enum: ['add', 'remove'] })
     expect(agreement.text).toMatchObject({ type: 'string' })
     const cognition = propsOf(byName.get(TOOL.cognition)!)
-    // No action on cognition: it always rewrites the whole text.
-    expect(Object.keys(cognition)).toEqual(['text'])
+    expect(cognition.action).toMatchObject({ type: 'string', enum: ['list', 'add', 'update', 'remove'] })
     expect(cognition.text).toMatchObject({ type: 'string' })
+    expect(cognition.match).toMatchObject({ type: 'string' })
+    expect(cognition.query).toMatchObject({ type: 'string' })
+    expect(cognition.offset).toMatchObject({ type: 'integer' })
+    expect(cognition.limit).toMatchObject({ type: 'integer' })
+  })
+
+  it('forwards dot_cognition list query, offset and limit to cognitionList', async () => {
+    const tool = load().find(row => row.name === TOOL.cognition) as { execute(args: unknown): Promise<string> }
+    expect(JSON.parse(await tool.execute({ action: 'list', query: 'tea', offset: 40, limit: 20 }))).toEqual({
+      query: 'tea',
+      offset: 40,
+      limit: 20,
+    })
   })
 
   it('exposes exactly the high-level task operations and rejects removed actions', async () => {

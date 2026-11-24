@@ -124,7 +124,7 @@ export function renderBrief(input: {
   out.push(`# Work order ${changeId} · ${material.id} (rev ${material.revision}) · ${run.id}`)
   out.push(`Title: ${title}`)
   if (input.isolation) {
-    out.push(`Isolation: you run in an isolated git worktree on branch ${input.isolation.branch} based on commit ${input.isolation.baseSha.slice(0, 7)}. Uncommitted changes in the original checkout are not present here; install dependencies if needed. Do not commit, push or switch branches — Dorothy integrates the delivery after acceptance.`)
+    out.push(`Isolation: you run in an isolated git worktree on branch ${input.isolation.branch} based on commit ${input.isolation.baseSha.slice(0, 7)}. Uncommitted changes in the original checkout are not present here; install dependencies if needed. This worktree shares its repository's .git with the human's checkout and other runs: never change git config, remotes, or any branch other than your task branch, and never push. Commit on your task branch only when the work order requires it (for example a merge); otherwise leave your changes uncommitted — Dorothy commits the accepted delivery.`)
   }
   out.push('')
   out.push(roleLine(run))

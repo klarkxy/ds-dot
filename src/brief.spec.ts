@@ -86,6 +86,16 @@ describe('renderBrief', () => {
     expect(text).not.toContain('done | skipped')
   })
 
+  it('tells an isolated run it may commit only when the order requires it', () => {
+    const text = renderBrief({ changeId: 'c-1', title: 'Ship', input, run: run(), isolation: { branch: 'dot/task-c-1', baseSha: 'abc1234def' } })
+    expect(text).toContain('Isolation: you run in an isolated git worktree on branch dot/task-c-1 based on commit abc1234.')
+    expect(text).toContain('Uncommitted changes in the original checkout are not present here; install dependencies if needed.')
+    expect(text).toContain('never change git config, remotes, or any branch other than your task branch, and never push')
+    expect(text).toContain('Commit on your task branch only when the work order requires it (for example a merge); otherwise leave your changes uncommitted — Dorothy commits the accepted delivery.')
+    expect(text).not.toContain('Do not commit, push or switch branches')
+    expect(renderBrief({ changeId: 'c-1', title: 'Ship', input, run: run() })).not.toContain('Isolation:')
+  })
+
   it('keeps the original request byte for byte, even with spaces and backticks', () => {
     const request = '  indented line\n\n```code``` and ``` fences  '
     const text = renderBrief({ changeId: 'c-1', title: 'Ship', input: { ...input, userRequest: request }, run: run() })

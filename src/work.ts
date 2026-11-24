@@ -7,7 +7,7 @@ import { lstatSync, readdirSync, realpathSync, type BigIntStats } from 'node:fs'
 import path from 'node:path'
 import { subjectKey, subjectMaterial, type DeliverySubject, type SubjectLook } from './acceptance.ts'
 import { totalUsage } from './context.ts'
-import type { DotContextUsage } from './contracts.ts'
+import type { DotContextUsage, TaskPermission } from './contracts.ts'
 import { z } from 'zod'
 
 export type ChangeControl = 'open' | 'paused' | 'cancelled'
@@ -159,6 +159,11 @@ export interface RunRecord {
   readonly expectedPreset?: string
   /** Permission the host must be set to before any delivery. Empty scope is still `read`, not "unset". */
   readonly access?: 'read' | 'write'
+  /**
+   * Writable permission applied at first dispatch. Absent on records that only
+   * stored `read` | `write`; those must not be re-pinned to a later global default.
+   */
+  readonly taskPermission?: TaskPermission
   readonly deliveries: readonly DeliveryRecord[]
   readonly phase: RunPhase
   readonly closeReason?: string
@@ -298,6 +303,7 @@ export const runSchema = z.object({
   creation: z.enum(['intent', 'inflight', 'confirmed', 'rejected', 'unknown']),
   expectedPreset: z.string().min(1).optional(),
   access: z.enum(['read', 'write']).optional(),
+  taskPermission: z.enum(['workspace-write', 'danger-full-access', 'safe-auto', 'auto']).optional(),
   deliveries: z.array(deliverySchema),
   phase: z.enum(['reserved', 'active', 'settling', 'completed', 'failed', 'stopped']),
   closeReason: z.string().optional(),
@@ -682,6 +688,8 @@ export interface ReserveInput {
   readonly external?: readonly ExternalOccupant[]
   readonly at?: number
   readonly reworkOf?: string
+  /** Writable permission to pin at reserve; ignored for read-only runs. */
+  readonly taskPermission?: TaskPermission
 }
 
 export interface WorkPersist {
@@ -1193,6 +1201,7 @@ export class WorkBook {
         writeScope: input.writeScope, baselineRefs: [], requestedSessionId: `session-${id}`, creation: 'intent',
         access: input.kind === 'review' ? 'read' : scopeWrites(input.writeScope) ? 'write' : 'read',
         deliveries: [delivery], phase: 'reserved', ...(input.reworkOf ? { reworkOf: input.reworkOf } : {}),
+        ...input.kind !== 'review' && scopeWrites(input.writeScope) && input.taskPermission ? { taskPermission: input.taskPermission } : {},
         createdAt: at, updatedAt: at,
       }
       await this.commit('runs', run.id, run)
@@ -1592,6 +1601,27 @@ export class WorkBook {
       this.runs.set(next.id, next)
       this.currentRevision += 1
       return { ok: true, prompt, run: next }
+    })
+  }
+
+  /**
+   * Pin the writable permission applied at first dispatch. A later global
+   * default must not overwrite it. Already-pinned and read-only runs are left
+   * unchanged.
+   */
+  pinTaskPermission(runId: string, permission: TaskPermission, at = Date.now()): Promise<{ readonly ok: true; readonly run: RunRecord } | WorkRefusal> {
+    return this.exclusive(async () => {
+      const refused = this.recoveryRefusal()
+      if (refused) return refused
+      const run = this.runs.get(runId)
+      if (!run) return { ok: false, code: 'missing', message: `unknown run ${runId}` }
+      if (run.taskPermission) return { ok: true, run }
+      if (run.access !== 'write') return { ok: true, run }
+      const next: RunRecord = { ...run, taskPermission: permission, updatedAt: at }
+      await this.commit('runs', next.id, next)
+      this.runs.set(next.id, next)
+      this.currentRevision += 1
+      return { ok: true, run: next }
     })
   }
 

@@ -22,7 +22,7 @@ import { registerHostRpc, type HostRpcContext } from '@klarkxy/dsh-plugin-kit/ho
 import { installPluginLogger } from '@klarkxy/dsh-plugin-kit/logger'
 import { approvalAuditId, raceApproval } from './approval-relay.ts'
 import type { RawEvent } from './chat.ts'
-import { COMPACTION_POLICY, PLUGIN_NAME, PRESET_ID, RPC_CHANNEL, SERVICE_NAME, type PendingQuestionItem, type TaskPermission, type TaskRecord } from './contracts.ts'
+import { COGNITION_PROMPT_ENTRIES_DEFAULT, COMPACTION_POLICY, PLUGIN_NAME, PRESET_ID, RPC_CHANNEL, SERVICE_NAME, type PendingQuestionItem, type TaskPermission, type TaskRecord } from './contracts.ts'
 import { CHAT_SAY_BODY_BYTES, checkChatImages } from './chat-images.ts'
 import { ChatFeed } from './feed.ts'
 import { DotCapabilities, type CapabilityPluginManager, type CapabilityTools } from './capabilities.ts'
@@ -33,8 +33,10 @@ import { clip } from './ledger.ts'
 import { detachNative } from './native.ts'
 import { PeerLedger } from './peer.ts'
 import { DOT_INSTRUCTIONS } from './prompt.ts'
-import { installPresetVisibility } from './preset-visibility.ts'
+import { installInternalPresetCreateGuard, installPresetVisibility, publicTaskPreset } from './preset-visibility.ts'
+import { shouldDeferApprovalToSafeAuto } from './approval-safe-auto.ts'
 import { REFLECTION_INSTRUCTIONS, REFLECTION_PRESET_ID } from './reflection.ts'
+import { KnowledgeError, parseKnowledgeEdit } from './memory.ts'
 import { APPROVAL_GRACE_MS, DotError, DotService, messageOf } from './service.ts'
 import { configI18n } from './i18n/index.ts'
 import { patchSettings } from './settings.ts'
@@ -64,11 +66,13 @@ const CALL_SCAN = 400
 export interface Config {
   homeDir?: string
   approvalGraceMs?: number
+  cognitionPromptEntries?: number
 }
 
 export const Config: Schema<Config> = Schema.object({
   homeDir: Schema.string().default(''),
   approvalGraceMs: Schema.number().min(0).max(60_000).default(APPROVAL_GRACE_MS),
+  cognitionPromptEntries: Schema.natural().default(COGNITION_PROMPT_ENTRIES_DEFAULT),
 }).i18n(configI18n())
 
 interface SessionLike {
@@ -128,6 +132,7 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
     log,
     trace: logger,
     approvalGraceMs: Number.isFinite(config.approvalGraceMs) ? Math.max(0, Math.min(60_000, config.approvalGraceMs!)) : APPROVAL_GRACE_MS,
+    cognitionPromptEntries: Number.isFinite(config.cognitionPromptEntries) ? Math.max(0, Math.trunc(config.cognitionPromptEntries!)) : COGNITION_PROMPT_ENTRIES_DEFAULT,
     pluginManager: () => ctx.get('pluginManager' as never),
   })
   sealOwned = agent => service.sealAgent(agent)
@@ -182,7 +187,17 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
     return done.finally(() => { if (retiring === done) retiring = undefined })
   }, 'dot.lifecycle')
 
-  ctx.effect(() => installPresetVisibility(ctx.agentPresets), 'dot.preset-visibility')
+  ctx.effect(() => {
+    const release = installPresetVisibility(ctx.agentPresets, ctx)
+    // Warm the public-default cache so `@deepseek-ai/dsh-tool-schedule` can
+    // rewrite `composedPreset` before the first roster read.
+    const warm = typeof (ctx.agentPresets as { remoteExportList?: () => Promise<unknown> }).remoteExportList === 'function'
+      ? ctx.agentPresets.remoteExportList()
+      : ctx.agentPresets.list()
+    void warm.catch(() => {})
+    return release
+  }, 'dot.preset-visibility')
+  ctx.effect(() => installInternalPresetCreateGuard(ctx.get('sessionController' as never), () => publicTaskPreset(ctx.agentPresets)), 'dot.public-session-create')
 
   // The dot preset: conversation, dot's tools, and in-place compaction for the
   // one turn that outgrows the window before a segment change. Choices go through
@@ -335,9 +350,14 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
   ctx.effect(() => ctx.on('approval/request', async (req, next): Promise<ApprovalOutcome> => {
     const origin = topLevelOf(req.agent as AgentLike)
     if (!origin) return next()
-    // A task session running under Safe Auto is reviewed by that plugin, not relayed here.
+    // Safe Auto reviews sessions that are intended to run under it. Residual
+    // overlay after Dorothy re-pins a task away from `safe-auto` must not skip
+    // `approvals=deny`.
     const requesting = (req.agent as AgentLike).session
-    if (requesting?.id && host.safeAutoActive?.(requesting.id)) return next()
+    if (requesting?.id && shouldDeferApprovalToSafeAuto({
+      overlayActive: host.safeAutoActive?.(requesting.id) === true,
+      intendedPermission: service.runTaskPermission(origin.id),
+    })) return next()
     const args = callArguments(req.agent as AgentLike, req.callId)
     const routed = service.relayRequest({
       kind: 'approval',
@@ -587,21 +607,31 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
         case 'knowledge': return { ok: true, value: await service.knowledgeView() }
         // Panel edits of the agreements/cognition do not switch segments at once: the change is
         // picked up before the next message (prompt-changed), or folded in while the segment is untouched.
-        case 'agreements.set': {
-          const text = field(payload, 'text')
-          return { ok: true, value: await service.setAgreements(typeof text === 'string' ? text : '') }
+        case 'agreements.edit': {
+          try {
+            return { ok: true, value: await service.editAgreements(parseKnowledgeEdit(field(payload, 'edit'), 'agreements')) }
+          } catch (error) {
+            if (error instanceof KnowledgeError || error instanceof DotError) return { ok: false, error: { code: error.code, message: error.message } }
+            throw error
+          }
         }
         case 'agreements.undo': return { ok: true, value: await service.undoAgreements() }
-        case 'cognition.set': {
-          const text = field(payload, 'text')
-          return { ok: true, value: await service.setCognition(typeof text === 'string' ? text : '') }
+        case 'cognition.edit': {
+          try {
+            return { ok: true, value: await service.editCognition(parseKnowledgeEdit(field(payload, 'edit'), 'cognition')) }
+          } catch (error) {
+            if (error instanceof KnowledgeError || error instanceof DotError) return { ok: false, error: { code: error.code, message: error.message } }
+            throw error
+          }
         }
         case 'cognition.restore': {
           const at = field(payload, 'at')
           return { ok: true, value: await service.restoreCognition(typeof at === 'number' ? at : Number.NaN) }
         }
         case 'settings.set': {
-          const next = patchSettings(store.settings, field(payload, 'patch'), service.locale)
+          let groups
+          try { groups = (await service.capabilitiesView()).groups } catch { groups = undefined }
+          const next = patchSettings(store.settings, field(payload, 'patch'), service.locale, groups)
           await store.setSettings(next)
           await service.settingsChanged()
           logger.info('settings.updated', 'Updated Dot settings via RPC.')

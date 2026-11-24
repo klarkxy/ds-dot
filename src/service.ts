@@ -11,6 +11,7 @@ import { HarnessError } from '@deepseek-ai/dsh-llm'
 import { mkdir } from 'node:fs/promises'
 import { isAbsolute, join, relative, sep } from 'node:path'
 import { APPROVAL_DETAIL_LIMIT, approvalNotice } from './approval-risk.ts'
+import type { IntendedRunPermission } from './approval-safe-auto.ts'
 import { createTwoFilesPatch } from 'diff'
 import { writerPrior, parseEvidenceRef, reportBullet, deliveryScope, scopeContainsPath, type DeliverySubject, type SubjectLook } from './acceptance.ts'
 import { captureScopeAsync, defaultIgnoreCover, foldRel, ignoreCovered, isLinkReason, pruneSnapshots, readManifest, readSnapshotEntry, relativePath, saveSnapshot, scanScope, scanScopeAsync, baselineCaptures, wipeArtifacts, type SnapshotExclusion, type SnapshotSource } from './artifacts.ts'
@@ -32,7 +33,7 @@ import { approvalDisplay, parseNotice } from './chat-format.ts'
 import { cardText } from './cards.ts'
 import { NoticeBatcher, formatNotices, formatNoticeDisplay, realTimer, type Notice, type Timer } from './batcher.ts'
 import { ZERO_USAGE, addUsage, combineUsage, netSegmentUsage, totalUsage, usageFromEvents } from './context.ts'
-import { PRESET_ID, TOOL, type AttentionView, type BoardView, type DotContextSections, type DotContextUsage, type DotContextView, type FactoryResetPreview, type FactoryResetResult, type InboxEventInput, type InboxRecord, type InboxSubmitResult, type KeepaliveInfo, type KnowledgeView, type ModelChoice, type PendingKind, type PendingQuestionItem, type RecipeBody, type RecipeProposal, type RecipeProposalView, type RecipeRecord, type ReflectionRun, type RolloverReason, type RuleConfig, type TrajectoryView } from './contracts.ts'
+import { PRESET_ID, TOOL, type AttentionView, type BoardView, type DotContextSections, type DotContextUsage, type DotContextView, type FactoryResetPreview, type FactoryResetResult, type InboxEventInput, type InboxRecord, type InboxSubmitResult, type KeepaliveInfo, type KnowledgeView, type ModelChoice, type PendingKind, type PendingQuestionItem, type RecipeBody, type RecipeProposal, type RecipeProposalView, type RecipeRecord, type ReflectionRun, type RolloverReason, type RuleConfig, type TaskPermission, type TrajectoryView } from './contracts.ts'
 import { SUMMARY_INSTRUCTION, SUMMARY_MAX_TOKENS, buildHandoff, type Handoff } from './handoff.ts'
 import { READ_ROWS_DEFAULT, READ_ROWS_MAX, SEARCH_LIMIT_DEFAULT, SEARCH_LIMIT_MAX, SEARCH_SESSIONS_MAX, formatRead, formatSearch, historyRows, queryTerms, searchRows, windowRows, type SessionHits } from './history.ts'
 import { InboxLedger, fenceUntrusted, inboxNotice, memoryInboxTable } from './inbox.ts'
@@ -45,7 +46,8 @@ import { ACCEPTED_DELIVERY_HINT, IDLE_SILENCE_HINT } from './task-hints.ts'
 import { AutoUpdater, type PluginManagerLike, type UpdateStatus } from './auto-update.ts'
 import { DOT_TRACE, emitDotTrace, type DotTraceInput } from './trace.ts'
 import type { RunAccess, RunKind, ChangePriority, TaskLink } from './contracts.ts'
-import { AGREEMENTS_MAX_CHARS, COGNITION_MAX_CHARS, KnowledgeError, addEntry, agreementNotesBlock, agreementsSection, cognitionSection, normalizeAgreements, normalizeCognition, removeEntry } from './memory.ts'
+import { KnowledgeError, agreementEntriesFromText, agreementNotesBlock, agreementsSection, applyAgreementEdit, applyCognitionEdit, applyCognitionOps, cognitionSection, cognitionWithActive, filterCognitionEntries, matchEntry, normalizeEntry, parseCognitionOps, parseKnowledgeEdit, sameEntries } from './memory.ts'
+import { COGNITION_PROMPT_ENTRIES_DEFAULT, type AgreementEntry, type CognitionEntry, type KnowledgeEdit } from './contracts.ts'
 import { deliverPeer, guardRunWriteTool, PeerLedger, refreshChildSeals, sealChildSession, type PeerSendInput } from './peer.ts'
 import { PendingHub, type PendingAnswer } from './pending.ts'
 import { personaSection } from './persona.ts'
@@ -69,7 +71,7 @@ import { formatDuration, formatTokens } from './ui-copy.ts'
 import type { RawEvent } from './chat.ts'
 import { SelfSettings } from './self-settings.ts'
 import { approvalCardCopy, copyLocale, t, type CopyLocale } from './i18n/index.ts'
-import { HIGH_RISK_TOOLS, HOST_SCHEDULE_MUTATORS, hostScheduleTargetsDot, resolveGrants, type DotCapabilities } from './capabilities.ts'
+import { HOST_SCHEDULE_MUTATORS, hostScheduleTargetsDot, isTaskOnlySelector, TASK_ONLY_TOOLS, type DotCapabilities } from './capabilities.ts'
 import type { CapabilityCatalogView, CapabilityGrant, CapabilityGroupView } from './contracts.ts'
 import type { GateVerdict } from './tool-scope.ts'
 
@@ -83,6 +85,8 @@ export interface DotServiceOptions {
   readonly locale?: CopyLocale
   /** Let original-session answerers settle approvals before waking dot. */
   readonly approvalGraceMs?: number
+  /** How many cognition entries reach dot's prompt; pinned entries always do on top. */
+  readonly cognitionPromptEntries?: number
   readonly timer?: Timer
   readonly now?: () => number
   readonly log?: (message: string) => void
@@ -182,7 +186,8 @@ export class DotService {
       store: options.store,
       homeDir: options.homeDir,
       now: this.now,
-      applyCognition: (text, baseVersion) => this.setCognition(text, 'reflection', baseVersion),
+      applyCognition: (ops, baseVersion) => this.applyCognitionOps(ops, baseVersion),
+      cognitionPromptEntries: () => this.cognitionPromptEntries,
       isDotIdle: () => {
         const dot = this.store.dotSessionId
         return dot !== undefined && !this.options.host.isRunning(dot)
@@ -451,6 +456,9 @@ export class DotService {
     const caps = this.options.capabilities
     const dot = this.store.dotSessionId
     if (!caps || !dot || this.closing) return { kind: 'deny', reason: 'This preset cannot run that tool.' }
+    // Task-run tools never reach dot's own session; if one was somehow applied
+    // anyway the gate still refuses it here.
+    if (TASK_ONLY_TOOLS.has(exec.name)) return { kind: 'deny', reason: `${exec.name} belongs to task runs; dispatch a dot_task instead.` }
     const entry = caps.appliedFor(dot)?.get(exec.name)
     if (!entry) return { kind: 'deny', reason: `The extra capability ${exec.name} was not applied to this segment.` }
     const live = caps.liveGrant(entry.chain)
@@ -553,9 +561,13 @@ export class DotService {
       const chain = group.kind === 'host' || group.id === 'builtin' ? parents : [group.id, ...parents]
       for (const tool of group.tools) {
         if (tool.missing === true) { lines.push(`${indent}  ${tool.name} — UNAVAILABLE (grant kept)`); continue }
+        if (tool.taskOnly === true) {
+          lines.push(`${indent}  ${tool.name} — grant=off (task-only: runs use it; never applied to dot)`)
+          continue
+        }
         let effective: string | undefined
         for (const selector of [`tool:${tool.name}`, ...chain]) { if (grants[selector] !== undefined) { effective = grants[selector]; break } }
-        const flags = [tool.conditional ? 'conditional (when-gate bypassed while granted)' : '', tool.highRisk === true ? 'HIGH RISK (runs unapproved and unsandboxed)' : '', applied?.has(tool.name) ? `applied=${applied.get(tool.name)?.grant}` : 'not applied this segment'].filter(Boolean).join(', ')
+        const flags = [tool.conditional ? 'conditional (when-gate bypassed while granted)' : '', applied?.has(tool.name) ? `applied=${applied.get(tool.name)?.grant}` : 'not applied this segment'].filter(Boolean).join(', ')
         lines.push(`${indent}  ${tool.name} — grant=${effective ?? 'off'}${flags ? ` (${flags})` : ''}`)
       }
       for (const child of group.children ?? []) row(child, chain, `${indent}  `)
@@ -577,17 +589,15 @@ export class DotService {
     if (selector === 'host' || selector === 'builtin') throw new DotError('dot/invalid', 'unattributed tools are granted one by one with tool:<name> or prefix:<segment>; there is no host-wide grant')
     if (!/^(tool|mcp|plugin|prefix|builtin):/.test(selector)) throw new DotError('dot/invalid', 'selector must be tool:<name>, mcp:<server>, plugin:<bundle>[#<entry>], builtin:<id>, or prefix:<segment>')
     if (selector.startsWith('tool:') && caps.locked.includes(selector.slice(5))) throw new DotError('dot/invalid', `${selector.slice(5)} is a locked dot tool; it is always on and cannot be granted`)
+    let groups: readonly CapabilityGroupView[] | undefined
+    try { groups = (await caps.catalog()).groups } catch { groups = undefined }
+    if (isTaskOnlySelector(selector, groups)) {
+      const name = selector.startsWith('tool:') ? selector.slice(5) : selector
+      throw new DotError('dot/invalid', `${name} belongs to task runs; dispatch a dot_task instead.`)
+    }
     if (!['off', 'ask', 'auto'].includes(input.grant)) throw new DotError('dot/invalid', 'grant must be off, ask, or auto')
     const grants = { ...this.store.settings.capabilities?.grants, [selector]: input.grant }
-    let reason = input.reason
-    if (input.grant === 'auto') {
-      // Warn the human when the merged grants would let a self-escalating tool
-      // run unapproved and unsandboxed; the proposal still stands.
-      const { groups } = await caps.catalog()
-      const risky = [...resolveGrants(grants, groups)].filter(([name, resolved]) => resolved.grant === 'auto' && HIGH_RISK_TOOLS.has(name)).map(([name]) => name).sort()
-      if (risky.length > 0) reason = `${reason}\nWarning: this makes ${risky.join(', ')} run automatically — no approval and no sandbox.`
-    }
-    return this.selfSettings.propose({ field: 'capabilities', value: { grants }, reason })
+    return this.selfSettings.propose({ field: 'capabilities', value: { grants }, reason: input.reason })
   }
 
   /**
@@ -2254,26 +2264,33 @@ export class DotService {
     return run
   }
 
+  /** How many cognition entries reach the prompt this service renders; pinned entries always do on top. */
+  private get cognitionPromptEntries(): number { return this.options.cognitionPromptEntries ?? COGNITION_PROMPT_ENTRIES_DEFAULT }
+
   async knowledgeView(): Promise<KnowledgeView> {
-    const undo = this.store.agreementsUndo
+    const undo = this.store.agreementEntriesUndo
     return {
-      agreements: { text: this.store.agreements, maxChars: AGREEMENTS_MAX_CHARS, canUndo: undo !== undefined && undo !== this.store.agreements },
-      cognition: { text: this.store.cognition, maxChars: COGNITION_MAX_CHARS, history: this.store.cognitionHistory },
+      agreements: { entries: this.store.agreementEntries, canUndo: undo !== undefined && !sameEntries(undo, this.store.agreementEntries) },
+      cognition: { entries: cognitionWithActive(this.store.cognitionEntries, this.cognitionPromptEntries), history: this.store.cognitionEntryHistory },
     }
+  }
+
+  /** Map a memory-layer refusal to the service error shape the tools report. */
+  private knowledgeError(error: unknown): DotError {
+    return error instanceof KnowledgeError ? new DotError(error.code, error.message) : error instanceof DotError ? error : new DotError('dot/invalid', messageOf(error))
   }
 
   /** dot adds one of the human's own requirements, in their words. */
   async agreementAdd(text: string): Promise<string> {
     return this.withKnowledge(async () => {
       if (this.store.settings.locks?.agreements) throw new DotError('dot/setting-locked', 'agreements are locked by the human; use dot_settings (action=propose) for the change you want')
-      const before = this.store.agreements
-      let after: string
-      try { after = addEntry(before, text) } catch (error) {
-        if (error instanceof KnowledgeError) throw new DotError(error.code, error.message)
-        throw error
+      const before = this.store.agreementEntries
+      let after: readonly AgreementEntry[]
+      try { after = applyAgreementEdit(before, { op: 'add', text }, this.now(), () => this.store.nextKnowledgeId('a')) } catch (error) {
+        throw this.knowledgeError(error)
       }
-      if (after === before) return 'That is already one of your agreements.'
-      await this.store.setAgreements(after)
+      if (sameEntries(after, before)) return 'That is already one of your agreements.'
+      await this.store.setAgreementEntries(after)
       await this.afterAgreementsChange(before, after, 'dot')
       return 'Recorded as an agreement. The [agreements] block of this session still shows them as they were when it started; your next session shows the new one.'
     })
@@ -2283,40 +2300,120 @@ export class DotService {
   async agreementRemove(text: string): Promise<string> {
     return this.withKnowledge(async () => {
       if (this.store.settings.locks?.agreements) throw new DotError('dot/setting-locked', 'agreements are locked by the human; use dot_settings (action=propose) for the change you want')
-      const before = this.store.agreements
-      let removed = ''
-      let after = before
-      try { const result = removeEntry(before, text); removed = result.removed; after = normalizeAgreements(result.text) } catch (error) {
-        if (error instanceof KnowledgeError) throw new DotError(error.code, error.message)
-        throw error
+      const before = this.store.agreementEntries
+      let target: AgreementEntry
+      try { target = matchEntry(before, text, 'agreement') } catch (error) {
+        throw this.knowledgeError(error)
       }
-      await this.store.setAgreements(after)
+      const after = before.filter(entry => entry.id !== target.id)
+      await this.store.setAgreementEntries(after)
       await this.afterAgreementsChange(before, after, 'dot')
-      return `Removed this agreement: "${removed}".`
+      return `Removed this agreement: "${target.text}".`
     })
   }
 
-  /** dot rewrites its whole cognition. */
-  async cognitionRewrite(text: string): Promise<string> {
+  /** dot records one new cognition entry. */
+  async cognitionAdd(text: string): Promise<string> {
     return this.withKnowledge(async () => {
-      const next = normalizeCognition(text)
-      if (next.trim().length > COGNITION_MAX_CHARS) throw new DotError('dot/invalid', `cognition is at most ${COGNITION_MAX_CHARS} characters; these have ${next.trim().length}`)
-      const before = this.store.cognition
-      await this.store.setCognition(next, this.now())
-      if (next !== before) await this.afterCognitionChange(before, next, 'dot')
-      return 'Your cognition is updated. The [cognition] block of this session still shows the old text; your next session shows the new one.'
+      const before = this.store.cognitionEntries
+      let after: readonly CognitionEntry[]
+      try { after = applyCognitionEdit(before, { op: 'add', text }, this.now(), () => this.store.nextKnowledgeId('c')) } catch (error) {
+        throw this.knowledgeError(error)
+      }
+      if (sameEntries(after, before)) return 'That is already in your cognition.'
+      const added = after.find(entry => !before.some(earlier => earlier.id === entry.id))
+      const woken = added ? undefined : after.find(entry => before.some(earlier => earlier.id === entry.id && earlier.seenAt !== entry.seenAt))
+      await this.store.setCognitionEntries(after, this.now())
+      await this.afterCognitionChange(before, after, 'dot', added?.id ?? woken?.id)
+      if (!added) return 'That is already in your cognition.'
+      return 'Recorded in your cognition. The [cognition] block of this session still shows what it showed when it started; your next session shows the new one.'
     })
   }
 
-  /** The human rewrote the agreements in the settings view (or approved a proposal). */
+  /** dot replaces the text of the cognition entry `match` names — pinned entries belong to the human. */
+  async cognitionUpdate(match: string, text: string): Promise<string> {
+    return this.withKnowledge(async () => {
+      const before = this.store.cognitionEntries
+      let target: CognitionEntry
+      try { target = matchEntry(before, match, 'cognition', 'match') } catch (error) {
+        throw this.knowledgeError(error)
+      }
+      if (target.pinned === true) throw new DotError('dot/pinned', `"${target.text}" is pinned by the human; only the human can change it`)
+      let after: readonly CognitionEntry[]
+      try { after = applyCognitionEdit(before, { op: 'edit', id: target.id, text }, this.now(), () => this.store.nextKnowledgeId('c')) } catch (error) {
+        throw this.knowledgeError(error)
+      }
+      await this.store.setCognitionEntries(after, this.now())
+      await this.afterCognitionChange(before, after, 'dot', target.id)
+      return 'Updated that cognition entry. The [cognition] block of this session still shows what it showed when it started; your next session shows the new one.'
+    })
+  }
+
+  /** dot deletes the cognition entry `match` names — pinned entries belong to the human. */
+  async cognitionRemove(match: string): Promise<string> {
+    return this.withKnowledge(async () => {
+      const before = this.store.cognitionEntries
+      let target: CognitionEntry
+      try { target = matchEntry(before, match, 'cognition', 'match') } catch (error) {
+        throw this.knowledgeError(error)
+      }
+      if (target.pinned === true) throw new DotError('dot/pinned', `"${target.text}" is pinned by the human; only the human can remove it`)
+      const after = before.filter(entry => entry.id !== target.id)
+      await this.store.setCognitionEntries(after, this.now())
+      await this.afterCognitionChange(before, after, 'dot')
+      return `Removed this cognition entry: "${target.text}".`
+    })
+  }
+
+  /** List or search all stored cognition entries (pinned, active, and dormant) with offset/limit paging. */
+  async cognitionList(input?: { readonly query?: string; readonly offset?: number; readonly limit?: number }): Promise<string> {
+    const ranked = cognitionWithActive(this.store.cognitionEntries, this.cognitionPromptEntries)
+    if (ranked.length === 0) return 'No cognition entries yet.'
+    const query = input?.query === undefined ? undefined : normalizeEntry(input.query)
+    const matched = filterCognitionEntries(ranked, query)
+    if (matched.length === 0) return `No cognition entries match "${query}" (${ranked.length} stored).`
+    const rawOffset = input?.offset ?? 0
+    if (!Number.isFinite(rawOffset) || rawOffset < 0) throw new DotError('dot/invalid', 'offset must be a non-negative integer')
+    const offset = Math.trunc(rawOffset)
+    const rawLimit = input?.limit ?? 40
+    if (!Number.isFinite(rawLimit) || rawLimit < 1) throw new DotError('dot/invalid', 'limit must be a positive integer')
+    const limit = Math.min(100, Math.trunc(rawLimit))
+    const page = matched.slice(offset, offset + limit)
+    if (page.length === 0) return `No cognition entries at offset ${offset} (${matched.length} matched).`
+    const start = offset + 1
+    const end = offset + page.length
+    const scope = query
+      ? `Matching cognition entries for "${query}" (${start}–${end} of ${matched.length}; ${ranked.length} total)`
+      : `Cognition entries (${start}–${end} of ${matched.length}; prompt limit ${this.cognitionPromptEntries})`
+    const lines = page.map(entry => `- [${entry.pinned === true ? 'pinned' : entry.active ? 'active' : 'dormant'}] ${entry.text}`)
+    const next = offset + page.length < matched.length ? `\nMore entries remain; pass offset=${offset + page.length} to continue.` : ''
+    return `${scope}:\n${lines.join('\n')}${next}`
+  }
+
+  /** dot_settings proposal approval carries bulk text: identical lines reuse their stored entry. */
   async setAgreements(text: string, by: 'human' | 'dot' = 'human'): Promise<KnowledgeView> {
     return this.withKnowledge(async () => {
-      const next = normalizeAgreements(text)
-      if (next.trim().length > AGREEMENTS_MAX_CHARS) throw new DotError('dot/invalid', `the agreements are at most ${AGREEMENTS_MAX_CHARS} characters; these have ${next.trim().length}`)
-      const before = this.store.agreements
-      if (next !== before) {
-        await this.store.setAgreements(next)
-        await this.afterAgreementsChange(before, next, by)
+      const before = this.store.agreementEntries
+      const after = agreementEntriesFromText(text, before, this.now(), () => this.store.nextKnowledgeId('a'), true)
+      if (!sameEntries(after, before)) {
+        await this.store.setAgreementEntries(after)
+        await this.afterAgreementsChange(before, after, by)
+      }
+      return this.knowledgeView()
+    })
+  }
+
+  /** One panel edit on the agreements: add, edit or remove a single entry. */
+  async editAgreements(edit: KnowledgeEdit): Promise<KnowledgeView> {
+    return this.withKnowledge(async () => {
+      const before = this.store.agreementEntries
+      let after: readonly AgreementEntry[]
+      try { after = applyAgreementEdit(before, parseKnowledgeEdit(edit, 'agreements'), this.now(), () => this.store.nextKnowledgeId('a')) } catch (error) {
+        throw this.knowledgeError(error)
+      }
+      if (!sameEntries(after, before)) {
+        await this.store.setAgreementEntries(after)
+        await this.afterAgreementsChange(before, after, 'human')
       }
       return this.knowledgeView()
     })
@@ -2325,34 +2422,54 @@ export class DotService {
   /** Put the agreements back to what they were before their latest change, whoever made it. */
   async undoAgreements(): Promise<KnowledgeView> {
     return this.withKnowledge(async () => {
-      const before = this.store.agreements
+      const before = this.store.agreementEntries
       if (!(await this.store.undoAgreements())) throw new DotError('dot/nothing-to-undo', 'there is no earlier version of the agreements')
-      await this.afterAgreementsChange(before, this.store.agreements, 'human')
+      await this.afterAgreementsChange(before, this.store.agreementEntries, 'human')
       return this.knowledgeView()
     })
   }
 
-  /** The human rewrote cognition, or the reflection pass did; neither is dot's own in-session change. */
-  async setCognition(text: string, by: 'human' | 'dot' | 'reflection' = 'human', baseVersion?: number): Promise<KnowledgeView> {
+  /** One panel edit on cognition: add, edit, remove or pin a single entry. */
+  async editCognition(edit: KnowledgeEdit): Promise<KnowledgeView> {
     return this.withKnowledge(async () => {
-      if (baseVersion !== undefined && this.store.cognitionVersion !== baseVersion) throw new DotError('dot/stale-reflection', 'cognition changed since this reflection started')
-      const next = normalizeCognition(text)
-      if (next.trim().length > COGNITION_MAX_CHARS) throw new DotError('dot/invalid', `cognition is at most ${COGNITION_MAX_CHARS} characters; these have ${next.trim().length}`)
-      const before = this.store.cognition
-      if (next !== before) {
-        await this.store.setCognition(next, this.now())
-        await this.afterCognitionChange(before, next, by)
+      const before = this.store.cognitionEntries
+      let after: readonly CognitionEntry[]
+      try { after = applyCognitionEdit(before, parseKnowledgeEdit(edit, 'cognition'), this.now(), () => this.store.nextKnowledgeId('c')) } catch (error) {
+        throw this.knowledgeError(error)
+      }
+      if (!sameEntries(after, before)) {
+        await this.store.setCognitionEntries(after, this.now())
+        await this.afterCognitionChange(before, after, 'human')
       }
       return this.knowledgeView()
     })
   }
 
-  /** Put an earlier cognition text back; the replaced text joins the history too. */
+  /** The reflection pass's ops, applied together or not at all; [] saves nothing. */
+  private async applyCognitionOps(raw: string, baseVersion: number): Promise<void> {
+    return this.withKnowledge(async () => {
+      if (this.store.cognitionVersion !== baseVersion) throw new DotError('dot/stale-reflection', 'cognition changed since this reflection started')
+      const before = this.store.cognitionEntries
+      let ops: ReturnType<typeof parseCognitionOps>
+      let after: readonly CognitionEntry[]
+      try {
+        ops = parseCognitionOps(raw)
+        after = applyCognitionOps(before, ops, this.now(), () => this.store.nextKnowledgeId('c'))
+      } catch (error) {
+        throw this.knowledgeError(error)
+      }
+      if (ops.length === 0 || sameEntries(after, before)) return
+      await this.store.setCognitionEntries(after, this.now())
+      await this.afterCognitionChange(before, after, 'reflection')
+    })
+  }
+
+  /** Put an earlier cognition entry list back; the list it replaces joins the history too. */
   async restoreCognition(at: number): Promise<KnowledgeView> {
     return this.withKnowledge(async () => {
-      const before = this.store.cognition
+      const before = this.store.cognitionEntries
       if (!(await this.store.restoreCognition(at, this.now()))) throw new DotError('dot/unknown-version', 'no earlier cognition version has that timestamp')
-      if (this.store.cognition !== before) await this.afterCognitionChange(before, this.store.cognition, 'human')
+      if (!sameEntries(this.store.cognitionEntries, before)) await this.afterCognitionChange(before, this.store.cognitionEntries, 'human')
       return this.knowledgeView()
     })
   }
@@ -2360,11 +2477,11 @@ export class DotService {
   // ---- background reflection -------------------------------------------
 
   /** The submission tool calls this; the pass must be the one currently running. */
-  reflectionSubmit(cognition: string, agreementNotes: string | undefined, sessionId: string): Promise<string> {
+  reflectionSubmit(ops: string, agreementNotes: string | undefined, sessionId: string): Promise<string> {
     // Same lane as `say`: a submission can never interleave with a human message
     // between reading agreementNotes and clearing them, so a fresh note is not
     // wiped by a message that carried the previous one.
-    return this.serial(() => this.reflection.submit(cognition, agreementNotes, sessionId))
+    return this.serial(() => this.reflection.submit(ops, agreementNotes, sessionId))
   }
 
   /** Reflection passes remembered for the trajectory view, oldest first. */
@@ -2378,18 +2495,24 @@ export class DotService {
   }
 
   /** dot's own change only updates the segment's seen snapshot when it was in step; a panel edit never does. */
-  private async afterAgreementsChange(before: string, after: string, by: 'human' | 'dot'): Promise<void> {
+  private async afterAgreementsChange(before: readonly AgreementEntry[], after: readonly AgreementEntry[], by: 'human' | 'dot'): Promise<void> {
     if (by !== 'dot') return
     const segment = this.store.segment
     if (!segment) return
     if ((segment.agreementsSeen ?? segment.agreements ?? '') === agreementsSection(before)) await this.store.noteAgreementsSeen(agreementsSection(after))
   }
 
-  private async afterCognitionChange(before: string, after: string, by: 'human' | 'dot' | 'reflection'): Promise<void> {
+  private async afterCognitionChange(before: readonly CognitionEntry[], after: readonly CognitionEntry[], by: 'human' | 'dot' | 'reflection', touchedId?: string): Promise<void> {
     if (by !== 'dot') return
     const segment = this.store.segment
     if (!segment) return
-    if ((segment.cognitionSeen ?? segment.cognition ?? '') === cognitionSection(before)) await this.store.noteCognitionSeen(cognitionSection(after))
+    if ((segment.cognitionSeen ?? segment.cognition ?? '') !== cognitionSection(before, this.cognitionPromptEntries)) return
+    // A change dot made in step is invisible to the prompt… unless it promoted
+    // a dormant entry dot did not touch. That promotion lands at the next
+    // message through the normal prompt-changed rollover instead.
+    const wasActive = new Set(cognitionWithActive(before, this.cognitionPromptEntries).filter(entry => entry.active).map(entry => entry.id))
+    if (cognitionWithActive(after, this.cognitionPromptEntries).some(entry => entry.active && !wasActive.has(entry.id) && entry.id !== touchedId)) return
+    await this.store.noteCognitionSeen(cognitionSection(after, this.cognitionPromptEntries))
   }
 
   // ---- host events -----------------------------------------------------
@@ -2718,15 +2841,57 @@ export class DotService {
    * commit; a lost receipt or a stop that is still settling does not block
    * unrelated changes.
    */
-  private runHost() { return bindRunSession(this.host, this.store.settings.taskPermission) }
+  private runHost(runId?: string, mode: 'mutate' | 'verify' = 'mutate', overridePermission?: TaskPermission) {
+    const run = runId ? this.store.work.run(runId) : undefined
+    const pinned = overridePermission ?? run?.taskPermission
+    if (mode === 'verify') {
+      if (pinned) return bindRunSession(this.host, pinned, { verifyOnly: true, pinned: true })
+      return bindRunSession(this.host, this.store.settings.taskPermission, { verifyOnly: true })
+    }
+    return bindRunSession(this.host, pinned ?? this.store.settings.taskPermission)
+  }
+
+  /** Permission Dorothy intends on this session's run (`'read-only'` for read-only runs), if any. */
+  runTaskPermission(sessionId: string): IntendedRunPermission | undefined {
+    const run = this.store.work.sessionRun(sessionId)
+    if (!run) return undefined
+    if (run.access === 'read' || run.kind === 'review' || !scopeWrites(run.writeScope)) return 'read-only'
+    return run.taskPermission
+  }
 
   launchWorkRun(runId: string, text: string, preset?: string, model?: { readonly provider: string; readonly model: string }) {
     return this.launchAndRemember(runId, text, preset, model)
   }
 
+  private effectiveWritePermission(requested: TaskPermission = this.store.settings.taskPermission): TaskPermission {
+    const resolved = this.host.effectiveTaskPermission?.(requested)
+    return resolved === 'workspace-write' || resolved === 'danger-full-access' || resolved === 'safe-auto' || resolved === 'auto'
+      ? resolved
+      : requested
+  }
+
   private async launchAndRemember(runId: string, text: string, preset?: string, model?: { readonly provider: string; readonly model: string }) {
-    const launched = await launchReservedRun(this.store.work, this.runHost(), runId, text, preset, model, async () => { await this.rememberRun(runId) })
-    if (launched.ok) await this.rememberRun(runId)
+    const existing = this.store.work.run(runId)
+    const isWrite = existing !== undefined && (existing.access === 'write' || (existing.access === undefined && existing.kind !== 'review' && scopeWrites(existing.writeScope)))
+    const targetPermission = isWrite
+      ? existing.taskPermission ?? this.effectiveWritePermission(this.store.settings.taskPermission)
+      : undefined
+    const launched = await launchReservedRun(
+      this.store.work,
+      this.runHost(runId, 'mutate', targetPermission),
+      runId,
+      text,
+      preset,
+      model,
+      async () => {
+        if (targetPermission) await this.store.work.pinTaskPermission(runId, targetPermission)
+        await this.rememberRun(runId)
+      },
+    )
+    if (launched.ok) {
+      if (targetPermission) await this.store.work.pinTaskPermission(runId, targetPermission)
+      await this.rememberRun(runId)
+    }
     return launched
   }
 
@@ -2744,7 +2909,7 @@ export class DotService {
     })
   }
   supplementWorkRun(runId: string, text: string, senderId: string, expected: { readonly inputRef: string; readonly inputRevision: number }) {
-    return supplementRun(this.store.work, this.runHost(), runId, text, senderId, this.now(), expected)
+    return supplementRun(this.store.work, this.runHost(runId, 'verify'), runId, text, senderId, this.now(), expected)
   }
 
   /** One context delivery on the named run. The work book keeps the input, the sender and any unconfirmed delivery. */
@@ -4132,17 +4297,17 @@ export class DotService {
     return {
       persona: personaSection(this.store.settings, this.locale),
       ...model ? { model } : {},
-      agreements: agreementsSection(this.store.agreements),
-      cognition: cognitionSection(this.store.cognition),
+      agreements: agreementsSection(this.store.agreementEntries),
+      cognition: cognitionSection(this.store.cognitionEntries, this.cognitionPromptEntries),
       ...capabilities !== undefined ? { capabilities } : {},
     }
   }
 
   /** Agreements block for a prompt that no segment record covers yet. */
-  currentAgreementsBlock(): string { return agreementsSection(this.store.agreements) }
+  currentAgreementsBlock(): string { return agreementsSection(this.store.agreementEntries) }
 
   /** Cognition block for a prompt that no segment record covers yet. */
-  currentCognitionBlock(): string { return cognitionSection(this.store.cognition) }
+  currentCognitionBlock(): string { return cognitionSection(this.store.cognitionEntries, this.cognitionPromptEntries) }
 
   private repliedInEvents(events: readonly RawEvent[]): { readonly replied: boolean; readonly lastReplyAt?: number } {
     let replied = false

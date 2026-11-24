@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { DEFAULT_SETTINGS } from './contracts.ts'
+import { DEFAULT_SETTINGS, validateMcpCredentialSet } from './contracts.ts'
 import { DEFAULT_ADDRESS, DEFAULT_PERSONA, PERSONA_MAX_CHARS } from './persona.ts'
 import { parseSettings, patchSettings } from './settings.ts'
 import { DotStore } from './store.ts'
@@ -37,7 +37,7 @@ describe('parseSettings', () => {
     expect(DEFAULT_SETTINGS.taskPermission).toBe('workspace-write')
     expect(parseSettings({}).taskPermission).toBe('workspace-write')
     expect(parseSettings({ taskPermission: 'danger-full-access' }).taskPermission).toBe('danger-full-access')
-    expect(parseSettings({ taskPermission: 'default' }).taskPermission).toBe('default')
+    expect(parseSettings({ taskPermission: 'default' }).taskPermission).toBe('workspace-write')
     // An unknown value never replaces a known one.
     expect(parseSettings({ taskPermission: 'inherit' }).taskPermission).toBe('workspace-write')
   })
@@ -154,5 +154,80 @@ describe('DotStore settings', () => {
     const reloaded = new DotStore(domain)
     expect(reloaded.dotSessionId).toBe('dot1')
     expect(reloaded.settings.scope).toBe('tracked')
+  })
+})
+
+describe('mcpServers setting', () => {
+  const deepwiki = { url: 'https://mcp.deepwiki.com/mcp', enabled: true }
+  it('accepts a valid remote row and a loopback http url', () => {
+    const next = patchSettings(DEFAULT_SETTINGS, { mcpServers: { deepwiki } })
+    expect(next.mcpServers?.deepwiki).toEqual(deepwiki)
+    for (const url of ['http://127.0.0.1:8080/mcp', 'http://localhost/mcp', 'http://[::1]/mcp']) {
+      expect(patchSettings(DEFAULT_SETTINGS, { mcpServers: { local: { url, enabled: true } } }).mcpServers?.local?.url).toBe(url)
+    }
+    expect(parseSettings({ mcpServers: { deepwiki } }).mcpServers?.deepwiki).toEqual(deepwiki)
+  })
+  it('rejects bad names, non-https non-loopback urls and malformed templates', () => {
+    expect(() => patchSettings(DEFAULT_SETTINGS, { mcpServers: { 'bad name!': deepwiki } })).toThrow(/invalid value/)
+    for (const url of ['http://example.com/mcp', 'ftp://x', 'notaurl', '']) {
+      expect(() => patchSettings(DEFAULT_SETTINGS, { mcpServers: { s: { url, enabled: true } } }), url).toThrow(/invalid value/)
+    }
+    for (const value of ['Bearer ${bad}', '${credential:}', 'x ${credential:1BAD}', '${credential:OK}${other}', 'unclosed ${credential:OK']) {
+      const row = { url: deepwiki.url, headers: { Authorization: value }, enabled: true }
+      expect(() => patchSettings(DEFAULT_SETTINGS, { mcpServers: { s: row } }), value).toThrow(/invalid value/)
+    }
+    const good = { url: deepwiki.url, headers: { Authorization: 'Bearer ${credential:DOT_MCP_GH_TOKEN}', 'X-Extra': 'plain' }, enabled: true }
+    expect(patchSettings(DEFAULT_SETTINGS, { mcpServers: { s: good } }).mcpServers?.s).toEqual(good)
+    expect(() => patchSettings(DEFAULT_SETTINGS, { mcpServers: { s: { ...good, headers: { 'bad header': 'x' } } } })).toThrow(/invalid value/)
+  })
+  it('holds NEW names to the stricter rule but lets stored legacy rows through', () => {
+    // `__` or edge `_` would let a tool name be claimed by two servers at
+    // once, so one grant would silently cover both.
+    for (const name of ['team__docs', 'a__b', '_edge', 'edge_', '__', '_']) {
+      expect(() => patchSettings(DEFAULT_SETTINGS, { mcpServers: { [name]: deepwiki } }), name).toThrow(/invalid value/)
+    }
+    // A stored legacy row still saves on unrelated edits; only additions are strict.
+    const legacy = { ...DEFAULT_SETTINGS, mcpServers: { 'team__docs': deepwiki } }
+    const next = patchSettings(legacy, { mcpServers: { 'team__docs': deepwiki, other: deepwiki } })
+    expect(Object.keys(next.mcpServers ?? {}).sort()).toEqual(['other', 'team__docs'])
+  })
+  it('drops grants a newly added server would inherit from an earlier owner', () => {
+    const previous = {
+      ...DEFAULT_SETTINGS,
+      capabilities: { grants: {
+        'mcp:deepwiki': 'auto' as const,
+        'tool:mcp__deepwiki__ask': 'auto' as const,
+        'tool:mcp__other__x': 'ask' as const,
+        'plugin:bundle': 'auto' as const,
+      } },
+    }
+    const next = patchSettings(previous, { mcpServers: { deepwiki } })
+    expect(next.capabilities?.grants).toEqual({ 'tool:mcp__other__x': 'ask', 'plugin:bundle': 'auto' })
+    // No grants touched when the write adds nothing new.
+    const existing = { ...previous, mcpServers: { deepwiki } }
+    const kept = patchSettings(existing, { mcpServers: { deepwiki } })
+    expect(kept.capabilities?.grants).toEqual(previous.capabilities?.grants)
+  })
+  it('drops bad stored rows one by one and clears on null', () => {
+    const parsed = parseSettings({ mcpServers: { deepwiki, 'bad name': deepwiki, bad: { url: 'http://x.com/mcp', enabled: true }, also_bad: 'junk' } })
+    expect(Object.keys(parsed.mcpServers ?? {})).toEqual(['deepwiki'])
+    expect(parseSettings({ mcpServers: 'junk' }).mcpServers).toBeUndefined()
+    const cleared = patchSettings({ ...DEFAULT_SETTINGS, mcpServers: { deepwiki } }, { mcpServers: null })
+    expect(cleared.mcpServers).toBeUndefined()
+  })
+})
+
+describe('validateMcpCredentialSet', () => {
+  const known = new Set(['deepwiki', 'github'])
+  it('rejects bad servers and values, accepts the panel flow', () => {
+    expect(validateMcpCredentialSet('deepwiki', 'tok', known)).toBeUndefined()
+    expect(validateMcpCredentialSet('github', 'x'.repeat(4096), known)).toBeUndefined()
+    expect(validateMcpCredentialSet(1, 'tok', known)).toBe('bad-server')
+    expect(validateMcpCredentialSet('bad name!', 'tok', known)).toBe('bad-server')
+    expect(validateMcpCredentialSet('ghost', 'tok', known)).toBe('unknown-server')
+    expect(validateMcpCredentialSet('deepwiki', 5, known)).toBe('bad-credential')
+    expect(validateMcpCredentialSet('deepwiki', '', known)).toBe('bad-credential')
+    expect(validateMcpCredentialSet('deepwiki', '   ', known)).toBe('bad-credential')
+    expect(validateMcpCredentialSet('deepwiki', 'x'.repeat(4097), known)).toBe('bad-credential')
   })
 })

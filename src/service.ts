@@ -5,12 +5,13 @@
  * entry wires host events into it; the preset child plugin exposes its
  * operations as model tools.
  */
-import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
+import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { randomUUID } from 'node:crypto'
 import { HarnessError } from '@deepseek-ai/dsh-llm'
 import { mkdir } from 'node:fs/promises'
-import { isAbsolute, join, relative, sep } from 'node:path'
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { APPROVAL_DETAIL_LIMIT, approvalNotice } from './approval-risk.ts'
+import type { IntendedRunPermission } from './approval-safe-auto.ts'
 import { createTwoFilesPatch } from 'diff'
 import { writerPrior, parseEvidenceRef, reportBullet, deliveryScope, scopeContainsPath, type DeliverySubject, type SubjectLook } from './acceptance.ts'
 import { captureScopeAsync, defaultIgnoreCover, foldRel, ignoreCovered, isLinkReason, pruneSnapshots, readManifest, readSnapshotEntry, relativePath, saveSnapshot, scanScope, scanScopeAsync, baselineCaptures, wipeArtifacts, type SnapshotExclusion, type SnapshotSource } from './artifacts.ts'
@@ -18,13 +19,14 @@ import { attentionItems } from './board-groups.ts'
 import { renderBrief, renderSupplement, runTitle } from './brief.ts'
 import { bindRunSession, cancelWork, countRelayInserts, finishWork, launchReservedRun, observeRun, reconcileRun, supplementRun } from './execution.ts'
 import { detectWorkspaceRoot } from './git-root.ts'
-import { commitDelivery, createTaskWorktree, listTaskWorktrees, mergeInto, removeTaskWorktree, runGit, taskWorktreeRoot, type GitRunner } from './git-worktree.ts'
+import { commitDelivery, createTaskWorktree, listTaskWorktrees, mergeInto, removeTaskWorktree, runGit, sanitizeRemoteDisplay, taskWorktreeRoot, type GitRunner, type TaskWorktree } from './git-worktree.ts'
+import { defaultSelfBuild, insideOrEqual, libHashOf, realpathOrResolve, type SelfBackup, type SelfInstall, type SelfUpgradeMarker } from './self-root.ts'
 import {
   WRITE_PATHS_EXAMPLE, artifactName, constraintList, jsonArray,
   occupantOf, pathScope, plannedOccupant, plannedScope, requirementList, samePathList,
   stepList, verifyRefusal,
 } from './work-actions.ts'
-import { absoluteScopePath, canonicalPath, changeIsTerminal, MAX_COMPLETED_CHANGES, InputShapeError, inputContractError, occupantsConflict, runCostTotals, runIsTerminal, scopeWithinRoot, scopeWrites, type ChangeRecord, type Constraint, type Occupant, type Requirement, type RootHint, type RunRecord, type TaskIsolation, type WorkRefusal } from './work.ts'
+import { absoluteScopePath, canonicalPath, onDiskPath, changeIsTerminal, MAX_COMPLETED_CHANGES, InputShapeError, inputContractError, isSameOrChildPath, occupantsConflict, runCostTotals, runIsTerminal, scopeWithinRoot, scopeWrites, type ChangeRecord, type Constraint, type Occupant, type Requirement, type RootHint, type RunRecord, type TaskIsolation, type WorkRefusal, type WriteScope } from './work.ts'
 import type { ShownView, ViewAnswer } from '@klarkxy/dsh-deep-view/contracts'
 import { DotCards, cardAnswerText, type DotCardRecord } from './card-state.ts'
 import { checkChatImages, type ChatImage } from './chat-images.ts'
@@ -32,7 +34,7 @@ import { approvalDisplay, parseNotice } from './chat-format.ts'
 import { cardText } from './cards.ts'
 import { NoticeBatcher, formatNotices, formatNoticeDisplay, realTimer, type Notice, type Timer } from './batcher.ts'
 import { ZERO_USAGE, addUsage, combineUsage, netSegmentUsage, totalUsage, usageFromEvents } from './context.ts'
-import { PRESET_ID, TOOL, type AttentionView, type BoardView, type DotContextSections, type DotContextUsage, type DotContextView, type FactoryResetPreview, type FactoryResetResult, type InboxEventInput, type InboxRecord, type InboxSubmitResult, type KeepaliveInfo, type KnowledgeView, type ModelChoice, type PendingKind, type PendingQuestionItem, type RecipeBody, type RecipeProposal, type RecipeProposalView, type RecipeRecord, type ReflectionRun, type RolloverReason, type RuleConfig, type TrajectoryView } from './contracts.ts'
+import { PRESET_ID, TOOL, type AttentionView, type BoardView, type DotContextSections, type DotContextUsage, type DotContextView, type FactoryResetPreview, type FactoryResetResult, type InboxEventInput, type InboxRecord, type InboxSubmitResult, type KeepaliveInfo, type KnowledgeView, type ModelChoice, type PendingKind, type PendingQuestionItem, type RecipeBody, type RecipeProposal, type RecipeProposalView, type RecipeRecord, type ReflectionRun, type RolloverReason, type RuleConfig, type TaskPermission, type TrajectoryView } from './contracts.ts'
 import { SUMMARY_INSTRUCTION, SUMMARY_MAX_TOKENS, buildHandoff, type Handoff } from './handoff.ts'
 import { READ_ROWS_DEFAULT, READ_ROWS_MAX, SEARCH_LIMIT_DEFAULT, SEARCH_LIMIT_MAX, SEARCH_SESSIONS_MAX, formatRead, formatSearch, historyRows, queryTerms, searchRows, windowRows, type SessionHits } from './history.ts'
 import { InboxLedger, fenceUntrusted, inboxNotice, memoryInboxTable } from './inbox.ts'
@@ -45,7 +47,8 @@ import { ACCEPTED_DELIVERY_HINT, IDLE_SILENCE_HINT } from './task-hints.ts'
 import { AutoUpdater, type PluginManagerLike, type UpdateStatus } from './auto-update.ts'
 import { DOT_TRACE, emitDotTrace, type DotTraceInput } from './trace.ts'
 import type { RunAccess, RunKind, ChangePriority, TaskLink } from './contracts.ts'
-import { AGREEMENTS_MAX_CHARS, COGNITION_MAX_CHARS, KnowledgeError, addEntry, agreementNotesBlock, agreementsSection, cognitionSection, normalizeAgreements, normalizeCognition, removeEntry } from './memory.ts'
+import { KnowledgeError, agreementEntriesFromText, agreementNotesBlock, agreementsSection, applyAgreementEdit, applyCognitionEdit, applyCognitionOps, cognitionSection, cognitionWithActive, filterCognitionEntries, matchEntry, normalizeEntry, parseCognitionOps, parseKnowledgeEdit, sameEntries } from './memory.ts'
+import { COGNITION_PROMPT_ENTRIES_DEFAULT, type AgreementEntry, type CognitionEntry, type KnowledgeEdit } from './contracts.ts'
 import { deliverPeer, guardRunWriteTool, PeerLedger, refreshChildSeals, sealChildSession, type PeerSendInput } from './peer.ts'
 import { PendingHub, type PendingAnswer } from './pending.ts'
 import { personaSection } from './persona.ts'
@@ -61,15 +64,19 @@ import type { DotStore } from './store.ts'
 import { factoryResetArchiveIds, factoryResetCounts, factoryResetStopGap, factoryResetTokenError, issueFactoryResetToken, type FactoryResetStopEvidence } from './factory-reset.ts'
 import { formatWorkspaceFiles, listWorkspaceFiles as listWorkspaceTree, readWorkspaceText, WORKSPACE_LIST_MAX } from './workspace-inspect.ts'
 import { eventTier } from './tiers.ts'
-import { TaskModelError, formatTaskModels, pickTaskModel, type TaskModelCatalog } from './task-models.ts'
+import { ArenaQueryError } from './arena-models.ts'
+import { TaskModelError, formatTaskModels, pickTaskModel, type TaskModelCatalog, type TaskModelQuery } from './task-models.ts'
 import { TaskPresetError, pickTaskPreset, type TaskPresetCatalog, type TaskPresetChoice } from './task-presets.ts'
 import { stamp, transcriptRows, type TranscriptRow } from './transcript.ts'
 import { formatDuration, formatTokens } from './ui-copy.ts'
 import type { RawEvent } from './chat.ts'
 import { SelfSettings } from './self-settings.ts'
 import { approvalCardCopy, copyLocale, t, type CopyLocale } from './i18n/index.ts'
-import { HIGH_RISK_TOOLS, resolveGrants, type DotCapabilities } from './capabilities.ts'
-import type { CapabilityCatalogView, CapabilityGrant, CapabilityGroupView } from './contracts.ts'
+import { HOST_SCHEDULE_MUTATORS, hostScheduleTargetsDot, isTaskOnlySelector, TASK_ONLY_TOOLS, type DotCapabilities } from './capabilities.ts'
+import type { CapabilityCatalogView, CapabilityGrant, CapabilityGroupView, DotMcpListView, DotMcpServerView } from './contracts.ts'
+import { dotOwnedCredentialRefs, mcpCredentialRefs } from './contracts.ts'
+import { MCP_CATALOG } from './mcp-catalog.ts'
+import { sharedDotMcp } from './mcp-shared.ts'
 import type { GateVerdict } from './tool-scope.ts'
 
 export interface DotServiceOptions {
@@ -82,6 +89,8 @@ export interface DotServiceOptions {
   readonly locale?: CopyLocale
   /** Let original-session answerers settle approvals before waking dot. */
   readonly approvalGraceMs?: number
+  /** How many cognition entries reach dot's prompt; pinned entries always do on top. */
+  readonly cognitionPromptEntries?: number
   readonly timer?: Timer
   readonly now?: () => number
   readonly log?: (message: string) => void
@@ -95,8 +104,19 @@ export interface DotServiceOptions {
   readonly inbox?: InboxLedger
   /** The host's plugin-manager service, looked up lazily; absent in tests and hosts without it. */
   readonly pluginManager?: () => unknown
+  /** Host credential store: describes and releases dot-local MCP tokens by ref name; never returns values. */
+  readonly credentials?: {
+    describe?(ref: string): Promise<{ readonly configured: boolean; readonly masked?: string } | undefined>
+    unset?(ref: string): Promise<unknown>
+  }
+  /** Global MCP server names on the host (manager rows + root tool names); the MCP page marks clashes. */
+  readonly globalMcpNames?: () => Iterable<string>
   /** Git runner for task-worktree isolation; tests inject a fake. */
   readonly git?: GitRunner
+  /** dot's own install, detected from the running module; write work inside it is guarded. */
+  readonly selfInstall?: SelfInstall
+  /** Rebuild run after a merged self-upgrade lands in the linked checkout; tests inject a fake. */
+  readonly selfBuild?: (root: string, signal?: AbortSignal) => Promise<{ readonly ok: boolean; readonly output: string }>
 }
 
 /** The history tools themselves: their calls and results are not part of the record they read. */
@@ -151,6 +171,8 @@ export class DotService {
   private readonly openCapabilityAsks = new Map<string, { readonly chain: readonly string[]; readonly withdraw: () => void }>()
   /** Decision wakes already queued in this process. The durable mark is notifiedAt. */
   private readonly decisionWakes = new Set<string>()
+  /** Truncated approvals dot read in full; allowing one without a read is refused. */
+  private readonly readApprovals = new Set<string>()
   private readonly childRefreshers = new Set<() => void>()
   private readonly childReleases = new Map<string, () => void>()
   private resetArmed?: { readonly token: string; readonly expiresAt: number }
@@ -166,6 +188,12 @@ export class DotService {
   readonly cards: DotCards
   /** The single background reflection pass; the reminder clock ticks its gate. */
   readonly reflection: ReflectionRunner
+  /**
+   * The upgrade marker that was already on disk when this process started.
+   * Only that marker may be hashed, announced, and cleared; a marker this
+   * instance writes in deploySelfBuild stays until a new process starts.
+   */
+  private readonly startupSelfUpgrade: SelfUpgradeMarker | undefined
 
   constructor(private readonly options: DotServiceOptions) {
     this.currentLocale = options.locale ?? options.store.uiLocale
@@ -181,7 +209,8 @@ export class DotService {
       store: options.store,
       homeDir: options.homeDir,
       now: this.now,
-      applyCognition: (text, baseVersion) => this.setCognition(text, 'reflection', baseVersion),
+      applyCognition: (ops, baseVersion) => this.applyCognitionOps(ops, baseVersion),
+      cognitionPromptEntries: () => this.cognitionPromptEntries,
       isDotIdle: () => {
         const dot = this.store.dotSessionId
         return dot !== undefined && !this.options.host.isRunning(dot)
@@ -234,6 +263,7 @@ export class DotService {
       ...options.log ? { log: options.log } : {},
       emit: input => this.emit(input),
     })
+    this.startupSelfUpgrade = options.store.selfUpgrade
   }
 
   get store(): DotStore { return this.options.store }
@@ -378,12 +408,12 @@ export class DotService {
         if (existing === undefined) {
           await mkdir(this.options.homeDir, { recursive: true })
           const sessionId = await this.host.createDot(this.options.homeDir, PRESET_ID)
-          await this.store.beginSegment({ sessionId, startedAt: this.now(), ...await this.frozen() })
+          await this.store.beginSegment({ sessionId, startedAt: this.now(), ...await this.frozen(sessionId) })
           return this.openedDot(sessionId)
         }
         if (await this.host.resumeDot(existing, PRESET_ID)) {
           // A session from before segments existed gets its record on first use.
-          if (!this.store.segment) await this.store.beginSegment({ sessionId: existing, startedAt: this.now(), ...await this.frozen() })
+          if (!this.store.segment) await this.store.beginSegment({ sessionId: existing, startedAt: this.now(), ...await this.frozen(existing) })
           return this.openedDot(existing)
         }
         await mkdir(this.options.homeDir, { recursive: true })
@@ -430,14 +460,30 @@ export class DotService {
     })
   }
 
+  private openApprovalIds(): Set<string> {
+    return new Set(this.pending.list().filter(row => row.kind === 'approval').map(row => row.id))
+  }
+
   saveApprovalDetail(detail: import('./contracts.ts').ApprovalDetail): Promise<void> {
-    return this.track(() => this.store.saveApprovalDetail(detail))
+    if (this.closing) return Promise.reject(new DotError('dot/disposed', 'dot is shutting down'))
+    // Update store.approvalDetails synchronously before async persistence so
+    // dot_answer action=read never races with a newly arrived request.
+    const run = this.store.saveApprovalDetail(detail, this.openApprovalIds())
+    this.inFlight.add(run)
+    void run.then(() => this.inFlight.delete(run), () => this.inFlight.delete(run))
+    return run
   }
 
   readApprovalDetail(id: string): string {
     const detail = this.store.approvalDetails.find(row => row.requestId === id)
-    if (!detail) throw new DotError('dot/unknown-request', `no recorded approval ${id}`)
-    return JSON.stringify(detail)
+    if (detail) {
+      this.readApprovals.add(id)
+      return JSON.stringify(detail)
+    }
+    if (this.pending.get(id)?.kind === 'approval') {
+      throw new DotError('dot/human-required', `full arguments for approval ${id} are unavailable; relay it to the human for a direct decision`)
+    }
+    throw new DotError('dot/unknown-request', `no recorded approval ${id}`)
   }
 
   /**
@@ -450,10 +496,15 @@ export class DotService {
     const caps = this.options.capabilities
     const dot = this.store.dotSessionId
     if (!caps || !dot || this.closing) return { kind: 'deny', reason: 'This preset cannot run that tool.' }
+    // Task-run tools never reach dot's own session; if one was somehow applied
+    // anyway the gate still refuses it here.
+    if (TASK_ONLY_TOOLS.has(exec.name)) return { kind: 'deny', reason: `${exec.name} belongs to task runs; dispatch a dot_task instead.` }
     const entry = caps.appliedFor(dot)?.get(exec.name)
     if (!entry) return { kind: 'deny', reason: `The extra capability ${exec.name} was not applied to this segment.` }
     const live = caps.liveGrant(entry.chain)
     if (live !== 'ask' && live !== 'auto') return { kind: 'deny', reason: `The extra capability ${exec.name} is off.` }
+    const scheduled = this.hostScheduleGate(exec)
+    if (scheduled !== 'next') return scheduled
     if (live === 'auto') return 'next'
     const allowed = await this.askCapabilityApproval(exec, entry.chain)
     if (!allowed) return { kind: 'deny', reason: `The human declined ${exec.name}.` }
@@ -464,7 +515,23 @@ export class DotService {
     if (!reapplied) return { kind: 'deny', reason: `The extra capability ${exec.name} was not applied to this segment.` }
     const still = caps.liveGrant(reapplied.chain)
     if (still !== 'ask' && still !== 'auto') return { kind: 'deny', reason: `The extra capability ${exec.name} is off.` }
-    return 'next'
+    return this.hostScheduleGate(exec)
+  }
+
+  /**
+   * Host schedule_create/edit with target this_session (or a Dorothy segment
+   * id) cannot be delivered: the controller refuses subagent-origin sessions,
+   * and a later segment no longer uses that id. Reminders for Dorothy herself
+   * go through `dot_schedule`.
+   */
+  private hostScheduleGate(exec: { readonly name: string; readonly arguments?: unknown }): GateVerdict {
+    if (!HOST_SCHEDULE_MUTATORS.has(exec.name)) return 'next'
+    const ids = new Set<string>()
+    if (this.store.dotSessionId) ids.add(this.store.dotSessionId)
+    if (this.store.segment?.sessionId) ids.add(this.store.segment.sessionId)
+    for (const past of this.store.pastSegments) ids.add(past.sessionId)
+    if (!hostScheduleTargetsDot(exec.arguments, ids)) return 'next'
+    return { kind: 'deny', reason: `Host schedule tools cannot deliver to Dorothy's hidden session (this_session or a Dorothy segment id). Use ${TOOL.schedule} so the reminder follows the current conversation segment.` }
   }
 
   /**
@@ -508,6 +575,39 @@ export class DotService {
     return answer?.kind === 'approval' && answer.allow === true
   }
 
+  /** The dot-local MCP servers plus the recommended catalog the MCP page draws. */
+  async mcpServersView(): Promise<DotMcpListView> {
+    const servers = this.store.settings.mcpServers ?? {}
+    const statuses = sharedDotMcp().servers
+    const views: DotMcpServerView[] = []
+    for (const [name, row] of Object.entries(servers)) {
+      const refs = mcpCredentialRefs(row)
+      let credential: DotMcpServerView['credential']
+      if (refs.length > 0) {
+        const info = await this.options.credentials?.describe?.(refs[0]!).catch(() => undefined)
+        credential = { ref: refs[0]!, configured: info?.configured === true, ...(info?.masked !== undefined ? { masked: info.masked } : {}) }
+      }
+      const status = statuses.get(name) ?? (row.enabled ? undefined : { state: 'off' })
+      const catalogEntry = row.catalog === undefined ? undefined : MCP_CATALOG.find(entry => entry.id === row.catalog)
+      views.push({
+        name, url: row.url, enabled: row.enabled,
+        auth: refs.length > 0 ? 'token' : 'none',
+        ...(row.catalog !== undefined ? { catalog: row.catalog } : {}),
+        ...(catalogEntry?.tokenUrl !== undefined ? { tokenUrl: catalogEntry.tokenUrl } : {}),
+        ...(credential !== undefined ? { credential } : {}),
+        ...(status !== undefined ? { status } : {}),
+      })
+    }
+    const catalog = MCP_CATALOG.filter(entry => !(entry.id in servers)).map(entry => ({
+      id: entry.id, name: entry.name, about: entry.about, url: entry.url, auth: entry.auth,
+      ...(entry.headers !== undefined ? { headers: entry.headers } : {}),
+      ...(entry.tokenUrl !== undefined ? { tokenUrl: entry.tokenUrl } : {}),
+      ...(entry.tokenHelp !== undefined ? { tokenHelp: entry.tokenHelp } : {}),
+    }))
+    const globals = [...(this.options.globalMcpNames?.() ?? [])].sort((a, b) => a.localeCompare(b))
+    return { servers: views, catalog, globals }
+  }
+
   /** The catalog, grants, and applied state the settings view draws. */
   async capabilitiesView(): Promise<CapabilityCatalogView> {
     const caps = this.options.capabilities
@@ -528,15 +628,24 @@ export class DotService {
     if (groups.length === 0) lines.push('No extra capabilities are currently installed.')
     const row = (group: CapabilityGroupView, parents: readonly string[], indent: string) => {
       const grant = grants[group.id]
-      // The host group is display-only: unattributed tools answer to per-tool grants.
-      const selector = group.kind === 'host' ? '(per-tool grants only)' : `[${group.id}] grant=${grant ?? 'inherited'}`
+      // Only the host and builtin parent rows are display-only: their tools answer to child/per-tool grants.
+      const displayOnly = group.kind === 'host' || group.id === 'builtin'
+      const selector = displayOnly
+        ? '(per-tool grants only)'
+        : isTaskOnlySelector(group.id, groups)
+          ? '(task-only: runs use it; never applied to dot)'
+          : `[${group.id}] grant=${grant ?? 'inherited'}`
       lines.push(`${indent}${group.label} ${selector}${group.missing === true ? ' UNAVAILABLE' : ''}`)
-      const chain = group.kind === 'host' ? parents : [group.id, ...parents]
+      const chain = displayOnly ? parents : [group.id, ...parents]
       for (const tool of group.tools) {
         if (tool.missing === true) { lines.push(`${indent}  ${tool.name} — UNAVAILABLE (grant kept)`); continue }
+        if (tool.taskOnly === true) {
+          lines.push(`${indent}  ${tool.name} — grant=off (task-only: runs use it; never applied to dot)`)
+          continue
+        }
         let effective: string | undefined
         for (const selector of [`tool:${tool.name}`, ...chain]) { if (grants[selector] !== undefined) { effective = grants[selector]; break } }
-        const flags = [tool.conditional ? 'conditional (when-gate bypassed while granted)' : '', tool.highRisk === true ? 'HIGH RISK (runs unapproved and unsandboxed)' : '', applied?.has(tool.name) ? `applied=${applied.get(tool.name)?.grant}` : 'not applied this segment'].filter(Boolean).join(', ')
+        const flags = [tool.conditional ? 'conditional (when-gate bypassed while granted)' : '', applied?.has(tool.name) ? `applied=${applied.get(tool.name)?.grant}` : 'not applied this segment'].filter(Boolean).join(', ')
         lines.push(`${indent}  ${tool.name} — grant=${effective ?? 'off'}${flags ? ` (${flags})` : ''}`)
       }
       for (const child of group.children ?? []) row(child, chain, `${indent}  `)
@@ -555,20 +664,18 @@ export class DotService {
     const caps = this.options.capabilities
     if (!caps) throw new DotError('dot/invalid', 'no capability catalog exists on this host')
     const selector = input.selector.trim()
-    if (selector === 'host') throw new DotError('dot/invalid', 'unattributed tools are granted one by one with tool:<name> or prefix:<segment>; there is no host-wide grant')
-    if (!/^(tool|mcp|plugin|prefix):/.test(selector)) throw new DotError('dot/invalid', 'selector must be tool:<name>, mcp:<server>, plugin:<bundle>[#<entry>], or prefix:<segment>')
+    if (selector === 'host' || selector === 'builtin') throw new DotError('dot/invalid', 'unattributed tools are granted one by one with tool:<name> or prefix:<segment>; there is no host-wide grant')
+    if (!/^(tool|mcp|plugin|prefix|builtin):/.test(selector)) throw new DotError('dot/invalid', 'selector must be tool:<name>, mcp:<server>, plugin:<bundle>[#<entry>], builtin:<id>, or prefix:<segment>')
     if (selector.startsWith('tool:') && caps.locked.includes(selector.slice(5))) throw new DotError('dot/invalid', `${selector.slice(5)} is a locked dot tool; it is always on and cannot be granted`)
+    let groups: readonly CapabilityGroupView[] | undefined
+    try { groups = (await caps.catalog()).groups } catch { groups = undefined }
+    if (isTaskOnlySelector(selector, groups)) {
+      const name = selector.startsWith('tool:') ? selector.slice(5) : selector
+      throw new DotError('dot/invalid', `${name} belongs to task runs; dispatch a dot_task instead.`)
+    }
     if (!['off', 'ask', 'auto'].includes(input.grant)) throw new DotError('dot/invalid', 'grant must be off, ask, or auto')
     const grants = { ...this.store.settings.capabilities?.grants, [selector]: input.grant }
-    let reason = input.reason
-    if (input.grant === 'auto') {
-      // Warn the human when the merged grants would let a self-escalating tool
-      // run unapproved and unsandboxed; the proposal still stands.
-      const { groups } = await caps.catalog()
-      const risky = [...resolveGrants(grants, groups)].filter(([name, resolved]) => resolved.grant === 'auto' && HIGH_RISK_TOOLS.has(name)).map(([name]) => name).sort()
-      if (risky.length > 0) reason = `${reason}\nWarning: this makes ${risky.join(', ')} run automatically — no approval and no sandbox.`
-    }
-    return this.selfSettings.propose({ field: 'capabilities', value: { grants }, reason })
+    return this.selfSettings.propose({ field: 'capabilities', value: { grants }, reason: input.reason })
   }
 
   /**
@@ -726,6 +833,8 @@ export class DotService {
   settingsChanged(): Promise<void> {
     this.armIdleCheck()
     this.updates.settingsChanged()
+    // The ds-dot/mcp preset row reconciles its mounts against the new settings.
+    sharedDotMcp().onSettingsChanged?.()
     // A grant revoked while its approval card waits settles the ask at once:
     // the call denies and the card expires through the unanswered path. This
     // runs outside the serial lane so a queued settings write cannot stall
@@ -942,8 +1051,14 @@ export class DotService {
       const activeLocale = this.currentLocale ?? this.store.uiLocale
       if (this.usageHandle !== undefined) { this.timer.clear(this.usageHandle); this.usageHandle = undefined }
       await this.usagePass
+      // Dot-owned MCP tokens leave the host credential store with the servers.
+      const mcpRefs = dotOwnedCredentialRefs(Object.values(this.store.settings.mcpServers ?? {}))
       try {
         await this.store.factoryReset(this.now())
+        sharedDotMcp().onSettingsChanged?.()
+        for (const ref of mcpRefs) {
+          try { await this.options.credentials?.unset?.(ref) } catch { /* best effort */ }
+        }
       } catch (failure) {
         throw new DotError('dot/reset-incomplete', `Factory reset is incomplete: sessions were archived and artifact files were removed, but clearing Dorothy's records failed (${messageOf(failure)}). Request a new preview to retry the remaining cleanup.`)
       }
@@ -1080,6 +1195,16 @@ export class DotService {
   updateStatus(): UpdateStatus | undefined { return this.store.updateStatus }
   checkUpdates(): Promise<UpdateStatus> { return this.updates.checkNow() }
 
+  /** What the panel shows about this install: where dot runs from and the newest kept pre-upgrade backup. */
+  selfStatus(): { readonly mode: 'linked' | 'installed' | 'unknown'; readonly root: string | null; readonly lastBackup?: SelfBackup } {
+    const self = this.options.selfInstall
+    return {
+      mode: self?.mode ?? 'unknown',
+      root: self?.root ?? null,
+      ...(this.store.selfBackup !== undefined ? { lastBackup: this.store.selfBackup } : {}),
+    }
+  }
+
   /**
    * Let reminders come due. Called once dot's preset is registered: a reminder
    * that fires earlier could not reopen dot's session and would take it for lost.
@@ -1088,7 +1213,36 @@ export class DotService {
     if (this.closing) return
     this.reminders.start()
     this.updates.start()
+    void this.resolveSelfUpgrade().catch(error => this.options.log?.(`dsh-dot: self-upgrade marker check failed: ${messageOf(error)}`))
     void this.reconcile().catch(error => this.options.log?.(`dsh-dot: reconciliation failed: ${messageOf(error)}`))
+  }
+
+  /**
+   * A self-upgrade that built under the previous process left a marker; hashing
+   * the bundle running now says whether the restart actually picked it up. The
+   * marker clears either way — the backup row stays for the restore hint.
+   * Only the marker captured at construction may be consumed: a later
+   * deploySelfBuild on this still-running process must not look like a restart.
+   */
+  private async resolveSelfUpgrade(): Promise<void> {
+    const marker = this.startupSelfUpgrade
+    if (!marker || this.closing) return
+    // A marker this instance just wrote is a different object; leave it for the next process.
+    if (this.store.selfUpgrade !== marker) return
+    const dot = this.store.dotSessionId
+    // Clearing before the session exists would drop the only notice of this upgrade.
+    if (!dot) return
+    try {
+      const hash = this.options.selfInstall ? libHashOf(this.options.selfInstall.root) : undefined
+      const text = hash !== undefined && hash === marker.libHash
+        ? `Self-upgrade to ${marker.commitSha} is running; the previous lib is kept at ${join(marker.backupDir, 'lib')}.`
+        : `Self-upgrade to ${marker.commitSha} was deployed, but the running build does not match it${hash === undefined ? ' (the bundle could not be read)' : ''}; the previous lib is kept at ${join(marker.backupDir, 'lib')}.`
+      this.notify({ sessionId: dot, kind: 'turn-end', text, at: this.now() })
+    } finally {
+      if (this.store.selfUpgrade === marker) {
+        await this.store.setSelfUpgrade(undefined).catch(error => this.options.log?.(`dsh-dot: self-upgrade marker was not cleared: ${messageOf(error)}`))
+      }
+    }
   }
 
   private canIdleCheck(): boolean {
@@ -1341,8 +1495,13 @@ export class DotService {
   }
 
   /** The models a task may run on, for dot to choose from. */
-  async listModels(): Promise<string> {
-    return formatTaskModels(this.store.settings.taskModels, await this.catalog())
+  async listModels(query: TaskModelQuery = {}): Promise<string> {
+    try {
+      return formatTaskModels(this.store.settings.taskModels, await this.catalog(), query)
+    } catch (error) {
+      if (error instanceof ArenaQueryError) throw new DotError('dot/invalid-model-query', error.message)
+      throw error
+    }
   }
 
   private async catalog(): Promise<TaskModelCatalog> {
@@ -1387,7 +1546,7 @@ export class DotService {
 
   manageTask(args: Record<string, unknown>): Promise<string> {
     const action = typeof args.action === 'string' ? args.action : ''
-    const awaitsHost = ['finish', 'cancel', 'supplement', 'dispatch', 'check', 'closeout', 'reject'].includes(action)
+    const awaitsHost = ['create', 'finish', 'cancel', 'supplement', 'dispatch', 'check', 'closeout', 'reject'].includes(action)
     const work = awaitsHost ? this.manageWorkAction(args) : this.serial(() => this.manageWorkAction(args))
     // Settling runs earn their token/wall cost whether or not the panel is open.
     return work.finally(() => this.scheduleRunUsage())
@@ -1557,6 +1716,12 @@ export class DotService {
     }
     // A model-generated tool call is not evidence of a human decision.
     if (view.kind === 'approval' && answer.kind === 'approval' && (view.humanRequired === true || this.rules.approvals === 'human')) throw new DotError('dot/human-required', `approval ${id} requires a direct human decision`)
+    if (view.kind === 'approval' && answer.kind === 'approval' && answer.allow === true && view.truncated === true && !this.readApprovals.has(id)) {
+      if (!this.store.approvalDetails.some(row => row.requestId === id)) {
+        throw new DotError('dot/human-required', `approval ${id} was truncated and its full arguments are unavailable; relay it to the human for a direct decision`)
+      }
+      throw new DotError('dot/read-required', `approval ${id} was truncated; read it with ${TOOL.answerPending} action=read before allowing`)
+    }
     if (view.kind === 'question' && this.rules.questions === 'human') throw new DotError('dot/human-required', `question ${id} requires a direct human answer in the original session`)
     // The human may switch to deny while dot is still judging a delivered request.
     const denied = view.kind === 'approval' && answer.kind === 'approval' && this.rules.approvals === 'deny'
@@ -1575,8 +1740,9 @@ export class DotService {
   }
 
   private pruneApprovalDetails(): Promise<void> {
-    const open = new Set(this.pending.list().filter(row => row.kind === 'approval').map(row => row.id))
-    const kept = this.store.approvalDetails.filter(row => open.has(row.requestId)).slice(-APPROVAL_DETAIL_LIMIT)
+    const open = this.openApprovalIds()
+    for (const id of [...this.readApprovals]) if (!open.has(id)) this.readApprovals.delete(id)
+    const kept = this.store.approvalDetails.filter(row => open.has(row.requestId))
     return this.store.replaceApprovalDetails(kept)
   }
 
@@ -1633,7 +1799,7 @@ export class DotService {
       if (inFlight) return { ok: false as const, reason: `previous run of ${recipe.id} "${recipe.name}" still in flight: ${inFlight.id}` }
       this.recipeStarting.add(recipe.id)
       try {
-        return { ok: true as const, change: await this.createChangeFromTool({ action: 'create', recipe: recipe.id, user_request: userRequest }) }
+        return { ok: true as const, change: (await this.createChangeFromTool({ action: 'create', recipe: recipe.id, user_request: userRequest })).change }
       } catch (error) {
         this.recipeStarting.delete(recipe.id)
         return { ok: false as const, reason: messageOf(error) }
@@ -1823,13 +1989,15 @@ export class DotService {
       const lastWork = this.store.work.listRuns()
         .filter(run => run.changeId === change.id && run.kind === 'work')
         .sort((a, b) => b.createdAt - a.createdAt || b.id.localeCompare(a.id))[0]
+      const fromChange = this.recipeDirFromChange(change)
       base = {
         goal: material?.goal ?? '',
         requirements: material?.requirements ?? [],
         ...(material?.requirementsFromGoal !== undefined ? { requirementsFromGoal: material.requirementsFromGoal } : {}),
         ...(material?.constraints ? { constraints: material.constraints } : {}),
         ...(material?.deliverableLanguage ? { deliverableLanguage: material.deliverableLanguage } : {}),
-        dir: change.cwd,
+        dir: fromChange.dir,
+        ...(fromChange.isolation !== undefined ? { isolation: fromChange.isolation } : {}),
         ...(lastWork?.expectedPreset ? { preset: lastWork.expectedPreset } : {}),
         ...(lastWork?.access ? { access: lastWork.access } : {}),
       }
@@ -2230,26 +2398,33 @@ export class DotService {
     return run
   }
 
+  /** How many cognition entries reach the prompt this service renders; pinned entries always do on top. */
+  private get cognitionPromptEntries(): number { return this.options.cognitionPromptEntries ?? COGNITION_PROMPT_ENTRIES_DEFAULT }
+
   async knowledgeView(): Promise<KnowledgeView> {
-    const undo = this.store.agreementsUndo
+    const undo = this.store.agreementEntriesUndo
     return {
-      agreements: { text: this.store.agreements, maxChars: AGREEMENTS_MAX_CHARS, canUndo: undo !== undefined && undo !== this.store.agreements },
-      cognition: { text: this.store.cognition, maxChars: COGNITION_MAX_CHARS, history: this.store.cognitionHistory },
+      agreements: { entries: this.store.agreementEntries, canUndo: undo !== undefined && !sameEntries(undo, this.store.agreementEntries) },
+      cognition: { entries: cognitionWithActive(this.store.cognitionEntries, this.cognitionPromptEntries), history: this.store.cognitionEntryHistory },
     }
+  }
+
+  /** Map a memory-layer refusal to the service error shape the tools report. */
+  private knowledgeError(error: unknown): DotError {
+    return error instanceof KnowledgeError ? new DotError(error.code, error.message) : error instanceof DotError ? error : new DotError('dot/invalid', messageOf(error))
   }
 
   /** dot adds one of the human's own requirements, in their words. */
   async agreementAdd(text: string): Promise<string> {
     return this.withKnowledge(async () => {
       if (this.store.settings.locks?.agreements) throw new DotError('dot/setting-locked', 'agreements are locked by the human; use dot_settings (action=propose) for the change you want')
-      const before = this.store.agreements
-      let after: string
-      try { after = addEntry(before, text) } catch (error) {
-        if (error instanceof KnowledgeError) throw new DotError(error.code, error.message)
-        throw error
+      const before = this.store.agreementEntries
+      let after: readonly AgreementEntry[]
+      try { after = applyAgreementEdit(before, { op: 'add', text }, this.now(), () => this.store.nextKnowledgeId('a')) } catch (error) {
+        throw this.knowledgeError(error)
       }
-      if (after === before) return 'That is already one of your agreements.'
-      await this.store.setAgreements(after)
+      if (sameEntries(after, before)) return 'That is already one of your agreements.'
+      await this.store.setAgreementEntries(after)
       await this.afterAgreementsChange(before, after, 'dot')
       return 'Recorded as an agreement. The [agreements] block of this session still shows them as they were when it started; your next session shows the new one.'
     })
@@ -2259,40 +2434,120 @@ export class DotService {
   async agreementRemove(text: string): Promise<string> {
     return this.withKnowledge(async () => {
       if (this.store.settings.locks?.agreements) throw new DotError('dot/setting-locked', 'agreements are locked by the human; use dot_settings (action=propose) for the change you want')
-      const before = this.store.agreements
-      let removed = ''
-      let after = before
-      try { const result = removeEntry(before, text); removed = result.removed; after = normalizeAgreements(result.text) } catch (error) {
-        if (error instanceof KnowledgeError) throw new DotError(error.code, error.message)
-        throw error
+      const before = this.store.agreementEntries
+      let target: AgreementEntry
+      try { target = matchEntry(before, text, 'agreement') } catch (error) {
+        throw this.knowledgeError(error)
       }
-      await this.store.setAgreements(after)
+      const after = before.filter(entry => entry.id !== target.id)
+      await this.store.setAgreementEntries(after)
       await this.afterAgreementsChange(before, after, 'dot')
-      return `Removed this agreement: "${removed}".`
+      return `Removed this agreement: "${target.text}".`
     })
   }
 
-  /** dot rewrites its whole cognition. */
-  async cognitionRewrite(text: string): Promise<string> {
+  /** dot records one new cognition entry. */
+  async cognitionAdd(text: string): Promise<string> {
     return this.withKnowledge(async () => {
-      const next = normalizeCognition(text)
-      if (next.trim().length > COGNITION_MAX_CHARS) throw new DotError('dot/invalid', `cognition is at most ${COGNITION_MAX_CHARS} characters; these have ${next.trim().length}`)
-      const before = this.store.cognition
-      await this.store.setCognition(next, this.now())
-      if (next !== before) await this.afterCognitionChange(before, next, 'dot')
-      return 'Your cognition is updated. The [cognition] block of this session still shows the old text; your next session shows the new one.'
+      const before = this.store.cognitionEntries
+      let after: readonly CognitionEntry[]
+      try { after = applyCognitionEdit(before, { op: 'add', text }, this.now(), () => this.store.nextKnowledgeId('c')) } catch (error) {
+        throw this.knowledgeError(error)
+      }
+      if (sameEntries(after, before)) return 'That is already in your cognition.'
+      const added = after.find(entry => !before.some(earlier => earlier.id === entry.id))
+      const woken = added ? undefined : after.find(entry => before.some(earlier => earlier.id === entry.id && earlier.seenAt !== entry.seenAt))
+      await this.store.setCognitionEntries(after, this.now())
+      await this.afterCognitionChange(before, after, 'dot', added?.id ?? woken?.id)
+      if (!added) return 'That is already in your cognition.'
+      return 'Recorded in your cognition. The [cognition] block of this session still shows what it showed when it started; your next session shows the new one.'
     })
   }
 
-  /** The human rewrote the agreements in the settings view (or approved a proposal). */
+  /** dot replaces the text of the cognition entry `match` names — pinned entries belong to the human. */
+  async cognitionUpdate(match: string, text: string): Promise<string> {
+    return this.withKnowledge(async () => {
+      const before = this.store.cognitionEntries
+      let target: CognitionEntry
+      try { target = matchEntry(before, match, 'cognition', 'match') } catch (error) {
+        throw this.knowledgeError(error)
+      }
+      if (target.pinned === true) throw new DotError('dot/pinned', `"${target.text}" is pinned by the human; only the human can change it`)
+      let after: readonly CognitionEntry[]
+      try { after = applyCognitionEdit(before, { op: 'edit', id: target.id, text }, this.now(), () => this.store.nextKnowledgeId('c')) } catch (error) {
+        throw this.knowledgeError(error)
+      }
+      await this.store.setCognitionEntries(after, this.now())
+      await this.afterCognitionChange(before, after, 'dot', target.id)
+      return 'Updated that cognition entry. The [cognition] block of this session still shows what it showed when it started; your next session shows the new one.'
+    })
+  }
+
+  /** dot deletes the cognition entry `match` names — pinned entries belong to the human. */
+  async cognitionRemove(match: string): Promise<string> {
+    return this.withKnowledge(async () => {
+      const before = this.store.cognitionEntries
+      let target: CognitionEntry
+      try { target = matchEntry(before, match, 'cognition', 'match') } catch (error) {
+        throw this.knowledgeError(error)
+      }
+      if (target.pinned === true) throw new DotError('dot/pinned', `"${target.text}" is pinned by the human; only the human can remove it`)
+      const after = before.filter(entry => entry.id !== target.id)
+      await this.store.setCognitionEntries(after, this.now())
+      await this.afterCognitionChange(before, after, 'dot')
+      return `Removed this cognition entry: "${target.text}".`
+    })
+  }
+
+  /** List or search all stored cognition entries (pinned, active, and dormant) with offset/limit paging. */
+  async cognitionList(input?: { readonly query?: string; readonly offset?: number; readonly limit?: number }): Promise<string> {
+    const ranked = cognitionWithActive(this.store.cognitionEntries, this.cognitionPromptEntries)
+    if (ranked.length === 0) return 'No cognition entries yet.'
+    const query = input?.query === undefined ? undefined : normalizeEntry(input.query)
+    const matched = filterCognitionEntries(ranked, query)
+    if (matched.length === 0) return `No cognition entries match "${query}" (${ranked.length} stored).`
+    const rawOffset = input?.offset ?? 0
+    if (!Number.isFinite(rawOffset) || rawOffset < 0) throw new DotError('dot/invalid', 'offset must be a non-negative integer')
+    const offset = Math.trunc(rawOffset)
+    const rawLimit = input?.limit ?? 40
+    if (!Number.isFinite(rawLimit) || rawLimit < 1) throw new DotError('dot/invalid', 'limit must be a positive integer')
+    const limit = Math.min(100, Math.trunc(rawLimit))
+    const page = matched.slice(offset, offset + limit)
+    if (page.length === 0) return `No cognition entries at offset ${offset} (${matched.length} matched).`
+    const start = offset + 1
+    const end = offset + page.length
+    const scope = query
+      ? `Matching cognition entries for "${query}" (${start}–${end} of ${matched.length}; ${ranked.length} total)`
+      : `Cognition entries (${start}–${end} of ${matched.length}; prompt limit ${this.cognitionPromptEntries})`
+    const lines = page.map(entry => `- [${entry.pinned === true ? 'pinned' : entry.active ? 'active' : 'dormant'}] ${entry.text}`)
+    const next = offset + page.length < matched.length ? `\nMore entries remain; pass offset=${offset + page.length} to continue.` : ''
+    return `${scope}:\n${lines.join('\n')}${next}`
+  }
+
+  /** dot_settings proposal approval carries bulk text: identical lines reuse their stored entry. */
   async setAgreements(text: string, by: 'human' | 'dot' = 'human'): Promise<KnowledgeView> {
     return this.withKnowledge(async () => {
-      const next = normalizeAgreements(text)
-      if (next.trim().length > AGREEMENTS_MAX_CHARS) throw new DotError('dot/invalid', `the agreements are at most ${AGREEMENTS_MAX_CHARS} characters; these have ${next.trim().length}`)
-      const before = this.store.agreements
-      if (next !== before) {
-        await this.store.setAgreements(next)
-        await this.afterAgreementsChange(before, next, by)
+      const before = this.store.agreementEntries
+      const after = agreementEntriesFromText(text, before, this.now(), () => this.store.nextKnowledgeId('a'), true)
+      if (!sameEntries(after, before)) {
+        await this.store.setAgreementEntries(after)
+        await this.afterAgreementsChange(before, after, by)
+      }
+      return this.knowledgeView()
+    })
+  }
+
+  /** One panel edit on the agreements: add, edit or remove a single entry. */
+  async editAgreements(edit: KnowledgeEdit): Promise<KnowledgeView> {
+    return this.withKnowledge(async () => {
+      const before = this.store.agreementEntries
+      let after: readonly AgreementEntry[]
+      try { after = applyAgreementEdit(before, parseKnowledgeEdit(edit, 'agreements'), this.now(), () => this.store.nextKnowledgeId('a')) } catch (error) {
+        throw this.knowledgeError(error)
+      }
+      if (!sameEntries(after, before)) {
+        await this.store.setAgreementEntries(after)
+        await this.afterAgreementsChange(before, after, 'human')
       }
       return this.knowledgeView()
     })
@@ -2301,34 +2556,54 @@ export class DotService {
   /** Put the agreements back to what they were before their latest change, whoever made it. */
   async undoAgreements(): Promise<KnowledgeView> {
     return this.withKnowledge(async () => {
-      const before = this.store.agreements
+      const before = this.store.agreementEntries
       if (!(await this.store.undoAgreements())) throw new DotError('dot/nothing-to-undo', 'there is no earlier version of the agreements')
-      await this.afterAgreementsChange(before, this.store.agreements, 'human')
+      await this.afterAgreementsChange(before, this.store.agreementEntries, 'human')
       return this.knowledgeView()
     })
   }
 
-  /** The human rewrote cognition, or the reflection pass did; neither is dot's own in-session change. */
-  async setCognition(text: string, by: 'human' | 'dot' | 'reflection' = 'human', baseVersion?: number): Promise<KnowledgeView> {
+  /** One panel edit on cognition: add, edit, remove or pin a single entry. */
+  async editCognition(edit: KnowledgeEdit): Promise<KnowledgeView> {
     return this.withKnowledge(async () => {
-      if (baseVersion !== undefined && this.store.cognitionVersion !== baseVersion) throw new DotError('dot/stale-reflection', 'cognition changed since this reflection started')
-      const next = normalizeCognition(text)
-      if (next.trim().length > COGNITION_MAX_CHARS) throw new DotError('dot/invalid', `cognition is at most ${COGNITION_MAX_CHARS} characters; these have ${next.trim().length}`)
-      const before = this.store.cognition
-      if (next !== before) {
-        await this.store.setCognition(next, this.now())
-        await this.afterCognitionChange(before, next, by)
+      const before = this.store.cognitionEntries
+      let after: readonly CognitionEntry[]
+      try { after = applyCognitionEdit(before, parseKnowledgeEdit(edit, 'cognition'), this.now(), () => this.store.nextKnowledgeId('c')) } catch (error) {
+        throw this.knowledgeError(error)
+      }
+      if (!sameEntries(after, before)) {
+        await this.store.setCognitionEntries(after, this.now())
+        await this.afterCognitionChange(before, after, 'human')
       }
       return this.knowledgeView()
     })
   }
 
-  /** Put an earlier cognition text back; the replaced text joins the history too. */
+  /** The reflection pass's ops, applied together or not at all; [] saves nothing. */
+  private async applyCognitionOps(raw: string, baseVersion: number): Promise<void> {
+    return this.withKnowledge(async () => {
+      if (this.store.cognitionVersion !== baseVersion) throw new DotError('dot/stale-reflection', 'cognition changed since this reflection started')
+      const before = this.store.cognitionEntries
+      let ops: ReturnType<typeof parseCognitionOps>
+      let after: readonly CognitionEntry[]
+      try {
+        ops = parseCognitionOps(raw)
+        after = applyCognitionOps(before, ops, this.now(), () => this.store.nextKnowledgeId('c'))
+      } catch (error) {
+        throw this.knowledgeError(error)
+      }
+      if (ops.length === 0 || sameEntries(after, before)) return
+      await this.store.setCognitionEntries(after, this.now())
+      await this.afterCognitionChange(before, after, 'reflection')
+    })
+  }
+
+  /** Put an earlier cognition entry list back; the list it replaces joins the history too. */
   async restoreCognition(at: number): Promise<KnowledgeView> {
     return this.withKnowledge(async () => {
-      const before = this.store.cognition
+      const before = this.store.cognitionEntries
       if (!(await this.store.restoreCognition(at, this.now()))) throw new DotError('dot/unknown-version', 'no earlier cognition version has that timestamp')
-      if (this.store.cognition !== before) await this.afterCognitionChange(before, this.store.cognition, 'human')
+      if (!sameEntries(this.store.cognitionEntries, before)) await this.afterCognitionChange(before, this.store.cognitionEntries, 'human')
       return this.knowledgeView()
     })
   }
@@ -2336,11 +2611,11 @@ export class DotService {
   // ---- background reflection -------------------------------------------
 
   /** The submission tool calls this; the pass must be the one currently running. */
-  reflectionSubmit(cognition: string, agreementNotes: string | undefined, sessionId: string): Promise<string> {
+  reflectionSubmit(ops: string, agreementNotes: string | undefined, sessionId: string): Promise<string> {
     // Same lane as `say`: a submission can never interleave with a human message
     // between reading agreementNotes and clearing them, so a fresh note is not
     // wiped by a message that carried the previous one.
-    return this.serial(() => this.reflection.submit(cognition, agreementNotes, sessionId))
+    return this.serial(() => this.reflection.submit(ops, agreementNotes, sessionId))
   }
 
   /** Reflection passes remembered for the trajectory view, oldest first. */
@@ -2354,18 +2629,24 @@ export class DotService {
   }
 
   /** dot's own change only updates the segment's seen snapshot when it was in step; a panel edit never does. */
-  private async afterAgreementsChange(before: string, after: string, by: 'human' | 'dot'): Promise<void> {
+  private async afterAgreementsChange(before: readonly AgreementEntry[], after: readonly AgreementEntry[], by: 'human' | 'dot'): Promise<void> {
     if (by !== 'dot') return
     const segment = this.store.segment
     if (!segment) return
     if ((segment.agreementsSeen ?? segment.agreements ?? '') === agreementsSection(before)) await this.store.noteAgreementsSeen(agreementsSection(after))
   }
 
-  private async afterCognitionChange(before: string, after: string, by: 'human' | 'dot' | 'reflection'): Promise<void> {
+  private async afterCognitionChange(before: readonly CognitionEntry[], after: readonly CognitionEntry[], by: 'human' | 'dot' | 'reflection', touchedId?: string): Promise<void> {
     if (by !== 'dot') return
     const segment = this.store.segment
     if (!segment) return
-    if ((segment.cognitionSeen ?? segment.cognition ?? '') === cognitionSection(before)) await this.store.noteCognitionSeen(cognitionSection(after))
+    if ((segment.cognitionSeen ?? segment.cognition ?? '') !== cognitionSection(before, this.cognitionPromptEntries)) return
+    // A change dot made in step is invisible to the prompt… unless it promoted
+    // a dormant entry dot did not touch. That promotion lands at the next
+    // message through the normal prompt-changed rollover instead.
+    const wasActive = new Set(cognitionWithActive(before, this.cognitionPromptEntries).filter(entry => entry.active).map(entry => entry.id))
+    if (cognitionWithActive(after, this.cognitionPromptEntries).some(entry => entry.active && !wasActive.has(entry.id) && entry.id !== touchedId)) return
+    await this.store.noteCognitionSeen(cognitionSection(after, this.cognitionPromptEntries))
   }
 
   // ---- host events -----------------------------------------------------
@@ -2429,6 +2710,19 @@ export class DotService {
     const route = routeRequest(this.rules, input.kind)
     if (route.action === 'skip' || route.action === 'deny') return { decided: route.action }
     const run = this.store.work.sessionRun(input.sessionId)
+    const runChange = run ? this.store.work.change(run.changeId) : undefined
+    // A git reset/clean is dot's call only when the requester's write run lives
+    // inside its own active task worktree and the command points nowhere else.
+    const isolation = runChange?.isolation
+    const argCwds = approvalArgCwds(input.arguments, input.cwd ?? run?.cwd)
+    const ownWorktree = input.viaSubagent !== true
+      && run?.access === 'write'
+      && isolation?.kind === 'worktree'
+      && isolation.state === 'active'
+      && isSameOrChildPath(isolation.worktree, run.cwd)
+      && (input.cwd === undefined || isSameOrChildPath(isolation.worktree, input.cwd))
+      && argCwds !== null
+      && argCwds.every(dir => isSameOrChildPath(isolation.worktree, dir))
     const notice = input.kind === 'approval'
       ? approvalNotice({
           toolName: input.toolName ?? input.subject,
@@ -2437,6 +2731,7 @@ export class DotService {
           ...(input.arguments !== undefined ? { arguments: input.arguments } : {}),
           ...(input.viaSubagent ? { viaSubagent: true } : {}),
           ...(run?.access === 'read' ? { readOnly: true } : {}),
+          ...(ownWorktree ? { ownWorktree: true } : {}),
         })
       : undefined
     const detail = notice?.text ?? input.detail
@@ -2449,12 +2744,14 @@ export class DotService {
       ...(input.questions !== undefined ? { questions: input.questions } : {}),
       ...(input.signal !== undefined ? { signal: input.signal } : {}),
       ...(humanRequired ? { humanRequired: true } : {}),
+      ...(notice?.truncated === true ? { truncated: true } : {}),
     })
-    const runChange = run ? this.store.work.change(run.changeId) : undefined
     const where = task ? `task "${task.title}"` : `untracked session${input.cwd ? ` in ${input.cwd}` : ''}`
     const lines = [runChange ? `${opened.id} for task ${runChange.id} "${runChange.title}": ${input.kind} · "${input.subject}"` : `${opened.id} · ${input.kind} from ${where} · "${input.subject}"`]
     if (detail) lines.push(`  detail: ${notice ? detail : clip(detail, 600)}`)
     if (humanRequired && notice) lines.push(`  human-required: ${notice.reasons.join(', ')}; do not use dot_answer.`)
+    if (notice && notice.cautions.length > 0) lines.push(`  caution: ${notice.cautions.join(', ')}; judge by authority and impact.`)
+    if (notice?.truncated === true) lines.push(`  truncated: read the full arguments with ${TOOL.answerPending} action=read before allowing.`)
     if (input.kind === 'question' && route.action === 'human') lines.push('  The human must answer the original question in its session; do not use dot_answer.')
     for (const q of input.questions ?? []) {
       lines.push(`  [${q.id}] ${q.question}${q.options?.length ? ' options: ' + q.options.map(o => o.label).join(' | ') : ''}${q.multiSelect ? ' (multi)' : ''}`)
@@ -2462,6 +2759,15 @@ export class DotService {
     // Decisions live in the system prompt and agreements, never repeated in each notice.
     // An already-aborted request is not queued at all.
     if (this.pending.get(opened.id)) {
+      if (input.kind === 'approval' && (input.arguments !== undefined || input.reason !== undefined || input.detail !== undefined)) {
+        void this.saveApprovalDetail({
+          requestId: opened.id,
+          sessionId: input.sessionId,
+          toolName: input.toolName ?? input.subject,
+          ...(input.reason !== undefined ? { reason: input.reason } : {}),
+          ...(input.arguments !== undefined ? { arguments: input.arguments } : input.detail !== undefined ? { arguments: input.detail } : {}),
+        }).catch(() => undefined)
+      }
       this.emit({ event: DOT_TRACE.approvalOpened, message: `Opened ${input.kind} ${opened.id}.`, sessionId: input.sessionId, ...(run ? { changeId: run.changeId } : {}), data: { requestId: opened.id, kind: input.kind } })
       this.notify({ sessionId: input.sessionId, kind: input.kind, requestId: opened.id, text: lines.join('\n'), at: this.now(), display: {
         ...approvalDisplay(input.arguments),
@@ -2581,6 +2887,7 @@ export class DotService {
     this.releaseChildSeals()
     if (this.disposal) return this.disposal
     this.closing = true
+    this.selfDeployAbort.abort()
     this.batcher.dispose()
     this.idleChecker.cancel()
     this.cancelKeepalive()
@@ -2589,6 +2896,7 @@ export class DotService {
     this.updates.dispose()
     this.pending.dispose()
     this.disposal = (async () => {
+      await this.selfDeployChain
       await this.reflection.dispose()
       await this.lane
       await Promise.allSettled([...this.inFlight])
@@ -2694,15 +3002,57 @@ export class DotService {
    * commit; a lost receipt or a stop that is still settling does not block
    * unrelated changes.
    */
-  private runHost() { return bindRunSession(this.host, this.store.settings.taskPermission) }
+  private runHost(runId?: string, mode: 'mutate' | 'verify' = 'mutate', overridePermission?: TaskPermission) {
+    const run = runId ? this.store.work.run(runId) : undefined
+    const pinned = overridePermission ?? run?.taskPermission
+    if (mode === 'verify') {
+      if (pinned) return bindRunSession(this.host, pinned, { verifyOnly: true, pinned: true })
+      return bindRunSession(this.host, this.store.settings.taskPermission, { verifyOnly: true })
+    }
+    return bindRunSession(this.host, pinned ?? this.store.settings.taskPermission)
+  }
+
+  /** Permission Dorothy intends on this session's run (`'read-only'` for read-only runs), if any. */
+  runTaskPermission(sessionId: string): IntendedRunPermission | undefined {
+    const run = this.store.work.sessionRun(sessionId)
+    if (!run) return undefined
+    if (run.access === 'read' || run.kind === 'review' || !scopeWrites(run.writeScope)) return 'read-only'
+    return run.taskPermission
+  }
 
   launchWorkRun(runId: string, text: string, preset?: string, model?: { readonly provider: string; readonly model: string }) {
     return this.launchAndRemember(runId, text, preset, model)
   }
 
+  private effectiveWritePermission(requested: TaskPermission = this.store.settings.taskPermission): TaskPermission {
+    const resolved = this.host.effectiveTaskPermission?.(requested)
+    return resolved === 'workspace-write' || resolved === 'danger-full-access' || resolved === 'safe-auto' || resolved === 'auto'
+      ? resolved
+      : requested
+  }
+
   private async launchAndRemember(runId: string, text: string, preset?: string, model?: { readonly provider: string; readonly model: string }) {
-    const launched = await launchReservedRun(this.store.work, this.runHost(), runId, text, preset, model, async () => { await this.rememberRun(runId) })
-    if (launched.ok) await this.rememberRun(runId)
+    const existing = this.store.work.run(runId)
+    const isWrite = existing !== undefined && (existing.access === 'write' || (existing.access === undefined && existing.kind !== 'review' && scopeWrites(existing.writeScope)))
+    const targetPermission = isWrite
+      ? existing.taskPermission ?? this.effectiveWritePermission(this.store.settings.taskPermission)
+      : undefined
+    const launched = await launchReservedRun(
+      this.store.work,
+      this.runHost(runId, 'mutate', targetPermission),
+      runId,
+      text,
+      preset,
+      model,
+      async () => {
+        if (targetPermission) await this.store.work.pinTaskPermission(runId, targetPermission)
+        await this.rememberRun(runId)
+      },
+    )
+    if (launched.ok) {
+      if (targetPermission) await this.store.work.pinTaskPermission(runId, targetPermission)
+      await this.rememberRun(runId)
+    }
     return launched
   }
 
@@ -2716,11 +3066,11 @@ export class DotService {
       sessionId, origin: 'started',
       title: change ? runTitle(change.title, `${run.changeId}/${run.id}`) : run.id,
       goal: `${run.changeId} ${run.id} input ${run.inputRef}@${run.inputRevision}`,
-      cwd: run.cwd, at: this.now(),
+      cwd: onDiskPath(run.cwd), at: this.now(),
     })
   }
   supplementWorkRun(runId: string, text: string, senderId: string, expected: { readonly inputRef: string; readonly inputRevision: number }) {
-    return supplementRun(this.store.work, this.runHost(), runId, text, senderId, this.now(), expected)
+    return supplementRun(this.store.work, this.runHost(runId, 'verify'), runId, text, senderId, this.now(), expected)
   }
 
   /** One context delivery on the named run. The work book keeps the input, the sender and any unconfirmed delivery. */
@@ -2823,6 +3173,7 @@ export class DotService {
     const isolation = change.isolation
     if (isolation?.kind !== 'worktree') return { ok: false, code: 'invalid', message: `${changeId} is not an isolated change` }
     if (isolation.state !== 'active') return { ok: false, code: 'invalid', message: `${changeId} was already ${isolation.state}` }
+    if (mode === 'merge' && isolation.base !== undefined) return { ok: false, code: 'invalid', message: `${changeId} was cut from ${isolation.base.ref}, not your checkout; keep the branch and integrate it yourself` }
     const view = this.store.work.workView(changeId)
     if (!change.closeout || view?.status !== 'done') return { ok: false, code: 'invalid', message: `${changeId} is not accepted yet` }
     const git = this.git()
@@ -2847,7 +3198,13 @@ export class DotService {
     const delivered = subject.changes.map(row => ({ ...row, path: `${subdir}${row.path}` }))
     let commitSha: string | undefined
     try {
-      const committed = await commitDelivery({ worktree: isolation.worktree, files: delivered, message: `${change.title}\n\nDorothy task ${changeId}` }, git)
+      const committed = await commitDelivery({
+        worktree: isolation.worktree,
+        files: delivered,
+        baseSha: isolation.baseSha,
+        branch: isolation.branch,
+        message: `${change.title}\n\nDorothy task ${changeId}`,
+      }, git)
       if (!committed.ok) return { ok: false, code: 'failed', message: committed.message }
       commitSha = committed.commitSha
     } catch (error) {
@@ -2870,7 +3227,105 @@ export class DotService {
     await withSha({ state: 'merged', ...(merged.mergedInto ? { mergedInto: merged.mergedInto } : {}) })
     // The branch is merged now, so -d succeeds and the worktree goes with it.
     await removeTaskWorktree({ repoRoot: isolation.repoRoot, worktree: isolation.worktree, branch: isolation.branch }, git)
-    return this.integrated(change, `merged ${isolation.branch} into ${merged.mergedInto}`)
+    let deploySha = commitSha
+    try {
+      const head = await git(['rev-parse', 'HEAD'], isolation.repoRoot)
+      if (head) deploySha = head
+    } catch { /* keep the worktree commit when HEAD cannot be read */ }
+    const deploying = this.queueSelfDeploy(isolation, deploySha, change)
+    return this.integrated(change, `merged ${isolation.branch} into ${merged.mergedInto}${deploying ? '; dot is rebuilding in the background, a notice follows when it finishes' : ''}`)
+  }
+
+  /**
+   * A merge landing in dot's own linked checkout is a self-upgrade. The build
+   * can take minutes, so it must not hold the panel's work.integrate RPC: the
+   * merge answers at once and the deploy runs behind selfDeployChain — one at
+   * a time, so two merges never build concurrently — reporting its outcome to
+   * dot's session through the same held-notice path integrated() uses.
+   */
+  private selfDeployChain: Promise<void> = Promise.resolve()
+  private selfDeployAbort = new AbortController()
+
+  /** Specs await queued self-upgrade deploys here; production never waits on them. */
+  selfDeploysSettled(): Promise<void> { return this.selfDeployChain }
+
+  private queueSelfDeploy(isolation: TaskIsolation, commitSha: string | undefined, change: ChangeRecord): boolean {
+    const self = this.options.selfInstall
+    if (self?.mode !== 'linked' || !this.sameRealPath(isolation.repoRoot, self.root)) return false
+    if (this.closing || this.selfDeployAbort.signal.aborted) return false
+    const root = self.root
+    const sha = commitSha ?? isolation.baseSha
+    const signal = this.selfDeployAbort.signal
+    this.selfDeployChain = this.selfDeployChain.then(async () => {
+      if (this.closing || signal.aborted) return
+      const text = await this.deploySelfBuild(root, sha, signal)
+      if (text === undefined) return
+      const dot = this.store.dotSessionId
+      if (dot) this.notify({ sessionId: dot, kind: 'turn-end', text: `Isolated task ${change.id} "${change.title}": ${text}.`, at: this.now() })
+    }).catch(error => this.options.log?.(`dsh-dot: self-upgrade deploy failed: ${messageOf(error)}`))
+    return true
+  }
+
+  /**
+   * Back the deployed lib up, rebuild it in place and roll the backup back on
+   * a failed build. A dirty live checkout ships whatever is uncommitted, so it
+   * is never built — the human commits or stashes first. The persisted marker
+   * lets the next start report whether the running bundle is the deployed one;
+   * lastBackup (the lib copy itself) stays for the panel's restore hint.
+   */
+  private async deploySelfBuild(root: string, sha: string, signal?: AbortSignal): Promise<string | undefined> {
+    // `git diff --quiet HEAD` semantics: staged or unstaged tracked changes
+    // count as dirty; untracked files and the gitignored lib/ do not.
+    if (signal?.aborted) return undefined
+    const dirty = await this.git()(['diff', '--quiet', 'HEAD'], root).then(() => false, () => true)
+    if (dirty) {
+      return `merged, but dot was not rebuilt because ${root} has uncommitted tracked changes that would ship in the build. Commit or stash them, run pnpm build there, then restart DeepSeek Harness.`
+    }
+    const backupDir = join(this.options.homeDir, 'self-upgrade', `${Math.floor(this.now())}-${sha.slice(0, 8)}`)
+    try {
+      cpSync(join(root, 'lib'), join(backupDir, 'lib'), { recursive: true })
+    } catch (error) {
+      return `merged, but the previous lib could not be backed up so dot was not rebuilt: ${messageOf(error)}`
+    }
+    const build = await (this.options.selfBuild ?? defaultSelfBuild)(root, signal).catch(error => ({ ok: false as const, output: messageOf(error) }))
+    if (!build.ok) {
+      try {
+        rmSync(join(root, 'lib'), { recursive: true, force: true })
+        cpSync(join(backupDir, 'lib'), join(root, 'lib'), { recursive: true })
+        try { rmSync(backupDir, { recursive: true, force: true }) } catch { /* best-effort drop of the failed attempt */ }
+        return `merged, but the rebuild failed and the previous lib was restored from ${join(backupDir, 'lib')}. Build output: ${build.output}`
+      } catch (error) {
+        return `merged, but the rebuild failed and the previous lib could not be restored from ${join(backupDir, 'lib')}: ${messageOf(error)}. Build output: ${build.output}`
+      }
+    }
+    await this.store.setSelfUpgrade({ at: this.now(), commitSha: sha, backupDir, libHash: libHashOf(root) ?? '' })
+    await this.store.setSelfBackup({ dir: join(backupDir, 'lib'), lib: join(root, 'lib') })
+    this.pruneSelfUpgradeBackups()
+    return `merged and dot was rebuilt; the previous lib is kept at ${join(backupDir, 'lib')}. Restart DeepSeek Harness to load it.`
+  }
+
+  private sameRealPath(left: string, right: string): boolean {
+    try {
+      return canonicalPath(realpathSync.native(left)) === canonicalPath(realpathSync.native(right))
+    } catch {
+      return false
+    }
+  }
+
+  /** Keep only the newest backup directories under `<homeDir>/self-upgrade`. */
+  private pruneSelfUpgradeBackups(keep = 3): void {
+    const root = join(this.options.homeDir, 'self-upgrade')
+    const protectedDir = this.store.selfBackup?.dir ? dirname(this.store.selfBackup.dir) : undefined
+    try {
+      const rows = readdirSync(root, { withFileTypes: true })
+        .filter(row => row.isDirectory())
+        .map(row => ({ path: join(root, row.name), at: statSync(join(root, row.name)).mtimeMs }))
+        .sort((a, b) => b.at - a.at)
+      for (const row of rows.slice(keep)) {
+        if (protectedDir && canonicalPath(row.path) === canonicalPath(protectedDir)) continue
+        rmSync(row.path, { recursive: true, force: true })
+      }
+    } catch { /* pruning is best effort */ }
   }
 
   /** The integration result reaches dot as a held notice; the board row shows the same state. */
@@ -3279,10 +3734,15 @@ export class DotService {
       ...(deliverableLanguage !== undefined ? { deliverableLanguage } : {}),
     }
     if (action === 'create') {
-      const change = await this.createChangeFromTool(args)
+      const created = await this.createChangeFromTool(args)
+      const change = created.change
       const recipe = change.recipe ? this.store.recipe(change.recipe.id) : undefined
       const view = this.store.work.workView(change.id)
-      return JSON.stringify(recipe ? { ...view, recipe: { id: recipe.id, name: recipe.name, revision: recipe.revision } } : view)
+      return JSON.stringify({
+        ...view,
+        ...(created.forcedIsolation ? { isolationNote: "This directory is dot's own live checkout, so the task runs in a git worktree even though isolation was \"none\"." } : {}),
+        ...(recipe ? { recipe: { id: recipe.id, name: recipe.name, revision: recipe.revision } } : {}),
+      })
     }
     const changeId = text('task_id') ?? ''
     if (!changeId) throw new DotError('dot/invalid', 'task_id is required')
@@ -3294,10 +3754,11 @@ export class DotService {
       : previousInput ? requirementsFollowGoal(previousInput) : undefined
     const changesInput = goal !== undefined || explicitRequirements !== undefined || steps !== undefined || dir !== undefined
       || constraints !== undefined || userRequest !== undefined || deliverableLanguage !== undefined
+    const nextDir = dir !== undefined ? this.boundSelfDir(currentChange, dir) : undefined
     const revised = await this.store.work.reviseChange(changeId, {
       ...(title !== undefined ? { title } : {}),
       ...(goal !== undefined ? { goal } : {}),
-      ...(dir !== undefined ? { cwd: dir } : {}),
+      ...(nextDir !== undefined ? { cwd: nextDir } : {}),
       ...(requirements ? { requirements } : {}),
       ...(changesInput && requirementsFromGoal !== undefined ? { requirementsFromGoal } : {}),
       ...(steps ? { steps } : {}),
@@ -3326,8 +3787,139 @@ export class DotService {
     return detectWorkspaceRoot(cwd)
   }
 
+  /**
+   * dot's own checkout is never a plain write target. A linked checkout gets
+   * a git worktree whose merge rebuilds the bundle; the installed package is
+   * the plugin manager's, so editing it is refused outright.
+   */
+  private selfIsolation(dir: string): 'worktree' | undefined {
+    const self = this.options.selfInstall
+    if (!self || !insideOrEqual(self.root, realpathOrResolve(dir))) return undefined
+    if (self.mode === 'installed') {
+      throw new DotError('dot/self', `${dir} is dot's own installed package, managed by the plugin manager; dot does not edit it. Changes to dot itself go to the maintainers as an issue or PR draft; settings, agreements, cognition and recipes change through their own tools.`)
+    }
+    return 'worktree'
+  }
+
+  /**
+   * A change made before the self-checkout guard can still name dot's live
+   * checkout. Its write runs stop at the one point every dispatch passes
+   * between reservation and launch — a plain cwd has no merge step to rebuild
+   * the bundle, and a failed build could leave dot unloadable. Isolated
+   * changes merge through the worktree path and stay allowed, but only while
+   * the actual cwd still lives in that worktree.
+   */
+  private selfRunBlocked(change: ChangeRecord, run: RunRecord | undefined, scope: WriteScope): boolean {
+    const self = this.options.selfInstall
+    if (!self || !scopeWrites(scope)) return false
+    const root = self.root
+    const isolation = change.isolation
+    // Only a linked self-maintenance worktree gets cwd / workspace-exclusive
+    // exemption; explicit scope.paths are always checked against live self.root.
+    const selfWorktree = (() => {
+      if (isolation?.kind !== 'worktree' || !this.sameRealPath(isolation.repoRoot, root)) return false
+      try {
+        return insideOrEqual(realpathOrResolve(isolation.worktree), realpathOrResolve(change.cwd))
+      } catch {
+        // A missing worktree still must not authorize a live-checkout cwd.
+        return false
+      }
+    })()
+    if (!selfWorktree && insideOrEqual(root, realpathOrResolve(change.cwd))) return true
+    const scopeRoot = run?.workspaceRoot || change.cwd
+    const scopeRootReal = realpathOrResolve(scopeRoot)
+    if (self.mode === 'installed') {
+      // Only the package itself is off-limits. A host project that merely
+      // contains node_modules/ds-dot is a normal write target.
+      if (scope.kind === 'workspace-exclusive') return !selfWorktree && insideOrEqual(root, scopeRootReal)
+      return scope.paths.some(entry => {
+        try {
+          return insideOrEqual(root, realpathOrResolve(absoluteScopePath(scopeRoot, entry.path)))
+        } catch {
+          return false
+        }
+      })
+    }
+    if (scope.kind === 'workspace-exclusive') {
+      if (selfWorktree) return false
+      return insideOrEqual(scopeRootReal, root) || insideOrEqual(root, scopeRootReal)
+    }
+    return scope.paths.some(entry => {
+      try {
+        const absolute = realpathOrResolve(absoluteScopePath(scopeRoot, entry.path))
+        return insideOrEqual(root, absolute) || (entry.type === 'directory' && insideOrEqual(absolute, root))
+      } catch {
+        return false
+      }
+    })
+  }
+
+  /**
+   * Revise must not walk an isolated self task back onto the live checkout,
+   * and must not aim a normal task at an installed package. Linked live
+   * checkout paths remap into the existing worktree.
+   */
+  private boundSelfDir(change: ChangeRecord | undefined, dir: string): string {
+    if (!change) {
+      this.selfIsolation(dir)
+      return dir
+    }
+    const isolation = change.isolation
+    if (isolation?.kind === 'worktree') {
+      const requested = realpathOrResolve(dir)
+      const worktree = realpathOrResolve(isolation.worktree)
+      if (insideOrEqual(worktree, requested)) return dir
+      const repoRoot = realpathOrResolve(isolation.repoRoot)
+      if (insideOrEqual(repoRoot, requested)) {
+        const rel = relative(repoRoot, requested)
+        return rel && rel !== '.' ? join(isolation.worktree, rel) : isolation.worktree
+      }
+      throw new DotError('dot/self', `${dir} leaves the isolated worktree for this task; stay inside ${isolation.worktree} or the original checkout at ${isolation.repoRoot}.`)
+    }
+    this.selfIsolation(dir)
+    return dir
+  }
+
+  /** Persist the original checkout, not the ephemeral worktree path, when saving a recipe from an isolated task. */
+  private recipeDirFromChange(change: ChangeRecord): { dir: string; isolation?: 'worktree' } {
+    const isolation = change.isolation
+    if (isolation?.kind !== 'worktree') return { dir: change.cwd }
+    const rel = relative(isolation.worktree, change.cwd)
+    const inside = rel === '' || (rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel))
+    const dir = inside && rel && rel !== '.' ? join(isolation.repoRoot, rel) : isolation.repoRoot
+    return { dir, isolation: 'worktree' }
+  }
+
+  /** Map in-checkout absolute write paths onto the worktree; keep paths already in the worktree and relative paths; reject anything outside both. */
+  private remapSelfScopePaths(fromRoot: string, toRoot: string, paths: string): string {
+    const listed = pathScope(paths)
+    if (!listed) return paths
+    const from = realpathOrResolve(fromRoot)
+    const to = realpathOrResolve(toRoot)
+    return JSON.stringify(listed.map(entry => {
+      if (!isAbsolute(entry.path)) return entry
+      const absolute = realpathOrResolve(entry.path)
+      if (insideOrEqual(to, absolute)) return entry
+      if (!insideOrEqual(from, absolute)) {
+        throw new DotError('dot/invalid', `scope ${entry.path} is outside ${fromRoot}`)
+      }
+      const rel = relative(from, absolute)
+      return { path: rel && rel !== '.' ? join(toRoot, rel) : toRoot, type: entry.type }
+    }))
+  }
+
+  /** Open a dot/task-* worktree for `dir`; a git failure reads as dot/invalid like create reports it. */
+  private async taskWorktreeFor(dir: string, base?: { readonly ref: string; readonly remote?: string }): Promise<TaskWorktree> {
+    try {
+      return await createTaskWorktree({ dir, homeDir: this.options.homeDir, ...(base !== undefined ? { base } : {}) }, this.git())
+    } catch (error) {
+      throw new DotError('dot/invalid', `isolation "worktree" could not be prepared: ${messageOf(error)}`)
+    }
+  }
+
   /** The create branch of dot_task: returns the created record so callers (recipe dispatch) need not parse the view JSON. */
-  private async createChangeFromTool(args: Record<string, unknown>): Promise<ChangeRecord> {
+  private async createChangeFromTool(args: Record<string, unknown>): Promise<{ readonly change: ChangeRecord; readonly forcedIsolation: boolean }> {
+    this.assertOpen()
     const text = (key: string) => typeof args[key] === 'string' ? args[key] as string : undefined
     const title = text('title')
     const goal = text('goal')
@@ -3355,13 +3947,20 @@ export class DotService {
     if (isolationArg !== undefined && isolationArg !== 'none' && isolationArg !== 'worktree') {
       throw new DotError('dot/invalid', 'isolation must be "none" or "worktree"')
     }
-    const wantsWorktree = isolationArg === 'worktree' || (isolationArg === undefined && recipe?.isolation === 'worktree')
-    let worktree: Awaited<ReturnType<typeof createTaskWorktree>> | undefined
+    const forcedIsolation = this.selfIsolation(createDir) === 'worktree'
+    const wantsWorktree = forcedIsolation || isolationArg === 'worktree' || (isolationArg === undefined && recipe?.isolation === 'worktree')
+    const baseRef = typeof args.base_ref === 'string' && args.base_ref.trim() !== '' ? args.base_ref.trim() : undefined
+    const baseRemote = typeof args.base_remote === 'string' && args.base_remote.trim() !== '' ? args.base_remote.trim() : undefined
+    if (baseRemote !== undefined && baseRef === undefined) throw new DotError('dot/invalid', 'base_remote needs base_ref')
+    if ((baseRef !== undefined || baseRemote !== undefined) && !wantsWorktree) throw new DotError('dot/invalid', 'base_ref and base_remote need isolation "worktree"')
+    const base = baseRef === undefined ? undefined : { ref: baseRef, ...(baseRemote !== undefined ? { remote: baseRemote } : {}) }
+    const storedBase = base === undefined ? undefined : { ref: base.ref, ...(base.remote !== undefined ? { remote: sanitizeRemoteDisplay(base.remote) } : {}) }
+    let worktree: TaskWorktree | undefined
     if (wantsWorktree) {
-      try {
-        worktree = await createTaskWorktree({ dir: createDir, homeDir: this.options.homeDir }, this.git())
-      } catch (error) {
-        throw new DotError('dot/invalid', `isolation "worktree" could not be prepared: ${messageOf(error)}`)
+      worktree = await this.taskWorktreeFor(createDir, base)
+      if (this.closing) {
+        await removeTaskWorktree({ repoRoot: worktree.repoRoot, worktree: worktree.worktree, branch: worktree.branch, baseSha: worktree.baseSha }, this.git()).catch(() => undefined)
+        throw new DotError('dot/disposed', 'dot is shutting down')
       }
     }
     let change: ChangeRecord
@@ -3378,7 +3977,9 @@ export class DotService {
         ...(worktree !== undefined ? {
           isolation: {
             kind: 'worktree' as const, repoRoot: worktree.repoRoot, worktree: worktree.worktree,
-            branch: worktree.branch, baseSha: worktree.baseSha, state: 'active' as const, at: this.now(),
+            branch: worktree.branch, baseSha: worktree.baseSha,
+            ...(storedBase !== undefined ? { base: storedBase } : {}),
+            state: 'active' as const, at: this.now(),
           },
         } : {}),
         ...(maxConcurrentRuns !== undefined ? { maxConcurrentRuns } : {}),
@@ -3395,7 +3996,7 @@ export class DotService {
     const humanReview = args.human_review !== undefined ? args.human_review === true : recipe?.humanReview === true
     if (humanReview) await this.store.work.requestOversight(change.id, this.now())
     void this.pruneWorkArtifactsIfNeeded()
-    return change
+    return { change, forcedIsolation }
   }
 
   private async reserveFromTool(args: Record<string, unknown>): Promise<{ changeId: string; runId: string; phase: RunRecord['phase']; requestedSessionId: string }> {
@@ -3770,6 +4371,9 @@ export class DotService {
   /** A version-matched user decision wakes dot once. It does not call decide, accept, or reject, and it does not open a session. */
   private openedDot(sessionId: string): string {
     this.recoverDecisionWakes()
+    if (this.store.selfUpgrade) {
+      void this.resolveSelfUpgrade().catch(error => this.options.log?.(`dsh-dot: self-upgrade marker check failed: ${messageOf(error)}`))
+    }
     return sessionId
   }
 
@@ -3910,22 +4514,46 @@ export class DotService {
       const candidate = plannedOccupant(cwd, plannedScope(role, input.access, input.paths, cwd), this.rootHint(cwd))
       return (await this.scopeReport(cwd, change?.id ?? '', candidate)).text
     }
+    let paths = input.paths
     if (!change) {
       const cwd = workspace?.path ?? input.cwd ?? (await this.homeWorkspace()).path
       if (!cwd || !isAbsolute(cwd)) throw new DotError('dot/invalid', 'directory must be absolute')
       const goal = input.goal?.trim() || input.instruction.trim()
       if (!goal) throw new DotError('dot/invalid', 'instruction must be non-empty')
-      change = await this.store.work.createChange({
-        title: input.title,
-        cwd,
-        goal,
-        requirements: [{ requirementRef: 'goal', text: goal, required: true }],
-        requirementsFromGoal: true,
-        ...(input.priority !== undefined ? { priority: input.priority } : {}),
-        at: this.now(),
-      })
+      // A write dispatch gets the same forced isolation an explicit create does.
+      const worktree = input.access === 'write' && this.selfIsolation(cwd) === 'worktree'
+        ? await this.taskWorktreeFor(cwd)
+        : undefined
+      try {
+        if (worktree !== undefined && paths) paths = this.remapSelfScopePaths(cwd, worktree.cwd, paths)
+        change = await this.store.work.createChange({
+          title: input.title,
+          cwd: worktree?.cwd ?? cwd,
+          goal,
+          requirements: [{ requirementRef: 'goal', text: goal, required: true }],
+          requirementsFromGoal: true,
+          ...(worktree !== undefined ? {
+            isolation: {
+              kind: 'worktree' as const, repoRoot: worktree.repoRoot, worktree: worktree.worktree,
+              branch: worktree.branch, baseSha: worktree.baseSha, state: 'active' as const, at: this.now(),
+            },
+          } : {}),
+          ...(input.priority !== undefined ? { priority: input.priority } : {}),
+          at: this.now(),
+        })
+      } catch (error) {
+        if (worktree !== undefined) {
+          await removeTaskWorktree({ repoRoot: worktree.repoRoot, worktree: worktree.worktree, branch: worktree.branch, baseSha: worktree.baseSha }, this.git()).catch(() => undefined)
+        }
+        throw error
+      }
       changeId = change.id
       void this.pruneWorkArtifactsIfNeeded()
+    } else if (paths && role !== 'review' && input.access === 'write' && change.isolation?.kind === 'worktree') {
+      const self = this.options.selfInstall
+      if (self?.mode === 'linked' && this.sameRealPath(change.isolation.repoRoot, self.root)) {
+        paths = this.remapSelfScopePaths(change.isolation.repoRoot, change.isolation.worktree, paths)
+      }
     }
     // Three failed rounds on this input revision is a sign to stop, not retry.
     if (role !== 'review') {
@@ -3940,17 +4568,24 @@ export class DotService {
     if (selected && input.access === 'write' && !scopeWrites(selected.writeScope)) {
       throw new DotError('dot/invalid', `${selected.id} is read-only, so access "write" does not start it. Reserve a write run with access "write" and paths covering the files. Example: paths ${WRITE_PATHS_EXAMPLE}. This run was not started.`)
     }
-    if (!selected && role !== 'review' && input.access !== 'write' && input.paths && pathScope(input.paths)?.length) {
+    if (!selected && role !== 'review' && input.access !== 'write' && paths && pathScope(paths)?.length) {
       throw new DotError('dot/invalid', `these paths are a write scope, so access must be "write", not "${input.access ?? 'read'}". Example: access "write", paths ${WRITE_PATHS_EXAMPLE}. The run was not started.`)
     }
-    const scope = selected ? selected.writeScope : plannedScope(role, input.access, input.paths, change.cwd)
+    const scope = selected ? selected.writeScope : plannedScope(role, input.access, paths, change.cwd)
+    // Changes older than the self-checkout guard can still name dot's live
+    // checkout; their write runs stop here, before any reservation is taken.
+    if (role !== 'review' && this.selfRunBlocked(change, selected, scope)) {
+      throw new DotError('dot/self', change.isolation?.kind === 'worktree'
+        ? `${change.id} targets dot's own live checkout in its write scope, so no write run starts on it.`
+        : `${change.id} targets dot's own live checkout without isolation, so no write run starts on it. Create a new task for this work; it runs in a git worktree.`)
+    }
     const report = await this.scopeReport(change.cwd, change.id, selected ? occupantOf(selected) : plannedOccupant(change.cwd, scope, this.rootHint(change.cwd)))
     if (scopeWrites(scope) && report.blocked) throw new DotError('dot/locked', report.text)
     const note = report.text === 'Directory lock is available.' ? '' : `\n${report.text}`
     let createdHere = false
     let runId = selected?.id
     if (!runId) {
-      const reserved = await this.reserveFromTool({ task_id: changeId, role, access: input.access ?? 'read', ...(input.paths ? { paths: input.paths } : {}), ...(input.stepRefs ? { step_refs: input.stepRefs } : {}) })
+      const reserved = await this.reserveFromTool({ task_id: changeId, role, access: input.access ?? 'read', ...(paths ? { paths } : {}), ...(input.stepRefs ? { step_refs: input.stepRefs } : {}) })
       runId = reserved.runId
       createdHere = true
     }
@@ -4099,23 +4734,26 @@ export class DotService {
   }
 
   /** Persona, model, agreements, cognition and capability grants as a segment starting now would freeze them. */
-  private async frozen(): Promise<Pick<Segment, 'persona' | 'model' | 'agreements' | 'cognition' | 'capabilities'>> {
+  private async frozen(sessionId?: string): Promise<Pick<Segment, 'persona' | 'model' | 'agreements' | 'cognition' | 'capabilities'>> {
     const model = this.host.modelKey()
-    const capabilities = this.options.capabilities?.signature()
+    // The record freezes the grants the apply actually resolved: a grant saved
+    // while the apply awaited the bundle scan must surface as a mismatch later.
+    const capabilities = this.options.capabilities?.appliedSignature(sessionId)
+      ?? this.options.capabilities?.signature()
     return {
       persona: personaSection(this.store.settings, this.locale),
       ...model ? { model } : {},
-      agreements: agreementsSection(this.store.agreements),
-      cognition: cognitionSection(this.store.cognition),
+      agreements: agreementsSection(this.store.agreementEntries),
+      cognition: cognitionSection(this.store.cognitionEntries, this.cognitionPromptEntries),
       ...capabilities !== undefined ? { capabilities } : {},
     }
   }
 
   /** Agreements block for a prompt that no segment record covers yet. */
-  currentAgreementsBlock(): string { return agreementsSection(this.store.agreements) }
+  currentAgreementsBlock(): string { return agreementsSection(this.store.agreementEntries) }
 
   /** Cognition block for a prompt that no segment record covers yet. */
-  currentCognitionBlock(): string { return cognitionSection(this.store.cognition) }
+  currentCognitionBlock(): string { return cognitionSection(this.store.cognitionEntries, this.cognitionPromptEntries) }
 
   private repliedInEvents(events: readonly RawEvent[]): { readonly replied: boolean; readonly lastReplyAt?: number } {
     let replied = false
@@ -4139,7 +4777,7 @@ export class DotService {
     const wanted = await this.frozen()
     const capChanged = (segment.capabilities ?? EMPTY_CAPABILITIES_SIGNATURE) !== (wanted.capabilities ?? EMPTY_CAPABILITIES_SIGNATURE)
     if (capChanged) await this.host.reapplyCapabilities?.(dot)
-    if (segment.persona !== wanted.persona || capChanged) await this.store.refreezeSegment(wanted)
+    if (segment.persona !== wanted.persona || capChanged) await this.store.refreezeSegment(await this.frozen(dot))
   }
 
   /**
@@ -4163,7 +4801,7 @@ export class DotService {
       if (segment.persona !== wanted.persona || segment.model !== wanted.model
         || (wanted.agreements ?? '') !== (segment.agreements ?? '')
         || (wanted.cognition ?? '') !== (segment.cognition ?? '')
-        || capChanged) await this.store.refreezeSegment(wanted)
+        || capChanged) await this.store.refreezeSegment(await this.frozen(dot))
       return undefined
     }
     const view = await this.host.dotContext(dot)
@@ -4228,7 +4866,7 @@ export class DotService {
     await this.store.beginSegment({
       sessionId,
       startedAt: at,
-      ...await this.frozen(),
+      ...await this.frozen(sessionId),
       opening,
       ...handoff ? { handoff } : {},
       reason,
@@ -4263,6 +4901,25 @@ export class DotService {
     if (!sessionId.trim()) throw new DotError('dot/invalid', 'session_id must be non-empty')
     if (this.isDot(sessionId)) throw new DotError('dot/invalid', 'that is dot itself')
   }
+}
+
+/** Extract explicit working-directory overrides from JSON tool arguments so retargeted shell calls cannot masquerade as in-worktree commands. */
+function approvalArgCwds(rawArgs: string | undefined, baseCwd: string | undefined): readonly string[] | null {
+  if (!rawArgs) return []
+  let parsed: unknown
+  try { parsed = JSON.parse(rawArgs) } catch { return [] }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return []
+  const row = parsed as Record<string, unknown>
+  const dirs: string[] = []
+  for (const key of ['workdir', 'cwd', 'workingDirectory', 'working_directory']) {
+    if (!Object.hasOwn(row, key) || row[key] === undefined || row[key] === null) continue
+    const value = row[key]
+    if (typeof value !== 'string' || !value.trim()) return null
+    if (baseCwd) { dirs.push(resolve(baseCwd, value)); continue }
+    if (!isAbsolute(value)) return null
+    dirs.push(value)
+  }
+  return dirs
 }
 
 export function messageOf(error: unknown): string {

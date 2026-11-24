@@ -7,12 +7,13 @@
  */
 import {
   Button, DisclosureRow, IconCheckOutlineRegular, IconChecklistOutlineRegular, IconChevronDownOutlineRegular,
-  IconCloseOutlineRegular, IconCordisPluginOutlineRegular, IconEditOutlineRegular, IconGaugeOutlineRegular,
+  IconCloseOutlineRegular, IconCordisPluginOutlineRegular, IconEditOutlineRegular, IconGaugeOutlineRegular, IconGlobeOutlineRegular,
   IconInspectOutlineRegular, IconShieldOutlineRegular, IconSlidersTwoOutlineRegular, IconUserOutlineRegular,
   IconWarningOutlineRegular, MarkdownText, Modal, modalSelector, StateDot, Tag, TextShimmer, Tooltip, UserMessageBubble,
   type MarkdownLabels, type StateDotState, type TagTone,
 } from '@deepseek-ai/dsh-client-ui-primitives'
-import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type ComponentType, type ReactNode } from 'react'
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ComponentType, type ReactNode } from 'react'
+import { backendMissingText, backendOutdatedStore, writeSelfBackup } from './backend-state.ts'
 import { Board, boardCounts, type BoardFilter } from './board.tsx'
 import { groupBoard, headerBoardCounts, sessionLookup } from './board-groups.ts'
 import { filterVisibleChat } from './chat-filter.ts'
@@ -25,7 +26,7 @@ import {
 import { ContextPanel, type ContextApi } from './context-panel.tsx'
 import { PersonaPanel, type KnowledgeApi } from './persona-panel.tsx'
 import { TrajectoryPanel, type TrajectoryApi } from './trajectory-panel.tsx'
-import type { BoardView, ChatItem, ChatSnapshot, DotSettings, RecipeBoardRow, RolloverReason } from './contracts.ts'
+import type { BoardView, ChatItem, ChatSnapshot, DotSettings, RecipeBoardRow, RolloverReason, SelfStatusView } from './contracts.ts'
 import type { ChatImage } from './chat-images.ts'
 import { SettingsPanel, useSettingProposals, type SaveNotice, type SettingsApi } from './settings-panel.tsx'
 import type { RenderFactorySlot } from '@klarkxy/dsh-plugin-kit/model-picker'
@@ -63,6 +64,8 @@ export interface ChatApi extends SettingsApi, ContextApi, TrajectoryApi, Knowled
   workIntegrate?(payload: WorkIntegratePayload): Promise<void>
   workRead?(request: WorkReadRequest): Promise<{ readonly source: string; readonly body: string; readonly truncated?: boolean; readonly totalBytes?: number }>
   settings(signal: AbortSignal): Promise<DotSettings>
+  /** Where this install runs from and its newest kept pre-upgrade backup; absent on backends older than the endpoint. */
+  selfStatus?(signal: AbortSignal): Promise<SelfStatusView>
 }
 
 /** deep-view's client card, read from its service when that plugin is installed. */
@@ -116,7 +119,7 @@ interface DrawerProps {
 }
 
 const SETTINGS_SECTIONS: ReadonlySet<DrawerTab> = new Set<SettingsSection>([
-  'proposals', 'general', 'takeover', 'dispatch', 'capabilities',
+  'proposals', 'general', 'takeover', 'dispatch', 'capabilities', 'mcp',
 ])
 
 function isSettingsSection(tab: DrawerTab): tab is SettingsSection {
@@ -193,6 +196,7 @@ function WorkDrawer({ locale, api, tab, wide, settings, trajectoryRev, running, 
     { value: 'takeover', label: t(locale, 'tabTakeover'), title: t(locale, 'sRequests'), icon: <IconShieldOutlineRegular size={15} /> },
     { value: 'dispatch', label: t(locale, 'tabDispatch'), title: t(locale, 'sTasks'), icon: <IconChecklistOutlineRegular size={15} /> },
     { value: 'capabilities', label: t(locale, 'tabCapabilities'), title: t(locale, 'sCapabilities'), icon: <IconCordisPluginOutlineRegular size={15} /> },
+    { value: 'mcp', label: t(locale, 'tabMcp'), title: t(locale, 'sMcp'), icon: <IconGlobeOutlineRegular size={15} /> },
     { value: 'persona', label: t(locale, 'tabPersona'), title: t(locale, 'personaTitle'), icon: <IconUserOutlineRegular size={15} />, dirty: personaDirty },
   ]
   const inspectItems: readonly DrawerNavItem[] = isTasks ? [] : [
@@ -275,7 +279,7 @@ function WorkDrawer({ locale, api, tab, wide, settings, trajectoryRev, running, 
             {tab === 'tasks'
               ? tasks
               : isSettingsSection(tab)
-                ? <SettingsPanel locale={locale} api={api} section={tab} proposals={proposalState} {...settings ? { settings } : {}} onSaved={onSaved} onStatusChange={setSaveNotice} onProposalCount={onProposalCount} {...renderFactorySlot ? { renderFactorySlot } : {}} />
+                ? <SettingsPanel locale={locale} api={api} section={tab} proposals={proposalState} {...settings ? { settings } : {}} onSaved={onSaved} onStatusChange={setSaveNotice} onProposalCount={onProposalCount} onSectionChange={requestTab} {...renderFactorySlot ? { renderFactorySlot } : {}} />
                 : tab === 'persona'
                   ? <PersonaPanel locale={locale} api={api} {...settings ? { settings } : {}} discardSignal={discardSignal} onDirtyChange={onDirtyChange} onSaved={onSaved} onStatusChange={setSaveNotice} />
                   : tab === 'context'
@@ -395,7 +399,7 @@ export function RecipesView({ locale, api, rows, error, onChanged }: {
   }
   if (rows.length === 0) {
     if (error === undefined) return <p className="dsh-ui-hint">{t(locale, 'recipeEmpty')}</p>
-    return <div className="dsh-ui-row" role="alert"><span className="dsh-ui-error">{t(locale, 'loadFailed')}: {error}</span><Button variant="ghost" onClick={onChanged}>{t(locale, 'retry')}</Button></div>
+    return <div className="dsh-ui-row" role="alert"><span className="dsh-ui-error" style={{ whiteSpace: 'pre-line' }}>{backendMissingText(locale, error) ?? `${t(locale, 'loadFailed')}: ${error}`}</span><Button variant="ghost" onClick={onChanged}>{t(locale, 'retry')}</Button></div>
   }
   return (
     <div className="dsh-dot-recipes">
@@ -547,6 +551,23 @@ export function ChatPanel({ locale, api, Card, onOpenSession, renderFactorySlot 
     api.settingProposals(life.signal).then(rows => { if (!life.signal.aborted) setProposalCount(rows.length) }, () => {})
     return () => life.abort()
   }, [api])
+  // One mount-time probe: the newest self-upgrade backup caches for the
+  // backendMissing restore hint. An older backend's not-found is the version
+  // skew the RPC wrapper already records; it must never break the panel.
+  useEffect(() => {
+    if (!api.selfStatus) return
+    const life = new AbortController()
+    api.selfStatus(life.signal).then(status => {
+      if (!life.signal.aborted) writeSelfBackup(status?.lastBackup)
+    }, () => {})
+    return () => life.abort()
+  }, [api])
+  // Merge/deploy publishes lastBackup on the chat snapshot so an already-open
+  // panel caches the restore path without waiting for a remount.
+  useEffect(() => {
+    if (snapshot?.lastBackup) writeSelfBackup(snapshot.lastBackup)
+  }, [snapshot?.lastBackup?.dir, snapshot?.lastBackup?.lib])
+  const backendOutdated = useSyncExternalStore(backendOutdatedStore.subscribe, backendOutdatedStore.getSnapshot)
   const { drawerTab, drawerWide, personaDirty, discardSignal, pendingDrawerAction, configOpen, requestDrawer, discardDrawerAction, cancelDrawerAction, setPersonaDirty, toggleDrawerWide } = useDrawerGuard()
   const labels = useMemo<MarkdownLabels>(() => {
     const c = cardCopy(locale)
@@ -658,11 +679,19 @@ export function ChatPanel({ locale, api, Card, onOpenSession, renderFactorySlot 
         </button>
       ) : null}
       </div>
+      {backendOutdated ? (
+        <div className="dsh-dot-banner-wrap">
+          <div className="dsh-dot-banner" role="status">
+            <IconWarningOutlineRegular size={14} className="dsh-dot-banner-icon" />
+            <span className="dsh-dot-banner-text">{t(locale, 'backendOutdated')}</span>
+          </div>
+        </div>
+      ) : null}
       {error !== undefined ? (
         <div className="dsh-dot-banner-wrap">
           <div className="dsh-dot-banner" role="alert">
             <IconWarningOutlineRegular size={14} className="dsh-dot-banner-icon" />
-            <span className="dsh-dot-banner-text">{t(locale, 'loadFailed')}: {error}</span>
+            <span className="dsh-dot-banner-text" style={{ whiteSpace: 'pre-line' }}>{backendMissingText(locale, error) ?? `${t(locale, 'loadFailed')}: ${error}`}</span>
             <Button variant="ghost" size="sm" onClick={retry}>{t(locale, 'retry')}</Button>
           </div>
         </div>

@@ -3,7 +3,8 @@
  * record lock. Accepted means the host took the message, not that the work finished.
  */
 import type { DotHost } from './host.ts'
-import { scopeWrites, type RunCursor, type RunPhase, type RunRecord, type WorkBook, type WorkRefusal } from './work.ts'
+import type { TaskPermission } from './contracts.ts'
+import { onDiskPath, scopeWrites, type RunCursor, type RunPhase, type RunRecord, type WorkBook, type WorkRefusal } from './work.ts'
 
 export interface FoundSession { readonly cwd?: string; readonly preset?: string }
 export interface CreatedSession { readonly sessionId: string; readonly cwd?: string; readonly preset?: string }
@@ -70,7 +71,7 @@ export async function launchReservedRun(book: WorkBook, host: RunSessionHost, ru
       if (current?.creation === 'unknown') return { ok: false, code: 'unknown', message: `${runId} was not found; a second session was not created` }
       try {
         const pinned = book.run(runId)?.expectedPreset
-        const created = await host.createSession({ sessionId: run.requestedSessionId, cwd: run.cwd, ...(pinned !== undefined ? { preset: pinned } : {}) })
+        const created = await host.createSession({ sessionId: run.requestedSessionId, cwd: onDiskPath(run.cwd), ...(pinned !== undefined ? { preset: pinned } : {}) })
         actualId = created.sessionId
         cwd = created.cwd
         seenPreset = created.preset
@@ -446,8 +447,26 @@ function countMessages(events: readonly RelayEvent[], accept: (row: Record<strin
   return seen.size + anonymous
 }
 
+const WRITABLE_PRESETS: readonly TaskPermission[] = ['safe-auto', 'workspace-write', 'danger-full-access', 'auto']
+
+export interface BindRunSessionOptions {
+  /**
+   * Confirm the session is still writable without calling `setWritable`.
+   * Used for pinned runs on `supplement` and for legacy runs that only
+   * stored `read` | `write`, so a later global default or plugin outage
+   * cannot widen or downgrade them.
+   */
+  readonly verifyOnly?: boolean
+  /**
+   * True when `writablePreset` was pinned on the run at first dispatch;
+   * `verifyOnly` must confirm that exact pinned permission rather than
+   * accepting any arbitrary writable preset.
+   */
+  readonly pinned?: boolean
+}
+
 /** Adapt the public host. Relay acceptance still has to be proved from the log. */
-export function bindRunSession(host: DotHost, writablePreset = 'default'): RunSessionHost {
+export function bindRunSession(host: DotHost, writablePreset: TaskPermission = 'workspace-write', options: BindRunSessionOptions = {}): RunSessionHost {
   return {
     async findSession(sessionId) {
       if (!host.findSession) throw new Error('session lookup is unavailable')
@@ -465,9 +484,21 @@ export function bindRunSession(host: DotHost, writablePreset = 'default'): RunSe
           if (!await host.setReadOnly(sessionId)) return 'rejected'
           return await host.verifyTaskPermission(sessionId, 'read', 'read-only') ? 'ok' : 'rejected'
         }
-        if (!host.setWritable || !host.verifyTaskPermission) return 'unknown'
-        if (!await host.setWritable(sessionId, writablePreset)) return 'rejected'
-        return await host.verifyTaskPermission(sessionId, 'write', writablePreset) ? 'ok' : 'rejected'
+        if (!host.verifyTaskPermission) return 'unknown'
+        if (options.verifyOnly) {
+          if (options.pinned) {
+            return await host.verifyTaskPermission(sessionId, 'write', writablePreset) ? 'ok' : 'rejected'
+          }
+          for (const preset of WRITABLE_PRESETS) {
+            try { if (await host.verifyTaskPermission(sessionId, 'write', preset)) return 'ok' } catch { /* try the next preset */ }
+          }
+          try { if (await host.verifyCurrentWriteAccess?.(sessionId)) return 'ok' } catch { /* still rejected */ }
+          return 'rejected'
+        }
+        if (!host.setWritable) return 'unknown'
+        const effective = host.effectiveTaskPermission?.(writablePreset) ?? writablePreset
+        if (!await host.setWritable(sessionId, effective)) return 'rejected'
+        return await host.verifyTaskPermission(sessionId, 'write', effective) ? 'ok' : 'rejected'
       } catch { return 'unknown' }
     },
     async prompt(sessionId, text, requestId) {

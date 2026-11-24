@@ -1,3 +1,5 @@
+import { existsSync, realpathSync } from 'node:fs'
+import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { renderBrief, renderSupplement, runTitle, type BriefInput, type BriefRun } from './brief.ts'
 
@@ -86,6 +88,27 @@ describe('renderBrief', () => {
     expect(text).not.toContain('done | skipped')
   })
 
+  it('tells an isolated run it may commit only when the order requires it', () => {
+    const text = renderBrief({ changeId: 'c-1', title: 'Ship', input, run: run(), isolation: { branch: 'dot/task-c-1', baseSha: 'abc1234def' } })
+    expect(text).toContain('Isolation: you run in an isolated git worktree on branch dot/task-c-1 based on commit abc1234.')
+    expect(text).toContain('Uncommitted changes in the original checkout are not present here; install dependencies if needed.')
+    expect(text).toContain('never change git config, remotes, or any branch other than your task branch, and never push')
+    expect(text).toContain('Commit on your task branch only when the work order requires it (for example a merge); otherwise leave your changes uncommitted — Dorothy commits the accepted delivery.')
+    expect(text).not.toContain('Do not commit, push or switch branches')
+    expect(renderBrief({ changeId: 'c-1', title: 'Ship', input, run: run() })).not.toContain('Isolation:')
+  })
+
+  it('names the base ref a task branch was cut from and strips userinfo from remote URLs', () => {
+    const remote = renderBrief({ changeId: 'c-1', title: 'Ship', input, run: run(), isolation: { branch: 'dot/task-c-1', baseSha: 'abc1234def', base: { ref: 'refs/pull/12/head', remote: 'upstream' } } })
+    expect(remote).toContain('on branch dot/task-c-1 based on refs/pull/12/head from upstream (commit abc1234)')
+    const stripped = renderBrief({ changeId: 'c-1', title: 'Ship', input, run: run(), isolation: { branch: 'dot/task-c-1', baseSha: 'abc1234def', base: { ref: 'refs/pull/12/head', remote: 'https://x-access-token:ghp_secret@github.com/org/repo.git' } } })
+    expect(stripped).toContain('from https://github.com/org/repo.git')
+    expect(stripped).not.toContain('ghp_secret')
+    expect(stripped).not.toContain('x-access-token')
+    const local = renderBrief({ changeId: 'c-1', title: 'Ship', input, run: run(), isolation: { branch: 'dot/task-c-1', baseSha: 'abc1234def', base: { ref: 'release/1.0' } } })
+    expect(local).toContain('on branch dot/task-c-1 based on release/1.0 (commit abc1234)')
+  })
+
   it('keeps the original request byte for byte, even with spaces and backticks', () => {
     const request = '  indented line\n\n```code``` and ``` fences  '
     const text = renderBrief({ changeId: 'c-1', title: 'Ship', input: { ...input, userRequest: request }, run: run() })
@@ -124,6 +147,17 @@ describe('renderBrief', () => {
     expect(review).not.toContain('Changed files:')
     expect(review).toContain('- Open issues:')
     expect(review).toContain('compare the diff')
+  })
+
+  it.skipIf(process.platform !== 'win32' || !existsSync('C:\\PROGRA~1'))('renders expanded on-disk cwd instead of 8.3 short names in briefs', () => {
+    const longBase = realpathSync.native('C:\\PROGRA~1')
+    const text = renderBrief({
+      changeId: 'c-1',
+      title: 'Ship',
+      input,
+      run: run({ cwd: 'c:\\progra~1\\dot-8dot3-proj' }),
+    })
+    expect(text).toContain(`Working directory: ${join(longBase, 'dot-8dot3-proj')}`)
   })
 })
 

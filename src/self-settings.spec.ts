@@ -1,19 +1,21 @@
 import { describe, expect, it } from 'vitest'
-import { DEFAULT_SETTINGS } from './contracts.ts'
+import { DEFAULT_SETTINGS, type AgreementEntry } from './contracts.ts'
 import { SelfSettings } from './self-settings.ts'
+import { agreementEntriesFromText } from './memory.ts'
+import { parseSettingProposal } from './storage.ts'
 import { DotStore } from './store.ts'
 
 function setup() {
   const store = new DotStore(undefined)
-  const state = { agreements: '', writes: [] as string[] }
+  const state = { entries: [] as AgreementEntry[], writes: [] as string[], nextId: 0 }
   const view = async () => ({
-    agreements: { text: state.agreements, maxChars: 4000, canUndo: false },
-    cognition: { text: '', maxChars: 4000, history: [] as Array<{ text: string; at: number }> },
+    agreements: { entries: state.entries, canUndo: false },
+    cognition: { entries: [] as unknown[], history: [] },
   })
   const service = {
     store,
     knowledgeView: view,
-    setAgreements: async (text: string) => { state.agreements = text; state.writes.push(text); return view() },
+    setAgreements: async (text: string) => { state.entries = agreementEntriesFromText(text, state.entries, 1, () => `a${++state.nextId}`); state.writes.push(text); return view() },
     settingsChanged: async () => {},
     serialSettings: async <T>(work: () => Promise<T>) => work(),
   }
@@ -52,6 +54,18 @@ describe('Dorothy self settings', () => {
     expect(await h.self.decide(id, false)).toContain('no settings changed')
   })
 
+  it('approves a follow-host baseline proposal after the upgrade migration', async () => {
+    const h = setup()
+    const proposal = parseSettingProposal({
+      id: 'setting-upgrade', field: 'taskPermission', before: 'default', after: 'danger-full-access', reason: 'faster', createdAt: 1,
+    })
+    expect(proposal?.before).toBe('workspace-write')
+    await h.store.putSettingProposal(proposal!)
+    expect(await h.self.decide(proposal!.id, true)).toContain('danger-full-access')
+    expect(h.store.settings.taskPermission).toBe('danger-full-access')
+    expect(h.store.settingProposals).toEqual([])
+  })
+
   it('refuses to propose anything but a real setting field', async () => {
     const h = setup()
     await expect(h.self.propose({ field: 'policy', value: 'ask before push', reason: 'safer' })).rejects.toThrow(/unknown setting/)
@@ -64,6 +78,55 @@ describe('Dorothy self settings', () => {
     expect(h.state.writes).toEqual([])
     await h.self.decide(h.store.settingProposals[0]!.id, true)
     expect(h.state.writes).toEqual(['- likes tea\n'])
+    expect(h.state.entries.map(entry => entry.text)).toEqual(['likes tea'])
+  })
+
+  it('reuses entry ids for unchanged lines and accepts a proposal of any size', async () => {
+    const h = setup()
+    h.state.entries = agreementEntriesFromText('- keep me\n- drop me\n', [], 1, () => `a${++h.state.nextId}`)
+    const long = 'x'.repeat(5000)
+    await h.self.propose({ field: 'agreements', value: `- keep me\n- ${long}`, reason: 'remember' })
+    await h.self.decide(h.store.settingProposals[0]!.id, true)
+    expect(h.state.entries.map(entry => entry.id)).toEqual(['a1', 'a3'])
+    expect(h.state.entries[1]!.text).toBe(long)
+  })
+
+  it('approves an agreements proposal saved before the entry-list migration', async () => {
+    const h = setup()
+    // A proposal from the string era stores its baseline as raw text; the
+    // current entries compare as normalized lines, so it is not stale.
+    h.state.entries = agreementEntriesFromText('- 先给结论\n', [], 1, () => `a${++h.state.nextId}`)
+    await h.store.putSettingProposal({
+      id: 'setting-legacy', field: 'agreements', before: '* 先给结论\n', after: '- 先给结论\n- 改完先跑测试\n', reason: 'add a rule', createdAt: 1,
+    })
+    expect(await h.self.decide('setting-legacy', true)).toContain('Approved')
+    expect(h.state.entries.map(entry => entry.text)).toEqual(['先给结论', '改完先跑测试'])
+  })
+
+  it('still refuses an agreements proposal when the entries moved meanwhile', async () => {
+    const h = setup()
+    h.state.entries = agreementEntriesFromText('- 先给结论\n- 新规矩\n', [], 1, () => `a${++h.state.nextId}`)
+    await h.store.putSettingProposal({
+      id: 'setting-legacy', field: 'agreements', before: '* 先给结论\n', after: '- 先给结论\n- 改完先跑测试\n', reason: 'add a rule', createdAt: 1,
+    })
+    await expect(h.self.decide('setting-legacy', true)).rejects.toMatchObject({ code: 'dot/proposal-stale' })
+    expect(h.state.entries.map(entry => entry.text)).toEqual(['先给结论', '新规矩'])
+  })
+
+  it('treats an inside-spacing difference as a real change, not a formatting one', async () => {
+    const h = setup()
+    h.state.entries = agreementEntriesFromText('- 先给 结论\n', [], 1, () => `a${++h.state.nextId}`)
+    await h.store.putSettingProposal({
+      id: 'setting-legacy', field: 'agreements', before: '- 先给  结论\n', after: '- 先给  结论\n- 新规矩\n', reason: 'add a rule', createdAt: 1,
+    })
+    await expect(h.self.decide('setting-legacy', true)).rejects.toMatchObject({ code: 'dot/proposal-stale' })
+  })
+
+  it('keeps internal whitespace verbatim when a bulk proposal is approved', async () => {
+    const h = setup()
+    await h.self.propose({ field: 'agreements', value: '- keep  me\n- tab\tline\n', reason: 'remember' })
+    await h.self.decide(h.store.settingProposals[0]!.id, true)
+    expect(h.state.entries.map(entry => entry.text)).toEqual(['keep  me', 'tab\tline'])
   })
 
   it('refuses an old proposal after the human locks it, including the agreements field', async () => {

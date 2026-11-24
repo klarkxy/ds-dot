@@ -4,17 +4,17 @@
  */
 import { groupModelMenuChoices, modelMenuShortName, parseModelMenuChoices, type ModelMenuChoice } from '@klarkxy/dsh-plugin-kit/model-menu'
 import { renderModelPicker, type RenderFactorySlot } from '@klarkxy/dsh-plugin-kit/model-picker'
-import { Button, Checkbox, IconInfoOutlineRegular, IconSearchOutlineRegular, Input, SegmentedTabs, Switch, Tooltip, type SegmentedTab } from '@deepseek-ai/dsh-client-ui-primitives'
+import { Button, Checkbox, IconCheckCircleFillRegular, IconChevronRightOutlineRegular, IconCloseOutlineRegular, IconInfoOutlineRegular, IconSearchOutlineRegular, IconWarningOutlineRegular, Input, SegmentedTabs, Switch, Tooltip, type SegmentedTab } from '@deepseek-ai/dsh-client-ui-primitives'
 import { createContext, useCallback, useContext, useEffect, useId, useMemo, useRef, useState, type ReactNode } from 'react'
 import type { SettingsSection } from './chat-hooks.ts'
 export type { SettingsSection } from './chat-hooks.ts'
-import { type ApprovalMode, type CapabilityCatalogView, type CapabilityGrant, type CapabilityGroupView, type DotSettings, type FactoryResetPreview, type FactoryResetResult, type KeepaliveInfo, type ModelChoice, type SettingField, type SettingProposal, type TakeoverMode, type TaskModelRule, type TaskPermission } from './contracts.ts'
+import { mcpCredentialName, mcpPrefix, mcpServerOf, isMcpServerUrl, MCP_NEW_SERVER_NAME_PATTERN, type ApprovalMode, type CapabilityCatalogView, type CapabilityGrant, type CapabilityGroupView, type CapabilityToolView, type DotMcpCatalogEntry, type DotMcpListView, type DotMcpServer, type DotMcpServerView, type DotSettings, type FactoryResetPreview, type FactoryResetResult, type KeepaliveInfo, type ModelChoice, type SettingField, type SettingProposal, type TakeoverMode, type TaskModelRule, type TaskPermission } from './contracts.ts'
 import { DESKTOP_NOTIFY_KEY } from './attention-client.ts'
 import type { UpdateResult, UpdateStatus } from './auto-update.ts'
 import { factoryResetScope, formatWhen, t, type CopyLocale, type TextKey } from './ui-copy.ts'
 
-/** null on model, persona or address goes back to the default. */
-export type SettingsPatch = { readonly [K in keyof DotSettings]?: K extends 'model' ? ModelChoice | null : K extends 'persona' | 'address' ? string | null : DotSettings[K] }
+/** null on model, persona, address or mcpServers goes back to the default. */
+export type SettingsPatch = { readonly [K in keyof DotSettings]?: K extends 'model' ? ModelChoice | null : K extends 'persona' | 'address' ? string | null : K extends 'mcpServers' ? DotSettings[K] | null : DotSettings[K] }
 export type SaveNotice = { readonly kind: 'saved' } | { readonly kind: 'error'; readonly message: string }
 
 export interface SettingsApi {
@@ -27,6 +27,13 @@ export interface SettingsApi {
   decideSetting(id: string, allow: boolean): Promise<string>
   /** Extra-capability catalog + what the live segment applied; absent in tests. */
   capabilities?(signal: AbortSignal): Promise<CapabilityCatalogView>
+  /** Dot-local MCP servers + recommended catalog; absent in tests. */
+  mcpList?(signal: AbortSignal): Promise<DotMcpListView>
+  /** Store a server's token in the host credential store; returns only its state. */
+  mcpCredentialSet?(server: string, value: string): Promise<{ configured: boolean; masked?: string }>
+  mcpCredentialUnset?(server: string): Promise<{ configured: boolean }>
+  /** Live task-permission options; absent in tests. */
+  taskPermissionOptions?(signal: AbortSignal): Promise<{ options: TaskPermission[] }>
   settings(signal: AbortSignal): Promise<DotSettings>
   previewFactoryReset?(): Promise<FactoryResetPreview>
   confirmFactoryReset?(token: string): Promise<FactoryResetResult>
@@ -177,7 +184,7 @@ function formatProposalValue(locale: CopyLocale, field: SettingProposal['field']
       if (value === 'dot' || value === 'human' || value === 'off') return { text: t(locale, `sQuestions_${value}`), block: false }
       break
     case 'taskPermission':
-      if (value === 'workspace-write' || value === 'danger-full-access' || value === 'default') return { text: t(locale, `sTaskPermission_${value}`), block: false }
+      if (value === 'workspace-write' || value === 'danger-full-access' || value === 'safe-auto' || value === 'auto') return { text: t(locale, `sTaskPermission_${value}`), block: false }
       break
     case 'reflection':
       if (typeof value === 'boolean') return { text: t(locale, value ? 'sReflection_on' : 'sReflection_off'), block: false }
@@ -300,11 +307,20 @@ function Proposals({ locale, choices, state, showTitle }: { locale: CopyLocale; 
 
 const GRANT_MODES: readonly [CapabilityGrant, CapabilityGrant, CapabilityGrant] = ['off', 'ask', 'auto']
 
+/** Delete one stored grant row. Used by GrantPicker and leftover task-only Reset. */
+function GrantReset({ locale, selector, onPick }: {
+  locale: CopyLocale
+  selector: string
+  onPick: (selector: string, grant: CapabilityGrant | undefined) => void
+}) {
+  return <Button variant="ghost" size="sm" className="dsh-dot-cap-clear" onClick={() => onPick(selector, undefined)}>{t(locale, 'sCapClear')}</Button>
+}
+
 /**
  * The off/ask/auto control of one row. A row without its own grant row shows
  * the value it inherits, dimmed; the clear button removes its own override.
  */
-function GrantPicker({ locale, label, chain, grants, applied, onPick }: {
+function GrantPicker({ locale, label, chain, grants, applied, onPick, hideClear }: {
   locale: CopyLocale
   label: string
   /** Selectors this row answers to, most specific first; the first owns the write. */
@@ -312,6 +328,8 @@ function GrantPicker({ locale, label, chain, grants, applied, onPick }: {
   grants: Readonly<Record<string, CapabilityGrant>>
   /** Grant the live segment applied to this tool; compared for the next-segment badge. */
   applied?: CapabilityGrant | undefined
+  /** Drop the × reset slot (the MCP page manages grants without it). */
+  hideClear?: boolean
   onPick: (selector: string, grant: CapabilityGrant | undefined) => void
 }) {
   const own = chain[0]
@@ -323,8 +341,12 @@ function GrantPicker({ locale, label, chain, grants, applied, onPick }: {
   const hasOwn = own !== undefined && grants[own] !== undefined
   return (
     <span className="dsh-dot-cap-grant" data-inherited={hasOwn ? undefined : ''}>
-      <SegmentedChoice locale={locale} label={label} value={effective} options={GRANT_MODES} labelKeyOf={option => `sCap_${option}` as TextKey} onChange={next => { if (own !== undefined) onPick(own, next) }} />
-      {hasOwn ? <Button variant="ghost" size="sm" className="dsh-dot-cap-clear" onClick={() => { if (own !== undefined) onPick(own, undefined) }}>{t(locale, 'sCapClear')}</Button> : null}
+      <SegmentedChoice locale={locale} label={label} value={effective} options={GRANT_MODES} labelKeyOf={option => `sCapShort_${option}` as TextKey} titleKeyOf={option => `sCap_${option}` as TextKey} onChange={next => { if (own !== undefined) onPick(own, next) }} />
+      {hideClear === true ? null : (
+        <span className="dsh-dot-cap-clear-slot">{hasOwn ? (
+          <Button variant="ghost" size="sm" className="dsh-dot-cap-clear" title={t(locale, 'sCapClear')} aria-label={t(locale, 'sCapClear')} onClick={() => { if (own !== undefined) onPick(own, undefined) }}><IconCloseOutlineRegular size={12} /></Button>
+        ) : null}</span>
+      )}
       {applied !== undefined && applied !== effective ? <span className="dsh-dot-cap-badge">{t(locale, 'sCapNext')}</span> : null}
     </span>
   )
@@ -335,16 +357,30 @@ function GrantPicker({ locale, label, chain, grants, applied, onPick }: {
  * with their entries, and the unattributed rest. Grants save as one whole
  * `capabilities` patch through the shared settings channel.
  */
-function Capabilities({ locale, api, grants, onPick }: {
+/** Status-dot tone for one MCP group's connection state. */
+function mcpStateTone(state: string | undefined): 'ok' | 'warn' | 'bad' | 'muted' {
+  if (state === 'connected') return 'ok'
+  if (state === 'connecting' || state === 'reconnecting' || state === 'waiting-credentials') return 'warn'
+  if (state === 'failed' || state === 'closed') return 'bad'
+  return 'muted'
+}
+
+function McpStateDot({ state }: { state?: string }) {
+  return <span className={`dsh-dot-mcp-state dsh-dot-mcp-state--${mcpStateTone(state)}`} />
+}
+
+function Capabilities({ locale, api, grants, onPick, onOpenMcp }: {
   locale: CopyLocale
   api: SettingsApi
   grants: Readonly<Record<string, CapabilityGrant>>
   onPick: (selector: string, grant: CapabilityGrant | undefined) => void
+  /** Switch to the MCP settings page when set. */
+  onOpenMcp?: () => void
 }) {
   const [view, setView] = useState<CapabilityCatalogView>()
   const [error, setError] = useState('')
-  // Choosing `auto` on a self-escalating row takes one more explicit confirm.
-  const [confirmAuto, setConfirmAuto] = useState<{ selector: string; label: string } | undefined>()
+  const [capFilter, setCapFilter] = useState('')
+  const [onlyOn, setOnlyOn] = useState(false)
   useEffect(() => {
     if (api.capabilities === undefined) return
     const life = new AbortController()
@@ -357,74 +393,392 @@ function Capabilities({ locale, api, grants, onPick }: {
     return () => { life.abort(); clearInterval(timer) }
   }, [api])
   if (api.capabilities === undefined) return null
+  if (view === undefined && !error) return <PaneSkeleton label={t(locale, 'settingsLoading')} />
   const applied = view?.applied ?? {}
-  const pick = (selector: string, grant: CapabilityGrant | undefined, label: string, highRisk: boolean) => {
-    if (grant === 'auto' && highRisk) { setConfirmAuto({ selector, label }); return }
-    onPick(selector, grant)
-  }
+  const capNeedle = capFilter.trim().toLowerCase()
+  const matchesTool = (tool: CapabilityToolView) => capNeedle === '' || tool.name.toLowerCase().includes(capNeedle) || (tool.description ?? '').toLowerCase().includes(capNeedle)
+  const displayedLabel = (group: CapabilityGroupView): string =>
+    group.kind === 'host' ? t(locale, 'sCapHostGroup')
+    : group.id === 'builtin' ? t(locale, 'sCapBuiltinGroup')
+    : group.id.startsWith('builtin:') ? t(locale, `sCapBuiltin_${group.id.slice('builtin:'.length)}` as TextKey) || group.label
+    // `bundle / entry` labels and bare entry ids may carry an npm scope; drop it
+    // for display (the full id stays on `title`).
+    : group.label.split(' / ').map(part => part.startsWith('@') && part.includes('/') ? part.slice(part.indexOf('/') + 1) : part).join(' / ')
+  const groupSelfHits = (group: CapabilityGroupView): boolean =>
+    capNeedle !== '' && (displayedLabel(group).toLowerCase().includes(capNeedle) || group.id.toLowerCase().includes(capNeedle))
+  const groupHits = (group: CapabilityGroupView): boolean =>
+    groupSelfHits(group) || group.tools.some(matchesTool) || (group.children ?? []).some(groupHits)
+  const countTools = (group: CapabilityGroupView): number =>
+    group.tools.length + (group.children ?? []).reduce((sum, child) => sum + countTools(child), 0)
+  const countTaskOnly = (group: CapabilityGroupView): number =>
+    group.tools.filter(tool => tool.taskOnly === true).length
+      + (group.children ?? []).reduce((sum, child) => sum + countTaskOnly(child), 0)
+  // A group grant can never apply to task-only tools, so a group whose tools
+  // are all task-only has nothing for the picker to do. Empty groups keep it.
+  const groupAllTaskOnly = (group: CapabilityGroupView): boolean =>
+    countTools(group) > 0 && countTaskOnly(group) === countTools(group)
+  const countsTowardGroup = (tool: CapabilityToolView): boolean => tool.taskOnly !== true && tool.missing !== true
+  const kindLabel = (group: CapabilityGroupView): string =>
+    group.kind === 'mcp' ? t(locale, 'sCapKind_mcp')
+    : group.kind === 'builtin' ? t(locale, 'sCapKind_builtin')
+    : group.kind === 'plugin' || group.kind === 'entry' ? t(locale, 'sCapKind_plugin')
+    : t(locale, 'sCapKind_unknown')
   const effectiveFor = (chain: readonly string[]): CapabilityGrant => {
     for (const selector of chain) { const grant = grants[selector]; if (grant !== undefined) return grant }
     return 'off'
   }
-  const groupRows = (group: CapabilityGroupView, parents: readonly string[]): ReactNode => {
-    // The host group is display-only: unattributed tools grant one by one.
-    const chain = group.kind === 'host' ? parents : [group.id, ...parents]
-    const changed = group.tools.some(tool => (applied[tool.name] ?? 'off') !== effectiveFor([`tool:${tool.name}`, ...chain]))
-    const granted = group.tools.some(tool => effectiveFor([`tool:${tool.name}`, ...chain]) !== 'off')
-      || (group.children ?? []).some(child => child.tools.some(tool => effectiveFor([`tool:${tool.name}`, child.id, ...chain]) !== 'off'))
-    const label = group.kind === 'host' ? t(locale, 'sCapHostGroup') : group.label
+  const groupRows = (group: CapabilityGroupView, parents: readonly string[], showFull = false): ReactNode => {
+    // The host and builtin groups are display-only: their tools grant one by one / via children.
+    const chain = group.kind === 'host' || group.id === 'builtin' ? parents : [group.id, ...parents]
+    const changed = group.tools.some(tool => countsTowardGroup(tool) && (applied[tool.name] ?? 'off') !== effectiveFor([`tool:${tool.name}`, ...chain]))
+    const granted = group.tools.some(tool => countsTowardGroup(tool) && effectiveFor([`tool:${tool.name}`, ...chain]) !== 'off')
+      || (group.children ?? []).some(child => child.tools.some(tool => countsTowardGroup(tool) && effectiveFor([`tool:${tool.name}`, child.id, ...chain]) !== 'off'))
+    const label = displayedLabel(group)
+    const selfHit = showFull || groupSelfHits(group)
+    if (capNeedle !== '' && !selfHit && !groupHits(group)) return null
+    const tools = selfHit || capNeedle === '' ? group.tools : group.tools.filter(matchesTool)
+    const displayGrant = group.kind === 'host' || group.id === 'builtin' ? 'off' : effectiveFor(chain)
     return (
-      <details key={group.id} className="dsh-dot-cap-group" open={granted}>
+      <details key={group.id} className="dsh-dot-cap-group" data-grant={displayGrant === 'off' ? 'off' : undefined} open={granted || capNeedle !== ''}>
         <summary className="dsh-dot-cap-head">
-          <span className="dsh-dot-cap-name">{label}<span className="dsh-dot-cap-id">{group.id}</span></span>
+          <IconChevronRightOutlineRegular size={12} className="dsh-dot-cap-chev" />
+          <span className="dsh-dot-cap-name" title={group.id}>
+            {group.kind === 'mcp' && group.status !== undefined ? <McpStateDot state={group.status.state} /> : null}
+            {label}{group.kind === 'builtin' && group.id !== 'builtin' ? null : <span className="dsh-dot-cap-tag">{kindLabel(group)}</span>}
+            {group.scope === 'dot' ? <span className="dsh-dot-cap-tag dsh-dot-cap-tag--dot">{t(locale, 'sCapDotOnly')}</span> : null}
+            <span className="dsh-dot-cap-count">{t(locale, 'sCapToolCount').replace('{n}', String(countTools(group)))}</span>
+          </span>
           {group.missing === true ? <span className="dsh-dot-cap-badge">{t(locale, 'sCapMissing')}</span> : null}
-          {group.highRisk === true ? <span className="dsh-dot-cap-badge dsh-dot-cap-badge--warn">{t(locale, 'sCapHighRisk')}</span> : null}
           {changed ? <span className="dsh-dot-cap-badge">{t(locale, 'sCapNext')}</span> : null}
-          {group.kind === 'host' ? null : (
+          {group.kind === 'host' || group.id === 'builtin' ? null : groupAllTaskOnly(group) ? (
+            grants[group.id] !== undefined ? (
+              <span className="dsh-dot-cap-control" onClick={event => event.preventDefault()}>
+                <span className="dsh-dot-cap-grant">
+                  <GrantReset locale={locale} selector={group.id} onPick={onPick} />
+                </span>
+              </span>
+            ) : null
+          ) : (
             <span className="dsh-dot-cap-control" onClick={event => event.preventDefault()}>
-              <GrantPicker locale={locale} label={label} chain={chain} grants={grants} applied={undefined} onPick={(selector, grant) => pick(selector, grant, label, group.highRisk === true)} />
+              <GrantPicker locale={locale} label={label} chain={chain} grants={grants} applied={undefined} onPick={onPick} />
             </span>
           )}
         </summary>
         <div className="dsh-dot-cap-body">
-          {group.tools.map(tool => {
+          {tools.map(tool => {
             const toolChain = [`tool:${tool.name}`, ...chain]
+            // Only a grantable group with exactly one tool has a picker to stand in for this row.
+            // Search that leaves a single visible tool must not hide the tool-level control.
+            const soloNoOwnGrant = group.kind !== 'host' && group.id !== 'builtin'
+              && group.tools.length === 1 && (group.children ?? []).length === 0
+              && grants[`tool:${tool.name}`] === undefined
+            const toolPrefix = mcpPrefix(group.label)
+            const toolLabel = group.kind === 'mcp' && tool.name.startsWith(toolPrefix) ? tool.name.slice(toolPrefix.length) : tool.name
             return (
               <div key={tool.name} className="dsh-dot-cap-row">
-                <span className="dsh-dot-cap-name" title={tool.description}>{tool.name}</span>
+                <span className="dsh-dot-cap-name dsh-dot-cap-tool" title={tool.name}>
+                  <code>{toolLabel}</code>
+                  {tool.description !== undefined ? <span className="dsh-dot-cap-desc">{tool.description}</span> : null}
+                </span>
                 {tool.missing === true ? <span className="dsh-dot-cap-badge">{t(locale, 'sCapMissing')}</span> : null}
                 {tool.conditional ? <span className="dsh-dot-cap-badge">{t(locale, 'sCapConditional')}</span> : null}
-                {tool.highRisk === true ? <span className="dsh-dot-cap-badge dsh-dot-cap-badge--warn">{t(locale, 'sCapHighRisk')}</span> : null}
-                <GrantPicker locale={locale} label={tool.name} chain={toolChain} grants={grants} applied={tool.missing === true ? undefined : (applied[tool.name] ?? 'off')} onPick={(selector, grant) => pick(selector, grant, tool.name, tool.highRisk === true)} />
+                {tool.taskOnly === true ? <span className="dsh-dot-cap-badge dsh-dot-cap-badge--warn" title={t(locale, 'sCapTaskOnlyHint')}>{t(locale, 'sCapTaskOnly')}</span> : null}
+                {tool.taskOnly === true ? (
+                  grants[`tool:${tool.name}`] !== undefined ? (
+                    <span className="dsh-dot-cap-grant">
+                      <GrantReset locale={locale} selector={`tool:${tool.name}`} onPick={onPick} />
+                    </span>
+                  ) : null
+                ) : soloNoOwnGrant ? null : (
+                  <GrantPicker locale={locale} label={tool.name} chain={toolChain} grants={grants} applied={tool.missing === true ? undefined : (applied[tool.name] ?? 'off')} onPick={onPick} />
+                )}
               </div>
             )
           })}
-          {(group.children ?? []).map(child => groupRows(child, chain))}
+          {(group.children ?? []).map(child => groupRows(child, chain, selfHit))}
         </div>
       </details>
     )
   }
+  /** A group counts as "on" when any tool in it resolves to a grant above off. */
+  const groupGranted = (group: CapabilityGroupView, parents: readonly string[] = []): boolean => {
+    const chain = group.kind === 'host' || group.id === 'builtin' ? parents : [group.id, ...parents]
+    return group.tools.some(tool => tool.taskOnly !== true && effectiveFor([`tool:${tool.name}`, ...chain]) !== 'off')
+      || (group.tools.length === 0 && (group.children ?? []).length === 0 && group.kind !== 'host' && group.id !== 'builtin' && effectiveFor(chain) !== 'off')
+      || (group.children ?? []).some(child => groupGranted(child, chain))
+  }
+  const sectionOf = (group: CapabilityGroupView): 'mcp' | 'plugin' | 'host' =>
+    group.kind === 'mcp' ? 'mcp' : group.kind === 'plugin' || group.kind === 'entry' ? 'plugin' : 'host'
+  const allGroups = view?.groups ?? []
+  const shownGroups = allGroups.filter(group => (capNeedle === '' || groupHits(group)) && (!onlyOn || groupGranted(group)))
   return (
     <div className="dsh-dot-caps">
+      <p className="dsh-dot-cap-intro">{t(locale, 'sCapIntro')}</p>
+      <div className="dsh-dot-cap-toolbar">
+        <Input
+          className="dsh-dot-cap-search"
+          icon={<IconSearchOutlineRegular size={13} />}
+          type="search"
+          aria-label={t(locale, 'sCapFilter')}
+          placeholder={t(locale, 'sCapFilter')}
+          value={capFilter}
+          onChange={event => setCapFilter(event.target.value)}
+        />
+        <Checkbox checked={onlyOn} label={t(locale, 'sCapOnlyOn')} onChange={next => setOnlyOn(next)} />
+      </div>
       {error ? <div className="dsh-ui-error" role="alert">{error}</div> : null}
-      {confirmAuto !== undefined ? (
-        <div className="dsh-dot-cap-confirm" role="alert">
-          <span className="dsh-dot-cap-confirm-text">{confirmAuto.label} — {t(locale, 'sCapConfirmAuto')}</span>
-          <Button variant="primary" size="sm" onClick={() => { onPick(confirmAuto.selector, 'auto'); setConfirmAuto(undefined) }}>{t(locale, 'sApprove')}</Button>
-          <Button variant="ghost" size="sm" onClick={() => setConfirmAuto(undefined)}>{t(locale, 'sDecline')}</Button>
-        </div>
-      ) : null}
       {view === undefined ? null : (
         <>
           <details className="dsh-dot-cap-group dsh-dot-cap-group--locked">
             <summary className="dsh-dot-cap-head">
-              <span className="dsh-dot-cap-name">{t(locale, 'sCapLockedTitle')}</span>
+              <span className="dsh-dot-cap-name">{t(locale, 'sCapLockedTitle')}<span className="dsh-dot-cap-count">{t(locale, 'sCapToolCount').replace('{n}', String(view.locked.length))}</span></span>
               <span className="dsh-dot-cap-badge dsh-dot-cap-badge--on">{t(locale, 'sCapAlways')}</span>
             </summary>
             <div className="dsh-dot-cap-body dsh-dot-cap-locked">{view.locked.map(name => <span key={name} className="dsh-dot-cap-locked-name">{name}</span>)}</div>
           </details>
           {view.groups.length === 0 ? <div className="dsh-dot-model-empty">{t(locale, 'sCapEmpty')}</div> : null}
-          {view.groups.map(group => groupRows(group, []))}
+          {(['mcp', 'plugin', 'host'] as const).map(section => {
+            const rows = shownGroups.filter(group => sectionOf(group) === section)
+            if (rows.length === 0) return null
+            return (
+              <div key={section} className="dsh-dot-cap-section-wrap">
+                <div className="dsh-dot-cap-section">{t(locale, `sCapSec_${section}` as TextKey)}</div>
+                {rows.map(group => groupRows(group, []))}
+                {section === 'mcp' && onOpenMcp !== undefined ? (
+                  <button type="button" className="dsh-dot-cap-mcplink" onClick={onOpenMcp}>{t(locale, 'sCapMcpLink')}</button>
+                ) : null}
+              </div>
+            )
+          })}
+        </>
+      )}
+    </div>
+  )
+}
+
+/** One-line status text for a dot-local MCP server row. */
+function mcpStatusText(locale: CopyLocale, server: DotMcpServerView): string {
+  const state = server.status?.state
+  if (!server.enabled || state === 'off') return t(locale, 'sMcpStateOff')
+  if (state === 'connected') return t(locale, 'sCapToolCount').replace('{n}', String(server.status?.toolCount ?? 0))
+  if (state === 'waiting-credentials') return t(locale, 'sMcpStateWaiting')
+  if (state === 'failed' || state === 'closed') return `${t(locale, 'sMcpStateFailed')}${server.status?.diagnostic !== undefined ? `: ${server.status.diagnostic}` : ''}`
+  return t(locale, 'sMcpStateConnecting')
+}
+
+/**
+ * The MCP page: dot-local servers the human connected, the recommended
+ * catalog, and the custom-server form. Adding a server only mounts it; its
+ * tools still need a grant here or under 额外能力.
+ */
+function McpPane({ locale, api, settings, grants, onPick, onSaved }: {
+  locale: CopyLocale
+  api: SettingsApi
+  settings: DotSettings
+  grants: Readonly<Record<string, CapabilityGrant>>
+  onPick: (selector: string, grant: CapabilityGrant | undefined) => void
+  onSaved: (next: DotSettings) => void
+}) {
+  const [view, setView] = useState<DotMcpListView>()
+  const [error, setError] = useState('')
+  const [saveError, setSaveError] = useState('')
+  const [tokenFor, setTokenFor] = useState<string>()
+  const [tokenDraft, setTokenDraft] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [customName, setCustomName] = useState('')
+  const [customUrl, setCustomUrl] = useState('')
+  const [customToken, setCustomToken] = useState('')
+  const [customError, setCustomError] = useState('')
+  useEffect(() => {
+    if (api.mcpList === undefined) return
+    const life = new AbortController()
+    const load = () => api.mcpList!(life.signal).then(
+      next => { setView(next); setError('') },
+      failure => { if (!life.signal.aborted) setError(failure instanceof Error ? failure.message : String(failure)) },
+    )
+    void load()
+    const timer = setInterval(load, 5000)
+    return () => { life.abort(); clearInterval(timer) }
+  }, [api])
+  if (api.mcpList === undefined) return null
+  if (view === undefined && !error) return <PaneSkeleton label={t(locale, 'settingsLoading')} />
+
+  const servers = settings.mcpServers ?? {}
+  const fail = (failure: unknown) => setSaveError(failure instanceof Error ? failure.message : String(failure))
+  const attemptPatch = async (patch: SettingsPatch): Promise<boolean> => {
+    try {
+      const saved = await api.setSettings(patch)
+      setSaveError('')
+      onSaved(saved)
+      return true
+    } catch (failure) {
+      fail(failure)
+      return false
+    }
+  }
+  const savePatch = async (patch: SettingsPatch): Promise<boolean> => {
+    setBusy(true)
+    try { return await attemptPatch(patch) } finally { setBusy(false) }
+  }
+  const saveServers = (next: Record<string, DotMcpServer>) => savePatch({ mcpServers: next })
+  const catalogRow = (entry: DotMcpCatalogEntry): DotMcpServer => ({
+    catalog: entry.id, url: entry.url, ...(entry.headers !== undefined ? { headers: entry.headers } : {}), enabled: true,
+  })
+  const connect = async (entry: DotMcpCatalogEntry, token?: string) => {
+    // Row first, token second: credential.set only accepts a stored server
+    // name. A failed token write keeps the row, which then offers the
+    // waiting-for-token field for a retry.
+    setBusy(true)
+    try {
+      if (!await attemptPatch({ mcpServers: { ...servers, [entry.id]: catalogRow(entry) } })) return
+      if (entry.auth === 'token' && token !== undefined && token !== '' && api.mcpCredentialSet !== undefined) {
+        await api.mcpCredentialSet(entry.id, token)
+      }
+      setTokenFor(undefined); setTokenDraft('')
+    } catch (failure) { fail(failure) } finally { setBusy(false) }
+  }
+  const saveToken = async (server: string, value: string) => {
+    if (api.mcpCredentialSet === undefined) return
+    setBusy(true)
+    try {
+      await api.mcpCredentialSet(server, value)
+      setTokenFor(undefined); setTokenDraft('')
+    } catch (failure) { fail(failure) } finally { setBusy(false) }
+  }
+  const removeServer = (name: string) => {
+    const next = { ...servers }
+    delete next[name]
+    // Dropping a server drops its grants in the same patch: the mcp: selector
+    // plus only the tool: selectors longest-prefix attribution gives to it —
+    // tools owned by an overlapping name (team vs team__docs) or by nothing
+    // keep their selectors.
+    const names = Object.keys(servers)
+    const cleaned = Object.fromEntries(Object.entries(grants).filter(([selector]) => {
+      if (selector === `mcp:${name}`) return false
+      if (!selector.startsWith('tool:')) return true
+      return mcpServerOf(selector.slice('tool:'.length), names) !== name
+    }))
+    void savePatch({ mcpServers: next, capabilities: { grants: cleaned } })
+  }
+  const addCustom = () => {
+    const name = customName.trim()
+    const url = customUrl.trim()
+    if (!MCP_NEW_SERVER_NAME_PATTERN.test(name)) { setCustomError(t(locale, 'sMcpErrName')); return }
+    if (name in servers) { setCustomError(t(locale, 'sMcpErrDuplicate')); return }
+    if (view?.globals?.includes(name) === true) { setCustomError(t(locale, 'sMcpGlobal')); return }
+    if (!isMcpServerUrl(url)) { setCustomError(t(locale, 'sMcpErrUrl')); return }
+    setCustomError('')
+    const headers = customToken === '' ? undefined : { Authorization: `Bearer \${credential:${mcpCredentialName(name)}}` }
+    void (async () => {
+      setBusy(true)
+      try {
+        if (!await attemptPatch({ mcpServers: { ...servers, [name]: { url, ...(headers !== undefined ? { headers } : {}), enabled: true } } })) return
+        if (customToken !== '' && api.mcpCredentialSet !== undefined) {
+          await api.mcpCredentialSet(name, customToken)
+        }
+        setCustomName(''); setCustomUrl(''); setCustomToken('')
+      } catch (failure) { fail(failure) } finally { setBusy(false) }
+    })()
+  }
+  const tokenField = (server: string, tokenUrl?: string, tokenHelpKey?: string) => (
+    <div className="dsh-dot-mcp-token">
+      <Input
+        type="password"
+        placeholder={t(locale, 'sMcpTokenPlaceholder')}
+        value={tokenDraft}
+        onChange={event => setTokenDraft(event.target.value)}
+      />
+      <Button variant="primary" size="sm" disabled={busy || tokenDraft.trim() === ''} onClick={() => void saveToken(server, tokenDraft.trim())}>{t(locale, 'sMcpTokenSave')}</Button>
+      {tokenUrl !== undefined ? <a className="dsh-dot-mcp-token-link" href={tokenUrl} target="_blank" rel="noreferrer">{t(locale, 'sMcpTokenLink')}</a> : null}
+      {tokenHelpKey !== undefined ? <span className="dsh-dot-mcp-token-help">{t(locale, tokenHelpKey as TextKey)}</span> : null}
+    </div>
+  )
+  const connectField = (entry: DotMcpCatalogEntry) => (
+    <div className="dsh-dot-mcp-token">
+      <Input
+        type="password"
+        placeholder={t(locale, 'sMcpTokenPlaceholder')}
+        value={tokenDraft}
+        onChange={event => setTokenDraft(event.target.value)}
+      />
+      <Button variant="primary" size="sm" disabled={busy} title={tokenDraft.trim() === '' ? t(locale, 'sMcpConnectNoToken') : undefined} onClick={() => void connect(entry, tokenDraft.trim())}>{t(locale, 'sMcpConnect')}</Button>
+      {entry.tokenUrl !== undefined ? <a className="dsh-dot-mcp-token-link" href={entry.tokenUrl} target="_blank" rel="noreferrer">{t(locale, 'sMcpTokenLink')}</a> : null}
+      {entry.tokenHelp !== undefined ? <span className="dsh-dot-mcp-token-help">{t(locale, entry.tokenHelp as TextKey)}</span> : null}
+    </div>
+  )
+  return (
+    <div className="dsh-dot-mcp">
+      <p className="dsh-dot-cap-intro">{t(locale, 'sMcpIntro')}</p>
+      {error ? <div className="dsh-ui-error" role="alert">{error}</div> : null}
+      {saveError !== '' ? (
+        <div className="dsh-ui-error" role="alert">
+          {saveError}
+          <Button variant="ghost" size="sm" aria-label={t(locale, 'dismissError')} title={t(locale, 'dismissError')} onClick={() => setSaveError('')}><IconCloseOutlineRegular size={12} /></Button>
+        </div>
+      ) : null}
+      {view === undefined ? null : (
+        <>
+          {(view.servers ?? []).length > 0 ? <div className="dsh-dot-cap-section">{t(locale, 'sMcpConnected')}</div> : null}
+          {(view.servers ?? []).map(server => {
+            const needsToken = server.auth === 'token' && server.credential?.configured !== true
+            return (
+              <div key={server.name} className="dsh-dot-mcp-row">
+                <div className="dsh-dot-mcp-line">
+                  <McpStateDot state={server.status?.state ?? (server.enabled ? 'connecting' : 'off')} />
+                  <span className="dsh-dot-mcp-name" title={server.name}>{server.name}</span>
+                  <span className="dsh-dot-mcp-status" title={server.status?.diagnostic}>{mcpStatusText(locale, server)}</span>
+                  <span className="dsh-dot-mcp-actions">
+                    <Button variant="ghost" size="sm" disabled={busy} onClick={() => void saveServers({ ...servers, [server.name]: { ...servers[server.name]!, enabled: !server.enabled } })}>
+                      {server.enabled ? t(locale, 'sMcpDisable') : t(locale, 'sMcpEnable')}
+                    </Button>
+                    {server.auth === 'token' ? (
+                      <Button variant="ghost" size="sm" disabled={busy} onClick={() => { setTokenFor(tokenFor === server.name ? undefined : server.name); setTokenDraft('') }}>
+                        {t(locale, 'sMcpRetoken')}
+                      </Button>
+                    ) : null}
+                    <Button variant="ghost" size="sm" disabled={busy} onClick={() => removeServer(server.name)}>{t(locale, 'sMcpRemove')}</Button>
+                  </span>
+                </div>
+                <div className="dsh-dot-mcp-grant">
+                  <GrantPicker locale={locale} label={server.name} chain={[`mcp:${server.name}`]} grants={grants} applied={undefined} hideClear={true} onPick={onPick} />
+                </div>
+                {needsToken ? tokenField(server.name, server.tokenUrl, server.catalog === 'github' ? 'sMcpTokenHelp_github' : undefined) : null}
+                {tokenFor === server.name && !needsToken ? tokenField(server.name, server.tokenUrl) : null}
+              </div>
+            )
+          })}
+          {(view.catalog ?? []).length > 0 ? <div className="dsh-dot-cap-section">{t(locale, 'sMcpRecommended')}</div> : null}
+          {(view.catalog ?? []).map(entry => {
+            const global = view.globals?.includes(entry.id) === true
+            return (
+              <div key={entry.id} className="dsh-dot-mcp-row">
+                <div className="dsh-dot-mcp-line">
+                  <span className="dsh-dot-mcp-name">{entry.name}</span>
+                  <span className="dsh-dot-mcp-about">{t(locale, entry.about as TextKey)}</span>
+                  <span className="dsh-dot-mcp-actions">
+                    {global ? null : entry.auth === 'none' ? (
+                      <Button variant="ghost" size="sm" disabled={busy} onClick={() => void connect(entry)}>{t(locale, 'sMcpConnect')}</Button>
+                    ) : (
+                      <Button variant="ghost" size="sm" disabled={busy} onClick={() => { setTokenFor(tokenFor === entry.id ? undefined : entry.id); setTokenDraft('') }}>{t(locale, 'sMcpConnect')}</Button>
+                    )}
+                  </span>
+                </div>
+                {global ? <div className="dsh-dot-mcp-global"><span className="dsh-dot-cap-badge">{t(locale, 'sMcpGlobal')}</span><span className="dsh-dot-mcp-token-help">{t(locale, 'sMcpGlobalHint')}</span></div> : null}
+                {!global && tokenFor === entry.id ? connectField(entry) : null}
+              </div>
+            )
+          })}
+          <details className="dsh-dot-mcp-custom">
+            <summary>{t(locale, 'sMcpCustom')}</summary>
+            <div className="dsh-dot-mcp-custom-body">
+              <Input  placeholder={t(locale, 'sMcpNamePlaceholder')} value={customName} onChange={event => setCustomName(event.target.value)} />
+              <Input  placeholder={t(locale, 'sMcpUrlPlaceholder')} value={customUrl} onChange={event => setCustomUrl(event.target.value)} />
+              <Input  type="password" placeholder={t(locale, 'sMcpTokenOptional')} value={customToken} onChange={event => setCustomToken(event.target.value)} />
+              {customError !== '' ? <div className="dsh-ui-error" role="alert">{customError}</div> : null}
+              <Button variant="primary" size="sm" disabled={busy} onClick={addCustom}>{t(locale, 'sMcpAdd')}</Button>
+            </div>
+          </details>
+          {(view.servers ?? []).length === 0 && (view.catalog ?? []).length === 0 ? <div className="dsh-dot-model-empty">{t(locale, 'sMcpEmpty')}</div> : null}
         </>
       )}
     </div>
@@ -464,12 +818,13 @@ function IdleCheckInput({ locale, value, onCommit, label, unit }: { locale: Copy
   )
 }
 
-function SegmentedChoice<T extends string>({ locale, label, value, options, labelKeyOf, onChange }: {
+function SegmentedChoice<T extends string>({ locale, label, value, options, labelKeyOf, titleKeyOf, onChange }: {
   locale: CopyLocale
   label: string
   value: T
   options: readonly [T, ...T[]]
   labelKeyOf: (option: T) => TextKey
+  titleKeyOf?: (option: T) => TextKey
   onChange: (next: T) => void
 }) {
   const baseId = useId()
@@ -477,8 +832,8 @@ function SegmentedChoice<T extends string>({ locale, label, value, options, labe
     id: `${baseId}-${option}`,
     panelId: `${baseId}-${option}-panel`,
     value: option,
-    label: <span className="dsh-dot-seg-label">{t(locale, labelKeyOf(option))}</span>,
-  })) as unknown as readonly [SegmentedTab<T>, ...SegmentedTab<T>[]], [baseId, locale, options, labelKeyOf])
+    label: <span className="dsh-dot-seg-label" title={t(locale, titleKeyOf === undefined ? labelKeyOf(option) : titleKeyOf(option))}>{t(locale, labelKeyOf(option))}</span>,
+  })) as unknown as readonly [SegmentedTab<T>, ...SegmentedTab<T>[]], [baseId, locale, options, labelKeyOf, titleKeyOf])
   return (
     <SegmentedTabs<T>
       size="sm"
@@ -643,7 +998,7 @@ export function PaneSkeleton({ label, rows = 4 }: { label: string; rows?: number
   )
 }
 
-export function SettingsPanel({ locale, api, settings, section = 'all', proposals, onSaved, onStatusChange, onProposalCount, renderFactorySlot }: {
+export function SettingsPanel({ locale, api, settings, section = 'all', proposals, onSaved, onStatusChange, onProposalCount, onSectionChange, renderFactorySlot }: {
   locale: CopyLocale
   api: SettingsApi
   settings?: DotSettings
@@ -652,6 +1007,8 @@ export function SettingsPanel({ locale, api, settings, section = 'all', proposal
   onSaved: (next: DotSettings) => void
   onStatusChange?: (status: SaveNotice | undefined) => void
   onProposalCount?: (count: number) => void
+  /** Switch the drawer to another settings section (MCP page link). */
+  onSectionChange?: (section: SettingsSection) => void
   renderFactorySlot?: RenderFactorySlot
 }) {
   const models = useModels(api)
@@ -659,6 +1016,7 @@ export function SettingsPanel({ locale, api, settings, section = 'all', proposal
   const [modelFilter, setModelFilter] = useState('')
   const [keepalive, setKeepalive] = useState<KeepaliveInfo>()
   const [keepaliveRefresh, setKeepaliveRefresh] = useState(0)
+  const [livePermissions, setLivePermissions] = useState<TaskPermission[]>(['workspace-write', 'danger-full-access'])
   const show = (target: SettingsSection) => section === 'all' || section === target
   const reloadSettings = useCallback(() => {
     api.settings(new AbortController().signal).then(onSaved, () => {})
@@ -677,6 +1035,16 @@ export function SettingsPanel({ locale, api, settings, section = 'all', proposal
     )
     return () => { life.abort() }
   }, [api, keepaliveRefresh, hasSettings, modelKey, cacheTtlSig, proposalState.revision])
+  useEffect(() => {
+    if (!api.taskPermissionOptions) return
+    if (section !== 'all' && section !== 'dispatch') return
+    const life = new AbortController()
+    api.taskPermissionOptions(life.signal).then(
+      value => { if (!life.signal.aborted && Array.isArray(value?.options)) setLivePermissions(value.options) },
+      () => {},
+    )
+    return () => { life.abort() }
+  }, [api, section])
   const reportStatus = useCallback((next: SaveNotice | undefined) => {
     setStatus(next)
     onStatusChange?.(next)
@@ -704,7 +1072,9 @@ export function SettingsPanel({ locale, api, settings, section = 'all', proposal
   }
   const approvalModes: readonly [ApprovalMode, ApprovalMode, ApprovalMode] = ['dot', 'human', 'deny']
   const questionModes: readonly [TakeoverMode, TakeoverMode, TakeoverMode] = ['dot', 'human', 'off']
-  const permissionModes: readonly [TaskPermission, TaskPermission, TaskPermission] = ['workspace-write', 'danger-full-access', 'default']
+  const permissionModes: readonly [TaskPermission, ...TaskPermission[]] = (livePermissions.includes(settings.taskPermission)
+    ? livePermissions
+    : [...livePermissions, settings.taskPermission]) as [TaskPermission, ...TaskPermission[]]
   const lock = (field: SettingField) => ({ locked: settings?.locks?.[field] === true, onLock: (locked: boolean) => save({ locks: { ...settings?.locks, [field]: locked } }) })
 
   // Models dot may start tasks on: provider-grouped catalog choices, followed by listed entries the catalog no longer has.
@@ -716,6 +1086,11 @@ export function SettingsPanel({ locale, api, settings, section = 'all', proposal
   const staleKeys = rule.list.filter(key => !catalogKeys.has(key) && (!needle || key.toLowerCase().includes(needle)))
   const toggleTaskModel = (key: string, checked: boolean) => {
     const list = checked ? [...rule.list.filter(item => item !== key), key] : rule.list.filter(item => item !== key)
+    save({ taskModels: { mode: rule.mode, list } })
+  }
+  const toggleTaskGroup = (keys: readonly string[], checked: boolean) => {
+    const drop = new Set(keys)
+    const list = checked ? [...rule.list, ...keys.filter(key => !rule.list.includes(key))] : rule.list.filter(key => !drop.has(key))
     save({ taskModels: { mode: rule.mode, list } })
   }
   const emptyAllowList = rule.mode === 'allow' && rule.list.length === 0
@@ -814,13 +1189,13 @@ export function SettingsPanel({ locale, api, settings, section = 'all', proposal
         <div className="dsh-dot-pane-section">
           {allSections ? <h3 className="dsh-dot-pane-section-title">{t(locale, 'sRequests')}</h3> : null}
           <div className="dsh-ui-form">
-            <Field label={t(locale, 'sScope')} {...lock('scope')}>
+            <Field label={t(locale, 'sScope')} tip={t(locale, 'sScopeDesc')} {...lock('scope')}>
               <SegmentedChoice locale={locale} label={t(locale, 'sScope')} value={settings.scope} options={['all', 'tracked']} labelKeyOf={opt => `sScope_${opt}`} onChange={next => save({ scope: next })} />
             </Field>
             <Field label={t(locale, 'sApprovals')} tip={approvalHelp} {...lock('approvals')}>
               <SegmentedChoice locale={locale} label={t(locale, 'sApprovals')} value={settings.approvals} options={approvalModes} labelKeyOf={opt => `sApprovals_${opt}`} onChange={next => save({ approvals: next })} />
             </Field>
-            <Field label={t(locale, 'sQuestions')} tip={settings.questions === 'dot' ? t(locale, 'sQuestionsDesc_dot') : undefined} {...lock('questions')}>
+            <Field label={t(locale, 'sQuestions')} tip={t(locale, `sQuestionsDesc_${settings.questions}` as TextKey)} {...lock('questions')}>
               <SegmentedChoice locale={locale} label={t(locale, 'sQuestions')} value={settings.questions} options={questionModes} labelKeyOf={opt => `sQuestions_${opt}`} onChange={next => save({ questions: next })} />
             </Field>
           </div>
@@ -830,7 +1205,13 @@ export function SettingsPanel({ locale, api, settings, section = 'all', proposal
         <div className="dsh-dot-pane-section">
           {allSections ? <h3 className="dsh-dot-pane-section-title">{t(locale, 'sTasks')}</h3> : null}
           <div className="dsh-ui-form">
-            <Field label={t(locale, 'sTaskPermission')} tip={t(locale, 'sTaskPermissionDesc')} {...lock('taskPermission')}>
+            <Field
+              label={t(locale, 'sTaskPermission')}
+              tip={t(locale, `sTaskPermissionDesc_${settings.taskPermission}` as TextKey)}
+              help={livePermissions.includes(settings.taskPermission) ? undefined : t(locale, 'sTaskPermissionUnavailable').replace('{name}', t(locale, `sTaskPermission_${settings.taskPermission}` as TextKey))}
+              helpTone={livePermissions.includes(settings.taskPermission) ? undefined : 'warn'}
+              {...lock('taskPermission')}
+            >
               <SegmentedChoice locale={locale} label={t(locale, 'sTaskPermission')} value={settings.taskPermission} options={permissionModes} labelKeyOf={opt => `sTaskPermission_${opt}`} onChange={next => save({ taskPermission: next })} />
             </Field>
             <Field label={t(locale, 'sTaskModels')} help={taskModelsHelp} helpTone={taskModelsHelp ? 'warn' : undefined} {...lock('taskModels')}>
@@ -852,28 +1233,50 @@ export function SettingsPanel({ locale, api, settings, section = 'all', proposal
                       <Button variant="ghost" size="sm" onClick={() => save({ taskModels: { mode: rule.mode, list: [] } })}>{t(locale, 'sTaskModelsClear')}</Button>
                     ) : null}
                   </div>
+                  {rule.list.length > 0 ? (
+                    <div className="dsh-dot-model-chips" data-tone={rule.mode} aria-label={t(locale, 'sTaskModelsSelected').replace('{n}', String(rule.list.length))}>
+                      {rule.list.map(key => {
+                        const choice = catalogChoices.find(item => taskModelKey(item) === key)
+                        const stale = choice === undefined
+                        return (
+                          <span key={key} className="dsh-dot-model-chip" data-stale={stale ? '' : undefined} title={stale ? `${key} ${t(locale, 'sTaskModelsGone')}` : choice.label}>
+                            <span className="dsh-dot-model-chip-name">{choice ? modelMenuShortName(choice) : key}</span>
+                            {choice ? <span className="dsh-dot-model-chip-provider">{choice.providerLabel ?? choice.provider}</span> : null}
+                            <button type="button" className="dsh-dot-model-chip-remove" aria-label={t(locale, 'sTaskModelsRemove').replace('{name}', choice ? modelMenuShortName(choice) : key)} onClick={() => toggleTaskModel(key, false)}>×</button>
+                          </span>
+                        )
+                      })}
+                    </div>
+                  ) : null}
                   <div className="dsh-dot-model-list">
                     {filteredGroups.length === 0 && staleKeys.length === 0 ? (
                       <div className="dsh-dot-model-empty">{catalogChoices.length === 0 && !models.failed ? t(locale, 'sModelLoading') : t(locale, 'sTaskModelsNoMatch')}</div>
                     ) : null}
-                    {filteredGroups.map(group => (
-                      <div className="dsh-dot-model-group" key={group.provider}>
-                        <div className="dsh-dot-model-group-title">{group.name}</div>
-                        {group.items.map(choice => {
-                          const key = taskModelKey(choice)
-                          return (
-                            <Checkbox
-                              key={key}
-                              className="dsh-dot-model-item"
-                              checked={rule.list.includes(key)}
-                              label={modelMenuShortName(choice)}
-                              title={choice.label}
-                              onChange={checked => toggleTaskModel(key, checked)}
-                            />
-                          )
-                        })}
-                      </div>
-                    ))}
+                    {filteredGroups.map(group => {
+                      const keys = group.items.map(taskModelKey)
+                      const selected = keys.filter(key => rule.list.includes(key))
+                      return (
+                        <details className="dsh-dot-model-group" key={group.provider} open={modelFilter.trim() !== '' || selected.length > 0}>
+                          <summary className="dsh-dot-model-group-title">
+                            <span className="dsh-dot-model-group-label">{group.name}<span className="dsh-dot-model-group-count">{selected.length}/{keys.length}</span></span>
+                            <button type="button" className="dsh-dot-model-group-toggle" onClick={event => { event.preventDefault(); event.stopPropagation(); toggleTaskGroup(keys, selected.length !== keys.length) }}>{t(locale, selected.length === keys.length ? 'sTaskModelsGroupNone' : 'sTaskModelsGroupAll')}</button>
+                          </summary>
+                          {group.items.map(choice => {
+                            const key = taskModelKey(choice)
+                            return (
+                              <Checkbox
+                                key={key}
+                                className="dsh-dot-model-item"
+                                checked={rule.list.includes(key)}
+                                label={modelMenuShortName(choice)}
+                                title={choice.label}
+                                onChange={checked => toggleTaskModel(key, checked)}
+                              />
+                            )
+                          })}
+                        </details>
+                      )
+                    })}
                     {staleKeys.length > 0 ? (
                       <div className="dsh-dot-model-group">
                         <div className="dsh-dot-model-group-title">{t(locale, 'sTaskModelsStaleGroup')}</div>
@@ -906,7 +1309,7 @@ export function SettingsPanel({ locale, api, settings, section = 'all', proposal
           {allSections ? <h3 className="dsh-dot-pane-section-title">{t(locale, 'sCapabilities')}</h3> : null}
           <div className="dsh-ui-form">
             <Field label={t(locale, 'sCapGrants')} tip={t(locale, 'sCapabilitiesDesc')} {...lock('capabilities')}>
-              <Capabilities locale={locale} api={api} grants={settings.capabilities?.grants ?? {}} onPick={(selector, grant) => {
+              <Capabilities locale={locale} api={api} grants={settings.capabilities?.grants ?? {}} onOpenMcp={api.mcpList !== undefined && onSectionChange !== undefined ? () => onSectionChange('mcp') : undefined} onPick={(selector, grant) => {
                 const grants = { ...settings.capabilities?.grants }
                 if (grant === undefined) delete grants[selector]
                 else grants[selector] = grant
@@ -914,6 +1317,17 @@ export function SettingsPanel({ locale, api, settings, section = 'all', proposal
               }} />
             </Field>
           </div>
+        </div>
+      ) : null}
+      {show('mcp') ? (
+        <div className="dsh-dot-pane-section">
+          {allSections ? <h3 className="dsh-dot-pane-section-title">{t(locale, 'sMcp')}</h3> : null}
+          <McpPane locale={locale} api={api} settings={settings} grants={settings.capabilities?.grants ?? {}} onSaved={onSaved} onPick={(selector, grant) => {
+            const grants = { ...settings.capabilities?.grants }
+            if (grant === undefined) delete grants[selector]
+            else grants[selector] = grant
+            save({ capabilities: { grants } })
+          }} />
         </div>
       ) : null}
     </div></LocaleContext.Provider>
@@ -982,7 +1396,23 @@ export const settingsCss = `
 .dsh-dot-chat .dsh-dot-model-toolbar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .dsh-dot-chat .dsh-dot-model-toolbar > button { flex-shrink: 0; white-space: nowrap; }
 .dsh-dot-chat .dsh-dot-model-search { flex: 1 1 160px; min-width: 0; height: 28px; }
-.dsh-dot-chat .dsh-dot-model-list { display: flex; flex-direction: column; gap: 8px; max-height: 220px; overflow-y: auto; padding: 2px; }
+.dsh-dot-chat .dsh-dot-model-list { display: flex; flex-direction: column; gap: 8px; max-height: 320px; overflow-y: auto; padding: 2px; }
+.dsh-dot-chat .dsh-dot-model-chips { display: flex; flex-wrap: wrap; gap: 4px; max-height: 96px; overflow-y: auto; }
+.dsh-dot-chat .dsh-dot-model-chip { display: inline-flex; align-items: center; gap: 4px; min-width: 0; max-width: 100%; padding: 1px 4px 1px 7px; border-radius: var(--dsw-radius-sm); background: var(--dsw-alias-bg-layer-2); font-size: 11px; line-height: 16px; color: var(--dsw-alias-label-primary); }
+.dsh-dot-chat .dsh-dot-model-chip[data-stale] { color: var(--dsw-alias-label-tertiary); }
+.dsh-dot-chat .dsh-dot-model-chip[data-stale] .dsh-dot-model-chip-name { text-decoration: line-through; }
+.dsh-dot-chat .dsh-dot-model-chips[data-tone='deny'] .dsh-dot-model-chip { color: var(--dsw-alias-state-warn-primary); }
+.dsh-dot-chat .dsh-dot-model-chip-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dsh-dot-chat .dsh-dot-model-chip-provider { flex-shrink: 0; font-size: 10px; color: var(--dsw-alias-label-tertiary); }
+.dsh-dot-chat .dsh-dot-model-chip-remove { border: 0; background: none; padding: 0 2px; color: inherit; cursor: pointer; font-size: 13px; line-height: 1; }
+.dsh-dot-chat .dsh-dot-model-group > summary { display: flex; align-items: center; gap: 6px; list-style: none; cursor: pointer; }
+.dsh-dot-chat .dsh-dot-model-group > summary::-webkit-details-marker { display: none; }
+.dsh-dot-chat .dsh-dot-model-group > summary::before { content: '›'; display: inline-block; transition: transform 0.12s; color: var(--dsw-alias-label-tertiary); }
+.dsh-dot-chat .dsh-dot-model-group[open] > summary::before { transform: rotate(90deg); }
+.dsh-dot-chat .dsh-dot-model-group-label { flex: 1 1 auto; min-width: 0; }
+.dsh-dot-chat .dsh-dot-model-group-count { margin-left: 6px; font-weight: 400; color: var(--dsw-alias-label-tertiary); }
+.dsh-dot-chat .dsh-dot-model-group-toggle { flex-shrink: 0; border: 0; background: none; padding: 0 6px; color: var(--dsw-alias-label-tertiary); font-size: 11px; line-height: 16px; cursor: pointer; }
+.dsh-dot-chat .dsh-dot-model-group-toggle:hover { color: var(--dsw-alias-label-primary); }
 .dsh-dot-chat .dsh-dot-model-empty { padding: 12px 8px; text-align: center; font-size: 12px; color: var(--dsw-alias-label-tertiary); }
 .dsh-dot-chat .dsh-dot-model-group { display: flex; flex-direction: column; gap: 2px; }
 .dsh-dot-chat .dsh-dot-model-group-title { padding: 4px 6px 2px; font-size: 11px; line-height: 16px; font-weight: 600; color: var(--dsw-alias-label-tertiary); }
@@ -999,19 +1429,32 @@ export const settingsCss = `
 .dsh-dot-chat .dsh-dot-factory-preview { display: flex; flex-direction: column; gap: 8px; margin: 8px 0; padding: 10px 12px; border-radius: var(--dsw-radius-md); background: var(--dsw-alias-bg-layer-1); box-shadow: var(--dsw-elevation-stroke); }
 .dsh-dot-chat .dsh-dot-factory-preview ul { margin: 0; padding-left: 18px; font-size: 12px; line-height: 18px; color: var(--dsw-alias-label-secondary); }
 .dsh-dot-chat .dsh-dot-caps { display: flex; flex-direction: column; gap: 8px; margin-top: 4px; }
+.dsh-dot-chat .dsh-dot-cap-intro { margin: 0; font-size: 12px; line-height: 18px; color: var(--dsw-alias-label-secondary); }
+.dsh-dot-chat .dsh-dot-cap-search { height: 28px; }
 .dsh-dot-chat .dsh-dot-cap-group { border-radius: var(--dsw-radius-md); background: var(--dsw-alias-bg-layer-1); box-shadow: var(--dsw-elevation-stroke); }
 .dsh-dot-chat .dsh-dot-cap-group > summary { list-style: none; }
 .dsh-dot-chat .dsh-dot-cap-group > summary::-webkit-details-marker { display: none; }
+.dsh-dot-chat .dsh-dot-cap-toolbar { display: flex; align-items: center; gap: 12px; }
+.dsh-dot-chat .dsh-dot-cap-toolbar .dsh-dot-cap-search { flex: 1 1 auto; }
 .dsh-dot-chat .dsh-dot-cap-head { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 8px; padding: 8px 12px; cursor: pointer; }
-.dsh-dot-chat .dsh-dot-cap-head .dsh-dot-cap-name { flex-basis: 100%; }
 .dsh-dot-chat .dsh-dot-cap-group--locked .dsh-dot-cap-head { cursor: pointer; }
-.dsh-dot-chat .dsh-dot-cap-name { flex: 1 1 auto; min-width: 0; font-size: 13px; line-height: 20px; color: var(--dsw-alias-label-primary); overflow-wrap: anywhere; }
-.dsh-dot-chat .dsh-dot-cap-id { margin-left: 6px; font-size: 11px; color: var(--dsw-alias-label-tertiary); font-family: var(--ds-font-family-code); }
-.dsh-dot-chat .dsh-dot-cap-control { flex: 0 0 auto; }
+.dsh-dot-chat .dsh-dot-cap-chev { flex-shrink: 0; color: var(--dsw-alias-label-tertiary); transition: transform 0.12s ease; }
+.dsh-dot-chat .dsh-dot-cap-group[open] > summary .dsh-dot-cap-chev { transform: rotate(90deg); }
+.dsh-dot-chat .dsh-dot-cap-name { flex: 1 1 120px; min-width: 120px; font-size: 13px; line-height: 20px; color: var(--dsw-alias-label-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dsh-dot-chat .dsh-dot-cap-group[data-grant='off'] > summary .dsh-dot-cap-name { color: var(--dsw-alias-label-secondary); }
+.dsh-dot-chat .dsh-dot-cap-section { margin: 10px 4px 2px; font-size: 11px; line-height: 16px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; color: var(--dsw-alias-label-tertiary); }
+.dsh-dot-chat .dsh-dot-cap-section-wrap { display: flex; flex-direction: column; gap: 8px; }
+.dsh-dot-chat .dsh-dot-cap-mcplink { align-self: flex-start; margin: 0 4px; padding: 0; border: none; background: none; font-size: 11px; line-height: 16px; color: var(--dsw-alias-accent-primary, var(--dsw-alias-label-tertiary)); cursor: pointer; }
+.dsh-dot-chat .dsh-dot-cap-tag { margin-left: 6px; padding: 0 5px; border-radius: var(--dsw-radius-sm); font-size: 10px; line-height: 14px; background: var(--dsw-alias-bg-layer-2); color: var(--dsw-alias-label-tertiary); }
+.dsh-dot-chat .dsh-dot-cap-tag--dot { color: var(--dsw-alias-state-success-primary); }
+.dsh-dot-chat .dsh-dot-cap-count { margin-left: 6px; font-size: 11px; color: var(--dsw-alias-label-tertiary); }
+.dsh-dot-chat .dsh-dot-cap-control { flex: 0 0 auto; margin-left: auto; }
 .dsh-dot-chat .dsh-dot-cap-body { display: flex; flex-direction: column; gap: 2px; padding: 0 12px 10px; }
 .dsh-dot-chat .dsh-dot-cap-body .dsh-dot-cap-group { box-shadow: none; background: var(--dsw-alias-bg-layer-2); }
-.dsh-dot-chat .dsh-dot-cap-row { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 8px; padding: 4px 0 4px 8px; }
-.dsh-dot-chat .dsh-dot-cap-row .dsh-dot-cap-name { flex-basis: 100%; }
+.dsh-dot-chat .dsh-dot-cap-row { display: flex; align-items: flex-start; flex-wrap: wrap; gap: 4px 8px; padding: 4px 0 4px 8px; }
+.dsh-dot-chat .dsh-dot-cap-tool { flex: 1 1 auto; display: flex; flex-direction: column; min-width: 0; }
+.dsh-dot-chat .dsh-dot-cap-tool code { font-family: var(--ds-font-family-code); font-size: 12px; }
+.dsh-dot-chat .dsh-dot-cap-desc { font-size: 11px; line-height: 15px; color: var(--dsw-alias-label-tertiary); }
 .dsh-dot-chat .dsh-dot-cap-grant { display: inline-flex; align-items: center; gap: 6px; flex-shrink: 0; }
 .dsh-dot-chat .dsh-dot-cap-grant[data-inherited] [role='tablist'] { opacity: 0.55; }
 .dsh-dot-chat .dsh-dot-cap-badge {
@@ -1020,9 +1463,33 @@ export const settingsCss = `
 }
 .dsh-dot-chat .dsh-dot-cap-badge--on { color: var(--dsw-alias-state-success-primary); }
 .dsh-dot-chat .dsh-dot-cap-badge--warn { color: var(--dsw-alias-state-warn-primary); }
-.dsh-dot-chat .dsh-dot-cap-confirm { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding: 8px 12px; border-radius: var(--dsw-radius-md); background: var(--dsw-alias-bg-layer-1); box-shadow: var(--dsw-elevation-stroke); }
-.dsh-dot-chat .dsh-dot-cap-confirm-text { flex: 1 1 240px; font-size: 12px; line-height: 18px; color: var(--dsw-alias-state-warn-primary); }
 .dsh-dot-chat .dsh-dot-cap-clear { flex-shrink: 0; }
-.dsh-dot-chat .dsh-dot-cap-locked { display: flex; flex-wrap: wrap; gap: 4px; }
+.dsh-dot-chat .dsh-dot-cap-clear-slot { display: inline-flex; align-items: center; justify-content: center; width: 24px; flex-shrink: 0; }
+.dsh-dot-chat .dsh-dot-cap-clear-slot .dsh-dot-cap-clear { padding: 2px; }
+.dsh-dot-chat .dsh-dot-cap-locked { flex-direction: row; flex-wrap: wrap; gap: 4px; }
 .dsh-dot-chat .dsh-dot-cap-locked-name { padding: 1px 6px; border-radius: var(--dsw-radius-sm); background: var(--dsw-alias-bg-layer-2); font-size: 11px; font-family: var(--ds-font-family-code); color: var(--dsw-alias-label-secondary); }
+.dsh-dot-chat .dsh-dot-mcp { display: flex; flex-direction: column; gap: 8px; margin-top: 4px; }
+.dsh-dot-chat .dsh-dot-mcp-row { display: flex; flex-direction: column; gap: 4px; padding: 8px 12px; border-radius: var(--dsw-radius-md); background: var(--dsw-alias-bg-layer-1); box-shadow: var(--dsw-elevation-stroke); }
+.dsh-dot-chat .dsh-dot-mcp-line { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 8px; min-width: 0; }
+.dsh-dot-chat .dsh-dot-mcp-name { flex-shrink: 0; font-size: 13px; line-height: 20px; font-weight: 500; color: var(--dsw-alias-label-primary); }
+.dsh-dot-chat .dsh-dot-mcp-status, .dsh-dot-chat .dsh-dot-mcp-about { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; line-height: 16px; color: var(--dsw-alias-label-tertiary); }
+.dsh-dot-chat .dsh-dot-mcp-actions { display: inline-flex; align-items: center; gap: 0; margin-left: auto; flex-shrink: 0; }
+.dsh-dot-chat .dsh-dot-mcp-grant { display: flex; align-items: center; }
+.dsh-dot-chat .dsh-dot-mcp-state { display: inline-block; width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
+.dsh-dot-chat .dsh-dot-cap-name .dsh-dot-mcp-state { margin-right: 6px; vertical-align: middle; }
+.dsh-dot-chat .dsh-dot-mcp-state--ok { background: var(--dsw-alias-state-success-primary); }
+.dsh-dot-chat .dsh-dot-mcp-state--warn { background: var(--dsw-alias-state-warn-primary); }
+.dsh-dot-chat .dsh-dot-mcp-state--bad { background: var(--dsw-alias-state-danger-primary, var(--dsw-alias-state-warn-primary)); }
+.dsh-dot-chat .dsh-dot-mcp-state--muted { background: var(--dsw-alias-label-tertiary); }
+.dsh-dot-chat .dsh-dot-mcp-token { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; padding-top: 2px; }
+.dsh-dot-chat .dsh-dot-mcp-token .dsh-ui-input, .dsh-dot-chat .dsh-dot-mcp-token input { flex: 1 1 140px; min-width: 0; }
+.dsh-dot-chat .dsh-dot-mcp-token-link { font-size: 11px; }
+.dsh-dot-chat .dsh-dot-mcp-token-help { flex-basis: 100%; font-size: 11px; line-height: 15px; color: var(--dsw-alias-label-tertiary); }
+.dsh-dot-chat .dsh-dot-mcp-global { display: flex; align-items: baseline; flex-wrap: wrap; gap: 6px; }
+.dsh-dot-chat .dsh-dot-mcp-global .dsh-dot-mcp-token-help { flex-basis: auto; }
+.dsh-dot-chat .dsh-dot-mcp-custom > summary { padding: 4px; font-size: 12px; line-height: 18px; color: var(--dsw-alias-label-secondary); cursor: pointer; list-style: none; }
+.dsh-dot-chat .dsh-dot-mcp-custom > summary::-webkit-details-marker { display: none; }
+.dsh-dot-chat .dsh-dot-mcp-custom > summary::before { content: '▸'; margin-right: 6px; color: var(--dsw-alias-label-tertiary); }
+.dsh-dot-chat .dsh-dot-mcp-custom[open] > summary::before { content: '▾'; }
+.dsh-dot-chat .dsh-dot-mcp-custom-body { display: flex; flex-direction: column; gap: 6px; padding: 8px 12px; border-radius: var(--dsw-radius-md); background: var(--dsw-alias-bg-layer-1); box-shadow: var(--dsw-elevation-stroke); }
 `

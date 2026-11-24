@@ -4,8 +4,11 @@
  * registration attribution lives in ./attribution.ts, which also ships as an
  * early loader row; this module only reads its shared owners map.
  */
-import type { CapabilityGrant, CapabilityGroupView, CapabilityToolView, DotSettings } from './contracts.ts'
+import { mcpGuess, mcpServerOf, type CapabilityGrant, type CapabilityGroupView, type CapabilityMcpStatus, type CapabilityToolView, type DotSettings } from './contracts.ts'
 import { installToolAttribution, SCOPED_COPY, sharedAttribution, type ToolOwner } from './attribution.ts'
+
+export { mcpGuess, mcpPrefix, mcpServerOf } from './contracts.ts'
+import { sharedDotMcp } from './mcp-shared.ts'
 import { restrictInheritedTools } from './tool-scope.ts'
 
 export { installToolAttribution, SCOPED_COPY } from './attribution.ts'
@@ -17,6 +20,7 @@ export const SELECTOR = {
   mcp: 'mcp:',
   plugin: 'plugin:',
   prefix: 'prefix:',
+  builtin: 'builtin:',
   host: 'host',
 } as const
 
@@ -25,19 +29,100 @@ export const mcpSelector = (server: string): string => `${SELECTOR.mcp}${server}
 export const pluginSelector = (bundle: string): string => `${SELECTOR.plugin}${bundle}`
 export const entrySelector = (bundle: string, entryId: string): string => `${SELECTOR.plugin}${bundle}#${entryId}`
 export const prefixSelector = (segment: string): string => `${SELECTOR.prefix}${segment}`
+export const builtinSelector = (id: string): string => `${SELECTOR.builtin}${id}`
+
+/** The display-only parent id of the host built-in groups. */
+export const BUILTIN_PARENT = 'builtin'
 
 /**
- * Host tools whose rc5 self-escalation short-circuits under dot's
- * danger-full-access session: they run unsandboxed with no host approval, so
- * dot's own grant is the only control. Catalog rows and the grant UI flag
- * them, and `auto` asks the human to confirm once more.
+ * Host built-in tools mounted on the dot preset (index.ts): global-nature
+ * rows only — skill, schedule, and the plugin manager tools row. Names mirror
+ * the mounted packages; they are preset-scope registrations, so root
+ * `tools.get` never sees them and the catalog lists them statically.
  */
-export const HIGH_RISK_TOOLS: ReadonlySet<string> = new Set(['plugin_manager', 'bash', 'pwsh', 'write', 'edit', 'apply_patch'])
+export const BUILTIN_GROUPS: readonly { readonly id: string; readonly label: string; readonly tools: readonly string[] }[] = [
+  { id: 'skill', label: 'skill', tools: ['skill'] },
+  { id: 'schedule', label: 'schedule', tools: ['schedule_create', 'schedule_list', 'schedule_view', 'schedule_edit'] },
+  { id: 'plugin-manager', label: 'plugin-manager', tools: ['plugin_manager'] },
+]
 
-/** DeepSeek function-name contract shared with the MCP public-name derivation. */
-const MCP_INVALID_CHARS = /[^A-Za-z0-9_-]/g
-/** Hashed MCP names keep the normalized prefix only up to this many characters. */
-const MCP_PREFIX_MAX = 64 - 12 - 1
+/** Host schedule tools that can name a delivery session. */
+export const HOST_SCHEDULE_MUTATORS: ReadonlySet<string> = new Set(['schedule_create', 'schedule_edit'])
+
+function argsRecord(args: unknown): Record<string, unknown> | undefined {
+  if (args === undefined || args === null) return undefined
+  if (typeof args === 'string') {
+    try {
+      const parsed = JSON.parse(args) as unknown
+      return parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed as Record<string, unknown> : undefined
+    } catch { return undefined }
+  }
+  return typeof args === 'object' && !Array.isArray(args) ? args as Record<string, unknown> : undefined
+}
+
+/**
+ * Whether a host schedule_create/edit would deliver into Dorothy's hidden
+ * session. `this_session` resolves to the calling subagent session, which the
+ * host cannot deliver to; an explicit Dorothy session id has the same problem
+ * after a segment change. Use `dot_schedule` for reminders to Dorothy herself.
+ */
+export function hostScheduleTargetsDot(args: unknown, sessionIds: ReadonlySet<string>): boolean {
+  const target = argsRecord(args)?.target
+  if (typeof target !== 'string') return false
+  const key = target.trim()
+  if (key === 'this_session') return true
+  return sessionIds.has(key)
+}
+
+/**
+ * Tools that belong to task runs only: they mutate files or run commands in
+ * the caller's own session, which for dot is danger-full-access and would
+ * bypass work orders, write scopes, baselines, locks and verification. They
+ * are never applied to dot's agent, whatever the grant says. The set is the
+ * host's built-in names; third-party write/command aliases gated in
+ * approval-risk stay a separate product decision.
+ */
+export const TASK_ONLY_TOOLS: ReadonlySet<string> = new Set(['plugin_manager', 'bash', 'pwsh', 'write', 'edit', 'apply_patch'])
+
+const countGroupTools = (group: CapabilityGroupView): number =>
+  group.tools.length + (group.children ?? []).reduce((sum, child) => sum + countGroupTools(child), 0)
+
+const countGroupTaskOnly = (group: CapabilityGroupView): number =>
+  group.tools.filter(tool => tool.taskOnly === true).length
+    + (group.children ?? []).reduce((sum, child) => sum + countGroupTaskOnly(child), 0)
+
+/** True when the group has tools and every one of them is task-only. Empty groups are not. */
+export function groupAllTaskOnly(group: CapabilityGroupView): boolean {
+  const total = countGroupTools(group)
+  return total > 0 && countGroupTaskOnly(group) === total
+}
+
+function findGroup(groups: readonly CapabilityGroupView[], id: string): CapabilityGroupView | undefined {
+  for (const group of groups) {
+    if (group.id === id) return group
+    const child = findGroup(group.children ?? [], id)
+    if (child !== undefined) return child
+  }
+  return undefined
+}
+
+/**
+ * Whether a grant selector can never apply to Dorothy: a `tool:` name in
+ * `TASK_ONLY_TOOLS`, a static builtin group whose members are all task-only
+ * (`builtin:plugin-manager`), or — when a catalog is passed — any group whose
+ * tools are all task-only.
+ */
+export function isTaskOnlySelector(selector: string, groups?: readonly CapabilityGroupView[]): boolean {
+  if (selector.startsWith(SELECTOR.tool)) return TASK_ONLY_TOOLS.has(selector.slice(SELECTOR.tool.length))
+  if (selector.startsWith(SELECTOR.builtin)) {
+    const id = selector.slice(SELECTOR.builtin.length)
+    const entry = BUILTIN_GROUPS.find(group => group.id === id)
+    if (entry !== undefined && entry.tools.length > 0 && entry.tools.every(name => TASK_ONLY_TOOLS.has(name))) return true
+  }
+  if (groups === undefined) return false
+  const group = findGroup(groups, selector)
+  return group !== undefined && groupAllTaskOnly(group)
+}
 
 export interface CapabilityToolDef {
   readonly name: string
@@ -89,34 +174,11 @@ export interface CapabilityDeps {
   pluginManager(): CapabilityPluginManager | undefined
   settings(): DotSettings
   readonly locked: readonly string[]
+  /** Preset-scope tool defs (dot-local MCP tools live only there); absent when the host cannot expose them. */
+  presetDefs?(): Promise<readonly CapabilityToolDef[]>
 }
 
-/** Normalize an MCP server name the way the harness does when it builds public tool names. */
-export function mcpPrefix(server: string): string {
-  return `mcp__${server.replace(MCP_INVALID_CHARS, '_')}__`
-}
 
-/**
- * The server a public MCP tool name belongs to. Clean names start with the
- * full `mcp__<server>__` prefix; hashed names are clipped to 51 chars plus a
- * hash, so the match accepts the prefix clipped to that length.
- */
-export function mcpServerOf(name: string, servers: readonly string[]): string | undefined {
-  const candidates = servers.map(server => ({ server, prefix: mcpPrefix(server) })).sort((left, right) => right.prefix.length - left.prefix.length)
-  for (const { server, prefix } of candidates) {
-    const clip = Math.min(prefix.length, MCP_PREFIX_MAX)
-    if (name.length >= clip && name.slice(0, clip) === prefix.slice(0, clip)) return server
-  }
-  return undefined
-}
-
-/** Best-effort server part of an `mcp__x__y` name when no configured server matches. */
-function mcpGuess(name: string): string | undefined {
-  if (!name.startsWith('mcp__')) return undefined
-  const rest = name.slice(5)
-  const split = rest.indexOf('__')
-  return split > 0 ? rest.slice(0, split) : undefined
-}
 
 const firstLine = (text: string | undefined): string | undefined => {
   const line = text?.split('\n').find(row => row.trim())?.trim()
@@ -151,9 +213,12 @@ export function grantOnChain(grants: Readonly<Record<string, CapabilityGrant>>, 
 export function resolveGrants(grants: Readonly<Record<string, CapabilityGrant>>, groups: readonly CapabilityGroupView[]): Map<string, ResolvedGrant> {
   const out = new Map<string, ResolvedGrant>()
   const walk = (group: CapabilityGroupView, parents: readonly string[]) => {
-    const chain = group.kind === 'host' ? parents : [group.id, ...parents]
+    const chain = group.kind === 'host' || group.id === BUILTIN_PARENT ? parents : [group.id, ...parents]
     for (const tool of group.tools) {
       if (tool.missing === true) continue
+      // Task-only names never resolve for dot's own session, whatever selector
+      // chain granted them: a stored grant stays stored but harmless.
+      if (TASK_ONLY_TOOLS.has(tool.name)) continue
       const toolChain = [toolSelector(tool.name), ...chain]
       const grant = grantOnChain(grants, toolChain)
       if (grant === 'ask' || grant === 'auto') out.set(tool.name, { grant, chain: toolChain })
@@ -178,18 +243,29 @@ interface CatalogInput {
   readonly grants: Readonly<Record<string, CapabilityGrant>>
   readonly locked: ReadonlySet<string>
   readonly conditional: (name: string) => boolean
+  /** Last schema descriptions recorded on a dot agent, keyed by tool name. */
+  readonly builtinDescriptions?: ReadonlyMap<string, string>
+  /** Names the last dot agent schema snapshot exposed; once known, builtin names outside it are missing. */
+  readonly builtinVisible?: ReadonlySet<string>
+  /** Dot-local MCP servers mounted on the preset scope, with their tools and live status. */
+  readonly dotMcp?: {
+    readonly servers: readonly string[]
+    readonly defs: readonly CapabilityToolDef[]
+    readonly status: (server: string) => CapabilityMcpStatus | undefined
+  }
 }
 
-interface MutableTool extends CapabilityToolView { description?: string; missing?: boolean; conditional: boolean; highRisk?: boolean }
+interface MutableTool extends CapabilityToolView { description?: string; missing?: boolean; conditional: boolean; taskOnly?: boolean }
 /** The catalog as buildCatalog assembles it; arrays freeze into the readonly view contract on return. */
 interface MutableGroup {
   id: string
-  kind: 'mcp' | 'plugin' | 'entry' | 'prefix' | 'host'
+  kind: 'mcp' | 'plugin' | 'entry' | 'builtin' | 'prefix' | 'host'
   label: string
   missing?: boolean
-  highRisk?: boolean
   tools: CapabilityToolView[]
   children?: MutableGroup[]
+  scope?: 'dot'
+  status?: CapabilityMcpStatus
 }
 
 /** The first name segment a `prefix:` group shares, split at the first `_`, `-` or `.`. */
@@ -199,8 +275,8 @@ function nameSegment(name: string): string | undefined {
   return segment === '' ? undefined : segment
 }
 
-const riskRow = (tool: MutableTool): MutableTool => {
-  if (HIGH_RISK_TOOLS.has(tool.name)) tool.highRisk = true
+const taskOnlyRow = (tool: MutableTool): MutableTool => {
+  if (TASK_ONLY_TOOLS.has(tool.name)) tool.taskOnly = true
   return tool
 }
 
@@ -212,7 +288,7 @@ const riskRow = (tool: MutableTool): MutableTool => {
 export function buildCatalog(input: CatalogInput): { readonly locked: readonly string[]; readonly groups: readonly CapabilityGroupView[] } {
   type G = MutableGroup
   const row = (def: CapabilityToolDef): MutableTool => {
-    const tool = riskRow({ name: def.name, conditional: input.conditional(def.name) })
+    const tool = taskOnlyRow({ name: def.name, conditional: input.conditional(def.name) })
     const description = firstLine(def.description)
     if (description !== undefined) tool.description = description
     return tool
@@ -230,8 +306,27 @@ export function buildCatalog(input: CatalogInput): { readonly locked: readonly s
     mcpTools.set(server, list)
   }
   const groups: MutableGroup[] = [...mcpTools.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([server, tools]) => ({
-    id: mcpSelector(server), kind: 'mcp', label: server, tools,
+    id: mcpSelector(server), kind: 'mcp' as const, label: server, tools,
   }))
+  // Dot-local servers: every configured one gets a group even with no tools
+  // yet, so it can be pre-granted. Same-name global rows were filtered out by
+  // the caller (the preset layer shadows them for dot's agent).
+  if (input.dotMcp !== undefined) {
+    // Attribute across every known server so an overlapping prefix
+    // (`team` vs `team__docs`) never lands a tool in two groups.
+    const allNames = [...input.servers, ...input.dotMcp.servers]
+    for (const server of [...input.dotMcp.servers].sort((a, b) => a.localeCompare(b))) {
+      const status = input.dotMcp.status(server)
+      const group: MutableGroup = {
+        id: mcpSelector(server), kind: 'mcp', label: server, scope: 'dot',
+        tools: input.dotMcp.defs.filter(def => mcpServerOf(def.name, allNames) === server).map(row),
+        ...(status !== undefined ? { status } : {}),
+      }
+      groups.push(group)
+    }
+    // At this point groups only holds mcp entries; re-sort merges both kinds.
+    groups.sort((left, right) => left.id.localeCompare(right.id))
+  }
 
   // Entry id → bundle name, from the manager's live row mapping. An entry with
   // no bundle row is its own group keyed `plugin:<entryId>`.
@@ -317,6 +412,24 @@ export function buildCatalog(input: CatalogInput): { readonly locked: readonly s
     groups.push({ id: SELECTOR.host, kind: 'host', label: 'Unattributed', tools: flat, ...(children.length > 0 ? { children } : {}) })
   }
 
+  // Host built-in rows mounted on the dot preset: display-only parent like
+  // `host`, grantable `builtin:<id>` children whose names are static.
+  groups.push({
+    id: BUILTIN_PARENT, kind: 'builtin', label: 'builtin', tools: [],
+    children: BUILTIN_GROUPS.map(entry => {
+      const tools = entry.tools.map(name => {
+        const tool = taskOnlyRow({ name, conditional: false })
+        const description = input.builtinDescriptions?.get(name)
+        if (description !== undefined) tool.description = description
+        if (input.builtinVisible !== undefined && !input.builtinVisible.has(name)) tool.missing = true
+        return tool
+      })
+      const child: MutableGroup = { id: builtinSelector(entry.id), kind: 'builtin', label: entry.label, tools }
+      if (tools.length > 0 && tools.every(tool => tool.missing === true)) child.missing = true
+      return child
+    }),
+  })
+
   // Granted selectors that own nothing right now stay visible as missing rows.
   const allGroups = (list: readonly MutableGroup[]): MutableGroup[] => list.flatMap(group => [group, ...allGroups(group.children ?? [])])
   for (const selector of Object.keys(input.grants).sort()) {
@@ -338,6 +451,9 @@ export function buildCatalog(input: CatalogInput): { readonly locked: readonly s
     } else if (selector.startsWith(SELECTOR.prefix)) {
       if (allGroups(groups).some(group => group.id === selector)) continue
       groups.push({ id: selector, kind: 'prefix', label: `${selector.slice(SELECTOR.prefix.length)}_*`, missing: true, tools: [] })
+    } else if (selector.startsWith(SELECTOR.builtin)) {
+      if (allGroups(groups).some(group => group.id === selector)) continue
+      groups.push({ id: selector, kind: 'builtin', label: selector.slice(SELECTOR.builtin.length), missing: true, tools: [] })
     } else if (selector === SELECTOR.host) {
       if (!allGroups(groups).some(group => group.id === SELECTOR.host)) groups.push({ id: SELECTOR.host, kind: 'host', label: 'Unattributed', missing: true, tools: [] })
     } else if (selector.startsWith(SELECTOR.tool)) {
@@ -345,7 +461,7 @@ export function buildCatalog(input: CatalogInput): { readonly locked: readonly s
       if (!name || input.locked.has(name)) continue
       const present = allGroups(groups).some(group => group.tools.some(tool => tool.name === name))
       if (present) continue
-      const missing = riskRow({ name, conditional: false, missing: true })
+      const missing = taskOnlyRow({ name, conditional: false, missing: true })
       const server = mcpGuess(name)
       const owner = server !== undefined ? groups.find(group => group.id === mcpSelector(server)) : undefined
       if (owner !== undefined) owner.tools.push(missing)
@@ -357,19 +473,13 @@ export function buildCatalog(input: CatalogInput): { readonly locked: readonly s
     }
   }
 
-  // A group is high-risk when any tool inside it (however nested) is.
-  const markRisk = (group: MutableGroup): boolean => {
-    const risky = group.tools.some(tool => tool.highRisk === true) || (group.children ?? []).map(markRisk).some(Boolean)
-    if (risky) group.highRisk = true
-    return risky
-  }
-  for (const group of groups) markRisk(group)
-
   return { locked: [...input.locked].sort(), groups }
 }
 
 interface AppliedState {
   readonly applied: ReadonlyMap<string, ResolvedGrant>
+  /** Signature of the grants snapshot this apply resolved against; a segment record freezes it. */
+  readonly signature: string
   readonly release: () => void
 }
 
@@ -379,7 +489,7 @@ const BUNDLE_CACHE_MS = 30_000
 interface ScopedTools extends CapabilityTools {
   register(definition: CapabilityToolDef & Record<string, unknown>): () => void
   restrict(filter: { allow: readonly string[] }): () => void
-  schemas(scope: unknown): readonly { readonly name: string }[]
+  schemas(scope: unknown): readonly { readonly name: string; readonly description?: string }[]
 }
 
 interface AgentCtxLike {
@@ -396,6 +506,12 @@ export class DotCapabilities {
   readonly owners: Map<string, ToolOwner> = sharedAttribution().owners
   private readonly agents = new Map<string, AppliedState>()
 
+  /** Tool name → first schema description line seen on a dot agent; feeds builtin catalog rows. */
+  private readonly schemaDescriptions = new Map<string, string>()
+
+  /** Names the last dot agent schema snapshot exposed, if one was ever taken. */
+  private lastSchemaNames?: ReadonlySet<string>
+
   constructor(private readonly deps: CapabilityDeps) {}
 
   /** The locked inherited tool names; never grantable. */
@@ -406,18 +522,56 @@ export class DotCapabilities {
 
   private bundlesCache?: { readonly at: number; readonly rows: readonly CapabilityBundle[] }
 
-  /** Drop the cached bundle rows; called on tools/change so a new plugin groups right away. */
-  invalidateBundles(): void { this.bundlesCache = undefined }
+  /** Mark the bundle rows stale without scanning. Catalog stays SWR; resolve/applyToAgent awaits a refresh. */
+  invalidateBundles(): void {
+    if (this.bundlesCache !== undefined) this.bundlesCache = { ...this.bundlesCache, at: 0 }
+  }
 
-  /** Bundle rows for attribution, cached briefly; a failed read reuses the last good answer. */
-  private async bundleRows(): Promise<readonly CapabilityBundle[]> {
-    const now = Date.now()
-    if (this.bundlesCache !== undefined && now - this.bundlesCache.at < BUNDLE_CACHE_MS) return this.bundlesCache.rows
-    let rows: readonly CapabilityBundle[]
-    try { rows = await this.deps.pluginManager()?.listBundles() ?? [] }
-    catch { return this.bundlesCache?.rows ?? [] }
-    this.bundlesCache = { at: now, rows }
-    return rows
+  /** Kick the first bundle read early so the first catalog rarely awaits it. */
+  prewarm(): void { void this.refreshBundles() }
+
+  private bundlesRefresh?: Promise<void>
+  private refreshBundles(): Promise<void> {
+    if (this.bundlesRefresh !== undefined) return this.bundlesRefresh
+    let work: Promise<void>
+    try {
+      // Call listBundles now so the first catalog starts the scan in this turn.
+      // Catch a synchronous throw here: an async IIFE's finally would run
+      // before this.bundlesRefresh is assigned and stick a settled promise.
+      work = Promise.resolve(this.deps.pluginManager()?.listBundles() ?? []).then(rows => {
+        this.bundlesCache = { at: Date.now(), rows }
+      })
+    } catch {
+      return Promise.resolve()
+    }
+    this.bundlesRefresh = work.catch(() => {}).finally(() => { this.bundlesRefresh = undefined })
+    return this.bundlesRefresh
+  }
+
+  /**
+   * Bundle rows for attribution, stale-while-revalidate: a cached answer is
+   * returned whatever its age while a coalesced refresh runs behind it; only
+   * the very first load has nothing to show and awaits — with
+   * `awaitBundles: false` that load also just defers the scan and answers empty.
+   */
+  private async bundleRows(options?: { readonly awaitBundles?: boolean }): Promise<readonly CapabilityBundle[]> {
+    const cache = this.bundlesCache
+    if (cache === undefined) {
+      if (options?.awaitBundles === false) { this.deferBundlesRefresh(); return [] }
+      await this.refreshBundles()
+      return this.bundlesCache?.rows ?? []
+    }
+    if (Date.now() - cache.at >= BUNDLE_CACHE_MS) this.deferBundlesRefresh()
+    return cache.rows
+  }
+
+  private bundlesDeferQueued = false
+
+  /** listBundles blocks the event loop on manifest reads; defer the kick so a serving response can flush first. */
+  private deferBundlesRefresh(): void {
+    if (this.bundlesDeferQueued || this.bundlesRefresh !== undefined) return
+    this.bundlesDeferQueued = true
+    setTimeout(() => { this.bundlesDeferQueued = false; void this.refreshBundles() }, 0)
   }
 
   /**
@@ -436,26 +590,71 @@ export class DotCapabilities {
   signature(): string { return capabilitiesSignature(this.deps.settings()) }
 
   /** The catalog the settings view and the dot_capabilities tool draw. */
-  async catalog(): Promise<{ readonly locked: readonly string[]; readonly groups: readonly CapabilityGroupView[] }> {
+  async catalog(options?: { readonly awaitBundles?: boolean; readonly grants?: Readonly<Record<string, CapabilityGrant>> }): Promise<{ readonly locked: readonly string[]; readonly groups: readonly CapabilityGroupView[] }> {
     const tools = this.deps.tools()
-    const defs = tools?.definitions() ?? []
-    let servers: string[] = []
-    try { servers = (this.deps.mcpManager()?.list() ?? []).map(server => server.name) } catch { servers = [] }
+    const dotServers = this.deps.settings().mcpServers ?? {}
+    const dotNames = Object.keys(dotServers)
+    // Only an enabled dot-local server mounts inside the preset scope and
+    // shadows a same-name global row; a disabled row is unmounted, so dot's
+    // agent falls back to the global tools again.
+    const enabledDotNames = dotNames.filter(name => dotServers[name]?.enabled !== false)
+    let globalNames: string[] = []
+    try { globalNames = (this.deps.mcpManager()?.list() ?? []).map(server => server.name) } catch { globalNames = [] }
+    // Longest-prefix attribution across BOTH scopes: `mcp__team__docs__x`
+    // belongs to `team__docs`, never to `team`, whichever side it lives on —
+    // otherwise granting one server would silently cover the other.
+    const allNames = [...globalNames, ...enabledDotNames]
+    const shadowed = (name: string) => {
+      const owner = mcpServerOf(name, allNames)
+      return owner !== undefined && enabledDotNames.includes(owner)
+    }
+    const defs = (tools?.definitions() ?? []).filter(def => !shadowed(def.name))
+    const servers = globalNames.filter(name => !enabledDotNames.includes(name))
+    let dotDefs: readonly CapabilityToolDef[] = []
+    if (dotNames.length > 0 && this.deps.presetDefs !== undefined) {
+      try { dotDefs = (await this.deps.presetDefs()).filter(def => shadowed(def.name)) } catch { dotDefs = [] }
+    }
     return buildCatalog({
       defs,
       owners: this.owners,
       servers,
-      bundles: [...await this.bundleRows()],
-      grants: this.deps.settings().capabilities?.grants ?? {},
+      bundles: [...await this.bundleRows(options)],
+      grants: options?.grants ?? this.deps.settings().capabilities?.grants ?? {},
       locked: new Set(this.deps.locked),
       conditional: name => tools !== undefined && tools.get(name) !== undefined && tools.executable(name) === undefined,
+      builtinDescriptions: this.schemaDescriptions,
+      builtinVisible: this.lastSchemaNames,
+      dotMcp: dotNames.length === 0 ? undefined : {
+        // A disabled row that shares its name with a surviving global server
+        // would produce a duplicate `mcp:<name>` group; the global row serves.
+        servers: dotNames.filter(name => enabledDotNames.includes(name) || !servers.includes(name)),
+        defs: dotDefs,
+        status: name => sharedDotMcp().servers.get(name) ?? (dotServers[name]?.enabled === false ? { state: 'off' } : undefined),
+      },
     })
   }
 
   /** Live grant resolution over the present catalog; only enabled tools are returned. */
   async resolve(): Promise<Map<string, ResolvedGrant>> {
-    const { groups } = await this.catalog()
-    return resolveGrants(this.deps.settings().capabilities?.grants ?? {}, groups)
+    return (await this.resolveSnapshot()).resolved
+  }
+
+  /** resolve() plus the exact grants object it resolved against, for the applied-state record. */
+  private async resolveSnapshot(): Promise<{ resolved: Map<string, ResolvedGrant>; grants: Record<string, CapabilityGrant> }> {
+    let grants = this.deps.settings().capabilities?.grants ?? {}
+    // Only `plugin:` selectors consume bundle rows, so without a live plugin
+    // grant a segment start must not block on a listBundles scan: the catalog
+    // answers from cache (or empty) while the deferred refresh runs. With one,
+    // apply still awaits the live bundle map after an explicit invalidate.
+    const pluginGranted = Object.keys(grants).some(key => key.startsWith(SELECTOR.plugin) && grants[key] !== 'off')
+    if (pluginGranted && (this.bundlesCache === undefined || this.bundlesCache.at === 0)) {
+      await this.refreshBundles()
+      // A grant saved while the scan ran never reached the agent; resolving the
+      // pre-scan snapshot would let the frozen signature claim it applied.
+      grants = this.deps.settings().capabilities?.grants ?? {}
+    }
+    const { groups } = await this.catalog({ awaitBundles: pluginGranted, grants })
+    return { resolved: resolveGrants(grants, groups), grants }
   }
 
   /** The live grant over one applied tool's stored selector chain; 'off' and absent both mean denied. */
@@ -466,6 +665,11 @@ export class DotCapabilities {
   /** Grants applied for one dot segment session at its start. */
   appliedFor(sessionId: string | undefined): ReadonlyMap<string, ResolvedGrant> | undefined {
     return sessionId === undefined ? undefined : this.agents.get(sessionId)?.applied
+  }
+
+  /** Signature of the grants snapshot the session's last apply actually resolved against. */
+  appliedSignature(sessionId: string | undefined): string | undefined {
+    return sessionId === undefined ? undefined : this.agents.get(sessionId)?.signature
   }
 
   /** Forget the applied state of a released agent; ctx disposal already lifted its restrict and copies. */
@@ -502,7 +706,8 @@ export class DotCapabilities {
       if (sessionId !== undefined) this.releaseAgent(sessionId)
       return applied
     }
-    const grants = await this.resolve()
+    const { resolved: grants, grants: snapshot } = await this.resolveSnapshot()
+    const signature = capabilitiesSignature({ capabilities: { grants: snapshot } })
     try {
       // The previous apply of this session releases first, synchronously:
       // its restrict masks the new allow list while it lives, and its scoped
@@ -511,12 +716,25 @@ export class DotCapabilities {
       // Names the agent scope cannot show stay unapplied even when granted:
       // restrict filters them out, and the gate must not report them applied.
       let visible: ReadonlySet<string> | undefined
-      try { visible = new Set(ctx.tools.schemas(agent).map(row => row.name)) } catch { visible = new Set() }
+      try {
+        const schemas = ctx.tools.schemas(agent)
+        visible = new Set(schemas.map(row => row.name))
+        this.lastSchemaNames = visible
+        for (const row of schemas) {
+          const description = typeof row.description === 'string' ? firstLine(row.description) : undefined
+          if (description !== undefined && !this.schemaDescriptions.has(row.name)) this.schemaDescriptions.set(row.name, description)
+        }
+      } catch { visible = new Set() }
       const copies: Array<{ name: string; def: CapabilityToolDef; dispose: () => void }> = []
       const allow = [...this.deps.locked]
       for (const [name, resolved] of grants) {
         const def = tools.get(name)
-        if (def === undefined) continue
+        if (def === undefined) {
+          // Preset-scope tools (host built-ins) are not in the root registry;
+          // a granted name the agent scope can show joins the allow list.
+          if (visible.has(name)) { allow.push(name); applied.set(name, resolved) }
+          continue
+        }
         if (tools.executable(name) !== undefined) {
           allow.push(name)
           if (visible.has(name)) applied.set(name, resolved)
@@ -553,11 +771,15 @@ export class DotCapabilities {
       // drop whatever was acquired and fall back to the locked-only mask.
       finish()
       try { releases.push(restrictInheritedTools(agentCtx, [...this.deps.locked], agent)) } catch { /* the scope is gone entirely */ }
-      const failed: AppliedState = { applied: new Map(), release: finish }
+      const failed: AppliedState = {
+        applied: new Map(),
+        signature: capabilitiesSignature({ capabilities: { grants: {} } }),
+        release: finish,
+      }
       this.agents.set(sessionId, failed)
       return failed.applied
     }
-    const state: AppliedState = { applied, release: finish }
+    const state: AppliedState = { applied, signature, release: finish }
     this.agents.set(sessionId, state)
     return applied
   }

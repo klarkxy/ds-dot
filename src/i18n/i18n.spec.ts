@@ -63,14 +63,14 @@ const SILENCE: Record<CopyLocale, string> = {
   ru: 'не принимай молчание за согласие',
 }
 const QUESTION_POLICY: Record<CopyLocale, { readonly label: string; readonly help: string }> = {
-  zh: { label: '可逆的自己定', help: '缺授权，或不可逆、外部、费用后果' },
-  en: { label: 'She decides', help: 'Missing authority, or an irreversible, external, or costly effect' },
-  ja: { label: '彼女が決める', help: 'ドロシーが目標内の可逆な既定を決めます' },
-  de: { label: 'Sie entscheidet', help: 'Fehlende Befugnis oder eine unumkehrbare, externe oder teure Folge' },
-  es: { label: 'Ella decide', help: 'Si falta autorización, o el efecto es irreversible, externo o costoso' },
-  fr: { label: 'Elle décide', help: 'Sans autorisation, ou si l’effet est irréversible, externe ou coûteux' },
-  pt: { label: 'Ela decide', help: 'Sem autorização, ou se o efeito for irreversível, externo ou custoso' },
-  ru: { label: 'Она решает', help: 'Нет разрешения, или эффект необратим, внешний или платный' },
+  zh: { label: '桃乐丝定', help: '缺授权，或不可逆、外部、费用后果' },
+  en: { label: 'Dorothy', help: 'Missing authority, or an irreversible, external, or costly effect' },
+  ja: { label: 'ドロシー', help: 'ドロシーが目標内の可逆な既定を決めます' },
+  de: { label: 'Dorothy', help: 'Fehlende Befugnis oder eine unumkehrbare, externe oder teure Folge' },
+  es: { label: 'Dorothy', help: 'Si falta autorización, o el efecto es irreversible, externo o costoso' },
+  fr: { label: 'Dorothy', help: 'Sans autorisation, ou si l’effet est irréversible, externe ou coûteux' },
+  pt: { label: 'Dorothy', help: 'Sem autorização, ou se o efeito for irreversível, externo ou custoso' },
+  ru: { label: 'Дороти', help: 'Нет разрешения, или эффект необратим, внешний или платный' },
 }
 
 const human = (text: string, time: number): RawEvent => ({
@@ -634,8 +634,8 @@ describe('i18n end-to-end lifecycle and PersonaPanel integration', () => {
     for (const loc of SUPPORTED_LOCALES) {
       let current: DotSettings = { ...DEFAULT_SETTINGS }
       const knowledge = {
-        agreements: { text: '', maxChars: 4000, canUndo: false },
-        cognition: { text: '', maxChars: 4000, history: [] },
+        agreements: { entries: [], canUndo: false },
+        cognition: { entries: [], history: [] },
       }
 
       function Harness() {
@@ -655,9 +655,9 @@ describe('i18n end-to-end lifecycle and PersonaPanel integration', () => {
           decideSetting: async () => '',
           settings: async () => current,
           knowledge: async () => knowledge,
-          setAgreements: async () => knowledge,
+          editAgreements: async () => knowledge,
           undoAgreements: async () => knowledge,
-          setCognition: async () => knowledge,
+          editCognition: async () => knowledge,
           restoreCognition: async () => knowledge,
         }
         return createElement(PersonaPanel, { locale: loc, api, settings, onSaved: setSettings })

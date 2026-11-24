@@ -3,10 +3,11 @@
  * runs themselves. There is no lock table. The short lane only commits; a
  * caller reads the workspace outside it and must pass the revision it saw.
  */
+import { lstatSync, readdirSync, realpathSync, type BigIntStats } from 'node:fs'
 import path from 'node:path'
 import { subjectKey, subjectMaterial, type DeliverySubject, type SubjectLook } from './acceptance.ts'
 import { totalUsage } from './context.ts'
-import type { DotContextUsage } from './contracts.ts'
+import type { DotContextUsage, TaskPermission } from './contracts.ts'
 import { z } from 'zod'
 
 export type ChangeControl = 'open' | 'paused' | 'cancelled'
@@ -109,6 +110,8 @@ export interface TaskIsolation {
   readonly worktree: string
   readonly branch: string
   readonly baseSha: string
+  /** Set when the branch was cut from a ref other than the checkout's HEAD. */
+  readonly base?: { readonly ref: string; readonly remote?: string }
   readonly state: 'active' | 'committed' | 'merged' | 'discarded'
   readonly commitSha?: string
   readonly mergedInto?: string
@@ -158,6 +161,11 @@ export interface RunRecord {
   readonly expectedPreset?: string
   /** Permission the host must be set to before any delivery. Empty scope is still `read`, not "unset". */
   readonly access?: 'read' | 'write'
+  /**
+   * Writable permission applied at first dispatch. Absent on records that only
+   * stored `read` | `write`; those must not be re-pinned to a later global default.
+   */
+  readonly taskPermission?: TaskPermission
   readonly deliveries: readonly DeliveryRecord[]
   readonly phase: RunPhase
   readonly closeReason?: string
@@ -275,6 +283,7 @@ export const changeSchema = z.object({
   isolation: z.object({
     kind: z.literal('worktree'), repoRoot: z.string().min(1), worktree: z.string().min(1),
     branch: z.string().min(1), baseSha: z.string().min(1),
+    base: z.object({ ref: z.string().min(1), remote: z.string().min(1).optional() }).optional(),
     state: z.enum(['active', 'committed', 'merged', 'discarded']),
     commitSha: z.string().min(1).optional(), mergedInto: z.string().min(1).optional(), at: z.number(),
   }).optional(),
@@ -297,6 +306,7 @@ export const runSchema = z.object({
   creation: z.enum(['intent', 'inflight', 'confirmed', 'rejected', 'unknown']),
   expectedPreset: z.string().min(1).optional(),
   access: z.enum(['read', 'write']).optional(),
+  taskPermission: z.enum(['workspace-write', 'danger-full-access', 'safe-auto', 'auto']).optional(),
   deliveries: z.array(deliverySchema),
   phase: z.enum(['reserved', 'active', 'settling', 'completed', 'failed', 'stopped']),
   closeReason: z.string().optional(),
@@ -432,13 +442,112 @@ export function canonicalPath(value: string, platform: NodeJS.Platform = process
   return platform === 'win32' ? trimmed.toLowerCase() : trimmed
 }
 
-export function pathsOverlap(left: string, right: string, platform: NodeJS.Platform = process.platform): boolean {
-  const api = platform === 'win32' ? path.win32 : path.posix
-  const contains = (parent: string, child: string) => {
-    const relative = api.relative(parent, child)
-    return relative === '' || (relative !== '..' && !relative.startsWith(`..${api.sep}`) && !api.isAbsolute(relative))
+function resolveSegmentOnDisk(dir: string, segment: string, api: typeof path.win32): string | undefined {
+  let entries: string[] | undefined
+  try {
+    entries = readdirSync(dir)
+  } catch {
+    entries = undefined
   }
-  return contains(left, right) || contains(right, left)
+  if (entries) {
+    const exact = entries.find(entry => entry === segment)
+    if (exact) return api.join(dir, exact)
+    const folded = segment.toLowerCase()
+    const matched = entries.find(entry => entry.toLowerCase() === folded)
+    if (matched) return api.join(dir, matched)
+  }
+  const candidate = api.join(dir, segment)
+  let stat: BigIntStats | undefined
+  try {
+    stat = lstatSync(candidate, { bigint: true })
+  } catch {
+    return undefined
+  }
+  if (!stat.isSymbolicLink()) {
+    try {
+      const realName = api.basename(realpathSync.native(candidate))
+      if (realName) {
+        const listed = entries?.find(entry => entry === realName)
+          ?? entries?.find(entry => entry.toLowerCase() === realName.toLowerCase())
+        const resolved = api.join(dir, listed ?? realName)
+        const check = lstatSync(resolved, { bigint: true })
+        if (check.ino === stat.ino && check.dev === stat.dev) return resolved
+      }
+    } catch {
+      // Fall back to parent entry matching below.
+    }
+  }
+  if (entries && stat.ino !== 0n) {
+    for (const entry of entries) {
+      const target = api.join(dir, entry)
+      try {
+        const entryStat = lstatSync(target, { bigint: true })
+        if (entryStat.ino === stat.ino && entryStat.dev === stat.dev) return target
+      } catch {
+        // Ignore entries removed concurrently during lookup.
+      }
+    }
+  }
+  return candidate
+}
+
+/**
+ * The cwd a session should be created in: stored values are canonicalized
+ * (case-folded on win32), so restore the on-disk spelling segment by segment
+ * without crossing symlinks or Windows directory junctions while still
+ * expanding 8.3 short-name segments. Falls back when unresolved; identity elsewhere.
+ */
+export function onDiskPath(value: string, platform: NodeJS.Platform = process.platform): string {
+  if (platform !== 'win32' || !value) return value
+  const api = path.win32
+  const resolved = api.isAbsolute(value) ? api.normalize(value) : api.resolve(value)
+  const root = api.parse(resolved).root
+  if (!root) return value
+  const trimmed = resolved === root ? root : resolved.replace(/[\\/]+$/, '')
+  const diskRoot = root
+    .replace(/^([a-z]):/i, (_, drive: string) => `${drive.toUpperCase()}:`)
+    .replace(/^(\\\\\?\\)([a-z]):/i, (_, prefix: string, drive: string) => `${prefix}${drive.toUpperCase()}:`)
+  const rest = trimmed.slice(root.length)
+  if (!rest) {
+    try {
+      lstatSync(diskRoot)
+      return diskRoot
+    } catch {
+      return value
+    }
+  }
+  const segments = rest.split(/[\\/]+/).filter(Boolean)
+  let current = diskRoot
+  for (let index = 0; index < segments.length; index += 1) {
+    const next = resolveSegmentOnDisk(current, segments[index]!, api)
+    if (next === undefined) {
+      return index === 0 ? value : api.join(current, ...segments.slice(index))
+    }
+    current = next
+  }
+  return current
+}
+
+function sameSessionCwd(actual: string, expectedCanonical: string, platform: NodeJS.Platform): boolean {
+  if (canonicalPath(actual, platform) === expectedCanonical) return true
+  if (platform !== 'win32' || process.platform !== 'win32') return false
+  return canonicalPath(onDiskPath(actual, platform), platform) === canonicalPath(onDiskPath(expectedCanonical, platform), platform)
+}
+
+function pathContains(parent: string, child: string, platform: NodeJS.Platform): boolean {
+  const api = platform === 'win32' ? path.win32 : path.posix
+  const relative = api.relative(parent, child)
+  return relative === '' || (relative !== '..' && !relative.startsWith(`..${api.sep}`) && !api.isAbsolute(relative))
+}
+
+/** True when `child` resolves to `parent` itself or a descendant inside `parent`. */
+export function isSameOrChildPath(parent: string, child: string, platform: NodeJS.Platform = process.platform): boolean {
+  if (!parent.trim() || !child.trim()) return false
+  return pathContains(canonicalPath(parent, platform), canonicalPath(child, platform), platform)
+}
+
+export function pathsOverlap(left: string, right: string, platform: NodeJS.Platform = process.platform): boolean {
+  return pathContains(left, right, platform) || pathContains(right, left, platform)
 }
 
 export interface RootHint { readonly workspaceRoot?: string; readonly gitCommonDir?: string; readonly uncertain?: boolean }
@@ -465,9 +574,7 @@ export function absoluteScopePath(root: string, scopePath: string, platform: Nod
 /** True when `scopePath` stays inside `root` after relative resolution. */
 export function scopeWithinRoot(root: string, scopePath: string, platform: NodeJS.Platform = process.platform): boolean {
   const absolute = absoluteScopePath(root, scopePath, platform)
-  const api = platform === 'win32' ? path.win32 : path.posix
-  const relative = api.relative(canonicalPath(root, platform), canonicalPath(absolute, platform))
-  return relative === '' || (relative !== '..' && !relative.startsWith(`..${api.sep}`) && !api.isAbsolute(relative))
+  return isSameOrChildPath(root, absolute, platform)
 }
 
 /**
@@ -589,6 +696,8 @@ export interface ReserveInput {
   readonly external?: readonly ExternalOccupant[]
   readonly at?: number
   readonly reworkOf?: string
+  /** Writable permission to pin at reserve; ignored for read-only runs. */
+  readonly taskPermission?: TaskPermission
 }
 
 export interface WorkPersist {
@@ -1100,6 +1209,7 @@ export class WorkBook {
         writeScope: input.writeScope, baselineRefs: [], requestedSessionId: `session-${id}`, creation: 'intent',
         access: input.kind === 'review' ? 'read' : scopeWrites(input.writeScope) ? 'write' : 'read',
         deliveries: [delivery], phase: 'reserved', ...(input.reworkOf ? { reworkOf: input.reworkOf } : {}),
+        ...input.kind !== 'review' && scopeWrites(input.writeScope) && input.taskPermission ? { taskPermission: input.taskPermission } : {},
         createdAt: at, updatedAt: at,
       }
       await this.commit('runs', run.id, run)
@@ -1482,7 +1592,7 @@ export class WorkBook {
       if (gate) return gate
       const sameId = actual.sessionId === run.requestedSessionId
       const cwdKnown = actual.cwd !== undefined
-      const cwdMatches = cwdKnown && canonicalPath(actual.cwd!, this.platform) === run.cwd
+      const cwdMatches = cwdKnown && sameSessionCwd(actual.cwd!, run.cwd, this.platform)
       const expectedPreset = run.expectedPreset
       const presetRequired = expectedPreset !== undefined
       const presetKnown = actual.preset !== undefined
@@ -1499,6 +1609,27 @@ export class WorkBook {
       this.runs.set(next.id, next)
       this.currentRevision += 1
       return { ok: true, prompt, run: next }
+    })
+  }
+
+  /**
+   * Pin the writable permission applied at first dispatch. A later global
+   * default must not overwrite it. Already-pinned and read-only runs are left
+   * unchanged.
+   */
+  pinTaskPermission(runId: string, permission: TaskPermission, at = Date.now()): Promise<{ readonly ok: true; readonly run: RunRecord } | WorkRefusal> {
+    return this.exclusive(async () => {
+      const refused = this.recoveryRefusal()
+      if (refused) return refused
+      const run = this.runs.get(runId)
+      if (!run) return { ok: false, code: 'missing', message: `unknown run ${runId}` }
+      if (run.taskPermission) return { ok: true, run }
+      if (run.access !== 'write') return { ok: true, run }
+      const next: RunRecord = { ...run, taskPermission: permission, updatedAt: at }
+      await this.commit('runs', next.id, next)
+      this.runs.set(next.id, next)
+      this.currentRevision += 1
+      return { ok: true, run: next }
     })
   }
 
@@ -1592,7 +1723,7 @@ export class WorkBook {
       if (run.actionClaim !== 'session' && run.creation !== 'inflight') return { ok: true, creation: run.creation, held: false }
       const sameId = actual.sessionId === run.requestedSessionId
       const cwdKnown = actual.cwd !== undefined
-      const cwdMatches = cwdKnown && canonicalPath(actual.cwd!, this.platform) === run.cwd
+      const cwdMatches = cwdKnown && sameSessionCwd(actual.cwd!, run.cwd, this.platform)
       const expectedPreset = run.expectedPreset
       const presetRequired = expectedPreset !== undefined
       const presetKnown = actual.preset !== undefined

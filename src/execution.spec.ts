@@ -1,6 +1,9 @@
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { bindRunSession, cancelWork, countPromptReceipts, countRelayInserts, finishWork, launchReservedRun, observeRun, reconcileReserved, reconcileRun, supplementRun, type RunSessionHost } from './execution.ts'
-import { WorkBook, type WorkPersist } from './work.ts'
+import { WorkBook, onDiskPath, type WorkPersist } from './work.ts'
 
 function openBook(): WorkBook {
   const persist: WorkPersist = async () => undefined
@@ -880,3 +883,71 @@ async function restartedClaim(preset?: string) {
   await launching
   return { held, reopened: restoreRows(snapshot) }
 }
+
+describe('session cwd junction and short-path launch', () => {
+  it('passes the on-disk junction path to createSession and rejects a host that returns the target', async () => {
+    const rawBase = mkdtempSync(join(tmpdir(), 'dot-exec-junc-'))
+    const base = onDiskPath(rawBase)
+    const real = join(base, 'RealTarget')
+    const junction = join(base, 'JunctionDir')
+    try {
+      mkdirSync(real, { recursive: true })
+      symlinkSync(real, junction, process.platform === 'win32' ? 'junction' : 'dir')
+
+      const book = new WorkBook(async () => undefined, process.platform)
+      const c1 = await book.createChange({ title: 'J1', cwd: process.platform === 'win32' ? junction.toLowerCase() : junction, goal: 'g', at: 1 })
+      const r1 = await book.reserveRun({ changeId: c1.id, cwd: c1.cwd, root: { workspaceRoot: c1.cwd }, writeScope: readScope, at: 2 })
+      if (!r1.ok) throw new Error(r1.message)
+
+      const seenCwds: string[] = []
+      const { host: goodHost, calls: goodCalls } = hostOf({
+        async findSession() { return undefined },
+        async createSession(input) {
+          seenCwds.push(input.cwd)
+          return { sessionId: input.sessionId, cwd: input.cwd }
+        },
+      })
+      const launched = await launchReservedRun(book, goodHost, r1.run.id, 'go')
+      expect(launched).toMatchObject({ ok: true, phase: 'active' })
+      expect(seenCwds).toEqual([junction])
+      expect(goodCalls.some(call => call.startsWith(`prompt ${r1.run.requestedSessionId} `))).toBe(true)
+
+      const c2 = await book.createChange({ title: 'J2', cwd: junction, goal: 'g', at: 3 })
+      const r2 = await book.reserveRun({ changeId: c2.id, cwd: c2.cwd, root: { workspaceRoot: c2.cwd }, writeScope: readScope, at: 4 })
+      if (!r2.ok) throw new Error(r2.message)
+      const { host: badHost, calls: badCalls } = hostOf({
+        async findSession() { return undefined },
+        async createSession(input) { return { sessionId: input.sessionId, cwd: real } },
+      })
+      const rejected = await launchReservedRun(book, badHost, r2.run.id, 'go')
+      expect(rejected).toMatchObject({ ok: false, code: 'closed-run' })
+      expect(badCalls.some(call => call.startsWith('prompt '))).toBe(false)
+      expect(book.run(r2.run.id)?.creation).toBe('rejected')
+    } finally {
+      rmSync(junction, { force: true })
+      rmSync(rawBase, { recursive: true, force: true })
+    }
+  })
+
+  it.skipIf(process.platform !== 'win32' || !existsSync('C:\\PROGRA~1'))('confirms and prompts a run reserved with an 8.3 short path when the host reports the expanded path', async () => {
+    const shortPath = 'C:\\PROGRA~1'
+    const longPath = realpathSync.native(shortPath)
+    const book = openBook()
+    const change = await book.createChange({ title: 'Short', cwd: shortPath, goal: 'g', at: 1 })
+    const held = await book.reserveRun({ changeId: change.id, cwd: shortPath, root: { workspaceRoot: shortPath }, writeScope: readScope, at: 2 })
+    if (!held.ok) throw new Error(held.message)
+    const seenCwds: string[] = []
+    const { host, calls } = hostOf({
+      async findSession() { return undefined },
+      async createSession(input) {
+        seenCwds.push(input.cwd)
+        return { sessionId: input.sessionId, cwd: input.cwd }
+      },
+    })
+    const launched = await launchReservedRun(book, host, held.run.id, 'inspect')
+    expect(launched).toMatchObject({ ok: true, phase: 'active' })
+    expect(seenCwds).toEqual([longPath])
+    expect(calls.some(call => call.startsWith(`prompt ${held.run.requestedSessionId} `))).toBe(true)
+    expect(book.run(held.run.id)?.creation).toBe('confirmed')
+  })
+})

@@ -22,6 +22,7 @@ export interface PendingInput {
   readonly questions?: readonly PendingQuestionItem[]
   readonly signal?: AbortSignal
   readonly humanRequired?: boolean
+  readonly truncated?: true
 }
 
 /** How a recent request ended. */
@@ -65,6 +66,7 @@ export class PendingHub {
       ...input.detail === undefined ? {} : { detail: input.detail },
       ...input.questions === undefined ? {} : { questions: input.questions },
       ...input.humanRequired ? { humanRequired: true } : {},
+      ...input.truncated === true ? { truncated: true } : {},
     }
     const withdraw = () => { this.settle(id, undefined) }
     const entry: Entry = { view, resolve: finish }

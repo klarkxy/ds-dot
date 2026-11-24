@@ -1,5 +1,7 @@
 node_modules/
 lib/
+__pycache__/
+*.py[co]
 .npm-cache/
 *.tsbuildinfo
 .scratch/

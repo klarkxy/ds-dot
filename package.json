@@ -1,6 +1,6 @@
 {
   "name": "ds-dot",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "Dorothy (dot): an always-on coordinator for DeepSeek Harness. Talk to Dorothy in her dedicated panel to manage workspaces, dispatch and verify tasks across sessions, handle routine approvals and questions, and get concise reports.",
   "icon": "./icon.svg",
   "license": "Apache-2.0",
@@ -32,6 +32,11 @@
       "import": "./lib/attribution.js",
       "default": "./lib/attribution.js"
     },
+    "./mcp": {
+      "types": "./lib/mcp.d.ts",
+      "import": "./lib/mcp.js",
+      "default": "./lib/mcp.js"
+    },
     "./reflection": {
       "types": "./lib/reflection.d.ts",
       "import": "./lib/reflection.js",
@@ -54,6 +59,7 @@
     "README.md",
     "docs/README.zh-CN.md",
     "docs/README.ja.md",
+    "docs/reference.md",
     "docs/images/dot-arrival.png",
     "LICENSE",
     "NOTICE.md"
@@ -94,7 +100,7 @@
     "prepare": "tsdown"
   },
   "dependencies": {
-    "@klarkxy/dsh-deep-view": "^0.3.4",
+    "@klarkxy/dsh-deep-view": "^0.3.5",
     "@klarkxy/dsh-plugin-kit": "^0.8.1",
     "diff": "^8.0.4",
     "zod": "4.6.6"
@@ -213,6 +219,7 @@
     "@deepseek-ai/dsh-launch-environment": "0.2.2-rc.5",
     "@deepseek-ai/dsh-home-paths": "0.2.2-rc.5",
     "@deepseek-ai/dsh-typert-protocol": "0.2.2-rc.5",
+    "@klarkxy/dsh-safe-auto": "0.5.12",
     "tsdown": "^0.22.14",
     "typescript": "^5.9.2",
     "vitest": "^3.2.4"
@@ -237,7 +244,7 @@
     "type": "git",
     "url": "git+https://github.com/klarkxy/ds-dot.git"
   },
-  "homepage": "https://github.com/klarkxy/ds-dot",
+  "homepage": "https://klarkxy.github.io/ds-dot/",
   "bugs": {
     "url": "https://github.com/klarkxy/ds-dot/issues"
   }

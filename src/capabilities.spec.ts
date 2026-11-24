@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { DEFAULT_SETTINGS, type CapabilityGroupView, type DotSettings } from './contracts.ts'
 import { parseSettings, patchSettings, CAPABILITY_GRANTS_MAX } from './settings.ts'
-import { buildCatalog, capabilitiesSignature, DotCapabilities, HIGH_RISK_TOOLS, installToolAttribution, mcpServerOf, resolveGrants, SCOPED_COPY, type CapabilityPluginManager, type CapabilityTools, type CapabilityToolDef } from './capabilities.ts'
+import { buildCatalog, capabilitiesSignature, DotCapabilities, hostScheduleTargetsDot, installToolAttribution, isTaskOnlySelector, mcpServerOf, resolveGrants, SCOPED_COPY, TASK_ONLY_TOOLS, type CapabilityPluginManager, type CapabilityTools, type CapabilityToolDef } from './capabilities.ts'
 import { sharedAttribution } from './attribution.ts'
 import { reasonBeforeDelivery } from './segments.ts'
 import { gateToolExecution } from './tool-scope.ts'
@@ -26,6 +26,27 @@ describe('capabilities setting', () => {
     expect(() => patchSettings(settingsWith({}), { capabilities: { grants: { 'tool:x': 'later' } } })).toThrow(/invalid value/)
     const oversized = Object.fromEntries(Array.from({ length: CAPABILITY_GRANTS_MAX + 1 }, (_, i) => [`tool:t${i}`, 'auto']))
     expect(() => patchSettings(settingsWith({}), { capabilities: { grants: oversized } })).toThrow(/invalid value/)
+    // A grant on a task-only tool is refused; an already-stored row carried
+    // unchanged is a no-op, and removing it stays allowed.
+    expect(() => patchSettings(settingsWith({}), { capabilities: { grants: { 'tool:bash': 'auto' } } })).toThrow(/task runs/)
+    const stored = settingsWith({ 'tool:bash': 'auto' })
+    expect(patchSettings(stored, { capabilities: { grants: { 'tool:bash': 'auto', 'tool:x': 'ask' } } }).capabilities.grants).toEqual({ 'tool:bash': 'auto', 'tool:x': 'ask' })
+    expect(patchSettings(stored, { capabilities: { grants: {} } }).capabilities.grants).toEqual({})
+    expect(() => patchSettings(settingsWith({}), { capabilities: { grants: { 'builtin:plugin-manager': 'auto' } } })).toThrow(/task runs/)
+    const storedGroup = settingsWith({ 'builtin:plugin-manager': 'ask', 'tool:x': 'auto' })
+    expect(patchSettings(storedGroup, { capabilities: { grants: { 'builtin:plugin-manager': 'ask', 'tool:x': 'auto' } } }).capabilities.grants)
+      .toEqual({ 'builtin:plugin-manager': 'ask', 'tool:x': 'auto' })
+    expect(patchSettings(storedGroup, { capabilities: { grants: { 'tool:x': 'auto' } } }).capabilities.grants).toEqual({ 'tool:x': 'auto' })
+    const dynamic = buildCatalog(catalogInput({
+      defs: fakeTools(['plugin_manager']).defs,
+      owners: new Map([['plugin_manager', { entryId: 'e1' }]]),
+      bundles: [{ name: 'p', rows: [{ entryId: 'e1' }] }],
+    }))
+    expect(() => patchSettings(settingsWith({}), { capabilities: { grants: { 'plugin:p': 'auto' } } }, 'zh', dynamic.groups)).toThrow(/task runs/)
+    const storedDynamic = settingsWith({ 'plugin:p': 'ask', 'tool:x': 'auto' })
+    expect(patchSettings(storedDynamic, { capabilities: { grants: { 'plugin:p': 'ask', 'tool:x': 'auto' } } }, 'zh', dynamic.groups).capabilities.grants)
+      .toEqual({ 'plugin:p': 'ask', 'tool:x': 'auto' })
+    expect(patchSettings(storedDynamic, { capabilities: { grants: { 'tool:x': 'auto' } } }, 'zh', dynamic.groups).capabilities.grants).toEqual({ 'tool:x': 'auto' })
   })
 })
 
@@ -144,7 +165,7 @@ describe('capability catalog', () => {
     expect(view.groups.find(group => group.id === 'plugin:p')?.tools.map(tool => tool.name)).toEqual(['owned_tool'])
   })
 
-  it('marks high-risk tools and bubbles the flag onto their groups', () => {
+  it('marks task-only tools on their rows and never on the groups', () => {
     const defs = fakeTools(['bash', 'plugin_manager', 'plugin_market', 'plain_tool']).defs
     const view = buildCatalog(catalogInput({
       defs,
@@ -152,15 +173,35 @@ describe('capability catalog', () => {
       bundles: [{ name: 'p', rows: [{ entryId: 'e1' }] }],
     }))
     const plug = view.groups.find(group => group.id === 'plugin:p')
-    expect(plug?.tools[0]?.highRisk).toBe(true)
-    expect(plug?.highRisk).toBe(true)
+    expect(plug?.tools[0]?.taskOnly).toBe(true)
+    expect('taskOnly' in (plug ?? {})).toBe(false)
     const host = view.groups.find(group => group.id === 'host')
     const prefix = host?.children?.find(child => child.id === 'prefix:plugin')
-    expect(prefix?.highRisk).toBe(true)
-    expect(prefix?.tools.find(tool => tool.name === 'plugin_manager')?.highRisk).toBe(true)
-    expect(prefix?.tools.find(tool => tool.name === 'plugin_market')?.highRisk).toBeUndefined()
-    expect(host?.tools.find(tool => tool.name === 'plain_tool')?.highRisk).toBeUndefined()
-    expect(HIGH_RISK_TOOLS.has('apply_patch')).toBe(true)
+    expect('taskOnly' in (prefix ?? {})).toBe(false)
+    expect(prefix?.tools.find(tool => tool.name === 'plugin_manager')?.taskOnly).toBe(true)
+    expect(prefix?.tools.find(tool => tool.name === 'plugin_market')?.taskOnly).toBeUndefined()
+    expect(host?.tools.find(tool => tool.name === 'plain_tool')?.taskOnly).toBeUndefined()
+    expect(TASK_ONLY_TOOLS.has('apply_patch')).toBe(true)
+    expect(TASK_ONLY_TOOLS.has('plugin_market')).toBe(false)
+  })
+
+  it('treats tool names and all-task-only groups as task-only selectors', () => {
+    expect(isTaskOnlySelector('tool:bash')).toBe(true)
+    expect(isTaskOnlySelector('tool:plugin_manager')).toBe(true)
+    expect(isTaskOnlySelector('tool:extra_tool')).toBe(false)
+    expect(isTaskOnlySelector('builtin:plugin-manager')).toBe(true)
+    expect(isTaskOnlySelector('builtin:schedule')).toBe(false)
+    expect(isTaskOnlySelector('plugin:p')).toBe(false)
+    const dynamic = buildCatalog(catalogInput({
+      defs: fakeTools(['plugin_manager']).defs,
+      owners: new Map([['plugin_manager', { entryId: 'e1' }]]),
+      bundles: [{ name: 'p', rows: [{ entryId: 'e1' }] }],
+    }))
+    expect(isTaskOnlySelector('plugin:p', dynamic.groups)).toBe(true)
+    const mixed = buildCatalog(catalogInput({
+      defs: fakeTools(['plugin_manager', 'plugin_market']).defs,
+    }))
+    expect(isTaskOnlySelector('prefix:plugin', mixed.groups)).toBe(false)
   })
 
   it('keeps granted-but-absent selectors as missing rows', () => {
@@ -179,6 +220,22 @@ describe('capability catalog', () => {
     const view = buildCatalog(catalogInput({ defs: fakeTools(['web_search', 'extra']).defs }))
     expect(view.groups.every(group => group.tools.every(tool => tool.name !== 'web_search'))).toBe(true)
     expect(view.locked).toContain('web_search')
+  })
+})
+
+describe('host schedule delivery target', () => {
+  it('treats this_session and Dorothy session ids as self-delivery', () => {
+    const ids = new Set(['dot-1', 'dot-old'])
+    expect(hostScheduleTargetsDot({ target: 'this_session' }, ids)).toBe(true)
+    expect(hostScheduleTargetsDot({ target: '  this_session  ' }, ids)).toBe(true)
+    expect(hostScheduleTargetsDot({ target: 'dot-1' }, ids)).toBe(true)
+    expect(hostScheduleTargetsDot({ target: 'dot-old' }, ids)).toBe(true)
+    expect(hostScheduleTargetsDot(JSON.stringify({ target: 'this_session' }), ids)).toBe(true)
+    expect(hostScheduleTargetsDot({ target: 'new_once' }, ids)).toBe(false)
+    expect(hostScheduleTargetsDot({ target: 'new' }, ids)).toBe(false)
+    expect(hostScheduleTargetsDot({ target: 'session-other' }, ids)).toBe(false)
+    expect(hostScheduleTargetsDot({ title: 't' }, ids)).toBe(false)
+    expect(hostScheduleTargetsDot(undefined, ids)).toBe(false)
   })
 })
 
@@ -504,7 +561,159 @@ describe('capability application', () => {
     expect(calls).toBe(1)
     caps.invalidateBundles()
     await caps.catalog()
+    await new Promise(resolve => setTimeout(resolve, 0))
     expect(calls).toBe(2)
+  })
+
+  it('applies a plugin:<bundle> grant after invalidate before the background tick when entryId differs', async () => {
+    const tools = fakeTools(['report_tool'])
+    let rows: { name: string; rows: { entryId?: string }[] }[] = [{ name: 'dsh-reports', rows: [{ entryId: 'include:reports' }] }]
+    const make = () => new DotCapabilities({
+      tools: () => tools,
+      mcpManager: () => undefined,
+      pluginManager: () => ({ listBundles: async () => rows }),
+      settings: () => settingsWith({ 'plugin:dsh-reports': 'auto' }),
+      locked: LOCKED,
+    })
+    const apply = async (caps: DotCapabilities) => {
+      const env = agentCtx(tools)
+      const applied = await caps.applyToAgent(env.ctx as never, { session: { id: 'dot' } } as never)
+      caps.releaseAll()
+      return applied
+    }
+
+    // Empty cache: apply awaits the first scan even when owners use a different entryId.
+    const empty = make()
+    empty.owners.set('report_tool', { entryId: 'include:reports' })
+    const fromEmpty = await apply(empty)
+    expect(fromEmpty.get('report_tool')?.grant).toBe('auto')
+    expect(fromEmpty.get('report_tool')?.chain).toEqual(['tool:report_tool', 'plugin:dsh-reports'])
+
+    // Stale cache after invalidate: catalog would SWR the empty mapping and miss
+    // plugin:dsh-reports; applyToAgent must await the refresh instead of the tick.
+    rows = []
+    const stale = make()
+    stale.owners.set('report_tool', { entryId: 'include:reports' })
+    await stale.catalog()
+    rows = [{ name: 'dsh-reports', rows: [{ entryId: 'include:reports' }] }]
+    stale.invalidateBundles()
+    const fromStale = await apply(stale)
+    expect(fromStale.get('report_tool')?.grant).toBe('auto')
+    expect(fromStale.get('report_tool')?.chain).toEqual(['tool:report_tool', 'plugin:dsh-reports'])
+  })
+
+  it('applies tool/mcp/builtin grants without awaiting a never-loaded bundle scan', async () => {
+    const tools = fakeTools(['mcp__s__a', 'extra_tool'])
+    let calls = 0
+    const caps = new DotCapabilities({
+      tools: () => tools,
+      mcpManager: () => ({ list: () => [{ name: 's' }] }),
+      // A scan that never finishes: awaiting it would hang the segment start.
+      pluginManager: () => ({ listBundles: () => { calls += 1; return new Promise<never>(() => {}) } }),
+      settings: () => settingsWith({ 'mcp:s': 'auto', 'tool:extra_tool': 'auto', 'builtin:skill': 'auto' }),
+      locked: LOCKED,
+    })
+    const env = agentCtx(tools)
+    const applied = await caps.applyToAgent(env.ctx as never, { session: { id: 'dot-1' } } as never)
+    // 'skill' is preset-scope and invisible to this scope, so it stays unapplied.
+    expect([...applied.entries()].map(([name, row]) => [name, row.grant]).sort())
+      .toEqual([['extra_tool', 'auto'], ['mcp__s__a', 'auto']])
+    expect(calls).toBe(0)
+    // The deferred scan still kicks for the next catalog read.
+    await new Promise(resolve => setTimeout(resolve, 0))
+    expect(calls).toBe(1)
+    caps.releaseAll()
+  })
+
+  it('resolves without awaiting a pending or invalidated bundle scan when no plugin grant exists', async () => {
+    const tools = fakeTools(['mcp__s__a', 'extra_tool'])
+    let calls = 0
+    const caps = new DotCapabilities({
+      tools: () => tools,
+      mcpManager: () => ({ list: () => [{ name: 's' }] }),
+      pluginManager: () => ({ listBundles: () => { calls += 1; return new Promise<never>(() => {}) } }),
+      settings: () => settingsWith({ 'mcp:s': 'auto', 'tool:extra_tool': 'auto', 'builtin:skill': 'auto' }),
+      locked: LOCKED,
+    })
+    // A scan already in flight must not block resolution either.
+    caps.prewarm()
+    expect(calls).toBe(1)
+    const fromPending = await caps.resolve()
+    expect([...fromPending.keys()].sort()).toEqual(['extra_tool', 'mcp__s__a', 'skill'])
+    expect(calls).toBe(1)
+
+    // An invalidated (at === 0) cache answers stale and leaves the scan deferred.
+    const quick = new DotCapabilities({
+      tools: () => tools,
+      mcpManager: () => ({ list: () => [{ name: 's' }] }),
+      pluginManager: () => ({ listBundles: async () => { calls += 1; return [] } }),
+      settings: () => settingsWith({ 'mcp:s': 'auto', 'tool:extra_tool': 'auto' }),
+      locked: LOCKED,
+    })
+    await quick.catalog()
+    expect(calls).toBe(2)
+    quick.invalidateBundles()
+    const fromStale = await quick.resolve()
+    expect([...fromStale.keys()].sort()).toEqual(['extra_tool', 'mcp__s__a'])
+    expect(calls).toBe(2)
+    await new Promise(resolve => setTimeout(resolve, 0))
+    expect(calls).toBe(3)
+  })
+
+  it('still awaits the bundle scan during resolve when a plugin grant is enabled', async () => {
+    const tools = fakeTools(['report_tool'])
+    let rows: { name: string; rows: { entryId?: string }[] }[] = []
+    let calls = 0
+    let release: () => void = () => {}
+    let gate: Promise<void> = Promise.resolve()
+    const caps = new DotCapabilities({
+      tools: () => tools,
+      mcpManager: () => undefined,
+      pluginManager: () => ({ listBundles: async () => { calls += 1; await gate; return rows } }),
+      settings: () => settingsWith({ 'plugin:dsh-reports': 'auto' }),
+      locked: LOCKED,
+    })
+    caps.owners.set('report_tool', { entryId: 'include:reports' })
+    await caps.catalog()
+    expect(calls).toBe(1)
+    rows = [{ name: 'dsh-reports', rows: [{ entryId: 'include:reports' }] }]
+    gate = new Promise<void>(resolve => { release = resolve })
+    caps.invalidateBundles()
+    let settled = false
+    const pending = caps.resolve().then(result => { settled = true; return result })
+    await Promise.resolve()
+    // The scan was invoked synchronously and resolve waits for it.
+    expect(calls).toBe(2)
+    expect(settled).toBe(false)
+    release()
+    const resolved = await pending
+    expect(resolved.get('report_tool')?.chain).toEqual(['tool:report_tool', 'plugin:dsh-reports'])
+  })
+
+  it('resolves a grant saved while the plugin scan was in flight and records its signature', async () => {
+    const tools = fakeTools(['extra_tool', 'report_tool'])
+    const settings = { current: settingsWith({ 'plugin:p': 'auto' }) }
+    let release: () => void = () => {}
+    const gate = new Promise<void>(done => { release = done })
+    const caps = new DotCapabilities({
+      tools: () => tools,
+      mcpManager: () => undefined,
+      pluginManager: () => ({ listBundles: async () => { await gate; return [{ name: 'p', rows: [{ entryId: 'e1' }] }] } }),
+      settings: () => settings.current,
+      locked: LOCKED,
+    })
+    caps.owners.set('extra_tool', {})
+    caps.owners.set('report_tool', { entryId: 'e1' })
+    const env = agentCtx(tools)
+    const pending = caps.applyToAgent(env.ctx as never, { session: { id: 'dot-1' } } as never)
+    await new Promise(done => setTimeout(done, 0))
+    // The human saves another grant while the apply still waits on the scan.
+    settings.current = settingsWith({ 'plugin:p': 'auto', 'tool:extra_tool': 'auto' })
+    release()
+    const applied = await pending
+    // The post-scan snapshot is what applied and what the signature freezes.
+    expect([...applied.keys()].sort()).toEqual(['extra_tool', 'report_tool'])
+    expect(caps.appliedSignature('dot-1')).toBe(capabilitiesSignature(settings.current))
   })
 
   it('reaches the raw register through the cordis.original symbol', async () => {
@@ -588,6 +797,23 @@ describe('service-level capability gate', () => {
     await store.setSettings(settingsWith({ 'plugin:p': 'auto', 'tool:extra_tool': 'off' }))
     expect(await service.capabilityGate({ name: 'extra_tool' })).toMatchObject({ kind: 'deny' })
     expect(bundleCalls).toBe(before)
+  })
+
+  it('denies host schedule delivery to Dorothy herself and passes other targets', async () => {
+    const { store, service, apply } = serviceHarness({ 'tool:schedule_create': 'auto', 'tool:schedule_edit': 'auto' }, undefined, ['schedule_create', 'schedule_edit'])
+    await store.beginSegment({ sessionId: 'dot-1', startedAt: 1, persona: '' })
+    await apply()
+    await expect(service.capabilityGate({ name: 'schedule_create', arguments: { target: 'this_session', title: 't', prompt: 'p' } }))
+      .resolves.toMatchObject({ kind: 'deny', reason: expect.stringContaining('dot_schedule') })
+    await expect(service.capabilityGate({ name: 'schedule_create', arguments: { target: 'dot-1', title: 't', prompt: 'p' } }))
+      .resolves.toMatchObject({ kind: 'deny' })
+    await expect(service.capabilityGate({ name: 'schedule_create', arguments: JSON.stringify({ target: 'this_session' }) }))
+      .resolves.toMatchObject({ kind: 'deny' })
+    await expect(service.capabilityGate({ name: 'schedule_edit', arguments: { target: 'this_session' } }))
+      .resolves.toMatchObject({ kind: 'deny' })
+    await expect(service.capabilityGate({ name: 'schedule_create', arguments: { target: 'new_once', title: 't', prompt: 'p' } })).resolves.toBe('next')
+    await expect(service.capabilityGate({ name: 'schedule_create', arguments: { target: 'new', title: 't', prompt: 'p' } })).resolves.toBe('next')
+    await expect(service.capabilityGate({ name: 'schedule_create', arguments: { target: 'session-other' } })).resolves.toBe('next')
   })
 
   it('denies ungranted and unapplied extras, passes auto, and denies after a live revoke', async () => {
@@ -762,19 +988,79 @@ describe('service-level capability gate', () => {
     expect(text).toContain('applied=auto')
   })
 
-  it('marks high-risk tools in the list and warns on the proposal card for auto grants', async () => {
+  it('marks task-only tools in the list and refuses tool:<task-only> proposals outright', async () => {
     const { store, service, apply } = serviceHarness({}, undefined, ['bash', 'team_a', 'team_b'])
     await store0(service)
     await apply()
     const text = await service.listCapabilities()
-    expect(text).toContain('HIGH RISK')
-    // A tool: auto grant that would self-escalate carries the warning into the proposal card.
-    await service.proposeCapability({ selector: 'tool:bash', grant: 'auto', reason: 'run shell' })
-    expect(store.settingProposals.at(-1)?.reason).toMatch(/Warning:.*bash/)
-    await service.selfSettings.decide(store.settingProposals.at(-1)!.id, false)
-    // An ask grant, or an auto grant touching no high-risk tool, warns on nothing.
+    expect(text).toContain('task-only')
+    const before = store.settingProposals.length
+    await expect(service.proposeCapability({ selector: 'tool:bash', grant: 'auto', reason: 'run shell' }))
+      .rejects.toMatchObject({ code: 'dot/invalid', message: expect.stringContaining('task runs') })
+    expect(store.settingProposals).toHaveLength(before)
+    // An ordinary selector still queues the proposal unchanged.
     await service.proposeCapability({ selector: 'prefix:team', grant: 'auto', reason: 'cluster' })
-    expect(store.settingProposals.at(-1)?.reason).not.toContain('Warning')
+    expect(store.settingProposals.at(-1)?.reason).toBe('cluster')
+  })
+
+  it('lists a task-only tool as grant=off even when a parent group grant is auto', async () => {
+    const { service, apply } = serviceHarness({ 'prefix:plugin': 'auto' }, undefined, ['plugin_manager', 'plugin_market'])
+    await store0(service)
+    await apply()
+    const text = await service.listCapabilities()
+    expect(text).toContain('plugin_manager — grant=off (task-only: runs use it; never applied to dot)')
+    expect(text).not.toMatch(/plugin_manager — grant=auto/)
+    expect(text).toMatch(/plugin_market — grant=auto/)
+  })
+
+  it('refuses builtin:plugin-manager and a dynamic all-task-only group selector', async () => {
+    const { store, service, apply, caps } = serviceHarness(
+      {},
+      () => ({ listBundles: async () => [{ name: 'p', rows: [{ entryId: 'e1' }] }] }),
+      ['plugin_manager'],
+    )
+    caps.owners.set('plugin_manager', { entryId: 'e1' })
+    await store0(service)
+    await apply()
+    const before = store.settingProposals.length
+    await expect(service.proposeCapability({ selector: 'builtin:plugin-manager', grant: 'auto', reason: 'manage plugins' }))
+      .rejects.toMatchObject({ code: 'dot/invalid', message: expect.stringContaining('task runs') })
+    await expect(service.proposeCapability({ selector: 'plugin:p', grant: 'ask', reason: 'bundle' }))
+      .rejects.toMatchObject({ code: 'dot/invalid', message: expect.stringContaining('task runs') })
+    expect(store.settingProposals).toHaveLength(before)
+  })
+
+  it('keeps task-only tools out of the applied set under tool/prefix/builtin/plugin grants', async () => {
+    const { caps, apply } = serviceHarness(
+      { 'tool:bash': 'auto', 'plugin:p': 'auto', 'builtin:plugin-manager': 'auto', 'prefix:pwsh': 'auto' },
+      () => ({ listBundles: async () => [{ name: 'p', rows: [{ entryId: 'e1' }] }] }),
+      ['bash', 'plugin_manager', 'extra_tool', 'pwsh', 'pwsh_status'],
+    )
+    caps.owners.set('bash', { entryId: 'e1' })
+    caps.owners.set('extra_tool', { entryId: 'e1' })
+    const applied = await apply()
+    expect([...applied.keys()].sort()).toEqual(['extra_tool', 'pwsh_status'])
+    expect(applied.get('pwsh_status')?.grant).toBe('auto')
+    for (const name of ['bash', 'plugin_manager', 'pwsh']) expect(caps.appliedFor('dot-1')?.has(name)).toBe(false)
+  })
+
+  it('denies a task-only name at the gate with the run guidance, grant or not', async () => {
+    const { service, apply } = serviceHarness({ 'tool:bash': 'auto', 'tool:extra_tool': 'auto' }, undefined, ['bash', 'extra_tool'])
+    await store0(service)
+    await apply()
+    expect(await service.capabilityGate({ name: 'bash' })).toMatchObject({ kind: 'deny', reason: expect.stringContaining('task runs') })
+    expect(await service.capabilityGate({ name: 'bash' })).toMatchObject({ reason: expect.stringContaining('dot_task') })
+    expect(await service.capabilityGate({ name: 'extra_tool' })).toBe('next')
+  })
+
+  it('shows built-in child group selectors and task-only group markers in listCapabilities', async () => {
+    const { service, apply } = serviceHarness({ 'builtin:schedule': 'auto' }, undefined, ['schedule_create', 'plugin_manager'])
+    await store0(service)
+    await apply()
+    const text = await service.listCapabilities()
+    expect(text).toContain('[builtin:schedule] grant=auto')
+    expect(text).toContain('schedule_create — grant=auto (applied=auto)')
+    expect(text).toContain('plugin-manager (task-only: runs use it; never applied to dot)')
   })
 })
 
@@ -1020,5 +1306,121 @@ describe('capability card ordering', () => {
     await store.addCard({ id: 'c2', number: 2, sessionId: 's1', callId: 'capability:old', title: 't', view: { type: 'stack', children: [] }, expired: true })
     const placed = feed.snapshot()!.items.find(item => item.key === 'capability:old')
     expect(placed?.at).toBe(299)
+  })
+})
+
+describe('dot-local MCP groups', () => {
+  const mcpSettings = (mcpServers: DotSettings['mcpServers'], grants: Record<string, 'off' | 'ask' | 'auto'> = {}): DotSettings =>
+    ({ ...DEFAULT_SETTINGS, capabilities: { grants }, mcpServers })
+
+  it('lists preset-scope tools as dot groups with status and shadows same-name global servers', async () => {
+    const { sharedDotMcp } = await import('./mcp-shared.ts')
+    sharedDotMcp().servers.set('github', { state: 'connected', toolCount: 1 })
+    try {
+      const caps = new DotCapabilities({
+        tools: () => fakeTools(['mcp__github__global_tool', 'mcp__exa__search', 'other_tool']),
+        mcpManager: () => ({ list: () => [{ name: 'github' }, { name: 'exa' }] }),
+        pluginManager: () => undefined,
+        settings: () => mcpSettings({ github: { url: 'https://api.githubcopilot.com/mcp/readonly', enabled: true }, deepwiki: { url: 'https://mcp.deepwiki.com/mcp', enabled: true } }),
+        locked: LOCKED,
+        presetDefs: async () => [
+          { name: 'mcp__github__repo_info', description: 'repo info' },
+          { name: 'mcp__deepwiki__ask', description: 'ask' },
+          { name: 'web_search' },
+        ],
+      })
+      const { groups } = await caps.catalog()
+      // The dot-local github group shadows the same-name global one: one row,
+      // preset tools only, live status, dot scope marker.
+      const githubRows = groups.filter(group => group.id === 'mcp:github')
+      expect(githubRows).toHaveLength(1)
+      expect(githubRows[0]).toMatchObject({ scope: 'dot', status: { state: 'connected', toolCount: 1 } })
+      expect(githubRows[0]!.tools.map(tool => tool.name)).toEqual(['mcp__github__repo_info'])
+      const deepwiki = groups.find(group => group.id === 'mcp:deepwiki')!
+      expect(deepwiki.scope).toBe('dot')
+      expect(deepwiki.tools.map(tool => tool.name)).toEqual(['mcp__deepwiki__ask'])
+      // The unrelated global server stays an ordinary group.
+      expect(groups.some(group => group.id === 'mcp:exa' && group.scope === undefined)).toBe(true)
+      // Grants resolve dot-local tool names like any other group.
+      const resolved = resolveGrants({ 'mcp:github': 'auto' }, groups)
+      expect(resolved.get('mcp__github__repo_info')).toMatchObject({ grant: 'auto' })
+    } finally { sharedDotMcp().servers.clear() }
+  })
+
+  it('attributes overlapping prefixes to the longest server name only', async () => {
+    // `team__docs` reaches settings as a stored legacy row; granting the
+    // global `team` must never cover `mcp__team__docs__*` tools.
+    const caps = new DotCapabilities({
+      tools: () => fakeTools(['mcp__team__list', 'mcp__team__docs__search']),
+      mcpManager: () => ({ list: () => [{ name: 'team' }] }),
+      pluginManager: () => undefined,
+      settings: () => mcpSettings({ 'team__docs': { url: 'https://docs.example/mcp', enabled: true } }),
+      locked: LOCKED,
+      presetDefs: async () => [{ name: 'mcp__team__docs__search' }],
+    })
+    const { groups } = await caps.catalog()
+    const team = groups.find(group => group.id === 'mcp:team')!
+    const teamDocs = groups.find(group => group.id === 'mcp:team__docs')!
+    expect(team.scope).toBeUndefined()
+    expect(team.tools.map(tool => tool.name)).toEqual(['mcp__team__list'])
+    expect(teamDocs.scope).toBe('dot')
+    expect(teamDocs.tools.map(tool => tool.name)).toEqual(['mcp__team__docs__search'])
+    // Every tool lands in exactly one group.
+    const all = groups.flatMap(group => group.tools.map(tool => tool.name))
+    expect(all).toHaveLength(new Set(all).size)
+  })
+
+  it('keeps a configured but disconnected server listed so it can be pre-granted', async () => {
+    const caps = new DotCapabilities({
+      tools: () => fakeTools([]),
+      mcpManager: () => undefined,
+      pluginManager: () => undefined,
+      settings: () => mcpSettings({ slow: { url: 'https://slow.example/mcp', enabled: true }, off: { url: 'https://x.example/mcp', enabled: false } }),
+      locked: LOCKED,
+      presetDefs: async () => [],
+    })
+    const { groups } = await caps.catalog()
+    const slow = groups.find(group => group.id === 'mcp:slow')!
+    expect(slow).toMatchObject({ kind: 'mcp', scope: 'dot', tools: [] })
+    expect(groups.find(group => group.id === 'mcp:off')?.status?.state).toBe('off')
+    const resolved = resolveGrants({ 'mcp:slow': 'auto' }, groups)
+    expect(resolved.size).toBe(0)
+  })
+})
+
+describe('mcpServersView', () => {
+  it('describes dot-owned credential refs without ever returning values', async () => {
+    const described: string[] = []
+    const store = new DotStore(undefined)
+    await store.setSettings({
+      ...DEFAULT_SETTINGS,
+      mcpServers: {
+        github: { catalog: 'github', url: 'https://api.githubcopilot.com/mcp/readonly', headers: { Authorization: 'Bearer ${credential:DOT_MCP_GITHUB_TOKEN}' }, enabled: true },
+        deepwiki: { url: 'https://mcp.deepwiki.com/mcp', enabled: true },
+      },
+    })
+    const service = new DotService({
+      host: {} as never, store, homeDir: '/tmp/dot-mcp-view-test',
+      credentials: { describe: async (ref: string) => { described.push(ref); return { configured: true, masked: '•••1' } } },
+    })
+    const view = await service.mcpServersView()
+    const github = view.servers.find(server => server.name === 'github')!
+    expect(github).toMatchObject({ auth: 'token', credential: { ref: 'DOT_MCP_GITHUB_TOKEN', configured: true, masked: '•••1' }, tokenUrl: 'https://github.com/settings/personal-access-tokens/new' })
+    expect(view.servers.find(server => server.name === 'deepwiki')?.auth).toBe('none')
+    // Already-configured ids drop out of the recommended catalog.
+    expect(view.catalog.some(entry => entry.id === 'github' || entry.id === 'deepwiki')).toBe(false)
+    expect(view.catalog.some(entry => entry.id === 'exa')).toBe(true)
+    // No credential value rides the payload — only its configured/masked state.
+    expect(described).toEqual(['DOT_MCP_GITHUB_TOKEN'])
+    expect(JSON.stringify(view)).not.toMatch(/sk_|ghp_|secret/i)
+  })
+
+  it('releases only dot-owned credential refs when servers are removed', async () => {
+    const { dotOwnedCredentialRefs } = await import('./contracts.ts')
+    const removed = [
+      { url: 'u', enabled: true, headers: { Authorization: 'Bearer ${credential:DOT_MCP_A_TOKEN}', 'X-B': '${credential:OTHER_REF}' } },
+      { url: 'u', enabled: true },
+    ]
+    expect(dotOwnedCredentialRefs(removed)).toEqual(['DOT_MCP_A_TOKEN'])
   })
 })

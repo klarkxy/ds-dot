@@ -15,7 +15,16 @@ describe('coordinator prompt contract', () => {
     for (const action of ['create', 'dispatch', 'check', 'finish', 'closeout', 'reject', 'revise', 'supplement']) expect(mentioned.has(action), action).toBe(true)
     expect(DOT_INSTRUCTIONS).toContain(TOOL.task)
     expect(DOT_INSTRUCTIONS).toContain(TOOL.workspace)
+    expect(DOT_INSTRUCTIONS).toContain('mcp__github__*')
     expect(DOT_INSTRUCTIONS).not.toContain('${TOOL.')
+  })
+  it('keeps model recommendations subordinate to explicit human and dot choices', () => {
+    expect(DOT_INSTRUCTIONS).toContain('when the human names a model or route, pass it exactly and never substitute another')
+    expect(DOT_INSTRUCTIONS).toContain("A recipe's saved model is the default for that recipe")
+    expect(DOT_INSTRUCTIONS).toContain('keep it unless the human names a different one for this task')
+    expect(DOT_INSTRUCTIONS).toContain('never overrides a recipe model')
+    expect(DOT_INSTRUCTIONS).toContain('any different model requires a new explicit dispatch by you')
+    expect(DOT_INSTRUCTIONS).toContain('a human-pinned model requires their approval first')
   })
   it('teaches the evidence grammar and the workspace read', () => {
     expect(DOT_INSTRUCTIONS).toContain('run:<runId>#<scenarioRef>')
@@ -55,9 +64,36 @@ describe('coordinator prompt contract', () => {
     for (const phrase of ['is in English', 'verbatim', 'original language', 'deliverable_language', "in the human's language"]) expect(language).toContain(phrase)
     expect(DOT_INSTRUCTIONS).toContain('user_request')
   })
+  it('draws the line between her own session and a task run', () => {
+    expect(DOT_INSTRUCTIONS).toContain('What you do yourself and what goes to a run:')
+    expect(DOT_INSTRUCTIONS).toContain('You never edit files or run commands yourself, even if a tool for it appears; those tools belong to runs.')
+    expect(DOT_INSTRUCTIONS).toContain(`reading a delivered file or two with ${TOOL.workspace} action=read`)
+    expect(DOT_INSTRUCTIONS).toContain('Choose task presets by fit: "ptc" for scripted batch work, "cordis" for DSH plugin development.')
+  })
   it('carries no leftover vocabulary from the removed regimes', () => {
     for (const stale of ['approvalNotice', 'assessApprovalRisk', 'EPERM', 'call action=list', 'dot_start_task', 'check_only', 'Every reply to the human ends with', 'every reply goes inside a card', 'end with one show_view']) {
       expect(DOT_INSTRUCTIONS, stale).not.toContain(stale)
+    }
+  })
+  it('grounds repo references in real files and git refs, accounting for linked worktrees', () => {
+    const repoCheck = DOT_INSTRUCTIONS.split('\n').find((entry) => entry.includes('names a repository script, remote, or branch'))
+    expect(repoCheck).toBeDefined()
+    for (const phrase of ['package.json', "main checkout's .git/config", 'pointer file', 'linked worktree', 'reading .git/config there fails', 'never proves a branch exists', 'verify refs inside the run', 'base_ref', 'base_remote']) {
+      expect(repoCheck).toContain(phrase)
+    }
+  })
+  it('guards promised follow-ups and worktree creation against stale baselines and disabled idle checks', () => {
+    const followUp = DOT_INSTRUCTIONS.split('\n').find((entry) => entry.includes('promise follow-up work for later'))
+    expect(followUp).toBeDefined()
+    for (const phrase of ['isolation=worktree', 'stacked PR', 'never call action=create early on a stale HEAD', TOOL.schedule, 'prerequisite task ID', 'idleCheckMinutes === 0', 'land in the target checkout', 'panel acceptance']) {
+      expect(followUp).toContain(phrase)
+    }
+  })
+  it('registers project workspaces only when dispatching work there and informs the human', () => {
+    const workspace = DOT_INSTRUCTIONS.split('\n').find((entry) => entry.includes('Register a new workspace'))
+    expect(workspace).toBeDefined()
+    for (const phrase of ['dispatch work into', 'mention it to the human', 'do not register broad parent folders']) {
+      expect(workspace).toContain(phrase)
     }
   })
 })

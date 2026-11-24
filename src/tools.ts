@@ -266,7 +266,9 @@ export function apply(ctx: Context): void {
       deliverable_language: { type: 'string', description: 'create/revise: target language for deliverable files/copy/commits (e.g. "Simplified Chinese"); omit to follow user_request and existing project files. Run reports stay in English.' },
       priority: { type: 'integer', description: 'create/revise: priority from 1 (normal) to 3 (urgent).' },
       human_review: { type: 'boolean', description: 'create/revise: set true when the human asked to decide before acceptance. The first closeout records the verification and opens that decision; a later closeout accepts it.' },
-      isolation: { type: 'string', enum: ['none', 'worktree'], description: 'create: run the task in an isolated git worktree on a dot/task-* branch so the human checkout stays untouched; the human integrates it from the panel after acceptance. Use when the human asked for an isolated branch/worktree or the checkout is dirty.' },
+      isolation: { type: 'string', enum: ['none', 'worktree'], description: "create: run the task in an isolated git worktree on a dot/task-* branch so the human checkout stays untouched; the human integrates it from the panel after acceptance. Use when the human asked for an isolated branch/worktree or the checkout is dirty. Tasks in dot's own live checkout always run in a worktree. For updating an existing pull request branch, cut it from base_ref (optionally fetched via base_remote)." },
+      base_ref: { type: 'string', description: 'create with isolation=worktree: git ref to cut the task branch from instead of the checkout\'s HEAD — a local branch, tag or commit, or with base_remote a remote ref such as refs/pull/123/head or a branch name. Use it to update an existing pull request branch.' },
+      base_remote: { type: 'string', description: 'create with base_ref: remote name or https URL to fetch base_ref from, e.g. the upstream repository of a pull request.' },
       max_concurrent: { type: 'integer', description: 'create/revise: maximum concurrent open runs (1 to 8).' },
       role: { type: 'string', enum: ['work', 'rework', 'review'], description: 'dispatch/check: run role. review is optional and reserves the whole workspace exclusively but launches read-only; verification needing writes (e.g. builds) belongs in a writer run.' },
       access: { type: 'string', enum: ['read', 'write'], description: 'dispatch/check: set "write" when the run will create, edit, or delete files; "read" is strictly read-only.' },
@@ -294,10 +296,18 @@ export function apply(ctx: Context): void {
   // ── dot_list_models ───────────────────────────────────────────────────────
   tool(defineToolInput({
     name: TOOL.listModels,
-    description: `List the provider/model keys permitted for dispatched tasks under the human's current settings, plus the default model used when none is specified.`,
-    parameters: {},
-    execute: async () => dot().listModels(),
-    title: 'List models',
+    description: `Recommend permitted provider/model routes using a pinned LMArena aggregate. mode=recommend (default) ranks by comma-separated task tags (general, coding, debugging, review, frontend, writing, research, analysis, planning, vision, ocr, document, chinese, math, instruction, multi-turn); mode=raw returns the original eligible catalog and default. This tool never selects a model or changes a route: explicitly pass your choice to dot_task action=dispatch, and never replace a model the human named.`,
+    parameters: {
+      mode: { type: 'string', enum: ['recommend', 'raw'], description: 'recommend (default): aggregate Arena evidence; raw: original eligible model list.' },
+      tags: { type: 'string', description: 'Comma-separated task tags for recommendation, e.g. "coding,review" or "vision,ocr". Default "general".' },
+      limit: { type: 'integer', description: 'Maximum ranked routes to return, 1–10 (default 5).' },
+    },
+    execute: async args => dot().listModels({
+      mode: str(args, 'mode') === 'raw' ? 'raw' : 'recommend',
+      ...str(args, 'tags') ? { tags: str(args, 'tags')! } : {},
+      ...num(args, 'limit') !== undefined ? { limit: num(args, 'limit')! } : {},
+    }),
+    title: 'Recommend models',
   }), true)
 
   // ── dot_send ──────────────────────────────────────────────────────────────
@@ -348,7 +358,7 @@ export function apply(ctx: Context): void {
   // Callers pass either allow or answers, never both.
   tool(defineToolInput({
     name: TOOL.answerPending,
-    description: 'Inspect untruncated approval parameters with action=read, or settle a pending approval or question from another session by request id. For an approval, pass allow=true or false; for a question, pass answers as a JSON array string covering every question id exactly once. Honor [settings snapshot], [agreements], and the approval principles in your system prompt (requests marked human-required cannot be answered here). If a request is already settled elsewhere, do not retry it and stay silent unless another update requires the human.',
+    description: 'Inspect untruncated approval parameters with action=read, or settle a pending approval or question from another session by request id. For an approval, pass allow=true or false; for a question, pass answers as a JSON array string covering every question id exactly once. Honor [settings snapshot], [agreements], and the approval principles in your system prompt (requests marked human-required cannot be answered here, and a truncated request must be read with action=read before allowing). If a request is already settled elsewhere, do not retry it and stay silent unless another update requires the human.',
     parameters: {
       id: { type: 'string', required: true, description: 'Pending request id from the notice.' },
       action: { type: 'string', enum: ['read'], description: 'Pass "read" to inspect full recorded approval arguments without settling the request.' },
@@ -478,7 +488,7 @@ export function apply(ctx: Context): void {
     description: "Manage the human's standing rules in [agreements], preserved in their own words. action=add: call only when the human explicitly states a standing rule or asks you to remember one; record a single concise line verbatim without paraphrasing. action=remove: remove an entry the human asked to drop by quoting enough of it to match uniquely. Updates take effect in the prompt prefix on the next segment.",
     parameters: {
       action: { type: 'string', enum: ['add', 'remove'], required: true, description: 'Operation: add or remove.' },
-      text: { type: 'string', required: true, description: "add: single-line rule in the human's exact words (max 400 characters). remove: exact rule text or a unique substring." },
+      text: { type: 'string', required: true, description: "add: single-line rule in the human's exact words. remove: exact rule text or a unique substring." },
     },
     execute: async (args) => str(args, 'action') === 'remove' ? dot().agreementRemove(str(args, 'text') ?? '') : dot().agreementAdd(str(args, 'text') ?? ''),
     title: 'Agreement',
@@ -487,11 +497,30 @@ export function apply(ctx: Context): void {
   // ── dot_cognition ─────────────────────────────────────────────────────────
   tool(defineToolInput({
     name: TOOL.cognition,
-    description: 'Rewrite your [cognition] block: your concise, durable understanding of the human (workflow preferences, habits) and of yourself (formed preferences, shared jokes, accomplishments together). Always pass the complete replacement text (empty string clears it); never include transient task status, and remember [agreements] always take precedence. Updates take effect in the prompt prefix on the next segment.',
+    description: 'Inspect or change your [cognition]: your durable understanding of the human (workflow preferences, habits) and of yourself (formed preferences, shared jokes, accomplishments together). action=list searches (optional query) and pages (offset, limit) through all stored entries, including dormant ones outside the prompt. action=add records a new entry; action=update replaces the entry that match identifies; action=remove deletes it. Keep each entry to one self-contained point, update an existing entry instead of adding a near-duplicate, never record transient task status, and remember [agreements] always take precedence. Pinned entries belong to the human: you cannot update or remove them. Updates take effect in the prompt prefix on the next segment.',
     parameters: {
-      text: { type: 'string', required: true, description: 'Complete replacement [cognition] text (max 4000 characters; empty clears it).' },
+      action: { type: 'string', enum: ['list', 'add', 'update', 'remove'], required: true, description: 'Operation: list, add, update, or remove.' },
+      text: { type: 'string', description: 'add/update: the entry text, one self-contained point.' },
+      match: { type: 'string', description: 'update/remove: the exact entry text or a unique substring of it.' },
+      query: { type: 'string', description: 'list: optional search text (case-insensitive words) to filter stored entries, including dormant ones.' },
+      offset: { type: 'integer', description: 'list: zero-based starting offset for paging (default 0).' },
+      limit: { type: 'integer', description: 'list: maximum entries to return (default 40, max 100).' },
     },
-    execute: async (args) => dot().cognitionRewrite(str(args, 'text') ?? ''),
+    execute: async (args) => {
+      const action = str(args, 'action')
+      if (action === 'list') {
+        const offset = num(args, 'offset')
+        const limit = num(args, 'limit')
+        return dot().cognitionList({
+          ...str(args, 'query') !== undefined ? { query: str(args, 'query')! } : {},
+          ...offset === undefined ? {} : { offset },
+          ...limit === undefined ? {} : { limit },
+        })
+      }
+      if (action === 'update') return dot().cognitionUpdate(str(args, 'match') ?? '', str(args, 'text') ?? '')
+      if (action === 'remove') return dot().cognitionRemove(str(args, 'match') ?? '')
+      return dot().cognitionAdd(str(args, 'text') ?? '')
+    },
     title: 'Cognition',
   }))
 
@@ -552,7 +581,7 @@ export function apply(ctx: Context): void {
       model: { type: 'string', description: 'save/revise: default provider/model key for dispatches; empty string clears.' },
       access: { type: 'string', enum: ['read', 'write'], description: 'save/revise: default run access for work and rework dispatches (review stays read-only).' },
       human_review: { type: 'boolean', description: 'save/revise: created tasks open human oversight before acceptance.' },
-      isolation: { type: 'string', enum: ['none', 'worktree'], description: 'save/revise: created tasks run in an isolated git worktree on a dot/task-* branch.' },
+      isolation: { type: 'string', enum: ['none', 'worktree'], description: "save/revise: created tasks run in an isolated git worktree on a dot/task-* branch. Tasks in dot's own live checkout always run in a worktree." },
       revision: { type: 'integer', description: 'restore: earlier revision number from action=read history.' },
       reason: { type: 'string', description: 'revise/restore: required — why this revision exists (name the failure it fixes).' },
     },
@@ -565,10 +594,10 @@ export function apply(ctx: Context): void {
   // human grants them in Settings > Capabilities, or approves a proposal here.
   tool(defineToolInput({
     name: TOOL.capabilities,
-    description: 'List optional extra capabilities (tools from other plugins and MCP servers) or propose changes. Extras are off by default. action=list shows a tree of selectors (tool:<name>, mcp:<server>, plugin:<bundle>[#<entry>], prefix:<segment>) with each tool\'s grant, whether it is applied to this segment, conditional, high-risk, and unavailable state. action=propose queues {selector, grant, reason} for human approval in Settings; grant is off | ask (each call pauses for human approval) | auto (calls run freely). Nothing changes until the human approves, and grants apply only from the next segment. action=propose_install {spec, version, reason} asks the human to install a plugin package; to find one use the official plugin_market/plugin_manager tools if the human granted them, else dsh_plugins (version is optional for official catalog bundles, exact otherwise). To build a new plugin or wire up an MCP server, dispatch a dot_task with preset "cordis" — a wrapper plugin can register an MCP server through mcpManager.',
+    description: 'List optional extra capabilities (tools from other plugins and MCP servers) or propose changes. Extras are off by default. action=list shows a tree of selectors (tool:<name>, mcp:<server>, plugin:<bundle>[#<entry>], builtin:<id>, prefix:<segment>) with each tool\'s grant, whether it is applied to this segment, conditional, task-only, and unavailable state. Task-only tools (bash, pwsh, write, edit, apply_patch, plugin_manager) belong to runs and are never granted to you. action=propose queues {selector, grant, reason} for human approval in Settings; grant is off | ask (each call pauses for human approval) | auto (calls run freely). Nothing changes until the human approves, and grants apply only from the next segment. action=propose_install {spec, version, reason} asks the human to install a plugin package; to find one use the official plugin_market tool if the human granted it, else dsh_plugins (version is optional for official catalog bundles, exact otherwise). To build a new plugin or wire up an MCP server, dispatch a dot_task with preset "cordis" — a wrapper plugin can register an MCP server through mcpManager.',
     parameters: {
       action: { type: 'string', enum: ['list', 'propose', 'propose_install'], required: true, description: 'Operation: list the catalog, propose a grant change, or propose installing a plugin.' },
-      selector: { type: 'string', description: 'propose: selector id from list output, e.g. tool:<name>, mcp:<server>, plugin:<bundle>, plugin:<bundle>#<entry>.' },
+      selector: { type: 'string', description: 'propose: selector id from list output, e.g. tool:<name>, mcp:<server>, plugin:<bundle>, plugin:<bundle>#<entry>, builtin:<id>.' },
       grant: { type: 'string', enum: ['off', 'ask', 'auto'], description: 'propose: the grant the selector should get.' },
       spec: { type: 'string', description: 'propose_install: npm package name of the plugin to install, e.g. dsh-something or @scope/pkg.' },
       version: { type: 'string', description: 'propose_install: exact published version, e.g. 1.2.3. Optional only when the bundle is an official on-demand catalog row — its version is already pinned.' },

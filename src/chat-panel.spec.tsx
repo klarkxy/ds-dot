@@ -4,6 +4,7 @@ import { JSDOM } from 'jsdom'
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 import { DEFAULT_SETTINGS, type ChatItem, type ChatSnapshot } from './contracts.ts'
 import { ChatPanel, chatCss, rowsOf, type ChatApi } from './chat-panel.tsx'
+import { noteBackendError, resetBackendOutdated, SELF_BACKUP_KEY } from './backend-state.ts'
 import { filterVisibleChat } from './chat-filter.ts'
 import { createDotCards } from './client.tsx'
 
@@ -54,11 +55,11 @@ function makeApi(snapshot: ChatSnapshot): ChatApi {
     settingProposals: async () => [],
     decideSetting: async () => 'ok',
     newSegment: async () => 'dot-2',
-    knowledge: async () => ({ agreements: { text: '', maxChars: 4000, canUndo: false }, cognition: { text: '', maxChars: 4000, history: [] } }),
-    setAgreements: async () => ({ agreements: { text: '', maxChars: 4000, canUndo: false }, cognition: { text: '', maxChars: 4000, history: [] } }),
-    undoAgreements: async () => ({ agreements: { text: '', maxChars: 4000, canUndo: false }, cognition: { text: '', maxChars: 4000, history: [] } }),
-    setCognition: async () => ({ agreements: { text: '', maxChars: 4000, canUndo: false }, cognition: { text: '', maxChars: 4000, history: [] } }),
-    restoreCognition: async () => ({ agreements: { text: '', maxChars: 4000, canUndo: false }, cognition: { text: '', maxChars: 4000, history: [] } }),
+    knowledge: async () => ({ agreements: { entries: [], canUndo: false }, cognition: { entries: [], history: [] } }),
+    editAgreements: async () => ({ agreements: { entries: [], canUndo: false }, cognition: { entries: [], history: [] } }),
+    undoAgreements: async () => ({ agreements: { entries: [], canUndo: false }, cognition: { entries: [], history: [] } }),
+    editCognition: async () => ({ agreements: { entries: [], canUndo: false }, cognition: { entries: [], history: [] } }),
+    restoreCognition: async () => ({ agreements: { entries: [], canUndo: false }, cognition: { entries: [], history: [] } }),
     context: async () => ({ live: true, compactions: 0 }),
     clearUsage: async () => ({ live: true, compactions: 0 }),
     trajectory: async () => ({ turns: [], earlier: 0 }),
@@ -772,7 +773,7 @@ describe('ChatPanel activity and notice cards', () => {
     const navButtons = () => [...drawer.querySelectorAll<HTMLButtonElement>('.dsh-dot-drawer-nav button')]
     const navBy = (key: string) => drawer.querySelector<HTMLButtonElement>(`.dsh-dot-drawer-nav button[data-nav="${key}"]`)!
     expect(navButtons().map(node => node.querySelector('.dsh-dot-nav-label')?.textContent)).toEqual([
-      '待确认', '常规', '会话接管', '派发任务', '额外能力', '人设', '上下文', '轨迹',
+      '待确认', '常规', '会话接管', '派发任务', '额外能力', 'MCP 服务', '人设', '上下文', '轨迹',
     ])
     expect(navBy('proposals').querySelector('.dsh-dot-nav-badge')?.textContent).toBe('1')
     expect(region()).toBe('常规')
@@ -1313,6 +1314,113 @@ describe('Composer images', () => {
     })
     expect(card.hasAttribute('data-dragging')).toBe(false)
     expect(card.querySelector('.dsh-dot-drop-mask')).toBeNull()
+    await act(async () => root.unmount())
+  })
+})
+
+describe('backend health banners', () => {
+  const empty: ChatSnapshot = { sessionId: 'dot-1', running: false, streaming: '', rev: 1, itemsRev: 1, items: [] }
+  const failingChat = (message: string): ChatApi => {
+    const api = makeApi(empty)
+    api.chat = async () => { throw new Error(message) }
+    api.wait = async () => { throw new Error(message) }
+    return api
+  }
+
+  it('a transport failure shows the missing-backend text instead of the raw error', async () => {
+    resetBackendOutdated()
+    const root = createRoot(document.getElementById('root')!)
+    await act(async () => { root.render(<ChatPanel locale="en" api={failingChat('transport failure for /dsh-dot/chat: HTTP 405')} onOpenSession={() => {}} />) })
+    expect(document.body.textContent).toContain("Dorothy's backend is not loaded")
+    expect(document.body.textContent).not.toContain('HTTP 405')
+    await act(async () => root.unmount())
+  })
+
+  it('appends the restore hint when a self-upgrade backup is cached', async () => {
+    resetBackendOutdated()
+    dom.window.localStorage.setItem(SELF_BACKUP_KEY, JSON.stringify({ dir: 'B:/bak', lib: 'R:/lib' }))
+    const root = createRoot(document.getElementById('root')!)
+    await act(async () => { root.render(<ChatPanel locale="en" api={failingChat('transport failure for /dsh-dot/chat: HTTP 404')} onOpenSession={() => {}} />) })
+    expect(document.body.textContent).toContain('copy B:/bak back to R:/lib')
+    await act(async () => root.unmount())
+  })
+
+  it('a generic load failure keeps the raw error text', async () => {
+    resetBackendOutdated()
+    const root = createRoot(document.getElementById('root')!)
+    await act(async () => { root.render(<ChatPanel locale="en" api={failingChat('socket hang up')} onOpenSession={() => {}} />) })
+    expect(document.body.textContent).toContain('socket hang up')
+    expect(document.body.textContent).not.toContain('backend is not loaded')
+    await act(async () => root.unmount())
+  })
+
+  it('an unknown-endpoint reply raises one outdated banner across repeated failures', async () => {
+    resetBackendOutdated()
+    const root = createRoot(document.getElementById('root')!)
+    await act(async () => { root.render(<ChatPanel locale="en" api={makeApi(empty)} onOpenSession={() => {}} />) })
+    expect(document.body.textContent).not.toContain('newer than')
+    await act(async () => { noteBackendError('not-found', 'unknown endpoint: self.status') })
+    expect(document.body.textContent).toContain('newer than')
+    expect(document.querySelectorAll('.dsh-dot-banner [role], .dsh-dot-banner').length).toBeGreaterThan(0)
+    const count = () => [...document.querySelectorAll('.dsh-dot-banner')].filter(row => row.getAttribute('role') === 'status').length
+    expect(count()).toBe(1)
+    await act(async () => {
+      noteBackendError('not-found', 'unknown endpoint: self.status')
+      noteBackendError('not-found', 'unknown endpoint: other')
+    })
+    expect(count()).toBe(1)
+    await act(async () => root.unmount())
+  })
+
+  it('calls self.status once on mount and caches the returned backup', async () => {
+    resetBackendOutdated()
+    const api = makeApi(empty)
+    let calls = 0
+    api.selfStatus = async () => {
+      calls += 1
+      return { mode: 'linked', root: 'R', lastBackup: { dir: 'B', lib: 'L' } }
+    }
+    const root = createRoot(document.getElementById('root')!)
+    await act(async () => { root.render(<ChatPanel locale="en" api={api} onOpenSession={() => {}} />) })
+    expect(calls).toBe(1)
+    expect(dom.window.localStorage.getItem(SELF_BACKUP_KEY)).toBe('{"dir":"B","lib":"L"}')
+    await act(async () => root.unmount())
+  })
+
+  it('a later chat snapshot lastBackup refreshes the restore cache', async () => {
+    resetBackendOutdated()
+    dom.window.localStorage.removeItem(SELF_BACKUP_KEY)
+    let snap: ChatSnapshot = { ...empty, rev: 1 }
+    let pushed = false
+    const api = makeApi(empty)
+    api.chat = async () => snap
+    api.wait = async (_rev, _itemsRev, signal) => {
+      if (!pushed) {
+        pushed = true
+        snap = { ...empty, rev: 2, lastBackup: { dir: 'B2', lib: 'L2' } }
+        return snap
+      }
+      return new Promise(resolve => { signal.addEventListener('abort', () => resolve(undefined), { once: true }) })
+    }
+    const root = createRoot(document.getElementById('root')!)
+    await act(async () => { root.render(<ChatPanel locale="en" api={api} onOpenSession={() => {}} />) })
+    await act(async () => { await Promise.resolve(); await new Promise(resolve => setTimeout(resolve, 40)) })
+    expect(dom.window.localStorage.getItem(SELF_BACKUP_KEY)).toBe('{"dir":"B2","lib":"L2"}')
+    await act(async () => root.unmount())
+  })
+
+  it('an old backend answering self.status not-found does not break the panel but flags the skew', async () => {
+    resetBackendOutdated()
+    const api = makeApi(empty)
+    api.selfStatus = async () => {
+      const error = new Error('unknown endpoint: self.status') as Error & { code?: string }
+      error.code = 'not-found'
+      noteBackendError('not-found', 'unknown endpoint: self.status')
+      throw error
+    }
+    const root = createRoot(document.getElementById('root')!)
+    await act(async () => { root.render(<ChatPanel locale="en" api={api} onOpenSession={() => {}} />) })
+    expect(document.body.textContent).toContain('newer than')
     await act(async () => root.unmount())
   })
 })

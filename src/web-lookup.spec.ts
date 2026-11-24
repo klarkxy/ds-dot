@@ -259,8 +259,16 @@ describe('dot web lookup', () => {
     }
     const pr = {
       number: 5, title: 'Fix', state: 'open', draft: false, mergeable: true,
-      head: { ref: 'feat/x', sha: 'aaa', repo: { id: 3, node_id: 'R_1', name: 'r', full_name: 'o/r', owner: { login: 'o', avatar_url: 'a', type: 'User' }, private: false, url: 'https://api.github.com/repos/o/r', description: 'the repo', fork: false } },
-      base: { ref: 'main', sha: 'bbb' },
+      head: {
+        ref: 'feat/x', sha: 'aaa',
+        user: { login: 'forker', avatar_url: 'u', type: 'User' },
+        repo: { id: 3, node_id: 'R_1', name: 'r', full_name: 'forker/r', owner: { login: 'forker', avatar_url: 'a', type: 'User' }, private: false, url: 'https://api.github.com/repos/forker/r', description: 'the fork', fork: true },
+      },
+      base: {
+        ref: 'main', sha: 'bbb',
+        user: { login: 'o', avatar_url: 'u2', type: 'User' },
+        repo: { id: 1, node_id: 'R_0', name: 'r', full_name: 'o/r', owner: { login: 'o', avatar_url: 'a2', type: 'User' }, private: false, url: 'https://api.github.com/repos/o/r', description: 'the repo', fork: false },
+      },
       url: 'https://api.github.com/repos/o/r/pulls/5',
       html_url: 'https://github.com/o/r/pull/5',
       diff_url: 'https://github.com/o/r/pull/5.diff',
@@ -270,6 +278,10 @@ describe('dot web lookup', () => {
       review_comments_url: 'https://api.github.com/repos/o/r/pulls/5/comments',
       statuses_url: 'https://api.github.com/repos/o/r/statuses/aaa',
       user: { login: 'author', avatar_url: 'b', type: 'User' },
+      assignee: { login: 'owner1', avatar_url: 'c', type: 'User' },
+      assignees: [{ login: 'owner1', avatar_url: 'c', type: 'User' }],
+      requested_reviewers: [{ login: 'rev1', avatar_url: 'd', type: 'User' }],
+      merged_by: { login: 'maintainer', avatar_url: 'e', type: 'User' },
       labels: [{ name: 'ready', color: '0e8a16' }],
       merged_at: null, created_at: '2025-01-01T00:00:00Z', updated_at: '2025-01-03T00:00:00Z',
       additions: 12, deletions: 4, changed_files: 2,
@@ -284,10 +296,14 @@ describe('dot web lookup', () => {
     })
     expect(compactGitHubJson(pr)).toEqual({
       number: 5, title: 'Fix', state: 'open', draft: false, mergeable: true,
-      head: { ref: 'feat/x', sha: 'aaa', repo: 'o/r' },
-      base: { ref: 'main', sha: 'bbb' },
+      head: { ref: 'feat/x', sha: 'aaa', user: 'forker', repo: 'forker/r' },
+      base: { ref: 'main', sha: 'bbb', user: 'o', repo: 'o/r' },
       html_url: 'https://github.com/o/r/pull/5',
       user: 'author',
+      assignee: 'owner1',
+      assignees: ['owner1'],
+      requested_reviewers: ['rev1'],
+      merged_by: 'maintainer',
       labels: ['ready'],
       merged_at: null, created_at: '2025-01-01T00:00:00Z', updated_at: '2025-01-03T00:00:00Z',
       additions: 12, deletions: 4, changed_files: 2,
@@ -295,6 +311,74 @@ describe('dot web lookup', () => {
     const raw = JSON.stringify({ review, pr })
     const small = JSON.stringify(compactGitHubJson({ review, pr }))
     expect(small.length).toBeLessThan(raw.length / 2)
+  })
+
+  it('preserves primary API records for repo details, user profiles, labels, and repo search', () => {
+    const repo = {
+      id: 42, node_id: 'R_42', name: 'ds-dot', full_name: 'klarkxy/ds-dot',
+      private: false,
+      owner: { login: 'klarkxy', id: 1, node_id: 'U_1', avatar_url: 'https://avatars/1', type: 'User' },
+      organization: { login: 'klarkxy', id: 1, node_id: 'O_1', avatar_url: 'https://avatars/1', type: 'Organization' },
+      html_url: 'https://github.com/klarkxy/ds-dot',
+      url: 'https://api.github.com/repos/klarkxy/ds-dot',
+      pulls_url: 'https://api.github.com/repos/klarkxy/ds-dot/pulls{/number}',
+      description: 'Dorothy sidebar coordinator',
+      default_branch: 'dev',
+      fork: false,
+    }
+    expect(compactGitHubJson(repo)).toEqual({
+      id: 42, name: 'ds-dot', full_name: 'klarkxy/ds-dot',
+      private: false,
+      owner: 'klarkxy',
+      organization: 'klarkxy',
+      html_url: 'https://github.com/klarkxy/ds-dot',
+      description: 'Dorothy sidebar coordinator',
+      default_branch: 'dev',
+      fork: false,
+    })
+
+    const user = {
+      login: 'klarkxy', id: 7, node_id: 'U_7',
+      avatar_url: 'https://avatars/7', gravatar_id: '',
+      url: 'https://api.github.com/users/klarkxy',
+      html_url: 'https://github.com/klarkxy',
+      repos_url: 'https://api.github.com/users/klarkxy/repos',
+      type: 'User', name: 'Klark', bio: 'Building tools', public_repos: 12,
+    }
+    expect(compactGitHubJson(user)).toEqual({
+      login: 'klarkxy', id: 7,
+      html_url: 'https://github.com/klarkxy',
+      type: 'User', name: 'Klark', bio: 'Building tools', public_repos: 12,
+    })
+
+    const labels = [
+      { id: 1, node_id: 'L_1', url: 'https://api.github.com/repos/klarkxy/ds-dot/labels/bug', name: 'bug', color: 'd73a4a', default: true, description: 'Broken behavior' },
+      { id: 2, node_id: 'L_2', url: 'https://api.github.com/repos/klarkxy/ds-dot/labels/feat', name: 'feat', color: '0e8a16', default: false, description: 'New capability' },
+    ]
+    expect(compactGitHubJson(labels)).toEqual([
+      { id: 1, name: 'bug', color: 'd73a4a', default: true, description: 'Broken behavior' },
+      { id: 2, name: 'feat', color: '0e8a16', default: false, description: 'New capability' },
+    ])
+
+    const searchRepos = {
+      total_count: 1,
+      incomplete_results: false,
+      items: [repo],
+    }
+    expect(compactGitHubJson(searchRepos)).toEqual({
+      total_count: 1,
+      incomplete_results: false,
+      items: [{
+        id: 42, name: 'ds-dot', full_name: 'klarkxy/ds-dot',
+        private: false,
+        owner: 'klarkxy',
+        organization: 'klarkxy',
+        html_url: 'https://github.com/klarkxy/ds-dot',
+        description: 'Dorothy sidebar coordinator',
+        default_branch: 'dev',
+        fork: false,
+      }],
+    })
   })
 
   it('fetches api.github.com directly and returns compacted JSON', async () => {
@@ -310,6 +394,70 @@ describe('dot web lookup', () => {
     const result = attempt.result
     expect(result).toMatchObject({ url: 'https://api.github.com/repos/o/r/issues/5', statusCode: 200, truncated: false })
     expect(result.body).toEqual({ kind: 'text', content: JSON.stringify({ number: 5, title: 'Bug', html_url: 'https://github.com/o/r/issues/5', user: 'octo' }, null, 1) })
+  })
+
+  it('upgrades http://api.github.com to https:// on the wire', async () => {
+    const seen: string[] = []
+    const fetch: LookupFetch = async (input) => {
+      seen.push(input)
+      return jsonResponse(JSON.stringify({ full_name: 'o/r', default_branch: 'dev', owner: { login: 'o', avatar_url: 'a', type: 'User' } }), 200, 'application/json')
+    }
+    const attempt = await gitHubApiFetch('http://api.github.com/repos/o/r?per_page=10', { fetch })
+    expect(seen).toEqual(['https://api.github.com/repos/o/r?per_page=10'])
+    expect(attempt?.ok).toBe(true)
+    if (!attempt?.ok) throw new Error('expected upgraded direct result')
+    expect(attempt.result.url).toBe('https://api.github.com/repos/o/r?per_page=10')
+  })
+
+  it('reads >200k raw PR lists cleanly before compacting, truncates only post-compaction, and falls back past rawCap', async () => {
+    const noiseRepo = {
+      id: 1, node_id: 'R_1', name: 'r', full_name: 'o/r',
+      owner: { login: 'o', avatar_url: 'https://avatars/o', type: 'User', followers_url: 'https://api.github.com/users/o/followers' },
+      description: 'x'.repeat(3_000),
+      pulls_url: 'https://api.github.com/repos/o/r/pulls{/number}',
+      issues_url: 'https://api.github.com/repos/o/r/issues{/number}',
+      statuses_url: 'https://api.github.com/repos/o/r/statuses/{sha}',
+    }
+    const prs = Array.from({ length: 40 }, (_, idx) => ({
+      number: idx + 1,
+      title: `PR ${idx + 1}`,
+      state: 'open',
+      node_id: `PR_${idx + 1}`,
+      url: `https://api.github.com/repos/o/r/pulls/${idx + 1}`,
+      html_url: `https://github.com/o/r/pull/${idx + 1}`,
+      user: { login: `dev${idx + 1}`, avatar_url: 'a', type: 'User' },
+      head: { ref: `feat/${idx + 1}`, sha: `sha${idx + 1}`, repo: noiseRepo },
+      base: { ref: 'dev', sha: 'base', repo: noiseRepo },
+      reactions: { url: 'https://api.github.com/reactions/1', total_count: 0 },
+    }))
+    const raw = JSON.stringify(prs)
+    expect(raw.length).toBeGreaterThan(200_000)
+
+    const fetch: LookupFetch = async () => jsonResponse(raw, 200, 'application/json')
+    const full = await gitHubApiFetch('https://api.github.com/repos/o/r/pulls', { fetch, maxChars: 200_000 })
+    expect(full?.ok).toBe(true)
+    if (!full?.ok) throw new Error('expected compacted list')
+    expect(full.result.truncated).toBe(false)
+    expect(full.result.body.kind).toBe('text')
+    const parsed = JSON.parse((full.result.body as { content: string }).content) as Array<{ number: number }>
+    expect(parsed).toHaveLength(40)
+    expect(parsed.map(item => item.number)).toEqual(Array.from({ length: 40 }, (_, i) => i + 1))
+
+    const clipped = await gitHubApiFetch('https://api.github.com/repos/o/r/pulls', { fetch, maxChars: 200 })
+    expect(clipped?.ok).toBe(true)
+    if (!clipped?.ok) throw new Error('expected clipped result')
+    expect(clipped.result.truncated).toBe(true)
+    expect((clipped.result.body as { content: string }).content).toHaveLength(200)
+
+    let cancelled = false
+    const oversized: LookupFetch = async () => new Response(new ReadableStream({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode(`[{"title":"${'a'.repeat(2_000_100)}"}]`))
+      },
+      cancel() { cancelled = true },
+    }))
+    expect(await gitHubApiFetch('https://api.github.com/repos/o/r/pulls', { fetch: oversized, maxChars: 200_000 })).toEqual({ ok: false, cooldown: false })
+    expect(cancelled).toBe(true)
   })
 
   it('marks rate limits and network failures as cooldown-worthy, other misses as one-off', async () => {

@@ -264,27 +264,42 @@ export async function jinaFetch(rawUrl: string, options: {
 /**
  * GitHub API responses bury the useful fields under per-object noise: every
  * `*_url` endpoint echo, `node_id`, reactions, inlined apps. Compact recursively
- * — collapse user/repo/label objects to their identifying string — while
- * keeping the content fields (title, body, state, refs, timestamps, `html_url`).
+ * — collapse nested user/repo/label references to their identifying string while
+ * keeping primary records (root objects, root arrays, search `items`, `head`/`base`)
+ * and content fields (title, body, state, refs, timestamps, `html_url`).
  */
-export function compactGitHubJson(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(compactGitHubJson)
+function compactGitHubValue(value: unknown, parentKey?: string): unknown {
+  if (Array.isArray(value)) return value.map(item => compactGitHubValue(item, parentKey))
   if (!value || typeof value !== 'object') return value
   const record = value as Record<string, unknown>
-  // Collapse shapes before key filtering — the marker keys would be dropped.
-  if (typeof record.login === 'string' && ('avatar_url' in record || 'type' in record)) return record.login
-  if (typeof record.full_name === 'string' && 'owner' in record) return record.full_name
-  if (typeof record.name === 'string' && 'color' in record) return record.name
+  // Collapse nested reference shapes before key filtering — the marker keys would be dropped.
+  if (parentKey && GITHUB_REFERENCE_KEYS.has(parentKey)) {
+    if (typeof record.login === 'string' && ('avatar_url' in record || 'type' in record)) return record.login
+    if (typeof record.full_name === 'string' && 'owner' in record) return record.full_name
+    if (typeof record.name === 'string' && 'color' in record) return record.name
+  }
   const out: Record<string, unknown> = {}
   for (const [key, entry] of Object.entries(record)) {
     if (GITHUB_NOISE_KEYS.has(key)) continue
     if (key.endsWith('_url') && key !== 'html_url') continue
     if (key === 'url' && typeof entry === 'string' && entry.startsWith('https://api.github.com/')) continue
-    out[key] = compactGitHubJson(entry)
+    out[key] = compactGitHubValue(entry, key)
   }
   return out
 }
 
+export function compactGitHubJson(value: unknown): unknown {
+  return compactGitHubValue(value)
+}
+
+const GITHUB_REFERENCE_KEYS = new Set([
+  'user', 'owner', 'author', 'committer', 'assignee', 'assignees',
+  'requested_reviewers', 'requested_reviewer', 'review_requester',
+  'merged_by', 'closed_by', 'actor', 'sender', 'organization', 'org',
+  'creator', 'uploader', 'triggering_actor',
+  'repo', 'repository', 'head_repository', 'parent', 'source', 'template_repository',
+  'label', 'labels',
+])
 const GITHUB_NOISE_KEYS = new Set(['node_id', 'gravatar_id', '_links', 'reactions', 'performed_via_github_app'])
 const GITHUB_API_HOST = 'api.github.com'
 const GITHUB_DIRECT_TIMEOUT_MS = 8_000
@@ -310,11 +325,15 @@ export async function gitHubApiFetch(rawUrl: string, options: {
   let target: URL
   try { target = new URL(rawUrl) } catch { return undefined }
   if ((target.protocol !== 'http:' && target.protocol !== 'https:') || target.hostname !== GITHUB_API_HOST) return undefined
+  if (target.username || target.password) return undefined
+  if (target.protocol === 'http:') target.protocol = 'https:'
   if (options.signal?.aborted) {
     throw new WebError('the lookup was cancelled', 'WEB_ABORTED', { cause: options.signal.reason })
   }
   const signal = combineSignal(options.signal, options.timeoutMs ?? GITHUB_DIRECT_TIMEOUT_MS)
   const maxChars = options.maxChars ?? DEFAULT_MAX_CHARS
+  // Decouple raw stream cap from post-compaction budget so large PR/search lists parse cleanly before shrinking.
+  const rawCap = Math.max(maxChars * 8, 2_000_000)
   let response: Response
   let body: { content: string; truncated: boolean }
   try {
@@ -324,7 +343,7 @@ export async function gitHubApiFetch(rawUrl: string, options: {
       signal,
       headers: { accept: 'application/vnd.github+json', 'user-agent': 'dsh-dot' },
     })
-    if (response.ok) body = await readBounded(response, maxChars, signal)
+    if (response.ok) body = await readBounded(response, rawCap, signal)
   } catch (error) {
     // A caller abort is a cancellation, not a GitHub failure: propagate it.
     if (options.signal?.aborted) throw asWebError(error, 'the lookup was cancelled', options.signal)
@@ -337,13 +356,15 @@ export async function gitHubApiFetch(rawUrl: string, options: {
   }
   let parsed: unknown
   try { parsed = JSON.parse(body!.content) } catch { return { ok: false, cooldown: false } }
+  const compacted = JSON.stringify(compactGitHubJson(parsed), null, 1)
+  const truncated = compacted.length > maxChars
   return {
     ok: true,
     result: {
       url: target.toString(),
       statusCode: response.status,
-      body: { kind: 'text', content: JSON.stringify(compactGitHubJson(parsed), null, 1) },
-      truncated: body!.truncated,
+      body: { kind: 'text', content: truncated ? compacted.slice(0, maxChars) : compacted },
+      truncated,
     },
   }
 }

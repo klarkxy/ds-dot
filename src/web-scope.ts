@@ -61,7 +61,7 @@ export function dotFetchProvider(parent: ParentWeb | undefined, fetch: LookupFet
     available: () => true,
     ready: llmProvider => fetchReady(parent, llmProvider),
     fetch: async (request, signal) => {
-      if (now() >= githubCooldownUntil) {
+      if (!pinned && now() >= githubCooldownUntil) {
         const direct = await gitHubApiFetch(request.url, { fetch, signal, maxChars: FETCH_MAX_CHARS })
         if (direct?.ok) return direct.result
         if (direct && !direct.ok && direct.cooldown) githubCooldownUntil = now() + GITHUB_COOLDOWN_MS

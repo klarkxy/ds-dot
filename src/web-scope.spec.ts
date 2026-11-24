@@ -285,4 +285,66 @@ describe('dot web scope', () => {
       expect(calls[0]).toBe('https://api.github.com/y')
     })
   })
+
+  it('respects an explicit fetch pin for api.github.com across delegation and unavailability', async () => {
+    await withPins(undefined, 'configured-fetch', async () => {
+      await withFetchSpy(async calls => {
+        const delegated = scopeFixture({
+          selectFetchProvider: () => ({ id: 'configured-fetch' }),
+          fetch: async () => ({ url: 'https://api.github.com/repos/o/r/issues/5', statusCode: 200, body: { kind: 'text', content: 'from-parent' }, truncated: false }),
+        })
+        installDotWeb(delegated.ctx as never)
+        await expect(delegated.runtime().fetch({ url: 'https://api.github.com/repos/o/r/issues/5' })).resolves.toMatchObject({ body: { content: 'from-parent' } })
+
+        const unavailable = scopeFixture({
+          selectFetchProvider: () => { throw Object.assign(new Error('none'), { code: 'WEB_PROVIDER_UNAVAILABLE' }) },
+          fetch: async () => { throw new Error('should not run') },
+        })
+        installDotWeb(unavailable.ctx as never)
+        await expect(unavailable.runtime().fetch({ url: 'https://api.github.com/repos/o/r/issues/5' })).rejects.toMatchObject({ code: 'WEB_PROVIDER_UNAVAILABLE' })
+
+        const missingParent = scopeFixture()
+        installDotWeb(missingParent.ctx as never)
+        await expect(missingParent.runtime().fetch({ url: 'https://api.github.com/repos/o/r/issues/5' })).rejects.toMatchObject({ code: 'WEB_PROVIDER_CONFIGURED_MISSING' })
+
+        expect(calls).toEqual([])
+      })
+    })
+  })
+
+  it('compacts >200k PR lists via dotFetchProvider without falling back to Jina', async () => {
+    await withPins(undefined, undefined, async () => {
+      const calls: string[] = []
+      const noiseRepo = {
+        id: 1, node_id: 'R_1', name: 'r', full_name: 'o/r',
+        owner: { login: 'o', avatar_url: 'a', type: 'User' },
+        description: 'd'.repeat(3_500),
+        pulls_url: 'https://api.github.com/repos/o/r/pulls{/number}',
+      }
+      const prs = Array.from({ length: 35 }, (_, idx) => ({
+        number: idx + 1,
+        title: `PR ${idx + 1}`,
+        state: 'open',
+        url: `https://api.github.com/repos/o/r/pulls/${idx + 1}`,
+        html_url: `https://github.com/o/r/pull/${idx + 1}`,
+        user: { login: `u${idx + 1}`, avatar_url: 'a', type: 'User' },
+        head: { ref: `feat/${idx + 1}`, sha: `s${idx + 1}`, repo: noiseRepo },
+        base: { ref: 'dev', sha: 'base', repo: noiseRepo },
+      }))
+      const raw = JSON.stringify(prs)
+      expect(raw.length).toBeGreaterThan(200_000)
+
+      const fetch: LookupFetch = async input => {
+        calls.push(input)
+        return new Response(raw, { status: 200, headers: { 'content-type': 'application/json' } })
+      }
+      const provider = dotFetchProvider(undefined, fetch, () => 0)!
+      const result = await provider.fetch({ url: 'https://api.github.com/repos/o/r/pulls' }, undefined)
+      expect(calls).toEqual(['https://api.github.com/repos/o/r/pulls'])
+      expect(result.truncated).toBe(false)
+      expect(result.body.kind).toBe('text')
+      const parsed = JSON.parse((result.body as { content: string }).content) as Array<{ number: number }>
+      expect(parsed).toHaveLength(35)
+    })
+  })
 })

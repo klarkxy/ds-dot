@@ -36,6 +36,7 @@ The static check is pattern-based rather than exhaustive; silence is never treat
 - **Dispatched tasks settings:** Configure *Task permissions* (`Workspace write` or `Full access`, plus `Safe Auto` when `@klarkxy/dsh-safe-auto` is installed and `Auto review` when DSH experimental review is enabled), *Allowed task models*, and the idle *Routine check* interval (`0` disables it).
 - **Arena-backed model recommendations:** `dot_list_models` ranks permitted `provider/model` choices from a pinned LMArena snapshot (`mode=raw` preserves the raw catalog view); Dorothy never substitutes a model you explicitly named. See [Arena data and aggregation notes](https://github.com/klarkxy/ds-dot/blob/dev/docs/model-arena.md).
 - **Factory reset** (bottom of Settings): Previews exact counts of Dorothy's own state before clearing; your own sessions, project files, and host persona stay untouched.
+- **Scoped web lookup & GitHub API compaction:** Dorothy's isolated `web_search` / `web_fetch` respect explicit `DSH_WEB_SEARCH_PROVIDER` / `DSH_WEB_FETCH_PROVIDER` pins. When unpinned, `web_fetch` upgrades `http://api.github.com` URLs to `https:`, fetches `api.github.com` directly with an 8s timeout, strips repetitive endpoint `*_url`/`node_id`/`reactions` metadata while preserving primary records and `html_url`, and falls back to Jina (cooling down direct attempts for 10 minutes on 403/429 or network errors).
 
 ---
 

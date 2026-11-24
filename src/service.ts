@@ -19,7 +19,7 @@ import { renderBrief, renderSupplement, runTitle } from './brief.ts'
 import { bindRunSession, cancelWork, countRelayInserts, finishWork, launchReservedRun, observeRun, reconcileRun, supplementRun } from './execution.ts'
 import { detectWorkspaceRoot } from './git-root.ts'
 import { commitDelivery, createTaskWorktree, listTaskWorktrees, mergeInto, removeTaskWorktree, runGit, taskWorktreeRoot, type GitRunner, type TaskWorktree } from './git-worktree.ts'
-import { defaultSelfBuild, insideOrEqual, libHashOf, realpathOrResolve, type SelfBackup, type SelfInstall } from './self-root.ts'
+import { defaultSelfBuild, insideOrEqual, libHashOf, realpathOrResolve, type SelfBackup, type SelfInstall, type SelfUpgradeMarker } from './self-root.ts'
 import {
   WRITE_PATHS_EXAMPLE, artifactName, constraintList, jsonArray,
   occupantOf, pathScope, plannedOccupant, plannedScope, requirementList, samePathList,
@@ -172,6 +172,12 @@ export class DotService {
   readonly cards: DotCards
   /** The single background reflection pass; the reminder clock ticks its gate. */
   readonly reflection: ReflectionRunner
+  /**
+   * The upgrade marker that was already on disk when this process started.
+   * Only that marker may be hashed, announced, and cleared; a marker this
+   * instance writes in deploySelfBuild stays until a new process starts.
+   */
+  private readonly startupSelfUpgrade: SelfUpgradeMarker | undefined
 
   constructor(private readonly options: DotServiceOptions) {
     this.currentLocale = options.locale ?? options.store.uiLocale
@@ -240,6 +246,7 @@ export class DotService {
       ...options.log ? { log: options.log } : {},
       emit: input => this.emit(input),
     })
+    this.startupSelfUpgrade = options.store.selfUpgrade
   }
 
   get store(): DotStore { return this.options.store }
@@ -1130,10 +1137,14 @@ export class DotService {
    * A self-upgrade that built under the previous process left a marker; hashing
    * the bundle running now says whether the restart actually picked it up. The
    * marker clears either way — the backup row stays for the restore hint.
+   * Only the marker captured at construction may be consumed: a later
+   * deploySelfBuild on this still-running process must not look like a restart.
    */
   private async resolveSelfUpgrade(): Promise<void> {
-    const marker = this.store.selfUpgrade
+    const marker = this.startupSelfUpgrade
     if (!marker || this.closing) return
+    // A marker this instance just wrote is a different object; leave it for the next process.
+    if (this.store.selfUpgrade !== marker) return
     const dot = this.store.dotSessionId
     // Clearing before the session exists would drop the only notice of this upgrade.
     if (!dot) return
@@ -1144,7 +1155,9 @@ export class DotService {
         : `Self-upgrade to ${marker.commitSha} was deployed, but the running build does not match it${hash === undefined ? ' (the bundle could not be read)' : ''}; the previous lib is kept at ${join(marker.backupDir, 'lib')}.`
       this.notify({ sessionId: dot, kind: 'turn-end', text, at: this.now() })
     } finally {
-      await this.store.setSelfUpgrade(undefined).catch(error => this.options.log?.(`dsh-dot: self-upgrade marker was not cleared: ${messageOf(error)}`))
+      if (this.store.selfUpgrade === marker) {
+        await this.store.setSelfUpgrade(undefined).catch(error => this.options.log?.(`dsh-dot: self-upgrade marker was not cleared: ${messageOf(error)}`))
+      }
     }
   }
 
@@ -4209,8 +4222,8 @@ export class DotService {
       const worktree = input.access === 'write' && this.selfIsolation(cwd) === 'worktree'
         ? await this.taskWorktreeFor(cwd)
         : undefined
-      if (worktree !== undefined && paths) paths = this.remapSelfScopePaths(cwd, worktree.cwd, paths)
       try {
+        if (worktree !== undefined && paths) paths = this.remapSelfScopePaths(cwd, worktree.cwd, paths)
         change = await this.store.work.createChange({
           title: input.title,
           cwd: worktree?.cwd ?? cwd,

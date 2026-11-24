@@ -1398,7 +1398,7 @@ export const settingsCss = `
 .dsh-dot-chat .dsh-dot-cap-locked-name { padding: 1px 6px; border-radius: var(--dsw-radius-sm); background: var(--dsw-alias-bg-layer-2); font-size: 11px; font-family: var(--ds-font-family-code); color: var(--dsw-alias-label-secondary); }
 .dsh-dot-chat .dsh-dot-mcp { display: flex; flex-direction: column; gap: 8px; margin-top: 4px; }
 .dsh-dot-chat .dsh-dot-mcp-row { display: flex; flex-direction: column; gap: 4px; padding: 8px 12px; border-radius: var(--dsw-radius-md); background: var(--dsw-alias-bg-layer-1); box-shadow: var(--dsw-elevation-stroke); }
-.dsh-dot-chat .dsh-dot-mcp-line { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.dsh-dot-chat .dsh-dot-mcp-line { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 8px; min-width: 0; }
 .dsh-dot-chat .dsh-dot-mcp-name { flex-shrink: 0; font-size: 13px; line-height: 20px; font-weight: 500; color: var(--dsw-alias-label-primary); }
 .dsh-dot-chat .dsh-dot-mcp-status, .dsh-dot-chat .dsh-dot-mcp-about { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; line-height: 16px; color: var(--dsw-alias-label-tertiary); }
 .dsh-dot-chat .dsh-dot-mcp-actions { display: inline-flex; align-items: center; gap: 4px; margin-left: auto; flex-shrink: 0; }

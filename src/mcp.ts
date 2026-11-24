@@ -33,6 +33,7 @@ interface RowCtx {
 }
 
 const toolPrefix = (server: string) => `mcp__${server}__`
+const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
 
 /** What decides whether an enabled server's mount is still current. */
 const signatureOf = (server: DotMcpServer) => JSON.stringify([server.url, server.headers ?? {}])
@@ -94,10 +95,25 @@ export async function apply(ctx: RowCtx) {
         failOnStartupError: false,
       })
       const entry: { fiber: FiberLike; signature: string; unwatch?: () => void } = { fiber, signature }
-      const status = client.connectionStatusOf(fiber)
-      if (status !== undefined) entry.unwatch = status.onChange(next => publish(server, next as { state: string }))
       mounted.set(server, entry)
-      publish(server, status?.current() ?? { state: 'connecting' })
+      const attachStatus = () => {
+        const status = client!.connectionStatusOf(fiber)
+        if (status === undefined) return false
+        entry.unwatch = status.onChange(next => publish(server, next as { state: string }))
+        publish(server, status.current())
+        return true
+      }
+      // The instance registers its status handle inside its own apply, so it
+      // can still be absent here; keep polling until it shows up.
+      if (!attachStatus()) {
+        publish(server, { state: 'connecting' })
+        void (async () => {
+          for (let i = 0; i < 120 && mounted.get(server) === entry; i++) {
+            await sleep(500)
+            if (attachStatus()) return
+          }
+        })()
+      }
     } catch (error) {
       // One bad server must not take the row (and its other servers) down.
       shared.servers.set(server, { state: 'failed', diagnostic: `mount failed: ${error instanceof Error ? error.message : String(error)}` })

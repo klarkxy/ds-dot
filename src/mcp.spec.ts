@@ -12,15 +12,18 @@ interface FakeFiber {
   dispose: ReturnType<typeof vi.fn>
 }
 
-function harness(initial: Readonly<Record<string, DotMcpServer>>) {
+function harness(initial: Readonly<Record<string, DotMcpServer>>, options: { statusDelayCalls?: number } = {}) {
   const shared = sharedDotMcp()
   const settings: DotSettings = { ...DEFAULT_SETTINGS, mcpServers: { ...initial } }
   shared.settings = () => settings
   const mounts: Array<Record<string, unknown>> = []
   const fibers: FakeFiber[] = []
   const defs = { list: [] as { name: string }[] }
+  let statusCalls = 0
   const clientModule = {
     connectionStatusOf(fiber: FakeFiber) {
+      statusCalls += 1
+      if (statusCalls <= (options.statusDelayCalls ?? 0)) return undefined
       return {
         current: () => fiber._status,
         onChange: (callback: (status: unknown) => void) => {
@@ -75,13 +78,15 @@ describe('ds-dot/mcp preset row', () => {
   it('disposes removed and disabled servers without touching the rest', async () => {
     const run = harness({ deepwiki, exa })
     await run.done
-    Object.assign(run.settings, { mcpServers: { deepwiki, exa: { ...exa, enabled: false } } });
+    Object.assign(run.settings, { mcpServers: { deepwiki, exa: { ...exa, enabled: false } }
+ });
     run.shared.onSettingsChanged?.()
     await settle()
     expect(run.fibers[1]!.dispose).toHaveBeenCalled()
     expect(run.fibers[0]!.dispose).not.toHaveBeenCalled()
     expect(run.mounts).toHaveLength(2)
-    Object.assign(run.settings, { mcpServers: {} });
+    Object.assign(run.settings, { mcpServers: {}
+ });
     run.shared.onSettingsChanged?.()
     await settle()
     expect(run.fibers[0]!.dispose).toHaveBeenCalled()
@@ -91,12 +96,14 @@ describe('ds-dot/mcp preset row', () => {
   it('remounts on url change but not on unrelated settings edits', async () => {
     const run = harness({ deepwiki })
     await run.done
-    Object.assign(run.settings, { mcpServers: { deepwiki: { ...deepwiki, headers: { 'X-A': '1' } } } });
+    Object.assign(run.settings, { mcpServers: { deepwiki: { ...deepwiki, headers: { 'X-A': '1' } } }
+ });
     run.shared.onSettingsChanged?.()
     await settle()
     expect(run.mounts).toHaveLength(2)
     expect(run.fibers[0]!.dispose).toHaveBeenCalled()
-    Object.assign(run.settings, { mcpServers: { deepwiki: { ...deepwiki, headers: { 'X-A': '1' } } } });
+    Object.assign(run.settings, { mcpServers: { deepwiki: { ...deepwiki, headers: { 'X-A': '1' } } }
+ });
     run.shared.onSettingsChanged?.()
     await settle()
     expect(run.mounts).toHaveLength(2)
@@ -107,6 +114,17 @@ describe('ds-dot/mcp preset row', () => {
     await run.done
     expect(run.mounts).toEqual([expect.objectContaining({ serverName: 'exa' })])
     expect(run.shared.servers.get('bad')?.state).toBe('failed')
+  })
+
+  it('attaches the status handle when it registers after ctx.plugin returns', async () => {
+    const run = harness({ deepwiki }, { statusDelayCalls: 2 })
+    await run.done
+    expect(run.shared.servers.get('deepwiki')?.state).toBe('connecting')
+    await new Promise(resolve => setTimeout(resolve, 1300))
+    run.defs.list = [{ name: 'mcp__deepwiki__ask' }]
+    run.push('deepwiki', { state: 'connected', toolCount: 1 })
+    await settleDebounce()
+    expect(run.shared.servers.get('deepwiki')).toEqual({ state: 'connected', toolCount: 1 })
   })
 
   it('publishes status and notifies once the dot-local tool set changes', async () => {

@@ -197,6 +197,46 @@ describe('reflection ops', () => {
     expect(sameCognitionContent(next, base)).toBe(true)
   })
 
+  it('keeps a folded-key replacement when the same batch removes or retargets the old row', () => {
+    const base = [cognition('c1', 'workdir is /Work', 1, 3)]
+    const addThenRemove = applyCognitionOps(
+      base,
+      parseCognitionOps(JSON.stringify([{ op: 'add', text: 'workdir is /work' }, { op: 'remove', id: 'c1' }])),
+      50,
+      ids('c', 1),
+    )
+    expect(addThenRemove.map(entry => entry.text)).toEqual(['workdir is /work'])
+    expect(addThenRemove[0]!.id).toBe('c2')
+    const removeThenAdd = applyCognitionOps(
+      base,
+      parseCognitionOps(JSON.stringify([{ op: 'remove', id: 'c1' }, { op: 'add', text: 'workdir is /work' }])),
+      50,
+      ids('c', 1),
+    )
+    expect(removeThenAdd.map(entry => entry.text)).toEqual(['workdir is /work'])
+    expect(removeThenAdd[0]!.id).toBe('c2')
+    const addThenUpdate = applyCognitionOps(
+      base,
+      parseCognitionOps(JSON.stringify([{ op: 'add', text: 'workdir is /work' }, { op: 'update', id: 'c1', text: 'new fact' }])),
+      50,
+      ids('c', 1),
+    )
+    expect(addThenUpdate.map(entry => ({ id: entry.id, text: entry.text }))).toEqual([
+      { id: 'c1', text: 'new fact' },
+      { id: 'c2', text: 'workdir is /work' },
+    ])
+  })
+
+  it('rejects a reflection update that collides with another remaining entryKey', () => {
+    const base = [cognition('c1', 'Likes tea', 1, 3), cognition('c2', 'other fact', 2, 4)]
+    expect(() => applyCognitionOps(base, parseCognitionOps('[{"op":"update","id":"c2","text":"likes  tea"}]'), 50, ids('c', 2)))
+      .toThrowError(expect.objectContaining({ code: 'dot/invalid' }))
+    expect(() => applyCognitionOps(base, parseCognitionOps('[{"op":"update","id":"c2","text":"likes  tea"}]'), 50, ids('c', 2)))
+      .toThrow(/already has that text/)
+    expect(() => applyCognitionEdit(base, { op: 'edit', id: 'c2', text: 'likes  tea' }, 50, ids('c', 2)))
+      .toThrow(/already has that text/)
+  })
+
   it('never hands a removed id out again: the counter decides, not the list', () => {
     const base = [cognition('c1', 'one', 1, 3), cognition('c2', 'two', 2, 4)]
     const nextId = ids('c', 4)

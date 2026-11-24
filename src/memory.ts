@@ -325,6 +325,14 @@ export function parseCognitionOps(raw: string): CognitionOp[] {
   })
 }
 
+/** Whether this batch will delete `id` or retarget it away from `key`. */
+function batchDropsKey(ops: readonly CognitionOp[], id: string, key: string): boolean {
+  return ops.some(op =>
+    (op.op === 'remove' && op.id === id) ||
+    (op.op === 'update' && op.id === id && entryKey(op.text) !== key)
+  )
+}
+
 /** The ops applied to the stored entries; validation runs first so a bad op drops the whole set. */
 export function applyCognitionOps(entries: readonly CognitionEntry[], ops: readonly CognitionOp[], now: number, nextId: NextEntryId): CognitionEntry[] {
   for (const op of ops) {
@@ -337,7 +345,9 @@ export function applyCognitionOps(entries: readonly CognitionEntry[], ops: reado
   return ops.reduce<CognitionEntry[]>((list, op) => {
     switch (op.op) {
       case 'add': {
-        const hits = entriesWithKey(list, op.text)
+        // A unique-key hit this batch will remove or retarget is not a wake target.
+        const key = entryKey(op.text)
+        const hits = entriesWithKey(list, op.text).filter(hit => !batchDropsKey(ops, hit.id, key))
         if (hits.length > 1) return list
         if (hits.length === 1) {
           const hit = hits[0]!
@@ -345,7 +355,12 @@ export function applyCognitionOps(entries: readonly CognitionEntry[], ops: reado
         }
         return [...list, { id: nextId(), text: op.text, createdAt: now, updatedAt: now, seenAt: now }]
       }
-      case 'update': return list.map(entry => entry.id === op.id ? { ...entry, text: op.text, updatedAt: now, seenAt: now } : entry)
+      case 'update': {
+        if (list.some(entry => entry.id !== op.id && entryKey(entry.text) === entryKey(op.text))) {
+          throw new KnowledgeError('dot/invalid', 'another cognition entry already has that text')
+        }
+        return list.map(entry => entry.id === op.id ? { ...entry, text: op.text, updatedAt: now, seenAt: now } : entry)
+      }
       case 'remove': return list.filter(entry => entry.id !== op.id)
       case 'confirm': return list.map(entry => entry.id === op.id ? { ...entry, seenAt: now } : entry)
     }

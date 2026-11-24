@@ -7,7 +7,7 @@
  */
 import {
   Button, DisclosureRow, IconCheckOutlineRegular, IconChecklistOutlineRegular, IconChevronDownOutlineRegular,
-  IconCloseOutlineRegular, IconCordisPluginOutlineRegular, IconEditOutlineRegular, IconGaugeOutlineRegular,
+  IconCloseOutlineRegular, IconCordisPluginOutlineRegular, IconEditOutlineRegular, IconGaugeOutlineRegular, IconGlobeOutlineRegular,
   IconInspectOutlineRegular, IconShieldOutlineRegular, IconSlidersTwoOutlineRegular, IconUserOutlineRegular,
   IconWarningOutlineRegular, MarkdownText, Modal, modalSelector, StateDot, Tag, TextShimmer, Tooltip, UserMessageBubble,
   type MarkdownLabels, type StateDotState, type TagTone,
@@ -116,7 +116,7 @@ interface DrawerProps {
 }
 
 const SETTINGS_SECTIONS: ReadonlySet<DrawerTab> = new Set<SettingsSection>([
-  'proposals', 'general', 'takeover', 'dispatch', 'capabilities',
+  'proposals', 'general', 'takeover', 'dispatch', 'capabilities', 'mcp',
 ])
 
 function isSettingsSection(tab: DrawerTab): tab is SettingsSection {
@@ -193,6 +193,7 @@ function WorkDrawer({ locale, api, tab, wide, settings, trajectoryRev, running, 
     { value: 'takeover', label: t(locale, 'tabTakeover'), title: t(locale, 'sRequests'), icon: <IconShieldOutlineRegular size={15} /> },
     { value: 'dispatch', label: t(locale, 'tabDispatch'), title: t(locale, 'sTasks'), icon: <IconChecklistOutlineRegular size={15} /> },
     { value: 'capabilities', label: t(locale, 'tabCapabilities'), title: t(locale, 'sCapabilities'), icon: <IconCordisPluginOutlineRegular size={15} /> },
+    { value: 'mcp', label: t(locale, 'tabMcp'), title: t(locale, 'sMcp'), icon: <IconGlobeOutlineRegular size={15} /> },
     { value: 'persona', label: t(locale, 'tabPersona'), title: t(locale, 'personaTitle'), icon: <IconUserOutlineRegular size={15} />, dirty: personaDirty },
   ]
   const inspectItems: readonly DrawerNavItem[] = isTasks ? [] : [
@@ -275,7 +276,7 @@ function WorkDrawer({ locale, api, tab, wide, settings, trajectoryRev, running, 
             {tab === 'tasks'
               ? tasks
               : isSettingsSection(tab)
-                ? <SettingsPanel locale={locale} api={api} section={tab} proposals={proposalState} {...settings ? { settings } : {}} onSaved={onSaved} onStatusChange={setSaveNotice} onProposalCount={onProposalCount} {...renderFactorySlot ? { renderFactorySlot } : {}} />
+                ? <SettingsPanel locale={locale} api={api} section={tab} proposals={proposalState} {...settings ? { settings } : {}} onSaved={onSaved} onStatusChange={setSaveNotice} onProposalCount={onProposalCount} onSectionChange={requestTab} {...renderFactorySlot ? { renderFactorySlot } : {}} />
                 : tab === 'persona'
                   ? <PersonaPanel locale={locale} api={api} {...settings ? { settings } : {}} discardSignal={discardSignal} onDirtyChange={onDirtyChange} onSaved={onSaved} onStatusChange={setSaveNotice} />
                   : tab === 'context'

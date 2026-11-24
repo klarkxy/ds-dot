@@ -373,7 +373,7 @@ describe('capabilities page', () => {
     await act(async () => { await Promise.resolve() })
     expect(document.querySelector('.dsh-dot-skeleton')).not.toBeNull()
     await act(async () => { resolveView!(catalog); await Promise.resolve() })
-    expect(document.querySelector('.dsh-dot-cap-intro')?.textContent).toContain('宿主提供的工具')
+    expect(document.querySelector('.dsh-dot-cap-intro')?.textContent).toContain('宿主提供的额外工具')
     expect(document.querySelectorAll('.dsh-dot-cap-group').length).toBeGreaterThanOrEqual(3)
     await search('wiki')
     expect(groupIds()).toContain('mcp:wiki')

@@ -72,7 +72,10 @@ import type { RawEvent } from './chat.ts'
 import { SelfSettings } from './self-settings.ts'
 import { approvalCardCopy, copyLocale, t, type CopyLocale } from './i18n/index.ts'
 import { HOST_SCHEDULE_MUTATORS, hostScheduleTargetsDot, isTaskOnlySelector, TASK_ONLY_TOOLS, type DotCapabilities } from './capabilities.ts'
-import type { CapabilityCatalogView, CapabilityGrant, CapabilityGroupView } from './contracts.ts'
+import type { CapabilityCatalogView, CapabilityGrant, CapabilityGroupView, DotMcpListView, DotMcpServerView } from './contracts.ts'
+import { dotOwnedCredentialRefs, mcpCredentialRefs } from './contracts.ts'
+import { MCP_CATALOG } from './mcp-catalog.ts'
+import { sharedDotMcp } from './mcp-shared.ts'
 import type { GateVerdict } from './tool-scope.ts'
 
 export interface DotServiceOptions {
@@ -100,6 +103,13 @@ export interface DotServiceOptions {
   readonly inbox?: InboxLedger
   /** The host's plugin-manager service, looked up lazily; absent in tests and hosts without it. */
   readonly pluginManager?: () => unknown
+  /** Host credential store: describes and releases dot-local MCP tokens by ref name; never returns values. */
+  readonly credentials?: {
+    describe?(ref: string): Promise<{ readonly configured: boolean; readonly masked?: string } | undefined>
+    unset?(ref: string): Promise<unknown>
+  }
+  /** Global MCP server names on the host (manager rows + root tool names); the MCP page marks clashes. */
+  readonly globalMcpNames?: () => Iterable<string>
   /** Git runner for task-worktree isolation; tests inject a fake. */
   readonly git?: GitRunner
 }
@@ -535,6 +545,39 @@ export class DotService {
     return answer?.kind === 'approval' && answer.allow === true
   }
 
+  /** The dot-local MCP servers plus the recommended catalog the MCP page draws. */
+  async mcpServersView(): Promise<DotMcpListView> {
+    const servers = this.store.settings.mcpServers ?? {}
+    const statuses = sharedDotMcp().servers
+    const views: DotMcpServerView[] = []
+    for (const [name, row] of Object.entries(servers)) {
+      const refs = mcpCredentialRefs(row)
+      let credential: DotMcpServerView['credential']
+      if (refs.length > 0) {
+        const info = await this.options.credentials?.describe?.(refs[0]!).catch(() => undefined)
+        credential = { ref: refs[0]!, configured: info?.configured === true, ...(info?.masked !== undefined ? { masked: info.masked } : {}) }
+      }
+      const status = statuses.get(name) ?? (row.enabled ? undefined : { state: 'off' })
+      const catalogEntry = row.catalog === undefined ? undefined : MCP_CATALOG.find(entry => entry.id === row.catalog)
+      views.push({
+        name, url: row.url, enabled: row.enabled,
+        auth: refs.length > 0 ? 'token' : 'none',
+        ...(row.catalog !== undefined ? { catalog: row.catalog } : {}),
+        ...(catalogEntry?.tokenUrl !== undefined ? { tokenUrl: catalogEntry.tokenUrl } : {}),
+        ...(credential !== undefined ? { credential } : {}),
+        ...(status !== undefined ? { status } : {}),
+      })
+    }
+    const catalog = MCP_CATALOG.filter(entry => !(entry.id in servers)).map(entry => ({
+      id: entry.id, name: entry.name, about: entry.about, url: entry.url, auth: entry.auth,
+      ...(entry.headers !== undefined ? { headers: entry.headers } : {}),
+      ...(entry.tokenUrl !== undefined ? { tokenUrl: entry.tokenUrl } : {}),
+      ...(entry.tokenHelp !== undefined ? { tokenHelp: entry.tokenHelp } : {}),
+    }))
+    const globals = [...(this.options.globalMcpNames?.() ?? [])].sort((a, b) => a.localeCompare(b))
+    return { servers: views, catalog, globals }
+  }
+
   /** The catalog, grants, and applied state the settings view draws. */
   async capabilitiesView(): Promise<CapabilityCatalogView> {
     const caps = this.options.capabilities
@@ -755,6 +798,8 @@ export class DotService {
   settingsChanged(): Promise<void> {
     this.armIdleCheck()
     this.updates.settingsChanged()
+    // The ds-dot/mcp preset row reconciles its mounts against the new settings.
+    sharedDotMcp().onSettingsChanged?.()
     // A grant revoked while its approval card waits settles the ask at once:
     // the call denies and the card expires through the unanswered path. This
     // runs outside the serial lane so a queued settings write cannot stall
@@ -971,8 +1016,14 @@ export class DotService {
       const activeLocale = this.currentLocale ?? this.store.uiLocale
       if (this.usageHandle !== undefined) { this.timer.clear(this.usageHandle); this.usageHandle = undefined }
       await this.usagePass
+      // Dot-owned MCP tokens leave the host credential store with the servers.
+      const mcpRefs = dotOwnedCredentialRefs(Object.values(this.store.settings.mcpServers ?? {}))
       try {
         await this.store.factoryReset(this.now())
+        sharedDotMcp().onSettingsChanged?.()
+        for (const ref of mcpRefs) {
+          try { await this.options.credentials?.unset?.(ref) } catch { /* best effort */ }
+        }
       } catch (failure) {
         throw new DotError('dot/reset-incomplete', `Factory reset is incomplete: sessions were archived and artifact files were removed, but clearing Dorothy's records failed (${messageOf(failure)}). Request a new preview to retry the remaining cleanup.`)
       }

@@ -21,7 +21,7 @@
       pr: 77,
       date: '2026.11.23',
       post: 'boundaries',
-      file: 'dot-task-only-tools-718b5b44.gif',
+      file: 'dot-task-only-tools-a616336.gif',
       title: {
         zh: '动手的工具只归任务',
         en: 'Hands-on tools stay with tasks',

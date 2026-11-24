@@ -1246,6 +1246,29 @@ describe('dot-local MCP groups', () => {
     } finally { sharedDotMcp().servers.clear() }
   })
 
+  it('attributes overlapping prefixes to the longest server name only', async () => {
+    // `team__docs` reaches settings as a stored legacy row; granting the
+    // global `team` must never cover `mcp__team__docs__*` tools.
+    const caps = new DotCapabilities({
+      tools: () => fakeTools(['mcp__team__list', 'mcp__team__docs__search']),
+      mcpManager: () => ({ list: () => [{ name: 'team' }] }),
+      pluginManager: () => undefined,
+      settings: () => mcpSettings({ 'team__docs': { url: 'https://docs.example/mcp', enabled: true } }),
+      locked: LOCKED,
+      presetDefs: async () => [{ name: 'mcp__team__docs__search' }],
+    })
+    const { groups } = await caps.catalog()
+    const team = groups.find(group => group.id === 'mcp:team')!
+    const teamDocs = groups.find(group => group.id === 'mcp:team__docs')!
+    expect(team.scope).toBeUndefined()
+    expect(team.tools.map(tool => tool.name)).toEqual(['mcp__team__list'])
+    expect(teamDocs.scope).toBe('dot')
+    expect(teamDocs.tools.map(tool => tool.name)).toEqual(['mcp__team__docs__search'])
+    // Every tool lands in exactly one group.
+    const all = groups.flatMap(group => group.tools.map(tool => tool.name))
+    expect(all).toHaveLength(new Set(all).size)
+  })
+
   it('keeps a configured but disconnected server listed so it can be pre-granted', async () => {
     const caps = new DotCapabilities({
       tools: () => fakeTools([]),

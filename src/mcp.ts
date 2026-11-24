@@ -48,21 +48,29 @@ export async function apply(ctx: RowCtx) {
   // agent picks up, and they are exactly what the published per-server status
   // reports (connected + toolCount). An unscoped definitions() view would be
   // the global layer, which never changes here.
-  const statusSignature = () =>
-    [...shared.servers.entries()]
+  const statusSignature = async () => {
+    const states = [...shared.servers.entries()]
       .map(([server, status]) => `${server}:${status.state}:${status.toolCount ?? ''}`)
       .sort()
       .join('\n')
+    // Tool names, not just counts: a same-count tool replacement on a
+    // mounted server must still re-apply the live agent's restrict.
+    let names: readonly string[] = []
+    try { names = (await shared.presetToolNames?.()) ?? [] } catch { names = [] }
+    return `${states}\n${[...names].sort().join('\n')}`
+  }
 
   let toolsTimer: ReturnType<typeof setTimeout> | undefined
   const noteToolsChanged = () => {
     if (toolsTimer !== undefined) clearTimeout(toolsTimer)
     toolsTimer = setTimeout(() => {
       toolsTimer = undefined
-      const next = statusSignature()
-      if (next === lastStatusSignature) return
-      lastStatusSignature = next
-      shared.onToolsChanged?.()
+      void (async () => {
+        const next = await statusSignature()
+        if (next === lastStatusSignature) return
+        lastStatusSignature = next
+        shared.onToolsChanged?.()
+      })()
     }, 500)
   }
 
@@ -138,10 +146,13 @@ export async function apply(ctx: RowCtx) {
   // latest snapshot.
   let reconciling = false
   let reconcileAgain = false
+  // Callers that arrive mid-pass wait for the queue to drain, so an awaited
+  // reconcile() really means "every queued pass finished".
+  const reconcileWaiters: Array<() => void> = []
   const reconcile = async () => {
     if (reconciling) {
       reconcileAgain = true
-      return
+      return new Promise<void>(resolve => reconcileWaiters.push(resolve))
     }
     reconciling = true
     try {
@@ -160,6 +171,7 @@ export async function apply(ctx: RowCtx) {
       log(`reconcile failed: ${error instanceof Error ? error.message : String(error)}`)
     } finally {
       reconciling = false
+      for (const resolve of reconcileWaiters.splice(0)) resolve()
     }
   }
 
@@ -173,6 +185,6 @@ export async function apply(ctx: RowCtx) {
     for (const name of [...mounted.keys()]) void unmount(name)
   }) as never)
 
-  lastStatusSignature = statusSignature()
+  lastStatusSignature = await statusSignature()
   await reconcile()
 }

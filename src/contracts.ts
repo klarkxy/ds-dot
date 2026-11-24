@@ -433,6 +433,8 @@ export interface DotMcpCatalogEntry {
 export interface DotMcpListView {
   readonly servers: readonly DotMcpServerView[]
   readonly catalog: readonly DotMcpCatalogEntry[]
+  /** Global MCP server names (manager rows plus names guessed from root tools); a dot-local row may not reuse one. */
+  readonly globals?: readonly string[]
 }
 
 /** Everything the human tunes in dot's settings view; stored with dot's state. */
@@ -479,6 +481,14 @@ export interface DotMcpServer {
 /** serverName keys of `mcpServers`, matching the host's MCP client limit. */
 export const MCP_SERVER_NAME_PATTERN = /^[A-Za-z0-9_-]{1,32}$/
 
+/**
+ * A NEW dot-local server name also must not touch the `__` separator or
+ * stray `_` edges — otherwise `mcp__a__x` could be claimed by both `a` and
+ * `a__x` and one grant would silently cover two servers. Stored legacy rows
+ * still parse; only additions are held to this.
+ */
+export const MCP_NEW_SERVER_NAME_PATTERN = /^(?!_)(?!.*__)(?!.*_$)[A-Za-z0-9_-]{1,32}$/
+
 /** MCP servers are remote-only: https anywhere, http only on loopback. */
 export function isMcpServerUrl(url: string): boolean {
   let parsed: URL
@@ -524,6 +534,33 @@ const MCP_INVALID_CHARS = /[^A-Za-z0-9_-]/g
 /** Normalize an MCP server name the way the harness does when it builds public tool names. */
 export function mcpPrefix(server: string): string {
   return `mcp__${server.replace(MCP_INVALID_CHARS, '_')}__`
+}
+
+/** Hashed MCP names keep the normalized prefix only up to this many characters. */
+const MCP_PREFIX_MAX = 64 - 12 - 1
+
+/**
+ * The server a public MCP tool name belongs to. Clean names start with the
+ * full `mcp__<server>__` prefix; hashed names are clipped to 51 chars plus a
+ * hash, so the match accepts the prefix clipped to that length. Longest
+ * prefix wins, so `mcp__team__docs__x` is attributed to `team__docs`, never
+ * to `team`, when both exist.
+ */
+export function mcpServerOf(name: string, servers: readonly string[]): string | undefined {
+  const candidates = servers.map(server => ({ server, prefix: mcpPrefix(server) })).sort((left, right) => right.prefix.length - left.prefix.length)
+  for (const { server, prefix } of candidates) {
+    const clip = Math.min(prefix.length, MCP_PREFIX_MAX)
+    if (name.length >= clip && name.slice(0, clip) === prefix.slice(0, clip)) return server
+  }
+  return undefined
+}
+
+/** Best-effort server part of an `mcp__x__y` name when no configured server matches. */
+export function mcpGuess(name: string): string | undefined {
+  if (!name.startsWith('mcp__')) return undefined
+  const rest = name.slice(5)
+  const split = rest.indexOf('__')
+  return split > 0 ? rest.slice(0, split) : undefined
 }
 
 /** The credential name dot's panel allocates for one server: `DOT_MCP_<NAME>_TOKEN`. */

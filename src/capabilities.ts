@@ -4,10 +4,10 @@
  * registration attribution lives in ./attribution.ts, which also ships as an
  * early loader row; this module only reads its shared owners map.
  */
-import { mcpPrefix, type CapabilityGrant, type CapabilityGroupView, type CapabilityMcpStatus, type CapabilityToolView, type DotSettings } from './contracts.ts'
+import { mcpGuess, mcpServerOf, type CapabilityGrant, type CapabilityGroupView, type CapabilityMcpStatus, type CapabilityToolView, type DotSettings } from './contracts.ts'
 import { installToolAttribution, SCOPED_COPY, sharedAttribution, type ToolOwner } from './attribution.ts'
 
-export { mcpPrefix } from './contracts.ts'
+export { mcpGuess, mcpPrefix, mcpServerOf } from './contracts.ts'
 import { sharedDotMcp } from './mcp-shared.ts'
 import { restrictInheritedTools } from './tool-scope.ts'
 
@@ -82,9 +82,6 @@ export function hostScheduleTargetsDot(args: unknown, sessionIds: ReadonlySet<st
  */
 export const HIGH_RISK_TOOLS: ReadonlySet<string> = new Set(['plugin_manager', 'bash', 'pwsh', 'write', 'edit', 'apply_patch'])
 
-/** Hashed MCP names keep the normalized prefix only up to this many characters. */
-const MCP_PREFIX_MAX = 64 - 12 - 1
-
 export interface CapabilityToolDef {
   readonly name: string
   readonly description?: string
@@ -139,27 +136,7 @@ export interface CapabilityDeps {
   presetDefs?(): Promise<readonly CapabilityToolDef[]>
 }
 
-/**
- * The server a public MCP tool name belongs to. Clean names start with the
- * full `mcp__<server>__` prefix; hashed names are clipped to 51 chars plus a
- * hash, so the match accepts the prefix clipped to that length.
- */
-export function mcpServerOf(name: string, servers: readonly string[]): string | undefined {
-  const candidates = servers.map(server => ({ server, prefix: mcpPrefix(server) })).sort((left, right) => right.prefix.length - left.prefix.length)
-  for (const { server, prefix } of candidates) {
-    const clip = Math.min(prefix.length, MCP_PREFIX_MAX)
-    if (name.length >= clip && name.slice(0, clip) === prefix.slice(0, clip)) return server
-  }
-  return undefined
-}
 
-/** Best-effort server part of an `mcp__x__y` name when no configured server matches. */
-function mcpGuess(name: string): string | undefined {
-  if (!name.startsWith('mcp__')) return undefined
-  const rest = name.slice(5)
-  const split = rest.indexOf('__')
-  return split > 0 ? rest.slice(0, split) : undefined
-}
 
 const firstLine = (text: string | undefined): string | undefined => {
   const line = text?.split('\n').find(row => row.trim())?.trim()
@@ -291,12 +268,14 @@ export function buildCatalog(input: CatalogInput): { readonly locked: readonly s
   // yet, so it can be pre-granted. Same-name global rows were filtered out by
   // the caller (the preset layer shadows them for dot's agent).
   if (input.dotMcp !== undefined) {
+    // Attribute across every known server so an overlapping prefix
+    // (`team` vs `team__docs`) never lands a tool in two groups.
+    const allNames = [...input.servers, ...input.dotMcp.servers]
     for (const server of [...input.dotMcp.servers].sort((a, b) => a.localeCompare(b))) {
-      const prefix = mcpPrefix(server)
       const status = input.dotMcp.status(server)
       const group: MutableGroup = {
         id: mcpSelector(server), kind: 'mcp', label: server, scope: 'dot',
-        tools: input.dotMcp.defs.filter(def => def.name.startsWith(prefix)).map(row),
+        tools: input.dotMcp.defs.filter(def => mcpServerOf(def.name, allNames) === server).map(row),
         ...(status !== undefined ? { status } : {}),
       }
       groups.push(group)
@@ -583,11 +562,18 @@ export class DotCapabilities {
     // shadows a same-name global row; a disabled row is unmounted, so dot's
     // agent falls back to the global tools again.
     const enabledDotNames = dotNames.filter(name => dotServers[name]?.enabled !== false)
-    const shadowed = (name: string) => enabledDotNames.some(server => name.startsWith(mcpPrefix(server)))
+    let globalNames: string[] = []
+    try { globalNames = (this.deps.mcpManager()?.list() ?? []).map(server => server.name) } catch { globalNames = [] }
+    // Longest-prefix attribution across BOTH scopes: `mcp__team__docs__x`
+    // belongs to `team__docs`, never to `team`, whichever side it lives on —
+    // otherwise granting one server would silently cover the other.
+    const allNames = [...globalNames, ...enabledDotNames]
+    const shadowed = (name: string) => {
+      const owner = mcpServerOf(name, allNames)
+      return owner !== undefined && enabledDotNames.includes(owner)
+    }
     const defs = (tools?.definitions() ?? []).filter(def => !shadowed(def.name))
-    let servers: string[] = []
-    try { servers = (this.deps.mcpManager()?.list() ?? []).map(server => server.name) } catch { servers = [] }
-    servers = servers.filter(name => !enabledDotNames.includes(name))
+    const servers = globalNames.filter(name => !enabledDotNames.includes(name))
     let dotDefs: readonly CapabilityToolDef[] = []
     if (dotNames.length > 0 && this.deps.presetDefs !== undefined) {
       try { dotDefs = (await this.deps.presetDefs()).filter(def => shadowed(def.name)) } catch { dotDefs = [] }

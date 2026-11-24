@@ -180,6 +180,34 @@ describe('mcpServers setting', () => {
     expect(patchSettings(DEFAULT_SETTINGS, { mcpServers: { s: good } }).mcpServers?.s).toEqual(good)
     expect(() => patchSettings(DEFAULT_SETTINGS, { mcpServers: { s: { ...good, headers: { 'bad header': 'x' } } } })).toThrow(/invalid value/)
   })
+  it('holds NEW names to the stricter rule but lets stored legacy rows through', () => {
+    // `__` or edge `_` would let a tool name be claimed by two servers at
+    // once, so one grant would silently cover both.
+    for (const name of ['team__docs', 'a__b', '_edge', 'edge_', '__', '_']) {
+      expect(() => patchSettings(DEFAULT_SETTINGS, { mcpServers: { [name]: deepwiki } }), name).toThrow(/invalid value/)
+    }
+    // A stored legacy row still saves on unrelated edits; only additions are strict.
+    const legacy = { ...DEFAULT_SETTINGS, mcpServers: { 'team__docs': deepwiki } }
+    const next = patchSettings(legacy, { mcpServers: { 'team__docs': deepwiki, other: deepwiki } })
+    expect(Object.keys(next.mcpServers ?? {}).sort()).toEqual(['other', 'team__docs'])
+  })
+  it('drops grants a newly added server would inherit from an earlier owner', () => {
+    const previous = {
+      ...DEFAULT_SETTINGS,
+      capabilities: { grants: {
+        'mcp:deepwiki': 'auto' as const,
+        'tool:mcp__deepwiki__ask': 'auto' as const,
+        'tool:mcp__other__x': 'ask' as const,
+        'plugin:bundle': 'auto' as const,
+      } },
+    }
+    const next = patchSettings(previous, { mcpServers: { deepwiki } })
+    expect(next.capabilities?.grants).toEqual({ 'tool:mcp__other__x': 'ask', 'plugin:bundle': 'auto' })
+    // No grants touched when the write adds nothing new.
+    const existing = { ...previous, mcpServers: { deepwiki } }
+    const kept = patchSettings(existing, { mcpServers: { deepwiki } })
+    expect(kept.capabilities?.grants).toEqual(previous.capabilities?.grants)
+  })
   it('drops bad stored rows one by one and clears on null', () => {
     const parsed = parseSettings({ mcpServers: { deepwiki, 'bad name': deepwiki, bad: { url: 'http://x.com/mcp', enabled: true }, also_bad: 'junk' } })
     expect(Object.keys(parsed.mcpServers ?? {})).toEqual(['deepwiki'])

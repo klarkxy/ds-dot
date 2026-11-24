@@ -64,6 +64,7 @@ afterEach(() => {
   shared.settings = undefined
   shared.onSettingsChanged = undefined
   shared.onToolsChanged = undefined
+  shared.presetToolNames = undefined
   shared.servers.clear()
 })
 
@@ -156,6 +157,23 @@ describe('ds-dot/mcp preset row', () => {
     expect(toolsChanged).toHaveBeenCalledTimes(1)
     // A tool-count bump is a real signature change.
     run.push('deepwiki', { state: 'connected', toolCount: 2 })
+    await settleDebounce()
+    expect(toolsChanged).toHaveBeenCalledTimes(2)
+  })
+
+  it('fires when a same-count tool set trades one name for another', async () => {
+    const run = harness({ deepwiki })
+    const toolsChanged = vi.fn()
+    run.shared.onToolsChanged = toolsChanged
+    let toolNames: readonly string[] = ['mcp__deepwiki__ask']
+    run.shared.presetToolNames = async () => toolNames
+    await run.done
+    run.push('deepwiki', { state: 'connected', toolCount: 1 })
+    await settleDebounce()
+    expect(toolsChanged).toHaveBeenCalledTimes(1)
+    // Same state and count, different name: still a signature change.
+    toolNames = ['mcp__deepwiki__read_wiki_structure']
+    run.push('deepwiki', { state: 'connected', toolCount: 1 })
     await settleDebounce()
     expect(toolsChanged).toHaveBeenCalledTimes(2)
   })

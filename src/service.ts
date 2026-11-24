@@ -104,6 +104,8 @@ export interface DotServiceOptions {
     describe?(ref: string): Promise<{ readonly configured: boolean; readonly masked?: string } | undefined>
     unset?(ref: string): Promise<unknown>
   }
+  /** Global MCP server names on the host (manager rows + root tool names); the MCP page marks clashes. */
+  readonly globalMcpNames?: () => Iterable<string>
   /** Git runner for task-worktree isolation; tests inject a fake. */
   readonly git?: GitRunner
 }
@@ -564,7 +566,8 @@ export class DotService {
       ...(entry.tokenUrl !== undefined ? { tokenUrl: entry.tokenUrl } : {}),
       ...(entry.tokenHelp !== undefined ? { tokenHelp: entry.tokenHelp } : {}),
     }))
-    return { servers: views, catalog }
+    const globals = [...(this.options.globalMcpNames?.() ?? [])].sort((a, b) => a.localeCompare(b))
+    return { servers: views, catalog, globals }
   }
 
   /** The catalog, grants, and applied state the settings view draws. */

@@ -4,7 +4,7 @@
  * patches from the panel are checked strictly and refused as a whole.
  */
 import { z } from 'zod'
-import { DEFAULT_SETTINGS, SETTING_FIELDS, TASK_MODEL_LIST_MAX, isMcpServerHeaders, isMcpServerUrl, MCP_SERVER_NAME_PATTERN, type DotSettings, type SettingField, type TaskPermission } from './contracts.ts'
+import { DEFAULT_SETTINGS, SETTING_FIELDS, TASK_MODEL_LIST_MAX, isMcpServerHeaders, isMcpServerUrl, MCP_NEW_SERVER_NAME_PATTERN, MCP_SERVER_NAME_PATTERN, mcpServerOf, type DotSettings, type SettingField, type TaskPermission } from './contracts.ts'
 import { type CopyLocale } from './i18n/index.ts'
 import { CACHE_TTL_MAX_ENTRIES, CACHE_TTL_MAX_MINUTES } from './keepalive.ts'
 import { ADDRESS_MAX_CHARS, PERSONA_MAX_CHARS, defaultAddress, defaultPersona } from './persona.ts'
@@ -121,8 +121,38 @@ export function patchSettings(current: DotSettings, patch: unknown, locale: Copy
     if (CLEARABLE.has(key) && value === null) { delete next[key]; continue }
     const parsed = FIELDS[key as Field].safeParse(value)
     if (!parsed.success) throw new SettingsError(`invalid value for ${key}`)
+    if (key === 'mcpServers') {
+      // A stored legacy name still passes through on unrelated saves, but a
+      // key absent in current settings is an addition and must be strict.
+      for (const name of Object.keys(parsed.data as Record<string, unknown>)) {
+        if (!(name in (current.mcpServers ?? {})) && !MCP_NEW_SERVER_NAME_PATTERN.test(name)) {
+          throw new SettingsError(`invalid value for ${key}`)
+        }
+      }
+    }
     if (key in defaults && (parsed.data as string).trim() === defaults[key]!.trim()) { delete next[key]; continue }
     next[key] = parsed.data
+  }
+  // A newly added server never inherits grants a human gave to something
+  // else: drop its `mcp:` selector and every `tool:` selector that resolves
+  // to it under longest-prefix attribution over the resulting server set.
+  const servers = (next as Partial<DotSettings>).mcpServers
+  if (servers !== undefined) {
+    const names = Object.keys(servers)
+    const added = names.filter(name => !(name in (current.mcpServers ?? {})))
+    if (added.length > 0) {
+      const grants = { ...((next as Partial<DotSettings>).capabilities?.grants ?? {}) }
+      let touched = false
+      for (const name of added) {
+        if (`mcp:${name}` in grants) { delete grants[`mcp:${name}`]; touched = true }
+      }
+      for (const selector of Object.keys(grants)) {
+        if (!selector.startsWith('tool:')) continue
+        const owner = mcpServerOf(selector.slice('tool:'.length), names)
+        if (owner !== undefined && added.includes(owner)) { delete grants[selector]; touched = true }
+      }
+      if (touched) next.capabilities = { grants }
+    }
   }
   return next as unknown as DotSettings
 }

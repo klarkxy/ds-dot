@@ -343,6 +343,71 @@ describe('Host plugin locale wiring & RPC', () => {
 
     for (const stop of disposers.reverse()) await stop()
   })
+
+  it('refuses dot-local names that clash with global servers and keeps credential.set stored-only', async () => {
+    const { domain } = fakeDomain()
+    const disposers: Array<() => void | Promise<void>> = []
+    let rpcHandler: Parameters<HostRpcContext['webServer']['register']>[0]['handler'] | undefined
+
+    const ctx = {
+      logger: { info: () => {}, warn: () => {}, error: () => {}, debug: () => {} },
+      storageDomain: { open: async () => domain },
+      sessionQuery: { readSession: async () => ({ events: [] }) },
+      sessions: { list: async () => [] },
+      sessionController: {},
+      workspaceRegistry: { list: () => [] },
+      agentPresets: { register: async () => async () => {}, list: () => [] },
+      agents: { get: () => undefined },
+      agentDefaultModel: { get: () => undefined },
+      connection: { requestRejection: () => undefined },
+      webServer: { register: (route: { handler: typeof rpcHandler }) => { rpcHandler = route.handler; return () => {} } },
+      settings: { describe: () => [] },
+      mcpManager: { list: () => [{ name: 'github' }] },
+      tools: { definitions: () => [{ name: 'mcp__exa__search' }], get: () => undefined, executable: () => undefined },
+      get: (name: string) => (ctx as Record<string, unknown>)[name],
+      provide: () => {},
+      on: () => () => {},
+      effect: (fn: () => (() => void | Promise<void>) | void) => {
+        const stop = fn()
+        if (typeof stop === 'function') disposers.push(stop)
+      },
+    }
+
+    await applyPlugin(ctx as never, { homeDir: join(tmpdir(), `dot-idx-${Date.now()}-mcpguard`) })
+    const server = createServer((req, res) => { void rpcHandler!(req, res) })
+    servers.push(server)
+    server.listen(0, '127.0.0.1')
+    await once(server, 'listening')
+    const addr = server.address()
+    if (!addr || typeof addr === 'string') throw new Error('No address')
+    const base = `http://127.0.0.1:${addr.port}${RPC_CHANNEL}`
+    const result = (reply: { body: Record<string, unknown> }) => reply.body.result as { ok: boolean; error?: { code: string } }
+
+    // A manager-listed global name is refused.
+    const clash = await postRpc(`${base}/settings.set`, 'settings.set', {
+      patch: { mcpServers: { github: { url: 'https://api.githubcopilot.com/mcp/readonly', enabled: true } } },
+    })
+    expect(result(clash)).toMatchObject({ ok: false, error: { code: 'dot/mcp-global-conflict' } })
+    // So is a name guessed from a root mcp__x__ tool.
+    const guessed = await postRpc(`${base}/settings.set`, 'settings.set', {
+      patch: { mcpServers: { exa: { url: 'https://mcp.exa.ai/mcp', enabled: true } } },
+    })
+    expect(result(guessed)).toMatchObject({ ok: false, error: { code: 'dot/mcp-global-conflict' } })
+    // A free name saves fine.
+    const okSet = await postRpc(`${base}/settings.set`, 'settings.set', {
+      patch: { mcpServers: { deepwiki: { url: 'https://mcp.deepwiki.com/mcp', enabled: true } } },
+    })
+    expect(result(okSet).ok).toBe(true)
+    // credential.set takes stored names only: a catalog id with no row fails.
+    const catalogOnly = await postRpc(`${base}/mcp.credential.set`, 'mcp.credential.set', { server: 'context7', value: 'x' })
+    expect(result(catalogOnly)).toMatchObject({ ok: false, error: { code: 'dot/mcp-bad-server' } })
+    // The stored name passes validation; without a credentials service the
+    // host reports the service as unavailable, not a bad argument.
+    const stored = await postRpc(`${base}/mcp.credential.set`, 'mcp.credential.set', { server: 'deepwiki', value: 'x' })
+    expect(result(stored)).toMatchObject({ ok: false, error: { code: 'dot/mcp-unavailable' } })
+
+    for (const stop of disposers.reverse()) await stop()
+  })
 })
 
 describe('UI locale wiring & client RPC sync', () => {

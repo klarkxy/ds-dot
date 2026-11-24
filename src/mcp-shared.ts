@@ -16,6 +16,9 @@ export interface DotMcpShared {
   /** Set by service.ts: invoked (debounced by the row) when the preset-scope
    *  MCP tool-name set changed, so the live agent's restrict re-applies. */
   onToolsChanged?: () => void
+  /** Set by index.ts: sorted names of the preset-scope tools attributed to
+   *  dot-local servers; part of the row's change signature. */
+  presetToolNames?: () => Promise<readonly string[]>
   /** Per-server status published by the row; read by catalog and mcp.list. */
   readonly servers: Map<string, CapabilityMcpStatus>
 }

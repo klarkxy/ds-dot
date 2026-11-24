@@ -246,6 +246,48 @@ describe.skipIf(!gitAvailable)('git worktrees (real git)', { timeout: 30_000 }, 
     } finally { cleanup() }
   })
 
+  it('commitDelivery accepts clean task commits within delivery and refuses unaccepted committed files or mismatched HEAD blobs', async () => {
+    const { repo, home, cleanup } = makeRepo()
+    try {
+      // Branch 1: run committed only the accepted file; tree is clean.
+      const okWt = await createTaskWorktree({ dir: repo, homeDir: home })
+      writeFileSync(join(okWt.worktree, 'a.txt'), 'accepted')
+      await commitAll(okWt.worktree, 'agent committed accepted change')
+      const headBefore = await runGit(['rev-parse', 'HEAD'], okWt.worktree)
+      const okFiles = [{ path: 'a.txt', kind: 'modified' as const, sha256: sha256(new TextEncoder().encode('accepted')) }]
+      expect(await commitDelivery({ worktree: okWt.worktree, files: okFiles, baseSha: okWt.baseSha, branch: okWt.branch, message: 'deliver' })).toEqual({ ok: true })
+      expect(await runGit(['rev-parse', 'HEAD'], okWt.worktree)).toBe(headBefore)
+      expect(await mergeInto({ repoRoot: repo, branch: okWt.branch, deliveredPaths: ['a.txt'] })).toMatchObject({ ok: true })
+
+      // Branch 2: run committed both accepted a.txt and unaccepted sub/b.txt; tree is clean.
+      const badWt = await createTaskWorktree({ dir: repo, homeDir: home })
+      writeFileSync(join(badWt.worktree, 'a.txt'), 'accepted')
+      writeFileSync(join(badWt.worktree, 'sub', 'b.txt'), 'unaccepted')
+      await commitAll(badWt.worktree, 'agent committed extra file')
+      const badHeadBefore = await runGit(['rev-parse', 'HEAD'], badWt.worktree)
+      const refusedExtra = await commitDelivery({ worktree: badWt.worktree, files: okFiles, baseSha: badWt.baseSha, branch: badWt.branch, message: 'deliver' })
+      expect(refusedExtra).toMatchObject({ ok: false })
+      expect(refusedExtra.ok ? '' : refusedExtra.message).toMatch(/unexpected committed changes outside the delivery.*sub\/b\.txt/)
+      expect(await runGit(['rev-parse', 'HEAD'], badWt.worktree)).toBe(badHeadBefore)
+
+      // Branch 3: HEAD blob differs from accepted disk content while git status hides it (--assume-unchanged).
+      const staleWt = await createTaskWorktree({ dir: repo, homeDir: home })
+      writeFileSync(join(staleWt.worktree, 'a.txt'), 'stale in head')
+      await commitAll(staleWt.worktree, 'stale commit')
+      await runGit(['update-index', '--assume-unchanged', 'a.txt'], staleWt.worktree)
+      writeFileSync(join(staleWt.worktree, 'a.txt'), 'accepted')
+      const refusedStale = await commitDelivery({ worktree: staleWt.worktree, files: okFiles, baseSha: staleWt.baseSha, branch: staleWt.branch, message: 'deliver' })
+      expect(refusedStale).toMatchObject({ ok: false })
+      expect(refusedStale.ok ? '' : refusedStale.message).toMatch(/committed content differs from acceptance/)
+
+      // Branch 4: worktree switched away from the task branch.
+      await runGit(['checkout', '--detach'], okWt.worktree)
+      const refusedBranch = await commitDelivery({ worktree: okWt.worktree, files: okFiles, baseSha: okWt.baseSha, branch: okWt.branch, message: 'deliver' })
+      expect(refusedBranch).toMatchObject({ ok: false })
+      expect(refusedBranch.ok ? '' : refusedBranch.message).toMatch(/expected branch/)
+    } finally { cleanup() }
+  })
+
   it('mergeInto refuses while the checkout has an operation in progress', async () => {
     const { repo, home, cleanup } = makeRepo()
     try {

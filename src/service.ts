@@ -2872,7 +2872,13 @@ export class DotService {
     const delivered = subject.changes.map(row => ({ ...row, path: `${subdir}${row.path}` }))
     let commitSha: string | undefined
     try {
-      const committed = await commitDelivery({ worktree: isolation.worktree, files: delivered, message: `${change.title}\n\nDorothy task ${changeId}` }, git)
+      const committed = await commitDelivery({
+        worktree: isolation.worktree,
+        files: delivered,
+        baseSha: isolation.baseSha,
+        branch: isolation.branch,
+        message: `${change.title}\n\nDorothy task ${changeId}`,
+      }, git)
       if (!committed.ok) return { ok: false, code: 'failed', message: committed.message }
       commitSha = committed.commitSha
     } catch (error) {

@@ -154,15 +154,45 @@ const porcelainPaths = (status: string): string[] => {
   return paths
 }
 
+const nulPaths = (raw: string): string[] => raw.split('\0').filter(name => name !== '')
+
+const headTreeEntries = async (worktree: string, paths: readonly string[], git: GitRunner): Promise<Map<string, { readonly type: string; readonly oid: string }>> => {
+  const entries = new Map<string, { readonly type: string; readonly oid: string }>()
+  if (paths.length === 0) return entries
+  const output = await git(['--literal-pathspecs', 'ls-tree', '-z', 'HEAD', '--', ...paths], worktree, { raw: true })
+  for (const record of nulPaths(output)) {
+    const tab = record.indexOf('\t')
+    if (tab === -1) continue
+    const meta = record.slice(0, tab).split(' ')
+    const name = record.slice(tab + 1)
+    if (meta[1] && meta[2]) entries.set(name, { type: meta[1], oid: meta[2] })
+  }
+  return entries
+}
+
 /**
  * Commit exactly the accepted delivery in the worktree — nothing a stray write
- * added afterwards. Delivered files must still match the acceptance snapshot
- * byte for byte, delivered deletions must still be absent, and git must report
- * no other modified or untracked path. Anything else refuses with
+ * added afterwards, and no unaccepted commits already landed on the branch.
+ * Delivered files must match the acceptance snapshot byte for byte, delivered
+ * deletions must be absent, git must report no other modified or untracked
+ * path, and when `baseSha` is given `baseSha..HEAD` must contain only delivered
+ * paths whose committed blobs match acceptance. Anything else refuses with
  * `worktree changed since acceptance`, leaving the tree untouched for retry.
  */
-export async function commitDelivery(input: { readonly worktree: string; readonly files: readonly DeliveredFile[]; readonly message: string }, git: GitRunner = runGit): Promise<{ readonly ok: true; readonly commitSha?: string } | { readonly ok: false; readonly message: string }> {
+export async function commitDelivery(input: {
+  readonly worktree: string
+  readonly files: readonly DeliveredFile[]
+  readonly message: string
+  readonly baseSha?: string
+  readonly branch?: string
+}, git: GitRunner = runGit): Promise<{ readonly ok: true; readonly commitSha?: string } | { readonly ok: false; readonly message: string }> {
   const worktree = input.worktree
+  if (input.branch !== undefined) {
+    const currentBranch = await git(['branch', '--show-current'], worktree)
+    if (currentBranch !== input.branch) {
+      return { ok: false, message: `worktree changed since acceptance: expected branch ${input.branch}, found ${currentBranch || 'detached HEAD'}` }
+    }
+  }
   const touched = new Set(input.files.map(file => file.path))
   for (const file of input.files) {
     const target = join(worktree, file.path)
@@ -182,6 +212,15 @@ export async function commitDelivery(input: { readonly worktree: string; readonl
   if (extra.length > 0) {
     return { ok: false, message: `worktree changed since acceptance: unexpected changes outside the delivery (${extra.join(', ')})` }
   }
+  const unexpectedCommitted = async (): Promise<string[]> => {
+    if (!input.baseSha) return []
+    const diff = await git(['diff', '--name-only', '-z', '--no-renames', input.baseSha, 'HEAD'], worktree, { raw: true })
+    return nulPaths(diff).filter(name => !touched.has(name))
+  }
+  const extraCommittedBefore = await unexpectedCommitted()
+  if (extraCommittedBefore.length > 0) {
+    return { ok: false, message: `worktree changed since acceptance: unexpected committed changes outside the delivery (${extraCommittedBefore.join(', ')})` }
+  }
   const present = input.files.filter(file => file.kind !== 'deleted').map(file => file.path)
   const deleted = input.files.filter(file => file.kind === 'deleted').map(file => file.path)
   // -f so an ignored-but-delivered file is staged; --cached --ignore-unmatch
@@ -190,9 +229,31 @@ export async function commitDelivery(input: { readonly worktree: string; readonl
   if (present.length > 0) await git(['--literal-pathspecs', 'add', '-f', '--', ...present], worktree)
   if (deleted.length > 0) await git(['--literal-pathspecs', 'rm', '-q', '--cached', '--ignore-unmatch', '--', ...deleted], worktree)
   const clean = await git(['diff', '--cached', '--quiet'], worktree).then(() => true, () => false)
-  if (clean) return { ok: true }
-  await git(['commit', '-m', input.message], worktree)
-  return { ok: true, commitSha: await git(['rev-parse', 'HEAD'], worktree) }
+  let commitSha: string | undefined
+  if (!clean) {
+    await git(['commit', '-m', input.message], worktree)
+    commitSha = await git(['rev-parse', 'HEAD'], worktree)
+  }
+  const extraCommittedAfter = await unexpectedCommitted()
+  if (extraCommittedAfter.length > 0) {
+    return { ok: false, message: `worktree changed since acceptance: unexpected committed changes outside the delivery (${extraCommittedAfter.join(', ')})` }
+  }
+  const headEntries = await headTreeEntries(worktree, input.files.map(file => file.path), git)
+  for (const file of input.files) {
+    const entry = headEntries.get(file.path)
+    if (file.kind === 'deleted') {
+      if (entry) return { ok: false, message: `worktree changed since acceptance: ${file.path} is still committed at HEAD` }
+      continue
+    }
+    if (!entry || entry.type !== 'blob') {
+      return { ok: false, message: `worktree changed since acceptance: ${file.path} is missing from HEAD` }
+    }
+    const expectedOid = await git(['--literal-pathspecs', 'hash-object', '--path', file.path, '--', join(worktree, file.path)], worktree)
+    if (entry.oid !== expectedOid) {
+      return { ok: false, message: `worktree changed since acceptance: ${file.path} committed content differs from acceptance` }
+    }
+  }
+  return commitSha !== undefined ? { ok: true, commitSha } : { ok: true }
 }
 
 /** True when `ref` (a branch) contains commits the base does not. */

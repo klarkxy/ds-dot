@@ -3707,6 +3707,66 @@ describe.skipIf(!worktreeGitAvailable)('task worktree isolation', { timeout: 30_
     } finally { await h.service.dispose(); cleanup() }
   })
 
+  it('integrate refuses when a task commit or merge includes files outside the accepted delivery', async () => {
+    const { repo, home, cleanup } = makeSpecRepo('dot-iso-committed-')
+    const h = setup(undefined, undefined, home, { git: runGit })
+    try {
+      writeFileSync(join(repo, 'README.md'), 'old readme')
+      writeFileSync(join(repo, 'pnpm-lock.yaml'), 'lock-old')
+      await runGit(['add', '-A'], repo)
+      await runGit(['commit', '-m', 'add readme and lockfile'], repo)
+      // Upstream branch updates both README.md and pnpm-lock.yaml.
+      await runGit(['checkout', '-b', 'upstream-pr'], repo)
+      writeFileSync(join(repo, 'README.md'), 'new readme')
+      writeFileSync(join(repo, 'pnpm-lock.yaml'), 'lock-new')
+      await runGit(['add', '-A'], repo)
+      await runGit(['commit', '-m', 'upstream pr change'], repo)
+      await runGit(['checkout', 'main'], repo)
+
+      // Task 1: scoped to README.md only, but merges upstream-pr leaving a clean tree with pnpm-lock.yaml committed.
+      const created = JSON.parse(await h.service.manageTask({ action: 'create', title: 'Merge PR', goal: 'update readme', dir: repo, isolation: 'worktree', human_review: true })) as { id: string }
+      const wt = h.store.work.change(created.id)!.cwd
+      const dispatched = await h.service.manageTask({
+        action: 'dispatch', task_id: created.id, instruction: 'merge upstream-pr', access: 'write',
+        paths: JSON.stringify([{ path: 'README.md', type: 'file' }]),
+      })
+      const runId = /(?:started|reserved) (run-\d+)/.exec(dispatched)![1]!
+      await runGit(['merge', '--no-edit', 'upstream-pr'], wt)
+      expect(await runGit(['status', '--porcelain'], wt)).toBe('')
+      await h.service.manageTask({ action: 'finish', task_id: created.id, run_id: runId })
+      const current = h.store.work.change(created.id)!
+      const asked = await h.service.manageTask({
+        action: 'closeout', task_id: created.id, expected_input_ref: current.currentInputRef, expected_input_revision: current.currentRevision,
+        checks: [{ requirementRef: 'goal', applicability: 'applicable', verdict: 'pass', evidenceRefs: [`run:${runId}`], note: 'readme updated' }],
+      })
+      await h.service.answerWorkReview(/pending (\S+)/.exec(asked)![1]!, true)
+      expect(await h.service.manageTask({
+        action: 'closeout', task_id: created.id, expected_input_ref: current.currentInputRef, expected_input_revision: current.currentRevision,
+        checks: [{ requirementRef: 'goal', applicability: 'applicable', verdict: 'pass', evidenceRefs: [`run:${runId}`], note: 'readme updated' }],
+      })).toContain('accepted')
+
+      for (const mode of ['keep', 'merge'] as const) {
+        const refused = await h.service.integrateWork(created.id, mode)
+        expect(refused).toMatchObject({ ok: false, code: 'failed' })
+        expect(refused.ok ? '' : refused.message).toMatch(/unexpected committed changes outside the delivery.*pnpm-lock\.yaml/)
+      }
+      expect(h.store.work.change(created.id)!.isolation!.state).toBe('active')
+      expect(readFileSync(join(repo, 'README.md'), 'utf-8')).toBe('old readme')
+      expect(readFileSync(join(repo, 'pnpm-lock.yaml'), 'utf-8')).toBe('lock-old')
+
+      // Task 2: task commits only the accepted README.md change -> integrateWork merge succeeds.
+      const cleanTask = JSON.parse(await h.service.manageTask({ action: 'create', title: 'Commit accepted', goal: 'update readme', dir: repo, isolation: 'worktree', human_review: true })) as { id: string }
+      await finishIsolated(h, cleanTask.id, cwd => {
+        writeFileSync(join(cwd, 'README.md'), 'clean readme')
+        execFileSync('git', ['-C', cwd, 'add', 'README.md'], { stdio: 'ignore' })
+        execFileSync('git', ['-C', cwd, 'commit', '-m', 'agent commit'], { stdio: 'ignore' })
+      })
+      const merged = await h.service.integrateWork(cleanTask.id, 'merge')
+      expect(merged).toMatchObject({ ok: true })
+      expect(readFileSync(join(repo, 'README.md'), 'utf-8')).toBe('clean readme')
+    } finally { await h.service.dispose(); cleanup() }
+  })
+
   it('integrate merge refuses to overwrite an ignored file the delivery adds', async () => {
     const { repo, home, cleanup } = makeSpecRepo('dot-iso-over-')
     const h = setup(undefined, undefined, home, { git: runGit })

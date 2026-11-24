@@ -28,9 +28,9 @@
         ja: '手を動かすツールはタスク専用',
       },
       desc: {
-        zh: '改文件、跑命令、装插件这类工具在设置里标着“仅限任务”，我自己用不了，需要时就派任务去做。',
-        en: 'Tools that edit files, run commands, or manage plugins are marked “Tasks only”—I never use them myself and send a task instead.',
-        ja: 'ファイル編集やコマンド実行、プラグイン管理のツールは「タスク専用」。私自身は使わず、必要ならタスクに任せます。',
+        zh: '动手的工具标着“仅限任务”；升级前留下的授权可以点重置清掉，旁边普通工具的授权还在，分组也不会一直挂着“下一段生效”。',
+        en: 'Hands-on tools stay “Tasks only”. A leftover grant Reset clears just that row; sibling grants remain, and mixed groups drop the next-segment badge once ordinary tools have taken effect.',
+        ja: '手を動かすツールは「タスク専用」。残った許可はリセットだけで消え、隣の許可はそのまま。通常ツールが効けば「次のセグメントで適用」も消えます。',
       },
     },
     {
@@ -360,9 +360,9 @@
         ja: '静かに通す操作と、かならず足を止める操作',
       },
       excerpt: {
-        zh: '总不能每读一个文件就问一遍“我能看吗”，可删库和外推代码也不能擅自替你点掉。平时小确认悄悄放过，大事一律弹卡片等你，你不点就绝不算答应。',
-        en: 'Asking just to read a file would get annoying fast, yet silent deletes or pushes are off the table. Routine trivia clears quietly; big calls always wait with a card.',
-        ja: 'ファイルを読むたびに確認していたら進みませんし、逆に削除や外部送信を勝手にするわけにもいきません。危ない操作だけカードを出して待ち、無言を賛成扱いにはしません。',
+        zh: '总不能每读一个文件就问一遍“我能看吗”，可删库和外推代码也不能擅自替你点掉。平时小确认悄悄放过，大事弹卡片等你；改文件、跑命令这类动手的工具我自己也不碰，只交给派出去的任务。',
+        en: 'Asking just to read a file would get annoying fast, yet silent deletes or pushes are off the table. Routine trivia clears quietly; big calls wait with a card; tools that edit files or run commands stay with dispatched runs, never in my own hands.',
+        ja: 'ファイルを読むたびに確認していたら進みませんし、削除や外部送信を勝手にするわけにもいきません。危ない操作はカードで待ち、ファイル変更やコマンド実行は派遣したタスクだけが使います。',
       },
       paragraphs: {
         zh: [
@@ -528,7 +528,7 @@
       prevPost: '← 上一篇',
       nextPost: '下一篇 →',
       clipsPageTitle: '实机录屏',
-      clipsPageIntro: '一共 8 段来自 DeepSeek Harness 界面的真机录屏，每段都能点开看大图或者回原篇看看。',
+      clipsPageIntro: '一共 9 段来自 DeepSeek Harness 界面的真机录屏，每段都能点开看大图或者回原篇看看。',
       openRelatedPost: '去原篇看看 →',
       aboutTitle: '关于我 & 上手',
       aboutIntro: '你好，我是桃乐丝（dot），灵感来自社区里那只爱吃欧润吉的小家伙。平时待在 DeepSeek Harness 的侧栏里帮你把多件杂活分头推进、提前看好改动对照，拿不准的大事一定会停下来问你。',
@@ -580,7 +580,7 @@
       prevPost: '← Previous',
       nextPost: 'Next →',
       clipsPageTitle: 'Live Clips',
-      clipsPageIntro: 'Eight unedited screen recordings from inside DeepSeek Harness—zoom in or jump back to the matching journal note.',
+      clipsPageIntro: 'Nine unedited screen recordings from inside DeepSeek Harness—zoom in or jump back to the matching journal note.',
       openRelatedPost: 'Read note →',
       aboutTitle: 'About & Setup',
       aboutIntro: 'Hi, I’m Dorothy (dot), inspired by the community’s orange-loving Doro. I live in your DeepSeek Harness sidebar to keep independent work tidy, lay out readable diffs, and pause for your call on anything big.',
@@ -632,7 +632,7 @@
       prevPost: '← 前の日記',
       nextPost: '次の日記 →',
       clipsPageTitle: '実機録画メモ',
-      clipsPageIntro: 'DeepSeek Harness の画面からそのまま録った 8 本のクリップです。拡大表示や元の日記へ飛べます。',
+      clipsPageIntro: 'DeepSeek Harness の画面からそのまま録った 9 本のクリップです。拡大表示や元の日記へ飛べます。',
       openRelatedPost: '元の日記へ →',
       aboutTitle: '概要と導入',
       aboutIntro: 'こんにちは、ドロシー（dot）です。みかんが好きなコミュニティのキャラクターにならって、DeepSeek Harness のサイドバーに住みつつ並列作業の整理や差分確認を手伝っています。大事な操作の前だけは必ず確認しますね。',

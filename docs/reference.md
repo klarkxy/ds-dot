@@ -27,6 +27,8 @@ Even in **Dorothy** mode, approvals matching these patterns **always** come stra
 
 The static check is pattern-based rather than exhaustive; silence is never treated as consent, write scopes coordinate Dorothy's own runs without OS file locks, and accepting a delivery closes the task without authorizing pushes, publishing, or spending.
 
+Dorothy's own session never receives the host built-in names in `TASK_ONLY_TOOLS` (`plugin_manager`, `bash`, `pwsh`, `write`, `edit`, `apply_patch`). Those tools stay with dispatched task runs. A stored legacy grant is inert and can be deleted from Settings → Extra capabilities; new or changed grants on those tools, on `builtin:plugin-manager`, or on any catalog group whose tools are all task-only are refused. Third-party write/command aliases used by the approval-risk gate are a separate check and are not part of this set.
+
 ---
 
 ## Optional DSH profile & settings details

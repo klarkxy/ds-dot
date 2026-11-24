@@ -12,20 +12,20 @@ import { routeRequest } from './rules.ts'
 import { DEFAULT_SETTINGS } from './contracts.ts'
 
 describe('Safe Auto deny-all priority', () => {
-  it('does not skip Dorothy deny-all for a task pinned away from safe-auto', () => {
+  it('does not skip Dorothy deny-all for a task pinned away from safe-auto or read-only', () => {
     expect(shouldDeferApprovalToSafeAuto({ overlayActive: true, intendedPermission: 'workspace-write' })).toBe(false)
     expect(shouldDeferApprovalToSafeAuto({ overlayActive: true, intendedPermission: 'danger-full-access' })).toBe(false)
     expect(shouldDeferApprovalToSafeAuto({ overlayActive: true, intendedPermission: 'auto' })).toBe(false)
+    expect(shouldDeferApprovalToSafeAuto({ overlayActive: true, intendedPermission: 'read-only' })).toBe(false)
     expect(shouldDeferApprovalToSafeAuto({ overlayActive: true, intendedPermission: 'safe-auto' })).toBe(true)
     expect(shouldDeferApprovalToSafeAuto({ overlayActive: true, intendedPermission: undefined })).toBe(true)
     expect(shouldDeferApprovalToSafeAuto({ overlayActive: false, intendedPermission: 'safe-auto' })).toBe(false)
   })
 
-  it('approvals=deny is rejected, not next(), when overlay is residual on a workspace-write task', () => {
+  it('approvals=deny is rejected, not next(), when overlay is residual on a workspace-write or read-only task', () => {
     const overlay = true
-    const skip = shouldDeferApprovalToSafeAuto({ overlayActive: overlay, intendedPermission: 'workspace-write' })
-    const routed = skip ? { action: 'next' as const } : routeRequest({ ...DEFAULT_SETTINGS, approvals: 'deny' }, 'approval')
-    expect(routed).toEqual({ action: 'deny' })
+    expect(shouldDeferApprovalToSafeAuto({ overlayActive: overlay, intendedPermission: 'workspace-write' }) ? { action: 'next' as const } : routeRequest({ ...DEFAULT_SETTINGS, approvals: 'deny' }, 'approval')).toEqual({ action: 'deny' })
+    expect(shouldDeferApprovalToSafeAuto({ overlayActive: overlay, intendedPermission: 'read-only' }) ? { action: 'next' as const } : routeRequest({ ...DEFAULT_SETTINGS, approvals: 'deny' }, 'approval')).toEqual({ action: 'deny' })
   })
 })
 
@@ -71,9 +71,10 @@ describe('real @klarkxy/dsh-safe-auto overlay contract', () => {
       snapshotEvents: () => events,
       append(type: string, data?: unknown) { events.push({ type, data }) },
     }
-    let current = 'workspace-write'
+    let current = 'team-write'
     const specs: Record<string, { sandbox: string; approval: string }> = {
       'read-only': { sandbox: 'read-only', approval: 'ask' },
+      'team-write': { sandbox: 'workspace-write', approval: 'ask' },
       'workspace-write': { sandbox: 'workspace-write', approval: 'ask' },
       'danger-full-access': { sandbox: 'danger-full-access', approval: 'never' },
     }
@@ -120,10 +121,11 @@ describe('real @klarkxy/dsh-safe-auto overlay contract', () => {
     expect(host.safeAutoActive!('s')).toBe(true)
     expect(await host.verifyTaskPermission!('s', 'write', 'safe-auto')).toBe(true)
 
-    expect(await host.setWritable!('s', 'workspace-write')).toBe(true)
+    expect(await host.setWritable!('s', 'team-write')).toBe(true)
     expect(control.sessionActive('s')).toBe(false)
     expect(host.safeAutoActive!('s')).toBe(false)
-    expect(await host.verifyTaskPermission!('s', 'write', 'workspace-write')).toBe(true)
+    expect(events.at(-1)).toEqual({ type: 'permission/preset', data: { preset: 'team-write' } })
+    expect(await host.verifyTaskPermission!('s', 'write', 'team-write')).toBe(true)
     expect(await host.verifyTaskPermission!('s', 'write', 'safe-auto')).toBe(false)
 
     expect(await host.setWritable!('s', 'safe-auto')).toBe(true)
@@ -131,6 +133,7 @@ describe('real @klarkxy/dsh-safe-auto overlay contract', () => {
     expect(await host.setWritable!('s', 'danger-full-access')).toBe(true)
     expect(control.sessionActive('s')).toBe(false)
     expect(current).toBe('danger-full-access')
+    expect(events.at(-1)).toEqual({ type: 'permission/preset', data: { preset: 'danger-full-access' } })
     await control.dispose()
   })
 })
@@ -260,6 +263,46 @@ describe('pinned task permission vs live default', () => {
     current = 'read-only'
     fake.verifyCurrentWriteAccess = async () => false
     expect((await supplementRun(book, live, held.run.id, 'stay read-only', 'dot', 7)).ok).toBe(false)
+    expect(permits).toEqual(['workspace-write'])
+  })
+
+  it('pinned verifyOnly requires the exact pinned permission without calling setWritable', async () => {
+    const book = openBook()
+    const change = await book.createChange({ title: 'Ship', cwd: '/repo', goal: 'land it', at: 1 })
+    const held = await book.reserveRun({
+      changeId: change.id, cwd: '/repo', root: { workspaceRoot: '/repo' }, writeScope, taskPermission: 'workspace-write', at: 2,
+    })
+    if (!held.ok) throw new Error(held.message)
+    expect((await book.publishBaseline(held.run.id, book.revision, 'base-1', 3)).applied).toBe(true)
+
+    const permits: string[] = []
+    let current = 'workspace-write'
+    const events: unknown[] = []
+    const fake = {
+      async findSession() { return { cwd: '/repo' } },
+      async createSession() { throw new Error('exists') },
+      async setWritable(_id: string, permission: string) { permits.push(permission); current = permission; return true },
+      async verifyTaskPermission(_id: string, _access: string, permission: string) { return current === permission },
+      async prompt() {},
+      async readEvents() { return events },
+      async relay(_session: string, sender: string, text: string, deliveryId?: string) {
+        events.push({
+          type: 'agent/inbox/spliced',
+          data: { inserted: [{ id: 'm', source: { kind: 'agent-message', form: 'relay', senderSessionId: sender, deliveryId }, content: [{ type: 'text', text }] }] },
+        })
+      },
+    }
+    expect((await launchReservedRun(book, bindRunSession(fake, 'workspace-write'), held.run.id, 'start')).ok).toBe(true)
+    expect(permits).toEqual(['workspace-write'])
+
+    // Verify-only with pinned: true succeeds on matching preset without calling setWritable.
+    const pinnedVerify = bindRunSession(fake, 'workspace-write', { verifyOnly: true, pinned: true })
+    expect((await supplementRun(book, pinnedVerify, held.run.id, 'more', 'dot', 6)).ok).toBe(true)
+    expect(permits).toEqual(['workspace-write'])
+
+    // If session drifted to safe-auto or danger-full-access, pinned verify rejects instead of widening/overwriting.
+    current = 'safe-auto'
+    expect((await supplementRun(book, pinnedVerify, held.run.id, 'drifted', 'dot', 7)).ok).toBe(false)
     expect(permits).toEqual(['workspace-write'])
   })
 })

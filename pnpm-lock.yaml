@@ -132,9 +132,6 @@ importers:
       '@deepseek-ai/schemastery':
         specifier: 3.19.0
         version: 3.19.0
-      '@klarkxy/dsh-model-route':
-        specifier: 0.3.0
-        version: 0.3.0(@deepseek-ai/dsh-client-ui-slots@0.2.2-rc.5(@deepseek-ai/cordis@4.1.0))(@deepseek-ai/schemastery@3.19.0)(react-dom@18.3.1(react@18.3.1))(react@18.3.1)(zod@4.6.6)
       '@klarkxy/dsh-safe-auto':
         specifier: 0.5.12
         version: 0.5.12(9385b12f78214045f4864e74c68af291)

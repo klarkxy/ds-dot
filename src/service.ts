@@ -11,6 +11,7 @@ import { HarnessError } from '@deepseek-ai/dsh-llm'
 import { mkdir } from 'node:fs/promises'
 import { isAbsolute, join, relative, sep } from 'node:path'
 import { APPROVAL_DETAIL_LIMIT, approvalNotice } from './approval-risk.ts'
+import type { IntendedRunPermission } from './approval-safe-auto.ts'
 import { createTwoFilesPatch } from 'diff'
 import { writerPrior, parseEvidenceRef, reportBullet, deliveryScope, scopeContainsPath, type DeliverySubject, type SubjectLook } from './acceptance.ts'
 import { captureScopeAsync, defaultIgnoreCover, foldRel, ignoreCovered, isLinkReason, pruneSnapshots, readManifest, readSnapshotEntry, relativePath, saveSnapshot, scanScope, scanScopeAsync, baselineCaptures, wipeArtifacts, type SnapshotExclusion, type SnapshotSource } from './artifacts.ts'
@@ -2723,32 +2724,57 @@ export class DotService {
    * commit; a lost receipt or a stop that is still settling does not block
    * unrelated changes.
    */
-  private runHost(runId?: string, mode: 'mutate' | 'verify' = 'mutate') {
+  private runHost(runId?: string, mode: 'mutate' | 'verify' = 'mutate', overridePermission?: TaskPermission) {
     const run = runId ? this.store.work.run(runId) : undefined
-    if (run?.taskPermission) return bindRunSession(this.host, run.taskPermission)
-    if (mode === 'verify') return bindRunSession(this.host, this.store.settings.taskPermission, { verifyOnly: true })
-    return bindRunSession(this.host, this.store.settings.taskPermission)
+    const pinned = overridePermission ?? run?.taskPermission
+    if (mode === 'verify') {
+      if (pinned) return bindRunSession(this.host, pinned, { verifyOnly: true, pinned: true })
+      return bindRunSession(this.host, this.store.settings.taskPermission, { verifyOnly: true })
+    }
+    return bindRunSession(this.host, pinned ?? this.store.settings.taskPermission)
   }
 
-  /** Writable permission Dorothy pinned on this session's run, if any. */
-  runTaskPermission(sessionId: string): TaskPermission | undefined {
-    return this.store.work.sessionRun(sessionId)?.taskPermission
+  /** Permission Dorothy intends on this session's run (`'read-only'` for read-only runs), if any. */
+  runTaskPermission(sessionId: string): IntendedRunPermission | undefined {
+    const run = this.store.work.sessionRun(sessionId)
+    if (!run) return undefined
+    if (run.access === 'read' || run.kind === 'review' || !scopeWrites(run.writeScope)) return 'read-only'
+    return run.taskPermission
   }
 
   launchWorkRun(runId: string, text: string, preset?: string, model?: { readonly provider: string; readonly model: string }) {
     return this.launchAndRemember(runId, text, preset, model)
   }
 
-  private async pinWritePermission(runId: string): Promise<void> {
-    const run = this.store.work.run(runId)
-    if (!run || run.access !== 'write' || run.taskPermission) return
-    await this.store.work.pinTaskPermission(runId, this.store.settings.taskPermission)
+  private effectiveWritePermission(requested: TaskPermission = this.store.settings.taskPermission): TaskPermission {
+    const resolved = this.host.effectiveTaskPermission?.(requested)
+    return resolved === 'workspace-write' || resolved === 'danger-full-access' || resolved === 'safe-auto' || resolved === 'auto'
+      ? resolved
+      : requested
   }
 
   private async launchAndRemember(runId: string, text: string, preset?: string, model?: { readonly provider: string; readonly model: string }) {
-    await this.pinWritePermission(runId)
-    const launched = await launchReservedRun(this.store.work, this.runHost(runId), runId, text, preset, model, async () => { await this.rememberRun(runId) })
-    if (launched.ok) await this.rememberRun(runId)
+    const existing = this.store.work.run(runId)
+    const isWrite = existing !== undefined && (existing.access === 'write' || (existing.access === undefined && existing.kind !== 'review' && scopeWrites(existing.writeScope)))
+    const targetPermission = isWrite
+      ? existing.taskPermission ?? this.effectiveWritePermission(this.store.settings.taskPermission)
+      : undefined
+    const launched = await launchReservedRun(
+      this.store.work,
+      this.runHost(runId, 'mutate', targetPermission),
+      runId,
+      text,
+      preset,
+      model,
+      async () => {
+        if (targetPermission) await this.store.work.pinTaskPermission(runId, targetPermission)
+        await this.rememberRun(runId)
+      },
+    )
+    if (launched.ok) {
+      if (targetPermission) await this.store.work.pinTaskPermission(runId, targetPermission)
+      await this.rememberRun(runId)
+    }
     return launched
   }
 
@@ -3463,7 +3489,6 @@ export class DotService {
       writeScope: role === 'review'
         ? { kind: 'workspace-exclusive' }
         : { kind: 'paths', paths: paths ?? (write ? [{ path: change.cwd, type: 'directory' as const }] : []) },
-      ...(role !== 'review' && write ? { taskPermission: this.store.settings.taskPermission } : {}),
       at: this.now(),
     })
     if (!reserved.ok) throw new DotError('dot/invalid', reserved.message)

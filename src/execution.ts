@@ -452,10 +452,17 @@ const WRITABLE_PRESETS: readonly TaskPermission[] = ['safe-auto', 'workspace-wri
 export interface BindRunSessionOptions {
   /**
    * Confirm the session is still writable without calling `setWritable`.
-   * Used for legacy runs that only stored `read` | `write`, so a later global
-   * default cannot widen them.
+   * Used for pinned runs on `supplement` and for legacy runs that only
+   * stored `read` | `write`, so a later global default or plugin outage
+   * cannot widen or downgrade them.
    */
   readonly verifyOnly?: boolean
+  /**
+   * True when `writablePreset` was pinned on the run at first dispatch;
+   * `verifyOnly` must confirm that exact pinned permission rather than
+   * accepting any arbitrary writable preset.
+   */
+  readonly pinned?: boolean
 }
 
 /** Adapt the public host. Relay acceptance still has to be proved from the log. */
@@ -479,6 +486,9 @@ export function bindRunSession(host: DotHost, writablePreset: TaskPermission = '
         }
         if (!host.verifyTaskPermission) return 'unknown'
         if (options.verifyOnly) {
+          if (options.pinned) {
+            return await host.verifyTaskPermission(sessionId, 'write', writablePreset) ? 'ok' : 'rejected'
+          }
           for (const preset of WRITABLE_PRESETS) {
             try { if (await host.verifyTaskPermission(sessionId, 'write', preset)) return 'ok' } catch { /* try the next preset */ }
           }

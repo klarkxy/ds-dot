@@ -184,10 +184,13 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
   }, 'dot.lifecycle')
 
   ctx.effect(() => {
-    const release = installPresetVisibility(ctx.agentPresets)
-    // Warm the public-default cache so schedule `new` / `new_once` can rewrite
-    // `composedPreset` before the first roster read.
-    void ctx.agentPresets.list().catch(() => {})
+    const release = installPresetVisibility(ctx.agentPresets, ctx)
+    // Warm the public-default cache so `@deepseek-ai/dsh-tool-schedule` can
+    // rewrite `composedPreset` before the first roster read.
+    const warm = typeof (ctx.agentPresets as { remoteExportList?: () => Promise<unknown> }).remoteExportList === 'function'
+      ? ctx.agentPresets.remoteExportList()
+      : ctx.agentPresets.list()
+    void warm.catch(() => {})
     return release
   }, 'dot.preset-visibility')
   ctx.effect(() => installInternalPresetCreateGuard(ctx.get('sessionController' as never), () => publicTaskPreset(ctx.agentPresets)), 'dot.public-session-create')
@@ -349,7 +352,7 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
     const requesting = (req.agent as AgentLike).session
     if (requesting?.id && shouldDeferApprovalToSafeAuto({
       overlayActive: host.safeAutoActive?.(requesting.id) === true,
-      intendedPermission: service.runTaskPermission(requesting.id),
+      intendedPermission: service.runTaskPermission(origin.id),
     })) return next()
     const args = callArguments(req.agent as AgentLike, req.callId)
     const routed = service.relayRequest({

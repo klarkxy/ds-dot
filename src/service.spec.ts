@@ -11,6 +11,7 @@ import { DotService, HOME_TITLE } from './service.ts'
 import { readSnapshot, saveSnapshot } from './artifacts.ts'
 import * as artifacts from './artifacts.ts'
 import { launchReservedRun } from './execution.ts'
+import { shouldDeferApprovalToSafeAuto } from './approval-safe-auto.ts'
 import { agreementsSection } from './memory.ts'
 import { PACKAGE_NAME, type PluginManagerLike } from './auto-update.ts'
 import { DotStore, type DotDomainHandle } from './store.ts'
@@ -3932,5 +3933,168 @@ describe('recipe proposals', () => {
     const reopened = new DotStore(memoryDomain(seed).domain)
     expect(reopened.recipeProposals).toHaveLength(1)
     expect(reopened.recipeProposals[0]).toMatchObject({ id: 'rpp-1', kind: 'restore', targetRevision: 1, status: 'pending' })
+  })
+})
+
+describe('DotService task permission pinning and Safe Auto read-only guard', () => {
+  it('pins degraded effectiveTaskPermission at first launch and stays workspace-write on supplement when Safe Auto returns', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'dot-perm-degrade-'))
+    const home = mkdtempSync(join(tmpdir(), 'dot-perm-degrade-home-'))
+    const h = setup({ taskPermission: 'safe-auto' }, undefined, home)
+    try {
+      writeFileSync(join(dir, 'a.ts'), 'before')
+      let safeAutoAvailable = false
+      let currentPreset: string | undefined
+      const setWritableCalls: string[] = []
+      const verified: string[] = []
+      h.host.effectiveTaskPermission = preset =>
+        preset === 'safe-auto' && !safeAutoAvailable ? 'workspace-write' : preset
+      h.host.setWritable = async (_id, preset) => {
+        setWritableCalls.push(preset)
+        currentPreset = preset
+        return true
+      }
+      h.host.verifyTaskPermission = async (_id, _access, preset) => {
+        verified.push(preset)
+        return currentPreset === preset
+      }
+      const baseRelay = h.host.relay.bind(h.host)
+      h.host.relay = async (target, sender, text, deliveryId, confirm, notice) => {
+        await baseRelay(target, sender, text, deliveryId, confirm, notice)
+        const list = h.events.get(target) ?? []
+        list.push({
+          type: 'agent/inbox/spliced',
+          data: { inserted: [{ id: `m-${list.length + 1}`, source: { kind: 'agent-message', form: 'relay', senderSessionId: sender, deliveryId }, content: [{ type: 'text', text }] }] },
+        })
+        h.events.set(target, list)
+      }
+
+      const started = await h.service.manageTask({ action: 'dispatch', dir, title: 'Ship', goal: 'land', access: 'write', instruction: 'go' })
+      const runId = /started (run-\d+)/.exec(started)![1]!
+      const run = h.store.work.run(runId)!
+      expect(run.taskPermission).toBe('workspace-write')
+      expect(setWritableCalls).toEqual(['workspace-write'])
+
+      // Safe Auto becomes available later, and supplement runs.
+      safeAutoAvailable = true
+      const sup = await h.service.supplementWorkRun(runId, 'extra info', 'dot', { inputRef: run.inputRef, inputRevision: run.inputRevision })
+      expect(sup.ok).toBe(true)
+      // Supplement must never call setWritable or promote the degraded run to safe-auto.
+      expect(setWritableCalls).toEqual(['workspace-write'])
+      expect(verified).toEqual(['workspace-write', 'workspace-write'])
+      expect(currentPreset).toBe('workspace-write')
+      expect(h.store.work.run(runId)?.taskPermission).toBe('workspace-write')
+    } finally {
+      await h.service.dispose()
+      rmSync(dir, { recursive: true, force: true })
+      rmSync(home, { recursive: true, force: true })
+    }
+  })
+
+  it('keeps a safe-auto run read-only verified on supplement without calling setWritable when Safe Auto becomes unavailable or UI permission tightens', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'dot-perm-safe-'))
+    const home = mkdtempSync(join(tmpdir(), 'dot-perm-safe-home-'))
+    const h = setup({ taskPermission: 'safe-auto' }, undefined, home)
+    try {
+      writeFileSync(join(dir, 'a.ts'), 'before')
+      let safeAutoAvailable = true
+      let overlayActive = false
+      let uiNativePreset = 'workspace-write'
+      const setWritableCalls: string[] = []
+      h.host.effectiveTaskPermission = preset =>
+        preset === 'safe-auto' && !safeAutoAvailable ? 'workspace-write' : preset
+      h.host.setWritable = async (_id, preset) => {
+        setWritableCalls.push(preset)
+        if (preset === 'safe-auto') {
+          overlayActive = true
+          uiNativePreset = 'workspace-write'
+        } else {
+          overlayActive = false
+          uiNativePreset = preset
+        }
+        return true
+      }
+      h.host.verifyTaskPermission = async (_id, _access, preset) =>
+        preset === 'safe-auto' ? overlayActive : !overlayActive && uiNativePreset === preset
+      const baseRelay = h.host.relay.bind(h.host)
+      h.host.relay = async (target, sender, text, deliveryId, confirm, notice) => {
+        await baseRelay(target, sender, text, deliveryId, confirm, notice)
+        const list = h.events.get(target) ?? []
+        list.push({
+          type: 'agent/inbox/spliced',
+          data: { inserted: [{ id: `m-${list.length + 1}`, source: { kind: 'agent-message', form: 'relay', senderSessionId: sender, deliveryId }, content: [{ type: 'text', text }] }] },
+        })
+        h.events.set(target, list)
+      }
+
+      const started = await h.service.manageTask({ action: 'dispatch', dir, title: 'Ship', goal: 'land', access: 'write', instruction: 'go' })
+      const runId = /started (run-\d+)/.exec(started)![1]!
+      const run = h.store.work.run(runId)!
+      expect(run.taskPermission).toBe('safe-auto')
+      expect(setWritableCalls).toEqual(['safe-auto'])
+      expect(overlayActive).toBe(true)
+
+      // 1. Safe Auto temporarily cannot take new sessions (available=false), while existing overlay remains active.
+      safeAutoAvailable = false
+      const sup1 = await h.service.supplementWorkRun(runId, 'note 1', 'dot', { inputRef: run.inputRef, inputRevision: run.inputRevision })
+      expect(sup1.ok).toBe(true)
+      expect(setWritableCalls).toEqual(['safe-auto'])
+      expect(overlayActive).toBe(true)
+
+      // 2. Human manually tightens the session in UI (read-only / native workspace-write), clearing Safe Auto.
+      overlayActive = false
+      uiNativePreset = 'read-only'
+      const sup2 = await h.service.supplementWorkRun(runId, 'note 2', 'dot', { inputRef: run.inputRef, inputRevision: run.inputRevision })
+      expect(sup2.ok).toBe(false)
+      // Never calls setWritable to re-escalate over the user's manual restriction.
+      expect(setWritableCalls).toEqual(['safe-auto'])
+      expect(uiNativePreset).toBe('read-only')
+      expect(overlayActive).toBe(false)
+    } finally {
+      await h.service.dispose()
+      rmSync(dir, { recursive: true, force: true })
+      rmSync(home, { recursive: true, force: true })
+    }
+  })
+
+  it('returns read-only for read/review runs in runTaskPermission and blocks Safe Auto deferral', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'dot-perm-ro-'))
+    const home = mkdtempSync(join(tmpdir(), 'dot-perm-ro-home-'))
+    const h = setup({ taskPermission: 'safe-auto', approvals: 'deny' }, undefined, home)
+    try {
+      await h.service.ensureDot()
+      writeFileSync(join(dir, 'a.ts'), 'before')
+      const change = JSON.parse(await h.service.manageTask({ action: 'create', title: 'Inspect', goal: 'check', dir, max_concurrent: 2 })) as { id: string }
+
+      // Read-only work run
+      const readStart = await h.service.manageTask({ action: 'dispatch', task_id: change.id, access: 'read', instruction: 'read it' })
+      const readRunId = /started (run-\d+)/.exec(readStart)![1]!
+      const readSessionId = h.store.work.run(readRunId)!.sessionId!
+      expect(h.store.work.run(readRunId)?.access).toBe('read')
+      expect(h.service.runTaskPermission(readSessionId)).toBe('read-only')
+
+      // Even if a user accidentally enabled Safe Auto overlay on this read-only run, approvals must NOT defer.
+      const deferRead = shouldDeferApprovalToSafeAuto({
+        overlayActive: true,
+        intendedPermission: h.service.runTaskPermission(readSessionId),
+      })
+      expect(deferRead).toBe(false)
+      expect(h.service.relayRequest({ kind: 'approval', sessionId: readSessionId, subject: 'bash', toolName: 'bash' })).toEqual({ decided: 'deny' })
+
+      // Review run (also read-only)
+      const reviewStart = await h.service.manageTask({ action: 'dispatch', task_id: change.id, role: 'review', instruction: 'review it' })
+      const reviewRunId = /started (run-\d+)/.exec(reviewStart)![1]!
+      const reviewSessionId = h.store.work.run(reviewRunId)!.sessionId!
+      expect(h.service.runTaskPermission(reviewSessionId)).toBe('read-only')
+      expect(shouldDeferApprovalToSafeAuto({
+        overlayActive: true,
+        intendedPermission: h.service.runTaskPermission(reviewSessionId),
+      })).toBe(false)
+      expect(h.service.relayRequest({ kind: 'approval', sessionId: reviewSessionId, subject: 'write', toolName: 'write' })).toEqual({ decided: 'deny' })
+    } finally {
+      await h.service.dispose()
+      rmSync(dir, { recursive: true, force: true })
+      rmSync(home, { recursive: true, force: true })
+    }
   })
 })

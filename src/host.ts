@@ -237,7 +237,7 @@ function sessionEventSink(session: unknown): { append: (type: string, data?: unk
 }
 
 /** Drop a residual Safe Auto overlay after Dorothy pins a native writable preset. */
-async function clearSafeAutoOverlay(rt: SafeAutoRuntime | undefined, sessionId: string, session: unknown): Promise<boolean> {
+async function clearSafeAutoOverlay(rt: SafeAutoRuntime | undefined, sessionId: string, session: unknown, preset: string): Promise<boolean> {
   if (rt?.sessionActive?.(sessionId) !== true) return true
   if (typeof rt.deselectSession === 'function') {
     try { await rt.deselectSession(sessionId) } catch { return false }
@@ -248,7 +248,7 @@ async function clearSafeAutoOverlay(rt: SafeAutoRuntime | undefined, sessionId: 
   // Real plugin `active()` treats permission/preset after `fromSeq` as a
   // native switch. `permissionPresets.set` of the same workspace-write value
   // that Safe Auto already pinned is a no-op and does not emit.
-  sink.append('permission/preset', { preset: 'workspace-write' })
+  sink.append('permission/preset', { preset })
   return rt.sessionActive?.(sessionId) !== true
 }
 
@@ -559,7 +559,7 @@ export function bindHost(get: Get, log?: (message: string) => void, modelOf?: ()
         if (sandbox !== 'workspace-write' && sandbox !== 'danger-full-access') return false
         const session = (await liveAgent(sessionId)).session
         if (!permit(session, preset)) return false
-        if (!await clearSafeAutoOverlay(safeAuto(), sessionId, session)) return false
+        if (!await clearSafeAutoOverlay(safeAuto(), sessionId, session, preset)) return false
         return true
       } catch (error) {
         log?.(`dsh-dot: writable permission not applied: ${String(error)}`)

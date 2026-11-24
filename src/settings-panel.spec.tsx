@@ -496,3 +496,95 @@ describe('desktop notifications switch', () => {
     }
   })
 })
+
+describe('MCP servers page', () => {
+  const apiStub = (over: Record<string, unknown> = {}) => ({
+    models: async () => ({ groups: [] }),
+    settings: async () => DEFAULT_SETTINGS,
+    settingProposals: async () => [],
+    decideSetting: async () => 'ok',
+    setSettings: async () => DEFAULT_SETTINGS,
+    ...over,
+  })
+
+  it('shows token-less servers waiting and saves the credential through its own RPC', async () => {
+    const setCalls: Array<{ server: string; value: string }> = []
+    const api = apiStub({
+      mcpList: async () => ({
+        servers: [{ name: 'github', url: 'https://api.githubcopilot.com/mcp/readonly', enabled: true, auth: 'token', credential: { ref: 'DOT_MCP_GITHUB_TOKEN', configured: false }, status: { state: 'waiting-credentials', diagnostic: 'missing token' }, tokenUrl: 'https://github.com/settings/personal-access-tokens/new' }],
+        catalog: [{ id: 'deepwiki', name: 'DeepWiki', about: 'sMcpAbout_deepwiki', url: 'https://mcp.deepwiki.com/mcp', auth: 'none' }],
+      }),
+      mcpCredentialSet: async (server: string, value: string) => { setCalls.push({ server, value }); return { configured: true, masked: '•••1' } },
+    })
+    const root = createRoot(document.getElementById('root')!)
+    await act(async () => root.render(<SettingsPanel locale="en" section="mcp" api={api as never} settings={DEFAULT_SETTINGS} onSaved={() => {}} />))
+    await act(async () => { await Promise.resolve() })
+    expect(document.body.textContent).toContain('Connected')
+    expect(document.body.textContent).toContain('Waiting for token')
+    expect(document.body.textContent).toContain('Recommended')
+    // A token-auth row without a configured credential keeps the inline field open.
+    const input = document.querySelector<HTMLInputElement>('input[type="password"]')!
+    expect(input).toBeTruthy()
+    expect(document.body.textContent).toContain('Create a token')
+    await act(async () => { type(input, 'tok-123') })
+    const save = [...document.querySelectorAll('button')].find(button => button.textContent === 'Save')!
+    await act(async () => save.click())
+    await act(async () => { await Promise.resolve() })
+    expect(setCalls).toEqual([{ server: 'github', value: 'tok-123' }])
+    await act(async () => root.unmount())
+  })
+
+  it('connects a no-auth catalog entry with one settings patch', async () => {
+    const saved: Array<Record<string, unknown>> = []
+    const api = apiStub({
+      setSettings: async (patch: Record<string, unknown>) => { saved.push(patch); return DEFAULT_SETTINGS },
+      mcpList: async () => ({
+        servers: [],
+        catalog: [{ id: 'deepwiki', name: 'DeepWiki', about: 'sMcpAbout_deepwiki', url: 'https://mcp.deepwiki.com/mcp', auth: 'none' }],
+      }),
+    })
+    const root = createRoot(document.getElementById('root')!)
+    await act(async () => root.render(<SettingsPanel locale="en" section="mcp" api={api as never} settings={DEFAULT_SETTINGS} onSaved={() => {}} />))
+    await act(async () => { await Promise.resolve() })
+    const connect = [...document.querySelectorAll('button')].find(button => button.textContent === 'Connect')!
+    await act(async () => connect.click())
+    await act(async () => { await Promise.resolve() })
+    expect(saved).toEqual([{ mcpServers: { deepwiki: { catalog: 'deepwiki', url: 'https://mcp.deepwiki.com/mcp', enabled: true } } }])
+    await act(async () => root.unmount())
+  })
+})
+
+describe('capabilities sections', () => {
+  const groups = [
+    { id: 'mcp:exa', kind: 'mcp' as const, label: 'exa', tools: [{ name: 'mcp__exa__search', conditional: false }] },
+    { id: 'mcp:github', kind: 'mcp' as const, label: 'github', scope: 'dot' as const, status: { state: 'connected', toolCount: 1 }, tools: [{ name: 'mcp__github__repo', conditional: false }] },
+    { id: 'plugin:p', kind: 'plugin' as const, label: 'p', tools: [{ name: 'pt_tool', conditional: false }] },
+    { id: 'builtin', kind: 'builtin' as const, label: 'builtin', tools: [], children: [{ id: 'builtin:skill', kind: 'builtin' as const, label: 'skill', tools: [{ name: 'skill', conditional: false }] }] },
+  ]
+
+  it('renders section headings, the dot-only tag, and the enabled-only filter', async () => {
+    const api = {
+      models: async () => ({ groups: [] }),
+      settings: async () => DEFAULT_SETTINGS,
+      settingProposals: async () => [],
+      decideSetting: async () => 'ok',
+      setSettings: async () => DEFAULT_SETTINGS,
+      capabilities: async () => ({ locked: [], groups, grants: {}, applied: {} }),
+    }
+    const settings: DotSettings = { ...DEFAULT_SETTINGS, capabilities: { grants: { 'mcp:github': 'auto' } } }
+    const root = createRoot(document.getElementById('root')!)
+    await act(async () => root.render(<SettingsPanel locale="en" section="capabilities" api={api as never} settings={settings} onSaved={() => {}} />))
+    await act(async () => { await Promise.resolve() })
+    const text = () => document.body.textContent ?? ''
+    for (const heading of ['MCP servers', 'Plugins', 'Host tools']) expect(text()).toContain(heading)
+    expect(text()).toContain('Dorothy only')
+    // 只看已开启 drops groups whose effective grant is off.
+    const toggle = () => [...document.querySelectorAll('input[type="checkbox"]')].find(input => input.closest('label')?.textContent === 'Enabled only')!
+    await act(async () => toggle().click())
+    await act(async () => { await Promise.resolve() })
+    expect(text()).not.toContain('exa')
+    expect(text()).not.toContain('pt_tool')
+    expect(text()).toContain('github')
+    await act(async () => root.unmount())
+  })
+})

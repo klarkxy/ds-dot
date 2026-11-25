@@ -88,27 +88,26 @@ export const chatCss = settingsCss + `
   background: var(--dsw-alias-bg-mask-1); animation: dsh-dot-fade var(--ds-transition-duration, 0.2s) ease-out;
 }
 .dsh-dot-chat .dsh-dot-drawer {
-  position: relative; width: min(460px, 100%); height: 100%; min-height: 0; display: flex; flex-direction: column;
+  position: relative; width: min(760px, 68cqw); max-width: 100%; height: 100%; min-height: 0; display: flex; flex-direction: column;
   border-left: 0.5px solid var(--dsw-alias-border-l1); background: var(--dsw-alias-bg-layer-1);
   box-shadow: var(--dsw-elevation-prominent);
   transition: width var(--ds-transition-duration, 0.2s) var(--ds-ease-in-out, ease-out);
   animation: dsh-dot-drawer-in var(--ds-transition-duration, 0.2s) var(--ds-ease-in-out, ease-out);
 }
-.dsh-dot-chat .dsh-dot-drawer[data-wide] { width: min(640px, 100%); }
-.dsh-dot-chat .dsh-dot-drawer[data-kind='settings'] { width: min(560px, 100%); }
-.dsh-dot-chat .dsh-dot-drawer[data-kind='settings'][data-wide] { width: min(720px, 100%); }
-@container (min-width: 860px) {
-  .dsh-dot-chat .dsh-dot-drawer-layer[data-kind='tasks'] { position: relative; inset: auto; z-index: 1; flex: 0 0 auto; height: 100%; overflow: visible; }
-  .dsh-dot-chat .dsh-dot-drawer-layer[data-kind='tasks'] .dsh-dot-drawer-backdrop { display: none; }
-  .dsh-dot-chat .dsh-dot-drawer[data-kind='tasks'] { width: 400px; max-width: 48cqw; box-shadow: none; }
-  .dsh-dot-chat .dsh-dot-drawer[data-kind='tasks'][data-wide] { width: 540px; max-width: 56cqw; }
+.dsh-dot-chat .dsh-dot-drawer[data-wide] { width: 90cqw; }
+.dsh-dot-chat .dsh-dot-drawer[data-resizing] { transition: none; }
+.dsh-dot-chat .dsh-dot-drawer-resize {
+  position: absolute; top: 0; bottom: 0; left: -3px; z-index: 2; width: 7px; border: 0; padding: 0; background: transparent;
+  cursor: col-resize; touch-action: none;
 }
-@container (min-width: 960px) {
-  .dsh-dot-chat .dsh-dot-drawer-layer[data-kind='settings'] { position: relative; inset: auto; z-index: 1; flex: 0 0 auto; height: 100%; overflow: visible; }
-  .dsh-dot-chat .dsh-dot-drawer-layer[data-kind='settings'] .dsh-dot-drawer-backdrop { display: none; }
-  .dsh-dot-chat .dsh-dot-drawer[data-kind='settings'] { width: 520px; max-width: 54cqw; box-shadow: none; }
-  .dsh-dot-chat .dsh-dot-drawer[data-kind='settings'][data-wide] { width: 680px; max-width: 66cqw; }
+.dsh-dot-chat .dsh-dot-drawer-resize::after {
+  content: ''; position: absolute; top: 0; bottom: 0; left: 3px; width: 1.5px; background: transparent;
+  transition: background-color var(--ds-transition-duration, 0.2s) var(--ds-ease-in-out, ease-in-out);
 }
+.dsh-dot-chat .dsh-dot-drawer-resize:hover::after,
+.dsh-dot-chat .dsh-dot-drawer-resize:focus-visible::after,
+.dsh-dot-chat .dsh-dot-drawer[data-resizing] .dsh-dot-drawer-resize::after { background: var(--dsw-alias-brand-primary); }
+.dsh-dot-chat .dsh-dot-drawer-resize:focus-visible { outline: none; }
 .dsh-dot-chat .dsh-dot-drawer-title {
   display: inline-flex; align-items: center; gap: 8px; min-width: 0; margin: 0; padding: 0 4px;
   font-size: 14px; line-height: 20px; font-weight: 600; color: var(--dsw-alias-label-primary);
@@ -222,11 +221,18 @@ export const chatCss = settingsCss + `
 .dsh-dot-chat .dsh-dot-settings-pane { gap: 0; }
 .dsh-dot-chat .dsh-dot-settings-pane > .dsh-ui-notice,
 .dsh-dot-chat .dsh-dot-settings-pane > .dsh-ui-error { margin-bottom: 16px; }
-.dsh-dot-chat .dsh-dot-pane-section { padding: 18px 0; border-bottom: 0.5px solid var(--dsw-alias-border-l2); }
-.dsh-dot-chat .dsh-dot-pane > .dsh-dot-pane-section:first-child { padding-top: 0; }
-.dsh-dot-chat .dsh-dot-pane > .dsh-dot-pane-section:last-child { padding-bottom: 0; border-bottom: 0; }
+/* Each settings topic is one quiet card on the drawer's base surface. */
+.dsh-dot-chat .dsh-dot-pane-section {
+  margin: 0 0 14px; padding: 14px 16px 4px;
+  border-radius: var(--dsw-radius-md); background: var(--dsw-alias-bg-base);
+  box-shadow: var(--dsw-elevation-stroke);
+}
+.dsh-dot-chat .dsh-dot-pane-section:last-child { margin-bottom: 0; }
+.dsh-dot-chat .dsh-dot-pane-section[data-tone='danger'] {
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--dsw-alias-state-error-primary) 30%, transparent);
+}
 .dsh-dot-chat .dsh-dot-pane-section .dsh-ui-form > .dsh-ui-field:first-child { padding-top: 4px; }
-.dsh-dot-chat .dsh-dot-pane-section .dsh-ui-form > .dsh-ui-field:last-child { padding-bottom: 0; }
+.dsh-dot-chat .dsh-dot-pane-section .dsh-ui-form > .dsh-ui-field:last-child { padding-bottom: 12px; }
 .dsh-dot-chat .dsh-dot-pane-section-title {
   margin: 0 0 8px; font-size: 12px; line-height: 18px; font-weight: 600;
   color: var(--dsw-alias-label-secondary);

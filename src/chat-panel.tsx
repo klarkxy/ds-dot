@@ -20,7 +20,7 @@ import { filterVisibleChat } from './chat-filter.ts'
 import { formatToolDetail, parseNotice, permissionLabel, resolveSessionBadge, summarizeNotice, summarizeToolCall, summarizeToolGroup, type NoticeEntry, type ParsedNotice, type SessionBadge, type TaskLookup } from './chat-format.ts'
 import { BellGlyph, Composer, GearGlyph, JumpGlyph, NarrowGlyph, ToolGlyph, WidenGlyph } from './composer.tsx'
 import {
-  useBoard, useChatFeed, useContextUse, useDrawerGuard, useLocalEchoes, useRecipes, useReminderRemoval, useScrollPin, useSettings,
+  DRAWER_MIN_PX, useBoard, useChatFeed, useContextUse, useDrawerGuard, useLocalEchoes, useRecipes, useReminderRemoval, useScrollPin, useSettings,
   type DrawerAction, type DrawerTab, type SettingsSection,
 } from './chat-hooks.ts'
 import { ContextPanel, type ContextApi } from './context-panel.tsx'
@@ -114,6 +114,8 @@ interface DrawerProps {
   readonly onDiscardPending: () => void
   readonly onDirtyChange: (dirty: boolean) => void
   readonly onWide: () => void
+  readonly widthPx: number | undefined
+  readonly onWidth: (px: number | undefined) => void
   readonly onSaved: (next: DotSettings) => void
   readonly onProposalCount: (count: number) => void
 }
@@ -136,14 +138,70 @@ interface DrawerNavItem {
 }
 
 /**
- * One drawer docked beside the chat for the board and every settings page.
- * It has no backdrop, so the conversation and the composer stay usable while it is open.
+ * Overlay drawer for the board and every settings page: it always floats over the
+ * chat stage behind a backdrop, never docking side-by-side. The left edge is a drag
+ * handle — dragging resizes within safe bounds, Arrow keys nudge, double-click resets.
  */
-function WorkDrawer({ locale, api, tab, wide, settings, trajectoryRev, running, waiting, proposalCount, tasks, renderFactorySlot, personaDirty, pendingAction, discardSignal, onRequest, onCancelPending, onDiscardPending, onDirtyChange, onWide, onSaved, onProposalCount }: DrawerProps) {
+function WorkDrawer({ locale, api, tab, wide, settings, trajectoryRev, running, waiting, proposalCount, tasks, renderFactorySlot, personaDirty, pendingAction, discardSignal, onRequest, onCancelPending, onDiscardPending, onDirtyChange, onWide, widthPx, onWidth, onSaved, onProposalCount }: DrawerProps) {
   const [saveNotice, setSaveNotice] = useState<SaveNotice>()
   useEffect(() => { setSaveNotice(undefined) }, [tab])
   const requestClose = useCallback(() => { onRequest({ kind: 'close' }) }, [onRequest])
   const requestTab = useCallback((next: DrawerTab) => { onRequest({ kind: 'tab', tab: next }) }, [onRequest])
+  const asideRef = useRef<HTMLElement>(null)
+  const dragRef = useRef<{ right: number }>()
+  const [dragging, setDragging] = useState(false)
+  const [sliderMax, setSliderMax] = useState(1200)
+  const [sliderNow, setSliderNow] = useState(DRAWER_MIN_PX)
+  const effectiveWide = wide && widthPx === undefined
+  /** Clamp into [min, layer width]; the overlay layer spans the stage, so 100% is the natural ceiling. */
+  const clampWidth = useCallback((px: number) => {
+    const layer = asideRef.current?.parentElement
+    const max = layer ? layer.clientWidth : window.innerWidth
+    return Math.max(DRAWER_MIN_PX, Math.min(px, max))
+  }, [])
+  const onResizePointerDown = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
+    const aside = asideRef.current
+    if (!aside || event.button !== 0) return
+    dragRef.current = { right: aside.getBoundingClientRect().right }
+    setDragging(true)
+    event.currentTarget.setPointerCapture(event.pointerId)
+    event.preventDefault()
+  }, [])
+  const onResizePointerMove = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
+    const drag = dragRef.current
+    if (!drag) return
+    onWidth(clampWidth(drag.right - event.clientX))
+  }, [clampWidth, onWidth])
+  const endResizeDrag = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
+    if (!dragRef.current) return
+    dragRef.current = undefined
+    setDragging(false)
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId)
+  }, [])
+  const onResizeKeyDown = useCallback((event: React.KeyboardEvent<HTMLDivElement>) => {
+    if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return
+    const aside = asideRef.current
+    if (!aside) return
+    event.preventDefault()
+    const step = (event.shiftKey ? 64 : 16) * (event.key === 'ArrowLeft' ? 1 : -1)
+    onWidth(clampWidth(aside.getBoundingClientRect().width + step))
+  }, [clampWidth, onWidth])
+  const resetWidth = useCallback(() => { dragRef.current = undefined; onWidth(undefined) }, [onWidth])
+  useEffect(() => {
+    const aside = asideRef.current
+    const layer = aside?.parentElement
+    if (!aside || !layer) return
+    const sync = () => {
+      setSliderMax(Math.max(DRAWER_MIN_PX, layer.clientWidth || 0))
+      const measured = Math.round(aside.getBoundingClientRect().width)
+      setSliderNow(measured > 0 ? measured : (widthPx ?? DRAWER_MIN_PX))
+    }
+    sync()
+    if (typeof ResizeObserver === 'undefined') return
+    const observer = new ResizeObserver(sync)
+    observer.observe(layer)
+    return () => observer.disconnect()
+  }, [widthPx, wide])
   useEffect(() => {
     const close = (event: globalThis.KeyboardEvent) => {
       if (event.key === 'Escape' && !event.defaultPrevented && !document.querySelector(modalSelector)) requestClose()
@@ -229,7 +287,24 @@ function WorkDrawer({ locale, api, tab, wide, settings, trajectoryRev, running, 
   return (
     <div className="dsh-dot-drawer-layer" data-kind={isTasks ? 'tasks' : 'settings'}>
     <button type="button" tabIndex={-1} className="dsh-dot-drawer-backdrop" aria-label={t(locale, 'closeDrawer')} onClick={requestClose} />
-    <aside className="dsh-dot-drawer" data-kind={isTasks ? 'tasks' : 'settings'} data-wide={wide ? '' : undefined} role="dialog" aria-label={isTasks ? t(locale, 'tasks') : t(locale, 'settings')}>
+    <aside ref={asideRef} className="dsh-dot-drawer" data-kind={isTasks ? 'tasks' : 'settings'} data-wide={wide && widthPx === undefined ? '' : undefined} data-resizing={dragging ? '' : undefined} role="dialog" aria-label={isTasks ? t(locale, 'tasks') : t(locale, 'settings')} {...widthPx === undefined ? {} : { style: { width: widthPx } }}>
+      <div
+        className="dsh-dot-drawer-resize"
+        role="slider"
+        tabIndex={0}
+        aria-label={t(locale, 'resizeDrawer')}
+        aria-orientation="vertical"
+        aria-valuemin={DRAWER_MIN_PX}
+        aria-valuemax={sliderMax}
+        aria-valuenow={sliderNow}
+        title={t(locale, 'resizeDrawer')}
+        onPointerDown={onResizePointerDown}
+        onPointerMove={onResizePointerMove}
+        onPointerUp={endResizeDrag}
+        onPointerCancel={endResizeDrag}
+        onKeyDown={onResizeKeyDown}
+        onDoubleClick={resetWidth}
+      />
       <header className="dsh-dot-drawer-head">
         <h2 className="dsh-dot-drawer-title">
           {activeItem.title}
@@ -247,7 +322,7 @@ function WorkDrawer({ locale, api, tab, wide, settings, trajectoryRev, running, 
             {t(locale, 'saveFailed')}{saveNotice.message}
           </span>
         ) : null}
-        <Button variant="ghost" size="sm" className="dsh-dot-drawer-widen" icon={wide ? <NarrowGlyph /> : <WidenGlyph />} aria-label={t(locale, wide ? 'narrowDrawer' : 'widenDrawer')} title={t(locale, wide ? 'narrowDrawer' : 'widenDrawer')} aria-pressed={wide} onClick={onWide} />
+        <Button variant="ghost" size="sm" className="dsh-dot-drawer-widen" icon={effectiveWide ? <NarrowGlyph /> : <WidenGlyph />} aria-label={t(locale, effectiveWide ? 'narrowDrawer' : 'widenDrawer')} title={t(locale, effectiveWide ? 'narrowDrawer' : 'widenDrawer')} aria-pressed={effectiveWide} onClick={onWide} />
         <Button variant="ghost" size="sm" icon={<IconCloseOutlineRegular size={15} />} aria-label={t(locale, 'closeDrawer')} title={t(locale, 'closeDrawer')} onClick={requestClose} />
       </header>
       {pendingAction ? (
@@ -334,10 +409,10 @@ function ProposalDiff({ locale, proposal }: { locale: CopyLocale; proposal: NonN
       {rows.map((row, index) => (
         <div key={`${row.label}-${index}`} className="dsh-dot-recipe-proposal-field">
           <span className="dsh-ui-meta">{row.label}</span>
-          {row.before !== undefined ? <span className="dsh-ui-meta">«{row.before}» → «{row.after}»</span> : null}
-          {row.changed?.map(pair => <span key={`~${pair.before}`} className="dsh-ui-meta">«{pair.before}» → «{pair.after}»</span>)}
-          {row.added?.map(text => <span key={`+${text}`} className="dsh-ui-meta">+ {text}</span>)}
-          {row.removed?.map(text => <span key={`-${text}`} className="dsh-ui-meta">− {text}</span>)}
+          {row.before !== undefined ? <span className="dsh-ui-meta dsh-dot-recipe-diff-change">«{row.before}» → «{row.after}»</span> : null}
+          {row.changed?.map(pair => <span key={`~${pair.before}`} className="dsh-ui-meta dsh-dot-recipe-diff-change">«{pair.before}» → «{pair.after}»</span>)}
+          {row.added?.map(text => <span key={`+${text}`} className="dsh-ui-meta dsh-dot-recipe-diff-add">+ {text}</span>)}
+          {row.removed?.map(text => <span key={`-${text}`} className="dsh-ui-meta dsh-dot-recipe-diff-remove">− {text}</span>)}
         </div>
       ))}
     </div>
@@ -402,7 +477,7 @@ export function RecipesView({ locale, api, rows, error, onChanged }: {
     return <div className="dsh-ui-row" role="alert"><span className="dsh-ui-error" style={{ whiteSpace: 'pre-line' }}>{backendMissingText(locale, error) ?? `${t(locale, 'loadFailed')}: ${error}`}</span><Button variant="ghost" onClick={onChanged}>{t(locale, 'retry')}</Button></div>
   }
   return (
-    <div className="dsh-dot-recipes">
+    <div className="dsh-dot-board dsh-dot-recipes">
       {error !== undefined ? <p className="dsh-ui-hint" role="status">{t(locale, 'recipesRefreshFailed')}: {error}</p> : null}
       {rows.map(row => {
         const inFlight = row.inFlight.length > 0
@@ -568,7 +643,7 @@ export function ChatPanel({ locale, api, Card, onOpenSession, renderFactorySlot 
     if (snapshot?.lastBackup) writeSelfBackup(snapshot.lastBackup)
   }, [snapshot?.lastBackup?.dir, snapshot?.lastBackup?.lib])
   const backendOutdated = useSyncExternalStore(backendOutdatedStore.subscribe, backendOutdatedStore.getSnapshot)
-  const { drawerTab, drawerWide, personaDirty, discardSignal, pendingDrawerAction, configOpen, requestDrawer, discardDrawerAction, cancelDrawerAction, setPersonaDirty, toggleDrawerWide } = useDrawerGuard()
+  const { drawerTab, drawerWide, drawerWidthPx, personaDirty, discardSignal, pendingDrawerAction, configOpen, requestDrawer, discardDrawerAction, cancelDrawerAction, setPersonaDirty, toggleDrawerWide, setDrawerWidthPx } = useDrawerGuard()
   const labels = useMemo<MarkdownLabels>(() => {
     const c = cardCopy(locale)
     return { code: { copyLabel: c.copy, copiedLabel: c.copied }, footnotes: c.footnotes }
@@ -733,6 +808,8 @@ export function ChatPanel({ locale, api, Card, onOpenSession, renderFactorySlot 
           onDiscardPending={discardDrawerAction}
           onDirtyChange={setPersonaDirty}
           onWide={toggleDrawerWide}
+          widthPx={drawerWidthPx}
+          onWidth={setDrawerWidthPx}
           onSaved={setSettings}
           onProposalCount={setProposalCount}
         />

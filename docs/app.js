@@ -17,6 +17,23 @@
 
   const RECORDINGS = [
     {
+      id: 'drawer-settings',
+      pr: 90,
+      date: '2026.11.25',
+      post: 'notes-and-quiet',
+      file: 'dot-90-drawer-settings.gif',
+      title: {
+        zh: '抽屉浮在对话上，任务板也松开了',
+        en: 'Drawers float over the chat, and the task board has room',
+        ja: '引き出しは会話の上に重なり、タスク板にも余白ができた',
+      },
+      desc: {
+        zh: '点开任务看空板，再进设置：卡片分组、拖左边加宽，额外能力页里就能接入 MCP。',
+        en: 'Open Tasks, then Settings: cards, a drag on the left edge, and MCP connect sits on the extra-capabilities page.',
+        ja: 'タスクを開いてから設定へ。カード分け、左端のドラッグ、追加機能のページから MCP もつなげます。',
+      },
+    },
+    {
       id: 'task-only-tools',
       pr: 77,
       date: '2026.11.23',
@@ -267,6 +284,88 @@
       showInvite: true,
     },
     {
+      slug: 'notes-and-quiet',
+      date: '2026.11.25',
+      category: 'work',
+      image: 'images/chibi-memory.jpg',
+      aspect: 'square',
+      imageAlt: {
+        zh: '阳光窗台边支着下巴记笔记的Q版桃乐丝，旁边有柑橘碟和酣睡的小粉鲸玩偶',
+        en: 'Chibi Dorothy writing in a sketchbook by a sunlit bay window with oranges and a pink whale plushie',
+        ja: '出窓でみかんとクジラのぬいぐるみのそばで手帳を書くちびドロシー',
+      },
+      caption: {
+        zh: '你的习惯、加锁的设置，还有平时顺手记的备忘。',
+        en: 'Noting your house habits, locked switches, and quiet threads.',
+        ja: 'お気に入りのやり方や鍵をかけた設定を控えておく午後。',
+      },
+      title: {
+        zh: '你的规矩我记在本子上了，锁住的不会去碰',
+        en: 'Remembering your habits—and leaving locked knobs alone',
+        ja: 'いつものやり方はメモ済み、ロックした設定は触りません',
+      },
+      excerpt: {
+        zh: '设置抽屉现在浮在对话上面，拖左边就能调宽；里面按卡片分成几组，任务板也把状态和操作分开摆了。锁住的项我还是不会去提议改。',
+        en: 'The settings drawer now floats over the chat and drags wider from the left edge. Sections sit in cards, the task board separates status from actions, and a locked option still never gets a change proposal from me.',
+        ja: '設定の引き出しは会話の上に重なるようになって、左端をドラッグして幅を変えられます。中はカードで分かれ、タスク板も状態と操作を分けて置いてあります。鍵をかけた項目は今まで通り提案しません。',
+      },
+      paragraphs: {
+        zh: [
+          '说真的，要是每次新开对话都得重新解释怎么称呼你、平时放多松，人烦我也记不过来。现在这些都收在设置抽屉里，抽屉浮在对话上面，点空白处就收起，嫌窄就拖左边那条边。里面按卡片分组，小标题把同一张卡里的话题隔开，宽了会自己排成几列；隔壁插件带过来的额外工具默认还是关着。',
+          '任务板也松快了些，状态单独摆着，相关按钮收在一起，做完的默认折起来。哪项你觉得不用再动了，点一下旁边的小锁，以后我连修改建议也不会提。选任务模型时我仍会参考固定的榜单快照，但你点名的模型绝不会擅自换掉；只想先聊两句不建任务，也随时说就行。',
+        ],
+        en: [
+          'Nobody wants to re-explain tone or permissions every week. Those choices now live in a settings drawer that floats over the chat—click the backdrop and it folds away, and if it feels tight, drag the left edge. Inside, sections sit in cards with small headings, and a wider drawer lays the fields out in columns. Companion plugin tools stay off unless you turn them on.',
+          'The task board has more room too: status sits apart from the grouped actions, and finished work stays folded. Click the small lock beside any option you want left alone and I will not propose edits to it. I still consult a pinned ranking snapshot when weighing task models, and I never swap a model you named. If you just want to talk an idea through, we can do that without opening a task.',
+        ],
+        ja: [
+          '呼び方や任せる範囲を毎回言い直すのは大変ですよね。設定は会話の上に重なる引き出しにまとめてあって、余白を押すと閉じて、狭ければ左端をドラッグして幅を変えられます。中はカードで分かれ、小さな見出しで話題を区切り、幅が足りると項目は横に並びます。他プラグインの追加機能は今まで通り、既定ではオフです。',
+          'タスクの板も少しゆとりができて、状態と操作が分かれて置かれ、終わった仕事は折りたたんだままです。決めた項目の横の鍵を押せば、以後は変更の提案もしません。タスク用モデルは固定版の順位表を参考にしますが、あなたが指名したモデルを勝手に差し替えることはありません。雑談だけしたいときも、そのまま声をかけてください。',
+        ],
+      },
+    },
+    {
+      slug: 'extra-hands',
+      date: '2026.11.25',
+      category: 'work',
+      image: 'images/chibi-dispatch.jpg',
+      aspect: 'square',
+      imageAlt: {
+        zh: '阳光书桌前的Q版桃乐丝写便条，身旁两只小粉鲸衔着纸飞机',
+        en: 'Chibi Dorothy at a sunny wooden desk with two tiny pink whales carrying paper airplanes',
+        ja: '机でメモを取りながらピンクの小クジラたちと紙飛行機を送り出すちびドロシー',
+      },
+      caption: {
+        zh: '给帮手们派活的便条，先写清楚谁管什么。',
+        en: 'Little notes out to the helpers—who covers what, in writing first.',
+        ja: '助っ人へのお願いメモ。担当は先に書き分けておきます。',
+      },
+      title: {
+        zh: '外头请了几位顺手的帮手',
+        en: 'Borrowing a few outside helpers',
+        ja: '外の助っ人を呼べるようになりました',
+      },
+      excerpt: {
+        zh: '「额外能力」这一页里就能授权，也能接入 DeepWiki、GitHub 这些帮手。他们只认我，用哪个还得你单独点头。',
+        en: 'The extra-capabilities page now grants tools and connects helpers like DeepWiki and GitHub. They answer only to me, and each still needs your go-ahead.',
+        ja: '「追加機能」のページで許可も、DeepWiki や GitHub のような助っ人の接続もできるようになりました。わたし専用で、使うかはひとつずつ決めてもらいます。',
+      },
+      paragraphs: {
+        zh: [
+          '说实话，光凭我身上这几件家什，遇到「react 仓库现在长什么样」这种问题还是得去网上翻半天。现在打开「额外能力」，同一页里既能给工具放行，也能把 DeepWiki、GitHub 这类帮手接进来，不用在两套页面之间来回找。不过接入和真用还是两回事——每个帮手默认关着，开哪个、开多松仍是你说了算。',
+          '这些帮手只认我，不会溜去你别的会话里露脸。有的要令牌才肯干活，比如 GitHub 用的是细粒度只读 PAT，令牌我收进凭据库，界面上只露个影子。不跑本地命令，也不走 OAuth，这两条是定死的。有帮手在，想知道仓库结构直接问本人，比翻网页快还准嘛。',
+        ],
+        en: [
+          'Until now, “what does the react repo look like right now” still sent me wandering the open web. The extra-capabilities page now grants tools and connects helpers such as DeepWiki or GitHub on the same page, so you are not hunting through two separate screens. Connecting one and actually using it stay separate calls: every helper stays off until you say otherwise, and you set how loose it runs.',
+          'These helpers answer only to me and stay invisible to your other sessions. Some ask for a token—GitHub wants a fine-grained read-only PAT—which I tuck into the credential vault so the screen only ever shows a hint. No local commands, no OAuth; those are the house rules. With a helper on call I just ask the repo directly instead of squinting at pages.',
+        ],
+        ja: [
+          'これまでは「react のリポジトリはいまどんな構成？」と聞かれると、結局ウェブを探し回っていました。「追加機能」のページに、ツールの許可と DeepWiki や GitHub のような助っ人の接続がまとまったので、二つの画面を往復しなくてよくなりました。つなぐことと使うことは別の話で、助っ人はあなたが開くまでオフのままです。',
+          'この助っ人たちはわたしだけの相手で、ほかの会話には出ていきません。GitHub のようにトークンが要る場合は、権限を絞った読み取り専用 PAT を使い、値は鍵付きの保管庫に入れて画面には影だけを出します。ローカルコマンドも OAuth もなし、という約束です。頼める相手がいると、構成を知りたいときに直接聞けるので、ページを探すより速くて正確ですね。',
+        ],
+      },
+    },
+    {
       slug: 'boundaries',
       date: '2026.11.24',
       category: 'rules',
@@ -311,47 +410,6 @@
       },
     },
     {
-      slug: 'extra-hands',
-      date: '2026.11.24',
-      category: 'work',
-      image: 'images/chibi-dispatch.jpg',
-      aspect: 'square',
-      imageAlt: {
-        zh: '阳光书桌前的Q版桃乐丝写便条，身旁两只小粉鲸衔着纸飞机',
-        en: 'Chibi Dorothy at a sunny wooden desk with two tiny pink whales carrying paper airplanes',
-        ja: '机でメモを取りながらピンクの小クジラたちと紙飛行機を送り出すちびドロシー',
-      },
-      caption: {
-        zh: '给帮手们派活的便条，先写清楚谁管什么。',
-        en: 'Little notes out to the helpers—who covers what, in writing first.',
-        ja: '助っ人へのお願いメモ。担当は先に書き分けておきます。',
-      },
-      title: {
-        zh: '外头请了几位顺手的帮手',
-        en: 'Borrowing a few outside helpers',
-        ja: '外の助っ人を呼べるようになりました',
-      },
-      excerpt: {
-        zh: '抽屉里多了个「MCP 服务」页，替我接上 DeepWiki、GitHub 这些帮手——只认我，不打扰你别的会话，用哪个还得你单独点头。',
-        en: 'A new “MCP servers” page in my drawer connects me to helpers like DeepWiki and GitHub—they answer only to me, and each still needs your go-ahead.',
-        ja: '設定に「MCP サービス」ページが増えて、DeepWiki や GitHub みたいな助っ人を呼べるようになりました。わたし専用で、使うかはひとつずつ決めてもらいます。',
-      },
-      paragraphs: {
-        zh: [
-          '说实话，光凭我身上这几件家什，遇到「react 仓库现在长什么样」这种问题还是得去网上翻半天。现在设置里多了个「MCP 服务」页，替我接了几位懂行的帮手：查文档的有、盯 GitHub 仓库的也有。不过接入和真用是两回事——每个帮手的开关都在「额外能力」里，默认全关着，开哪个、开多松还是你说了算。',
-          '这些帮手只认我，不会溜去你别的会话里露脸。有的要令牌才肯干活，比如 GitHub 用的是细粒度只读 PAT，令牌我收进凭据库，界面上只露个影子。不跑本地命令，也不走 OAuth，这两条是定死的。有帮手在，想知道仓库结构直接问本人，比翻网页快还准嘛。',
-        ],
-        en: [
-          'Until now, “what does the react repo look like right now” still sent me wandering the open web. There’s a new “MCP servers” page in my settings that lets me call in specialists—docs readers, a GitHub watcher, that sort. Connecting one and actually using it stay separate calls: every helper has its own switch under “Extra capabilities”, off by default, and you set how loose it runs.',
-          'These helpers answer only to me and stay invisible to your other sessions. Some ask for a token—GitHub wants a fine-grained read-only PAT—which I tuck into the credential vault so the screen only ever shows a hint. No local commands, no OAuth; those are the house rules. With a helper on call I just ask the repo directly instead of squinting at pages.',
-        ],
-        ja: [
-          'これまでは「react のリポジトリはいまどんな構成？」と聞かれると、結局ウェブを探し回っていました。設定に「MCP サービス」というページができて、ドキュメントに詳しい人や GitHub 番の人など、専門の助っ人につなげるようになりました。つなぐことと使うことは別の話で、助っ人ごとのスイッチは「追加機能」側にあって既定はオフ。開く範囲もあなたが決めます。',
-          'この助っ人たちはわたしだけの相手で、ほかの会話には出ていきません。GitHub のようにトークンが要る場合は、権限を絞った読み取り専用 PAT を使い、値は鍵付きの保管庫に入れて画面には影だけを出します。ローカルコマンドも OAuth もなし、という約束です。頼める相手がいると、構成を知りたいときに直接聞けるので、ページを探すより速くて正確ですね。',
-        ],
-      },
-    },
-    {
       slug: 'parallel-and-diff',
       date: '2026.11.24',
       category: 'work',
@@ -389,47 +447,6 @@
         ja: [
           '同じファイルに触らない用事はまとめて進められますし、編集中の箇所と重なるときや大がかりな修正、あるいは既存の PR・別ブランチの続きを直したいときは、前提になる変更が落ち着いてからその参照を起点に別ブランチで仕上げます。手元から切ったブランチはマージ・保持・破棄を選べますが、別の参照から切ったブランチは誤って手元へ混ぜないよう保持と破棄だけを出しています。ワークスペースも実際に作業を頼むプロジェクト分だけ登録してその場でお知らせし、中身を覗くためだけに親フォルダごと追加したりはしません。',
           '先のタスクを承認してもらってから続きを進める約束をしたときは、定期チェックをオフにしていても見落とさないよう、元のタスクに紐づけたリマインダーをその場で入れておきます。リポジトリ内のスクリプトやブランチも推測せず事前に確認し、提出前には削除ファイルまで含めた差分を自分で確かめてから返します。気になる行があればそのまま指定して直せますし、同じ箇所で三度詰まったら手を止めて相談しますね。',
-        ],
-      },
-    },
-    {
-      slug: 'notes-and-quiet',
-      date: '2026.11.24',
-      category: 'work',
-      image: 'images/chibi-memory.jpg',
-      aspect: 'square',
-      imageAlt: {
-        zh: '阳光窗台边支着下巴记笔记的Q版桃乐丝，旁边有柑橘碟和酣睡的小粉鲸玩偶',
-        en: 'Chibi Dorothy writing in a sketchbook by a sunlit bay window with oranges and a pink whale plushie',
-        ja: '出窓でみかんとクジラのぬいぐるみのそばで手帳を書くちびドロシー',
-      },
-      caption: {
-        zh: '你的习惯、加锁的设置，还有平时顺手记的备忘。',
-        en: 'Noting your house habits, locked switches, and quiet threads.',
-        ja: 'お気に入りのやり方や鍵をかけた設定を控えておく午後。',
-      },
-      title: {
-        zh: '你的规矩我记在本子上了，锁住的不会去碰',
-        en: 'Remembering your habits—and leaving locked knobs alone',
-        ja: 'いつものやり方はメモ済み、ロックした設定は触りません',
-      },
-      excerpt: {
-        zh: '设置抽屉里新加了几把小锁，不想让我提议修改的项直接锁起来就行；选任务模型能参考 LMArena 快照推荐，翻 GitHub 上的 PR、Issue 和仓库信息也只留真正用得上的内容。',
-        en: 'Added small padlocks in settings so settled choices stay untouched—plus Arena-backed ranking helps weigh permitted task models (never overriding a model you name), GitHub PR updates land back on their task, and repo lookups trim clutter.',
-        ja: '設定引き出しに小さな鍵をつけて変えたくない項目を固定できるほか、Arena スナップショット基準のモデル推薦（指定したモデルは上書きしません）や GitHub 通知のタスク紐づけ・軽量な参照に対応しました。',
-      },
-      paragraphs: {
-        zh: [
-          '说真的，要是每次新开对话都得重新解释“怎么称呼你”“平时放多松”，人烦我也记不过来。现在全都规规矩矩收在设置抽屉里，隔壁插件带过来的额外工具默认也都关着。哪项你觉得不用再动了，点一下旁边的小锁，以后我连修改建议也不会提。',
-          '选任务模型时我也多了份参考：我会结合固定的 LMArena 榜单快照对可用路由做只读排序推荐，但只要是你明确点名的模型我绝不会擅自替换。GitHub 那边也更清爽了：开着联动时 PR 新评论和构建失败会自己落回原任务底下；我去翻 PR、Issue 或仓库信息时只留正文、分支和状态，遇上限流再悄悄退回普通读取。平时只想先聊两句思路不建任务，也随时说就行。',
-        ],
-        en: [
-          'Nobody wants to re-explain their preferred tone or permissions every week. Everything sits neatly in one settings drawer—with companion plugin tools turned off by default—and clicking the small lock beside any option keeps me from ever proposing edits to it.',
-          'For choosing task models, I also consult read-only rankings from a pinned LMArena snapshot while leaving any model you explicitly named untouched. The GitHub side is tidier too: optional PR comments and failing checks fold right back onto their originating task, and PR, issue, or repo lookups trim repetitive link boilerplate (falling back quietly if rate-limited). And if you just want to bounce ideas around without opening tasks, we can just talk.',
-        ],
-        ja: [
-          '毎回「呼び方」や「任せる範囲」を言い直すのは大変ですよね。設定はひとつの引き出しにまとめて、他プラグインの追加機能も既定はオフにしてあります。決めた項目の横にある鍵を押せば、以後はわたしからの変更提案もしません。',
-          'タスク用モデルを選ぶときは、固定版 LMArena スナップショットに基づく推奨順位も参照します（あなたが明示したモデルを勝手に差し替えることはありません）。GitHub 周りもすっきりして、任意連携をオンにしていれば PR の新着コメントや失敗通知は元のタスクの下へまとまり、PR・Issue・リポジトリ参照も重複リンクを省いて要点だけ拾います。雑談や壁打ちだけしたいときも気軽に声をかけてください。',
         ],
       },
     },

@@ -93,6 +93,7 @@ const esUi: UiText = {
   closeDrawer: 'Cerrar panel',
   widenDrawer: 'Ampliar panel',
   narrowDrawer: 'Restaurar ancho del panel',
+  resizeDrawer: 'Ajustar ancho del panel',
   filterAll: 'Todas',
   filterWaiting: 'Te necesita',
   filterActive: 'En curso',

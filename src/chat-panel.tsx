@@ -114,9 +114,13 @@ interface DrawerProps {
   readonly onDiscardPending: () => void
   readonly onDirtyChange: (dirty: boolean) => void
   readonly onWide: () => void
+  readonly widthPx: number | undefined
+  readonly onWidth: (px: number | undefined) => void
   readonly onSaved: (next: DotSettings) => void
   readonly onProposalCount: (count: number) => void
 }
+
+const DRAWER_MIN_PX = 340
 
 const SETTINGS_SECTIONS: ReadonlySet<DrawerTab> = new Set<SettingsSection>([
   'proposals', 'general', 'takeover', 'dispatch', 'capabilities', 'mcp',
@@ -136,14 +140,52 @@ interface DrawerNavItem {
 }
 
 /**
- * One drawer docked beside the chat for the board and every settings page.
- * It has no backdrop, so the conversation and the composer stay usable while it is open.
+ * Overlay drawer for the board and every settings page: it always floats over the
+ * chat stage behind a backdrop, never docking side-by-side. The left edge is a drag
+ * handle — dragging resizes within safe bounds, Arrow keys nudge, double-click resets.
  */
-function WorkDrawer({ locale, api, tab, wide, settings, trajectoryRev, running, waiting, proposalCount, tasks, renderFactorySlot, personaDirty, pendingAction, discardSignal, onRequest, onCancelPending, onDiscardPending, onDirtyChange, onWide, onSaved, onProposalCount }: DrawerProps) {
+function WorkDrawer({ locale, api, tab, wide, settings, trajectoryRev, running, waiting, proposalCount, tasks, renderFactorySlot, personaDirty, pendingAction, discardSignal, onRequest, onCancelPending, onDiscardPending, onDirtyChange, onWide, widthPx, onWidth, onSaved, onProposalCount }: DrawerProps) {
   const [saveNotice, setSaveNotice] = useState<SaveNotice>()
   useEffect(() => { setSaveNotice(undefined) }, [tab])
   const requestClose = useCallback(() => { onRequest({ kind: 'close' }) }, [onRequest])
   const requestTab = useCallback((next: DrawerTab) => { onRequest({ kind: 'tab', tab: next }) }, [onRequest])
+  const asideRef = useRef<HTMLElement>(null)
+  const dragRef = useRef<{ right: number }>()
+  const [dragging, setDragging] = useState(false)
+  /** Clamp into [min, layer width]; the overlay layer spans the stage, so 100% is the natural ceiling. */
+  const clampWidth = useCallback((px: number) => {
+    const layer = asideRef.current?.parentElement
+    const max = layer ? layer.clientWidth : window.innerWidth
+    return Math.max(DRAWER_MIN_PX, Math.min(px, max))
+  }, [])
+  const onResizePointerDown = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
+    const aside = asideRef.current
+    if (!aside || event.button !== 0) return
+    dragRef.current = { right: aside.getBoundingClientRect().right }
+    setDragging(true)
+    event.currentTarget.setPointerCapture(event.pointerId)
+    event.preventDefault()
+  }, [])
+  const onResizePointerMove = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
+    const drag = dragRef.current
+    if (!drag) return
+    onWidth(clampWidth(drag.right - event.clientX))
+  }, [clampWidth, onWidth])
+  const endResizeDrag = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
+    if (!dragRef.current) return
+    dragRef.current = undefined
+    setDragging(false)
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId)
+  }, [])
+  const onResizeKeyDown = useCallback((event: React.KeyboardEvent<HTMLDivElement>) => {
+    if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return
+    const aside = asideRef.current
+    if (!aside) return
+    event.preventDefault()
+    const step = (event.shiftKey ? 64 : 16) * (event.key === 'ArrowLeft' ? 1 : -1)
+    onWidth(clampWidth(aside.getBoundingClientRect().width + step))
+  }, [clampWidth, onWidth])
+  const resetWidth = useCallback(() => { dragRef.current = undefined; onWidth(undefined) }, [onWidth])
   useEffect(() => {
     const close = (event: globalThis.KeyboardEvent) => {
       if (event.key === 'Escape' && !event.defaultPrevented && !document.querySelector(modalSelector)) requestClose()
@@ -229,7 +271,24 @@ function WorkDrawer({ locale, api, tab, wide, settings, trajectoryRev, running, 
   return (
     <div className="dsh-dot-drawer-layer" data-kind={isTasks ? 'tasks' : 'settings'}>
     <button type="button" tabIndex={-1} className="dsh-dot-drawer-backdrop" aria-label={t(locale, 'closeDrawer')} onClick={requestClose} />
-    <aside className="dsh-dot-drawer" data-kind={isTasks ? 'tasks' : 'settings'} data-wide={wide ? '' : undefined} role="dialog" aria-label={isTasks ? t(locale, 'tasks') : t(locale, 'settings')}>
+    <aside ref={asideRef} className="dsh-dot-drawer" data-kind={isTasks ? 'tasks' : 'settings'} data-wide={wide && widthPx === undefined ? '' : undefined} data-resizing={dragging ? '' : undefined} role="dialog" aria-label={isTasks ? t(locale, 'tasks') : t(locale, 'settings')} {...widthPx === undefined ? {} : { style: { width: widthPx } }}>
+      <div
+        className="dsh-dot-drawer-resize"
+        role="slider"
+        tabIndex={0}
+        aria-label={t(locale, 'resizeDrawer')}
+        aria-orientation="vertical"
+        aria-valuemin={DRAWER_MIN_PX}
+        aria-valuemax={1200}
+        aria-valuenow={widthPx}
+        title={t(locale, 'resizeDrawer')}
+        onPointerDown={onResizePointerDown}
+        onPointerMove={onResizePointerMove}
+        onPointerUp={endResizeDrag}
+        onPointerCancel={endResizeDrag}
+        onKeyDown={onResizeKeyDown}
+        onDoubleClick={resetWidth}
+      />
       <header className="dsh-dot-drawer-head">
         <h2 className="dsh-dot-drawer-title">
           {activeItem.title}
@@ -568,7 +627,7 @@ export function ChatPanel({ locale, api, Card, onOpenSession, renderFactorySlot 
     if (snapshot?.lastBackup) writeSelfBackup(snapshot.lastBackup)
   }, [snapshot?.lastBackup?.dir, snapshot?.lastBackup?.lib])
   const backendOutdated = useSyncExternalStore(backendOutdatedStore.subscribe, backendOutdatedStore.getSnapshot)
-  const { drawerTab, drawerWide, personaDirty, discardSignal, pendingDrawerAction, configOpen, requestDrawer, discardDrawerAction, cancelDrawerAction, setPersonaDirty, toggleDrawerWide } = useDrawerGuard()
+  const { drawerTab, drawerWide, drawerWidthPx, personaDirty, discardSignal, pendingDrawerAction, configOpen, requestDrawer, discardDrawerAction, cancelDrawerAction, setPersonaDirty, toggleDrawerWide, setDrawerWidthPx } = useDrawerGuard()
   const labels = useMemo<MarkdownLabels>(() => {
     const c = cardCopy(locale)
     return { code: { copyLabel: c.copy, copiedLabel: c.copied }, footnotes: c.footnotes }
@@ -733,6 +792,8 @@ export function ChatPanel({ locale, api, Card, onOpenSession, renderFactorySlot 
           onDiscardPending={discardDrawerAction}
           onDirtyChange={setPersonaDirty}
           onWide={toggleDrawerWide}
+          widthPx={drawerWidthPx}
+          onWidth={setDrawerWidthPx}
           onSaved={setSettings}
           onProposalCount={setProposalCount}
         />

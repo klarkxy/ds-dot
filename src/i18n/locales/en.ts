@@ -94,6 +94,7 @@ const enUi: UiText = {
   closeDrawer: 'Close drawer',
   widenDrawer: 'Widen drawer',
   narrowDrawer: 'Restore drawer width',
+  resizeDrawer: 'Resize drawer',
   filterAll: 'All',
   filterWaiting: 'Needs you',
   filterActive: 'In progress',

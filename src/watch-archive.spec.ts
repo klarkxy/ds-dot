@@ -51,7 +51,7 @@ function harness(sessions: SessionRow[] | (() => Promise<SessionRow[]>)) {
     approvalGraceMs: 0,
     now: () => 1_000,
   })
-  return { service, store, archived, replies, said }
+  return { service, store, archived, replies, said, host }
 }
 
 describe('archived watched sessions leave the active ledger', () => {
@@ -178,5 +178,43 @@ describe('archived watched sessions leave the active ledger', () => {
     expect(store.task('session-old')?.status).toBe('archived')
     expect(store.task('session-new')?.status).toBe('idle')
     expect(store.task('session-new')?.origin).toBe('watched')
+  })
+
+  it('keeps reconciling after one caller aborts, and does not notify a turn that ends during archive', async () => {
+    let releaseList: (rows: SessionRow[]) => void = () => {}
+    const pendingList = new Promise<SessionRow[]>(resolve => { releaseList = resolve })
+    let calls = 0
+    let listedSignal: AbortSignal | undefined
+    const { service, store } = harness(async signal => {
+      calls += 1
+      listedSignal = signal
+      return pendingList
+    })
+    await service.watch('session-old', 'old')
+    const caller = new AbortController()
+    const first = service.syncWatched(caller.signal)
+    await Promise.resolve()
+    caller.abort()
+    await first
+    const second = service.syncWatched()
+    releaseList([])
+    await second
+    expect(calls).toBe(1)
+    expect(listedSignal?.aborted).toBe(false)
+    expect(store.task('session-old')?.status).toBe('archived')
+
+    let releaseReply: (text: string) => void = () => {}
+    const pendingReply = new Promise<string>(resolve => { releaseReply = resolve })
+    const live = harness([row('session-a', false)])
+    ;(live.host as { latestReply: () => Promise<string> }).latestReply = () => pendingReply
+    await live.service.watch('session-a', 'follow it')
+    const turn = live.service.onTurnEnd('session-a')
+    await Promise.resolve()
+    await live.service.noteSessionArchived('session-a')
+    releaseReply('late reply')
+    await turn
+    await live.service.say('hello')
+    expect(live.said).toEqual([undefined])
+    expect(live.store.task('session-a')?.status).toBe('archived')
   })
 })

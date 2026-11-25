@@ -1726,21 +1726,29 @@ export class DotService {
    * list leaves every watch as it was. Sessions dot started are not touched.
    */
   async syncWatched(signal?: AbortSignal): Promise<void> {
-    if (this.watchedSync) return this.watchedSync
-    const run = this.syncWatchedNow(signal).finally(() => {
-      if (this.watchedSync === run) this.watchedSync = undefined
+    if (!this.watchedSync) {
+      const run = this.syncWatchedNow().finally(() => {
+        if (this.watchedSync === run) this.watchedSync = undefined
+      })
+      this.watchedSync = run
+    }
+    const shared = this.watchedSync
+    if (!signal) return shared
+    if (signal.aborted) return
+    return new Promise((resolve, reject) => {
+      const finish = () => { signal.removeEventListener('abort', finish); resolve() }
+      signal.addEventListener('abort', finish)
+      shared.then(finish, error => { signal.removeEventListener('abort', finish); reject(error) })
     })
-    this.watchedSync = run
-    return run
   }
 
-  private async syncWatchedNow(signal?: AbortSignal): Promise<void> {
+  private async syncWatchedNow(): Promise<void> {
     if (this.closing) return
     const watchedAt = this.watchCandidates()
     if (watchedAt.size === 0) return
     let rows: Awaited<ReturnType<DotHost['listSessions']>>
     try {
-      rows = await this.host.listSessions(signal ?? AbortSignal.timeout(15_000))
+      rows = await this.host.listSessions(AbortSignal.timeout(15_000))
     } catch {
       return
     }
@@ -2784,7 +2792,7 @@ export class DotService {
     const reply = await this.host.latestReply(sessionId, 600).catch(() => undefined)
     if (this.closing) return
     const task = await this.store.apply({ type: 'turn-end', sessionId, at: this.now(), ...reply ? { note: reply } : {} }, this.pending.list())
-    if (!task) return
+    if (!task || task.status === 'archived') return
     const ownedNow = this.store.work.sessionRun(sessionId)
     const change = ownedNow ? this.store.work.change(ownedNow.changeId) : undefined
     const older = ownedNow && change && (ownedNow.inputRef !== change.currentInputRef || ownedNow.inputRevision !== change.currentRevision)

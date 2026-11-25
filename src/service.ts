@@ -159,6 +159,8 @@ export class DotService {
   private closing = false
   private disposal?: Promise<void>
   private readonly inFlight = new Set<Promise<unknown>>()
+  /** One host-list reconciliation at a time; overlapping board polls share it. */
+  private watchedSync?: Promise<void>
   private readonly now: () => number
   private idleSince?: number
   /** Changes to the agreements and cognition run one at a time, so two never start from the same text. */
@@ -1461,8 +1463,9 @@ export class DotService {
   overview(signal: AbortSignal, limit = 30): Promise<string> { return this.track(() => this.overviewNow(signal, limit)) }
 
   private async overviewNow(signal: AbortSignal, limit: number): Promise<string> {
+    const watchedAt = this.watchCandidates()
     const listed = await this.host.listSessions(signal)
-    await this.retireWatched(listed)
+    await this.retireWatched(listed, watchedAt)
     const rows = listed
       .filter(row => !row.subagent && !row.blank && !this.isDot(row.sessionId))
       .sort((a, b) => b.updatedAt - a.updatedAt)
@@ -1698,7 +1701,9 @@ export class DotService {
 
   private async unwatchNow(sessionId: string): Promise<boolean> {
     if (this.closing) return false
-    return this.store.untrack(sessionId)
+    const removed = await this.store.untrack(sessionId)
+    if (removed) this.dropWatchNotices(sessionId)
+    return removed
   }
 
   /** The host archived this session. A watched row stops looking idle; the host session is not archived again. */
@@ -1721,22 +1726,43 @@ export class DotService {
    * list leaves every watch as it was. Sessions dot started are not touched.
    */
   async syncWatched(signal?: AbortSignal): Promise<void> {
+    if (this.watchedSync) return this.watchedSync
+    const run = this.syncWatchedNow(signal).finally(() => {
+      if (this.watchedSync === run) this.watchedSync = undefined
+    })
+    this.watchedSync = run
+    return run
+  }
+
+  private async syncWatchedNow(signal?: AbortSignal): Promise<void> {
     if (this.closing) return
-    if (!this.store.list().some(task => task.origin === 'watched' && task.status !== 'archived')) return
+    const watchedAt = this.watchCandidates()
+    if (watchedAt.size === 0) return
     let rows: Awaited<ReturnType<DotHost['listSessions']>>
     try {
       rows = await this.host.listSessions(signal ?? AbortSignal.timeout(15_000))
     } catch {
       return
     }
-    await this.retireWatched(rows)
+    await this.retireWatched(rows, watchedAt)
   }
 
-  private async retireWatched(rows: readonly { readonly sessionId: string; readonly archived: boolean }[]): Promise<void> {
+  /** Watched rows still idle when a host list starts, keyed by updatedAt. */
+  private watchCandidates(): Map<string, number> {
+    return new Map(
+      this.store.list()
+        .filter(task => task.origin === 'watched' && task.status !== 'archived')
+        .map(task => [task.sessionId, task.updatedAt]),
+    )
+  }
+
+  private async retireWatched(rows: readonly { readonly sessionId: string; readonly archived: boolean }[], watchedAt: ReadonlyMap<string, number>): Promise<void> {
     if (this.closing) return
     const byId = new Map(rows.map(row => [row.sessionId, row]))
     for (const task of this.store.list()) {
       if (task.origin !== 'watched' || task.status === 'archived') continue
+      // A watch created or rewritten while the list was in flight keeps its new state.
+      if (watchedAt.get(task.sessionId) !== task.updatedAt) continue
       const row = byId.get(task.sessionId)
       if (row && !row.archived) continue
       await this.retireWatch(task.sessionId)
@@ -1747,7 +1773,19 @@ export class DotService {
     if (this.closing) return Promise.resolve()
     const task = this.store.task(sessionId)
     if (!task || task.origin !== 'watched' || task.status === 'archived') return Promise.resolve()
+    this.dropWatchNotices(sessionId)
     return this.store.apply({ type: 'archived', sessionId, at: this.now() }, this.pending.list()).then(() => undefined)
+  }
+
+  /** Queued turn-end and error notes for a watch that is no longer active. Approvals stay until they settle. */
+  private dropWatchNotices(sessionId: string): void {
+    this.batcher.dropWhere(item => item.sessionId === sessionId && item.requestId === undefined)
+  }
+
+  /** A ledger row that still receives turn, error, and tracked-scope relay events. */
+  private liveTask(sessionId: string) {
+    const task = this.store.task(sessionId)
+    return task && task.status !== 'archived' ? task : undefined
   }
 
   read(sessionId: string, maxChars = 4000): Promise<string> { return this.track(() => this.readNow(sessionId, maxChars)) }
@@ -2742,7 +2780,7 @@ export class DotService {
         this.options.log?.(`dsh-dot: run ${owned.id} was not observed: ${messageOf(error)}`)
       })
     }
-    if (this.isDot(sessionId) || !this.store.tracks(sessionId)) return
+    if (this.isDot(sessionId) || !this.liveTask(sessionId)) return
     const reply = await this.host.latestReply(sessionId, 600).catch(() => undefined)
     if (this.closing) return
     const task = await this.store.apply({ type: 'turn-end', sessionId, at: this.now(), ...reply ? { note: reply } : {} }, this.pending.list())
@@ -2757,7 +2795,7 @@ export class DotService {
   }
 
   onError(sessionId: string, error: unknown): void {
-    if (this.closing || this.isDot(sessionId) || !this.store.tracks(sessionId)) return
+    if (this.closing || this.isDot(sessionId) || !this.liveTask(sessionId)) return
     const message = messageOf(error)
     void this.store.apply({ type: 'error', sessionId, at: this.now(), message }, this.pending.list())
     const owned = this.store.work.sessionRun(sessionId)
@@ -2773,7 +2811,7 @@ export class DotService {
    */
   relayRequest(input: { kind: PendingKind; sessionId: string; subject: string; detail?: string; cwd?: string; questions?: readonly PendingQuestionItem[]; signal?: AbortSignal; toolName?: string; reason?: string; arguments?: string; viaSubagent?: boolean }): RelayOutcome {
     if (this.closing || this.isDot(input.sessionId) || !this.store.dotSessionId) return { decided: 'skip' }
-    const tracked = this.store.tracks(input.sessionId)
+    const tracked = this.liveTask(input.sessionId) !== undefined
     if (!tracked && this.rules.scope === 'tracked') return { decided: 'skip' }
     const task = this.store.task(input.sessionId)
     const route = routeRequest(this.rules, input.kind)

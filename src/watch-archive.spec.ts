@@ -37,6 +37,12 @@ function harness(sessions: SessionRow[] | (() => Promise<SessionRow[]>)) {
     readEvents: async () => [],
     dispose: async () => {},
   } as unknown as DotHost
+  const replies = { n: 0 }
+  const said: Array<string | undefined> = []
+  ;(host as { latestReply: () => Promise<string> }).latestReply = async () => { replies.n += 1; return 'still readable' }
+  ;(host as { modelKey: () => undefined; syncModel: () => void; say: (id: string, message: string, carried?: string) => Promise<void> }).modelKey = () => undefined
+  ;(host as { syncModel: () => void }).syncModel = () => {}
+  ;(host as { say: (id: string, message: string, carried?: string) => Promise<void> }).say = async (_id, _message, carried) => { said.push(carried) }
   const store = new DotStore(undefined)
   const service = new DotService({
     host,
@@ -45,7 +51,7 @@ function harness(sessions: SessionRow[] | (() => Promise<SessionRow[]>)) {
     approvalGraceMs: 0,
     now: () => 1_000,
   })
-  return { service, store, archived }
+  return { service, store, archived, replies, said }
 }
 
 describe('archived watched sessions leave the active ledger', () => {
@@ -128,5 +134,49 @@ describe('archived watched sessions leave the active ledger', () => {
     expect(text).toMatch(/IDLE session-b\b/)
     expect(service.board().tasks.map(task => task.sessionId)).toEqual(['session-b'])
     expect(archived).toEqual([])
+  })
+
+  it('does not notify or relay a watch after it is archived', async () => {
+    const { service, store, archived, replies } = harness([row('session-a', false)])
+    await service.watch('session-a', 'follow it')
+    await service.noteSessionArchived('session-a')
+    replies.n = 0
+    await service.onTurnEnd('session-a')
+    service.onError('session-a', new Error('boom'))
+    expect(replies.n).toBe(0)
+    expect(store.task('session-a')?.status).toBe('archived')
+    await store.beginSegment({ sessionId: 'dot', startedAt: 1, persona: 'p' })
+    expect(service.relayRequest({ kind: 'approval', sessionId: 'session-a', subject: 'bash' })).toEqual({ decided: 'skip' })
+    expect(archived).toEqual([])
+  })
+
+  it('drops a held turn-end when the watch is removed', async () => {
+    const { service, said } = harness([row('session-a', false)])
+    await service.watch('session-a', 'follow it')
+    await service.onTurnEnd('session-a')
+    expect(await service.unwatch('session-a')).toBe(true)
+    await service.say('hello')
+    expect(said).toEqual([undefined])
+  })
+
+  it('does not archive a watch created while the host list is in flight, and shares that list', async () => {
+    let release: (rows: SessionRow[]) => void = () => {}
+    const pending = new Promise<SessionRow[]>(resolve => { release = resolve })
+    let calls = 0
+    const { service, store } = harness(async () => {
+      calls += 1
+      return calls === 1 ? pending : [row('session-old', false), row('session-new', false)]
+    })
+    await service.watch('session-old', 'old')
+    const first = service.syncWatched()
+    const second = service.syncWatched()
+    await Promise.resolve()
+    await service.watch('session-new', 'new')
+    release([])
+    await Promise.all([first, second])
+    expect(calls).toBe(1)
+    expect(store.task('session-old')?.status).toBe('archived')
+    expect(store.task('session-new')?.status).toBe('idle')
+    expect(store.task('session-new')?.origin).toBe('watched')
   })
 })

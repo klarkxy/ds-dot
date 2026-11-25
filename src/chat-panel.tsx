@@ -334,10 +334,10 @@ function ProposalDiff({ locale, proposal }: { locale: CopyLocale; proposal: NonN
       {rows.map((row, index) => (
         <div key={`${row.label}-${index}`} className="dsh-dot-recipe-proposal-field">
           <span className="dsh-ui-meta">{row.label}</span>
-          {row.before !== undefined ? <span className="dsh-ui-meta">«{row.before}» → «{row.after}»</span> : null}
-          {row.changed?.map(pair => <span key={`~${pair.before}`} className="dsh-ui-meta">«{pair.before}» → «{pair.after}»</span>)}
-          {row.added?.map(text => <span key={`+${text}`} className="dsh-ui-meta">+ {text}</span>)}
-          {row.removed?.map(text => <span key={`-${text}`} className="dsh-ui-meta">− {text}</span>)}
+          {row.before !== undefined ? <span className="dsh-ui-meta dsh-dot-recipe-diff-change">«{row.before}» → «{row.after}»</span> : null}
+          {row.changed?.map(pair => <span key={`~${pair.before}`} className="dsh-ui-meta dsh-dot-recipe-diff-change">«{pair.before}» → «{pair.after}»</span>)}
+          {row.added?.map(text => <span key={`+${text}`} className="dsh-ui-meta dsh-dot-recipe-diff-add">+ {text}</span>)}
+          {row.removed?.map(text => <span key={`-${text}`} className="dsh-ui-meta dsh-dot-recipe-diff-remove">− {text}</span>)}
         </div>
       ))}
     </div>
@@ -402,7 +402,7 @@ export function RecipesView({ locale, api, rows, error, onChanged }: {
     return <div className="dsh-ui-row" role="alert"><span className="dsh-ui-error" style={{ whiteSpace: 'pre-line' }}>{backendMissingText(locale, error) ?? `${t(locale, 'loadFailed')}: ${error}`}</span><Button variant="ghost" onClick={onChanged}>{t(locale, 'retry')}</Button></div>
   }
   return (
-    <div className="dsh-dot-recipes">
+    <div className="dsh-dot-board dsh-dot-recipes">
       {error !== undefined ? <p className="dsh-ui-hint" role="status">{t(locale, 'recipesRefreshFailed')}: {error}</p> : null}
       {rows.map(row => {
         const inFlight = row.inFlight.length > 0

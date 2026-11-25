@@ -28,9 +28,9 @@
         ja: '引き出しは会話の上に重なり、タスク板にも余白ができた',
       },
       desc: {
-        zh: '点开任务看空板，再进设置：卡片分组、拖左边加宽，额外能力和 MCP 并排在同一块面板里。',
-        en: 'Open Tasks, then Settings: cards, a drag on the left edge, and extra capabilities beside MCP on one panel.',
-        ja: 'タスクを開いてから設定へ。カード分け、左端のドラッグ、追加機能と MCP が同じパネルに並びます。',
+        zh: '点开任务看空板，再进设置：卡片分组、拖左边加宽，额外能力页里就能接入 MCP。',
+        en: 'Open Tasks, then Settings: cards, a drag on the left edge, and MCP connect sits on the extra-capabilities page.',
+        ja: 'タスクを開いてから設定へ。カード分け、左端のドラッグ、追加機能のページから MCP もつなげます。',
       },
     },
     {
@@ -346,21 +346,21 @@
         ja: '外の助っ人を呼べるようになりました',
       },
       excerpt: {
-        zh: '「额外能力」和「MCP 服务」现在并排在同一块面板里。DeepWiki、GitHub 这些帮手只认我，用哪个还得你单独点头。',
-        en: 'Extra capabilities and MCP servers now sit on one panel. Helpers like DeepWiki and GitHub answer only to me, and each still needs your go-ahead.',
-        ja: '「追加機能」と「MCP サービス」が同じパネルに並ぶようになりました。DeepWiki や GitHub のような助っ人はわたし専用で、使うかはひとつずつ決めてもらいます。',
+        zh: '「额外能力」这一页里就能授权，也能接入 DeepWiki、GitHub 这些帮手。他们只认我，用哪个还得你单独点头。',
+        en: 'The extra-capabilities page now grants tools and connects helpers like DeepWiki and GitHub. They answer only to me, and each still needs your go-ahead.',
+        ja: '「追加機能」のページで許可も、DeepWiki や GitHub のような助っ人の接続もできるようになりました。わたし専用で、使うかはひとつずつ決めてもらいます。',
       },
       paragraphs: {
         zh: [
-          '说实话，光凭我身上这几件家什，遇到「react 仓库现在长什么样」这种问题还是得去网上翻半天。设置里的「额外能力」和「MCP 服务」现在是同一块面板的左右两边，接上帮手和给它放行不用来回翻页。不过接入和真用还是两回事——每个帮手默认关着，开哪个、开多松仍是你说了算。',
+          '说实话，光凭我身上这几件家什，遇到「react 仓库现在长什么样」这种问题还是得去网上翻半天。现在打开「额外能力」，同一页里既能给工具放行，也能把 DeepWiki、GitHub 这类帮手接进来，不用在两套页面之间来回找。不过接入和真用还是两回事——每个帮手默认关着，开哪个、开多松仍是你说了算。',
           '这些帮手只认我，不会溜去你别的会话里露脸。有的要令牌才肯干活，比如 GitHub 用的是细粒度只读 PAT，令牌我收进凭据库，界面上只露个影子。不跑本地命令，也不走 OAuth，这两条是定死的。有帮手在，想知道仓库结构直接问本人，比翻网页快还准嘛。',
         ],
         en: [
-          'Until now, “what does the react repo look like right now” still sent me wandering the open web. Extra capabilities and MCP servers now share one panel, so connecting a helper and granting it sit side by side. Connecting one and actually using it stay separate calls: every helper stays off until you say otherwise, and you set how loose it runs.',
+          'Until now, “what does the react repo look like right now” still sent me wandering the open web. The extra-capabilities page now grants tools and connects helpers such as DeepWiki or GitHub on the same page, so you are not hunting through two separate screens. Connecting one and actually using it stay separate calls: every helper stays off until you say otherwise, and you set how loose it runs.',
           'These helpers answer only to me and stay invisible to your other sessions. Some ask for a token—GitHub wants a fine-grained read-only PAT—which I tuck into the credential vault so the screen only ever shows a hint. No local commands, no OAuth; those are the house rules. With a helper on call I just ask the repo directly instead of squinting at pages.',
         ],
         ja: [
-          'これまでは「react のリポジトリはいまどんな構成？」と聞かれると、結局ウェブを探し回っていました。「追加機能」と「MCP サービス」は今は同じパネルの左右に並ぶので、助っ人をつなぐ画面と許可する画面を往復しなくてよくなりました。つなぐことと使うことは別の話で、助っ人はあなたが開くまでオフのままです。',
+          'これまでは「react のリポジトリはいまどんな構成？」と聞かれると、結局ウェブを探し回っていました。「追加機能」のページに、ツールの許可と DeepWiki や GitHub のような助っ人の接続がまとまったので、二つの画面を往復しなくてよくなりました。つなぐことと使うことは別の話で、助っ人はあなたが開くまでオフのままです。',
           'この助っ人たちはわたしだけの相手で、ほかの会話には出ていきません。GitHub のようにトークンが要る場合は、権限を絞った読み取り専用 PAT を使い、値は鍵付きの保管庫に入れて画面には影だけを出します。ローカルコマンドも OAuth もなし、という約束です。頼める相手がいると、構成を知りたいときに直接聞けるので、ページを探すより速くて正確ですね。',
         ],
       },

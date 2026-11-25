@@ -832,12 +832,16 @@ export function SettingsPanel({ locale, api, settings, section = 'all', proposal
       {/* In 'all' the unified panel already renders once under capabilities above; the mcp section re-renders it only when opened on its own. */}
       {section === 'mcp' ? (
         <div className="dsh-dot-pane-section">
-          <CapabilitiesMcpPanel locale={locale} api={api} settings={settings} zone="mcp" onSaved={onSaved} onPick={(selector, grant) => {
-            const grants = { ...settings.capabilities?.grants }
-            if (grant === undefined) delete grants[selector]
-            else grants[selector] = grant
-            save({ capabilities: { grants } })
-          }} />
+          <div className="dsh-ui-form">
+            <Field label={t(locale, 'sCapGrants')} tip={t(locale, 'sCapabilitiesDesc')} wide {...lock('capabilities')}>
+              <CapabilitiesMcpPanel locale={locale} api={api} settings={settings} zone="mcp" onSaved={onSaved} onPick={(selector, grant) => {
+                const grants = { ...settings.capabilities?.grants }
+                if (grant === undefined) delete grants[selector]
+                else grants[selector] = grant
+                save({ capabilities: { grants } })
+              }} />
+            </Field>
+          </div>
         </div>
       ) : null}
     </div></LocaleContext.Provider>

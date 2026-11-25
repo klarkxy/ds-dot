@@ -88,7 +88,7 @@ export const chatCss = settingsCss + `
   background: var(--dsw-alias-bg-mask-1); animation: dsh-dot-fade var(--ds-transition-duration, 0.2s) ease-out;
 }
 .dsh-dot-chat .dsh-dot-drawer {
-  position: relative; width: min(760px, 68cqw); height: 100%; min-height: 0; display: flex; flex-direction: column;
+  position: relative; width: min(760px, 68cqw); max-width: 100%; height: 100%; min-height: 0; display: flex; flex-direction: column;
   border-left: 0.5px solid var(--dsw-alias-border-l1); background: var(--dsw-alias-bg-layer-1);
   box-shadow: var(--dsw-elevation-prominent);
   transition: width var(--ds-transition-duration, 0.2s) var(--ds-ease-in-out, ease-out);

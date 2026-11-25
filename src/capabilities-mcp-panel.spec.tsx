@@ -118,6 +118,27 @@ describe('unified capabilities & MCP panel', () => {
     await act(async () => root.unmount())
   })
 
+  it('reopens a manually collapsed group when the search matches it', async () => {
+    const api = apiStub({
+      capabilities: async () => capabilitiesView(),
+      mcpList: async () => mcpListView(),
+    })
+    const settings: DotSettings = { ...DEFAULT_SETTINGS, capabilities: { grants: { 'plugin:p': 'auto' } } }
+    const root = createRoot(document.getElementById('root')!)
+    await renderPanel(root, api, 'capabilities', settings)
+    const plugin = [...document.querySelectorAll<HTMLDetailsElement>('.dsh-dot-cap-group')]
+      .find(group => group.querySelector(':scope > summary')?.textContent?.includes('p'))!
+    expect(plugin.open).toBe(true)
+    await act(async () => plugin.querySelector(':scope > summary')!.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })))
+    expect(plugin.open).toBe(false)
+    const search = document.querySelector<HTMLInputElement>('input[type="search"]')!
+    await act(async () => type(search, 'pt_tool'))
+    const matched = [...document.querySelectorAll<HTMLDetailsElement>('.dsh-dot-cap-group')]
+      .find(group => group.querySelector(':scope > summary')?.textContent?.includes('pt_tool') || group.querySelector(':scope > summary')?.textContent?.includes('p'))!
+    expect(matched.open).toBe(true)
+    await act(async () => root.unmount())
+  })
+
   it('resets an override through a text button visually distinct from server removal', async () => {
     let current: DotSettings = {
       ...DEFAULT_SETTINGS,

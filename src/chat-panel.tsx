@@ -20,7 +20,7 @@ import { filterVisibleChat } from './chat-filter.ts'
 import { formatToolDetail, parseNotice, permissionLabel, resolveSessionBadge, summarizeNotice, summarizeToolCall, summarizeToolGroup, type NoticeEntry, type ParsedNotice, type SessionBadge, type TaskLookup } from './chat-format.ts'
 import { BellGlyph, Composer, GearGlyph, JumpGlyph, NarrowGlyph, ToolGlyph, WidenGlyph } from './composer.tsx'
 import {
-  useBoard, useChatFeed, useContextUse, useDrawerGuard, useLocalEchoes, useRecipes, useReminderRemoval, useScrollPin, useSettings,
+  DRAWER_MIN_PX, useBoard, useChatFeed, useContextUse, useDrawerGuard, useLocalEchoes, useRecipes, useReminderRemoval, useScrollPin, useSettings,
   type DrawerAction, type DrawerTab, type SettingsSection,
 } from './chat-hooks.ts'
 import { ContextPanel, type ContextApi } from './context-panel.tsx'
@@ -120,8 +120,6 @@ interface DrawerProps {
   readonly onProposalCount: (count: number) => void
 }
 
-const DRAWER_MIN_PX = 340
-
 const SETTINGS_SECTIONS: ReadonlySet<DrawerTab> = new Set<SettingsSection>([
   'proposals', 'general', 'takeover', 'dispatch', 'capabilities', 'mcp',
 ])
@@ -152,6 +150,9 @@ function WorkDrawer({ locale, api, tab, wide, settings, trajectoryRev, running, 
   const asideRef = useRef<HTMLElement>(null)
   const dragRef = useRef<{ right: number }>()
   const [dragging, setDragging] = useState(false)
+  const [sliderMax, setSliderMax] = useState(1200)
+  const [sliderNow, setSliderNow] = useState(DRAWER_MIN_PX)
+  const effectiveWide = wide && widthPx === undefined
   /** Clamp into [min, layer width]; the overlay layer spans the stage, so 100% is the natural ceiling. */
   const clampWidth = useCallback((px: number) => {
     const layer = asideRef.current?.parentElement
@@ -186,6 +187,21 @@ function WorkDrawer({ locale, api, tab, wide, settings, trajectoryRev, running, 
     onWidth(clampWidth(aside.getBoundingClientRect().width + step))
   }, [clampWidth, onWidth])
   const resetWidth = useCallback(() => { dragRef.current = undefined; onWidth(undefined) }, [onWidth])
+  useEffect(() => {
+    const aside = asideRef.current
+    const layer = aside?.parentElement
+    if (!aside || !layer) return
+    const sync = () => {
+      setSliderMax(Math.max(DRAWER_MIN_PX, layer.clientWidth || 0))
+      const measured = Math.round(aside.getBoundingClientRect().width)
+      setSliderNow(measured > 0 ? measured : (widthPx ?? DRAWER_MIN_PX))
+    }
+    sync()
+    if (typeof ResizeObserver === 'undefined') return
+    const observer = new ResizeObserver(sync)
+    observer.observe(layer)
+    return () => observer.disconnect()
+  }, [widthPx, wide])
   useEffect(() => {
     const close = (event: globalThis.KeyboardEvent) => {
       if (event.key === 'Escape' && !event.defaultPrevented && !document.querySelector(modalSelector)) requestClose()
@@ -279,8 +295,8 @@ function WorkDrawer({ locale, api, tab, wide, settings, trajectoryRev, running, 
         aria-label={t(locale, 'resizeDrawer')}
         aria-orientation="vertical"
         aria-valuemin={DRAWER_MIN_PX}
-        aria-valuemax={1200}
-        aria-valuenow={widthPx}
+        aria-valuemax={sliderMax}
+        aria-valuenow={sliderNow}
         title={t(locale, 'resizeDrawer')}
         onPointerDown={onResizePointerDown}
         onPointerMove={onResizePointerMove}
@@ -306,7 +322,7 @@ function WorkDrawer({ locale, api, tab, wide, settings, trajectoryRev, running, 
             {t(locale, 'saveFailed')}{saveNotice.message}
           </span>
         ) : null}
-        <Button variant="ghost" size="sm" className="dsh-dot-drawer-widen" icon={wide ? <NarrowGlyph /> : <WidenGlyph />} aria-label={t(locale, wide ? 'narrowDrawer' : 'widenDrawer')} title={t(locale, wide ? 'narrowDrawer' : 'widenDrawer')} aria-pressed={wide} onClick={onWide} />
+        <Button variant="ghost" size="sm" className="dsh-dot-drawer-widen" icon={effectiveWide ? <NarrowGlyph /> : <WidenGlyph />} aria-label={t(locale, effectiveWide ? 'narrowDrawer' : 'widenDrawer')} title={t(locale, effectiveWide ? 'narrowDrawer' : 'widenDrawer')} aria-pressed={effectiveWide} onClick={onWide} />
         <Button variant="ghost" size="sm" icon={<IconCloseOutlineRegular size={15} />} aria-label={t(locale, 'closeDrawer')} title={t(locale, 'closeDrawer')} onClick={requestClose} />
       </header>
       {pendingAction ? (

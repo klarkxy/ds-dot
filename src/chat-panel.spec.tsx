@@ -845,6 +845,13 @@ describe('ChatPanel activity and notice cards', () => {
     expect(drawer.hasAttribute('data-wide')).toBe(true)
     await act(async () => { handle.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'ArrowLeft', bubbles: true })) })
     expect(drawer.hasAttribute('data-wide')).toBe(false)
+    // A dragged width is not the wide preset: the button offers widen again, and clicking it clears the pixels.
+    const widenAgain = drawer.querySelector<HTMLButtonElement>('button[aria-label="加宽抽屉"]')!
+    expect(widenAgain.getAttribute('aria-pressed')).toBe('false')
+    await act(async () => { widenAgain.click() })
+    expect(drawer.hasAttribute('data-wide')).toBe(true)
+    expect(drawer.style.width).toBe('')
+    expect(dom.window.localStorage.getItem('dsh-dot:drawer-width')).toBeNull()
 
     // The gear closes its own drawer; the tasks button opens the other one, with no settings nav.
     await act(async () => { gear.click() })

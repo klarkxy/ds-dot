@@ -251,14 +251,16 @@ export interface DrawerGuard {
 }
 
 const DRAWER_WIDTH_KEY = 'dsh-dot:drawer-width'
+/** Narrowest dragged drawer. Shared with the resize handle so a stored value cannot reopen thinner than the drag floor. */
+export const DRAWER_MIN_PX = 340
 
-/** Dragged drawer widths survive reopens; a malformed entry falls back to the CSS presets. */
+/** Dragged drawer widths survive reopens; a malformed or too-narrow entry falls back to the CSS presets. */
 function readDrawerWidth(): number | undefined {
   try {
     const raw = globalThis.localStorage?.getItem(DRAWER_WIDTH_KEY)
     if (!raw) return undefined
     const px = Number(raw)
-    return Number.isFinite(px) && px >= 240 ? px : undefined
+    return Number.isFinite(px) && px >= DRAWER_MIN_PX ? px : undefined
   } catch {
     return undefined
   }
@@ -292,8 +294,6 @@ export function useDrawerGuard(): DrawerGuard {
     if (action) applyDrawerAction(action)
   }, [pendingDrawerAction, applyDrawerAction])
   const cancelDrawerAction = useCallback(() => setPendingDrawerAction(undefined), [])
-  // The widen toggle is a preset: switching it drops any dragged width so the preset applies.
-  const toggleDrawerWide = useCallback(() => { setWidthPx(undefined); setDrawerWide(value => !value) }, [])
   const setDrawerWidthPx = useCallback((px: number | undefined) => {
     setWidthPx(px)
     try {
@@ -301,6 +301,14 @@ export function useDrawerGuard(): DrawerGuard {
       else globalThis.localStorage?.setItem(DRAWER_WIDTH_KEY, String(Math.round(px)))
     } catch { /* a quota or privacy-mode failure must not break resizing */ }
   }, [])
+  // The widen control follows the width actually on screen. A dragged width is not
+  // the wide preset, so the next click clears it and applies 90cqw instead of
+  // collapsing to the narrow preset.
+  const toggleDrawerWide = useCallback(() => {
+    const effective = drawerWide && drawerWidthPx === undefined
+    setDrawerWidthPx(undefined)
+    setDrawerWide(!effective)
+  }, [drawerWide, drawerWidthPx, setDrawerWidthPx])
   // Leaving the persona page settles the guard: a saved page has nothing left to hold.
   useEffect(() => {
     if (drawerTab !== 'persona') { setPersonaDirty(false); setPendingDrawerAction(undefined) }

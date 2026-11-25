@@ -701,13 +701,15 @@ function WorkRow({ locale, item, pending, onAccept, onReject, onAnswer, onResume
       </div>
       {actions ? (
         <div className="dsh-dot-work-actions">
-          <span className="dsh-dot-work-act-group" data-kind="primary">
-            {lookOpen && typeof look === 'object' && look ? <Button variant="primary" size="sm" onClick={() => onAnswer({ id: look.id, allow: true })}>{t(locale, 'workLookAccept')}</Button> : null}
-            {lookOpen && typeof look === 'object' && look ? <Button variant="ghost" size="sm" aria-expanded={rejectMode === 'look'} onClick={() => setRejectMode(m => m === 'look' ? undefined : 'look')}>{t(locale, 'workLookReject')}</Button> : null}
-            {accept ? <Button variant="primary" size="sm" onClick={() => onAccept(accept)}>{t(locale, 'workAccept')}</Button> : null}
-            {reject ? <Button variant="ghost" size="sm" aria-expanded={rejectMode === 'reject'} onClick={() => setRejectMode(m => m === 'reject' ? undefined : 'reject')}>{t(locale, 'workReject')}</Button> : null}
-            {integrates.includes('merge') ? <Button variant="primary" size="sm" disabled={integrateBusy} onClick={() => void runIntegrate('merge')}>{t(locale, 'workIntegrateMerge')}</Button> : null}
-          </span>
+          {(lookOpen && typeof look === 'object' && look) || accept || reject || integrates.includes('merge') ? (
+            <span className="dsh-dot-work-act-group" data-kind="primary">
+              {lookOpen && typeof look === 'object' && look ? <Button variant="primary" size="sm" onClick={() => onAnswer({ id: look.id, allow: true })}>{t(locale, 'workLookAccept')}</Button> : null}
+              {lookOpen && typeof look === 'object' && look ? <Button variant="ghost" size="sm" aria-expanded={rejectMode === 'look'} onClick={() => setRejectMode(m => m === 'look' ? undefined : 'look')}>{t(locale, 'workLookReject')}</Button> : null}
+              {accept ? <Button variant="primary" size="sm" onClick={() => onAccept(accept)}>{t(locale, 'workAccept')}</Button> : null}
+              {reject ? <Button variant="ghost" size="sm" aria-expanded={rejectMode === 'reject'} onClick={() => setRejectMode(m => m === 'reject' ? undefined : 'reject')}>{t(locale, 'workReject')}</Button> : null}
+              {integrates.includes('merge') ? <Button variant="primary" size="sm" disabled={integrateBusy} onClick={() => void runIntegrate('merge')}>{t(locale, 'workIntegrateMerge')}</Button> : null}
+            </span>
+          ) : null}
           {resume || integrates.includes('keep') ? (
             <span className="dsh-dot-work-act-group" data-kind="secondary">
               {resume ? <Button variant="ghost" size="sm" onClick={() => onResume(resume)}>{t(locale, 'workResume')}</Button> : null}

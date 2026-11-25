@@ -8,7 +8,7 @@
  * server.
  */
 import { Button, Checkbox, IconChevronRightOutlineRegular, IconCloseOutlineRegular, IconSearchOutlineRegular, Input, SegmentedTabs, type SegmentedTab } from '@deepseek-ai/dsh-client-ui-primitives'
-import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from 'react'
+import { useEffect, useId, useMemo, useRef, useState, type MouseEvent, type ReactNode } from 'react'
 import { mcpCredentialName, mcpPrefix, mcpServerOf, isMcpServerUrl, MCP_NEW_SERVER_NAME_PATTERN, type CapabilityGrant, type CapabilityCatalogView, type CapabilityGroupView, type CapabilityToolView, type DotMcpCatalogEntry, type DotMcpListView, type DotMcpServer, type DotMcpServerView, type DotSettings } from './contracts.ts'
 import type { SettingsApi, SettingsPatch } from './settings-panel.tsx'
 import { PaneSkeleton } from './settings-panel.tsx'
@@ -177,10 +177,14 @@ export function CapabilitiesMcpPanel({ locale, api, settings, zone, onPick, onSa
   const [customUrl, setCustomUrl] = useState('')
   const [customToken, setCustomToken] = useState('')
   const [customError, setCustomError] = useState('')
-  // Manual details toggles: id → open override; consulted once per render and
-  // dropped again as soon as the user re-toggles, so automatic answers
-  // (grants, search) resume ownership instead of sticking.
+  // Summary clicks record the user's choice against the automatic answer
+  // then showing. Search, and any later change to that automatic answer,
+  // drop the override. The native toggle event is ignored: mounting
+  // <details open> fires one and would lock the first painted state.
   const manual = useRef<Record<string, boolean>>({})
+  const manualAuto = useRef<Record<string, boolean>>({})
+  const needleSeen = useRef<string | null>(null)
+  const [detailsRev, bumpDetails] = useState(0)
 
   if (api.capabilities === undefined && api.mcpList === undefined) return null
   const capPending = api.capabilities !== undefined && cap.view === undefined && cap.error === ''
@@ -279,6 +283,13 @@ export function CapabilitiesMcpPanel({ locale, api, settings, zone, onPick, onSa
 
   /* ---------- capability catalog helpers ---------- */
   const capNeedle = capFilter.trim().toLowerCase()
+  if (needleSeen.current !== capNeedle) {
+    if (needleSeen.current !== null) {
+      manual.current = {}
+      manualAuto.current = {}
+    }
+    needleSeen.current = capNeedle
+  }
   const matchesTool = (tool: CapabilityToolView) => capNeedle === '' || tool.name.toLowerCase().includes(capNeedle) || (tool.description ?? '').toLowerCase().includes(capNeedle)
   const displayedLabel = (group: CapabilityGroupView): string =>
     group.kind === 'host' ? t(locale, 'sCapHostGroup')
@@ -319,9 +330,26 @@ export function CapabilitiesMcpPanel({ locale, api, settings, zone, onPick, onSa
    * while any grant is in effect; a manual toggle wins once, then reverts to
    * the automatic answer so the view never sticks open.
    */
-  const expandDetails = (id: string, auto: boolean): boolean => manual.current[id] ?? auto
-  const toggleDetails = (id: string, open: boolean) => {
-    manual.current[id] = open
+  const expandDetails = (id: string, auto: boolean): boolean => {
+    void detailsRev
+    if (capNeedle !== '') return auto
+    const picked = manual.current[id]
+    if (picked === undefined) return auto
+    if (manualAuto.current[id] !== auto) {
+      delete manual.current[id]
+      delete manualAuto.current[id]
+      return auto
+    }
+    return picked
+  }
+  const onDetailsClick = (id: string, auto: boolean) => (event: MouseEvent<HTMLElement>) => {
+    const target = event.target as { closest?: (selector: string) => unknown } | null
+    if (target && typeof target.closest === 'function' && target.closest('button, a, input, textarea, [role="tab"]')) return
+    const details = event.currentTarget.parentElement
+    if (!details || details.tagName !== 'DETAILS') return
+    manual.current[id] = !(details as HTMLDetailsElement).open
+    manualAuto.current[id] = auto
+    bumpDetails(rev => rev + 1)
   }
 
   /** Compact collapsed row of one tool inside an expanded group body. */
@@ -378,11 +406,8 @@ export function CapabilitiesMcpPanel({ locale, api, settings, zone, onPick, onSa
     const autoOpen = displayOnly || granted || capNeedle !== ''
     const open = expandDetails(`group:${group.id}`, autoOpen)
     return (
-      <details key={group.id} className="dsh-dot-cap-group" data-grant={displayGrant === 'off' ? 'off' : undefined} open={open} onToggle={event => {
-        const el = event.currentTarget as HTMLDetailsElement
-        if (event.target === el) toggleDetails(`group:${group.id}`, el.open)
-      }}>
-        <summary className="dsh-dot-cap-head">
+      <details key={group.id} className="dsh-dot-cap-group" data-grant={displayGrant === 'off' ? 'off' : undefined} open={open}>
+        <summary className="dsh-dot-cap-head" onClick={onDetailsClick(`group:${group.id}`, autoOpen)}>
           <IconChevronRightOutlineRegular size={12} className="dsh-dot-cap-chev" />
           <span className="dsh-dot-cap-name" title={group.id}>
             {group.kind === 'mcp' && group.status !== undefined ? <McpStateDot state={group.status.state} /> : null}
@@ -502,11 +527,8 @@ export function CapabilitiesMcpPanel({ locale, api, settings, zone, onPick, onSa
       )
     }
     return (
-      <details key={server.name} className="dsh-dot-mcp-row dsh-dot-mcp-server" open={open} onToggle={event => {
-        const el = event.currentTarget as HTMLDetailsElement
-        if (event.target === el) toggleDetails(`server:${server.name}`, el.open)
-      }}>
-        <summary className="dsh-dot-mcp-summary">
+      <details key={server.name} className="dsh-dot-mcp-row dsh-dot-mcp-server" open={open}>
+        <summary className="dsh-dot-mcp-summary" onClick={onDetailsClick(`server:${server.name}`, autoOpen)}>
           <IconChevronRightOutlineRegular size={12} className="dsh-dot-cap-chev" />
           <div className="dsh-dot-mcp-line">
             <McpStateDot state={server.status?.state ?? (server.enabled ? 'connecting' : 'off')} />

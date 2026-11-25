@@ -237,6 +237,7 @@ export function useScrollPin(activitySig: string, watch: readonly unknown[]): {
 export interface DrawerGuard {
   readonly drawerTab: DrawerTab | null
   readonly drawerWide: boolean
+  readonly drawerWidthPx: number | undefined
   readonly personaDirty: boolean
   readonly discardSignal: number
   readonly pendingDrawerAction: DrawerAction | undefined
@@ -246,6 +247,21 @@ export interface DrawerGuard {
   readonly cancelDrawerAction: () => void
   readonly setPersonaDirty: (dirty: boolean) => void
   readonly toggleDrawerWide: () => void
+  readonly setDrawerWidthPx: (px: number | undefined) => void
+}
+
+const DRAWER_WIDTH_KEY = 'dsh-dot:drawer-width'
+
+/** Dragged drawer widths survive reopens; a malformed entry falls back to the CSS presets. */
+function readDrawerWidth(): number | undefined {
+  try {
+    const raw = globalThis.localStorage?.getItem(DRAWER_WIDTH_KEY)
+    if (!raw) return undefined
+    const px = Number(raw)
+    return Number.isFinite(px) && px >= 240 ? px : undefined
+  } catch {
+    return undefined
+  }
 }
 
 /**
@@ -256,6 +272,7 @@ export interface DrawerGuard {
 export function useDrawerGuard(): DrawerGuard {
   const [drawerTab, setDrawerTab] = useState<DrawerTab | null>(null)
   const [drawerWide, setDrawerWide] = useState(false)
+  const [drawerWidthPx, setWidthPx] = useState<number | undefined>(readDrawerWidth)
   const [personaDirty, setPersonaDirty] = useState(false)
   const [discardSignal, setDiscardSignal] = useState(0)
   const [pendingDrawerAction, setPendingDrawerAction] = useState<DrawerAction>()
@@ -275,13 +292,21 @@ export function useDrawerGuard(): DrawerGuard {
     if (action) applyDrawerAction(action)
   }, [pendingDrawerAction, applyDrawerAction])
   const cancelDrawerAction = useCallback(() => setPendingDrawerAction(undefined), [])
-  const toggleDrawerWide = useCallback(() => setDrawerWide(value => !value), [])
+  // The widen toggle is a preset: switching it drops any dragged width so the preset applies.
+  const toggleDrawerWide = useCallback(() => { setWidthPx(undefined); setDrawerWide(value => !value) }, [])
+  const setDrawerWidthPx = useCallback((px: number | undefined) => {
+    setWidthPx(px)
+    try {
+      if (px === undefined) globalThis.localStorage?.removeItem(DRAWER_WIDTH_KEY)
+      else globalThis.localStorage?.setItem(DRAWER_WIDTH_KEY, String(Math.round(px)))
+    } catch { /* a quota or privacy-mode failure must not break resizing */ }
+  }, [])
   // Leaving the persona page settles the guard: a saved page has nothing left to hold.
   useEffect(() => {
     if (drawerTab !== 'persona') { setPersonaDirty(false); setPendingDrawerAction(undefined) }
   }, [drawerTab])
   useEffect(() => { if (!personaDirty) setPendingDrawerAction(undefined) }, [personaDirty])
-  return { drawerTab, drawerWide, personaDirty, discardSignal, pendingDrawerAction, configOpen: drawerTab !== null && CONFIG_TABS.has(drawerTab), requestDrawer, discardDrawerAction, cancelDrawerAction, setPersonaDirty, toggleDrawerWide }
+  return { drawerTab, drawerWide, drawerWidthPx, personaDirty, discardSignal, pendingDrawerAction, configOpen: drawerTab !== null && CONFIG_TABS.has(drawerTab), requestDrawer, discardDrawerAction, cancelDrawerAction, setPersonaDirty, toggleDrawerWide, setDrawerWidthPx }
 }
 
 export interface ReminderRemoval {

@@ -93,6 +93,7 @@ const deUi: UiText = {
   closeDrawer: 'Seitenleiste schließen',
   widenDrawer: 'Seitenleiste verbreitern',
   narrowDrawer: 'Standardbreite wiederherstellen',
+  resizeDrawer: 'Seitenleistenbreite anpassen',
   filterAll: 'Alle',
   filterWaiting: 'Braucht dich',
   filterActive: 'In Arbeit',

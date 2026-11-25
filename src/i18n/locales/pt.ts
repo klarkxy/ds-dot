@@ -93,6 +93,7 @@ const ptUi: UiText = {
   closeDrawer: 'Fechar painel lateral',
   widenDrawer: 'Alargar painel lateral',
   narrowDrawer: 'Restaurar largura do painel lateral',
+  resizeDrawer: 'Ajustar largura do painel lateral',
   filterAll: 'Tudo',
   filterWaiting: 'Precisa de você',
   filterActive: 'Em andamento',

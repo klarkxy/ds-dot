@@ -93,6 +93,7 @@ const jaUi: UiText = {
   closeDrawer: 'ドロワーを閉じる',
   widenDrawer: 'ドロワーを広げる',
   narrowDrawer: 'ドロワー幅を戻す',
+  resizeDrawer: 'ドロワー幅を調整',
   filterAll: 'すべて',
   filterWaiting: '要対応',
   filterActive: '進行中',

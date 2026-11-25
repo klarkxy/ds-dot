@@ -815,6 +815,37 @@ describe('ChatPanel activity and notice cards', () => {
     await act(async () => { widen.click() })
     expect(drawer.hasAttribute('data-wide')).toBe(true)
 
+    // The drawer always overlays the stage: the layer stays absolutely positioned and the backdrop is never hidden.
+    expect(chatCss).not.toContain('@container (min-width: 860px)')
+    expect(chatCss).not.toContain('@container (min-width: 960px)')
+    expect(chatCss).not.toContain('.dsh-dot-drawer-backdrop { display: none')
+
+    // Dragging the left edge resizes the drawer and persists the width across reopens.
+    const layer = document.querySelector<HTMLElement>('.dsh-dot-drawer-layer')!
+    Object.defineProperty(layer, 'clientWidth', { configurable: true, value: 1000 })
+    Object.defineProperty(drawer, 'getBoundingClientRect', { configurable: true, value: () => { const width = Number.parseFloat(drawer.style.width) || 800; return { left: 1000 - width, right: 1000, width, top: 0, bottom: 600, height: 600, x: 1000 - width, y: 0, toJSON: () => ({}) } } })
+    const handle = drawer.querySelector<HTMLElement>('.dsh-dot-drawer-resize')!
+    expect(handle.getAttribute('role')).toBe('slider')
+    await act(async () => { handle.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'ArrowLeft', bubbles: true })) })
+    expect(drawer.style.width).toBe('816px')
+    expect(dom.window.localStorage.getItem('dsh-dot:drawer-width')).toBe('816')
+    await act(async () => { handle.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true })) })
+    expect(drawer.style.width).toBe('800px')
+    // The clamp never lets the drawer exceed the stage width.
+    await act(async () => { handle.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'ArrowLeft', shiftKey: true, bubbles: true })) })
+    await act(async () => { handle.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'ArrowLeft', shiftKey: true, bubbles: true })) })
+    await act(async () => { handle.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'ArrowLeft', shiftKey: true, bubbles: true })) })
+    expect(drawer.style.width).toBe('992px')
+    await act(async () => { handle.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'ArrowLeft', shiftKey: true, bubbles: true })) })
+    expect(drawer.style.width).toBe('1000px')
+    // Double-click resets to the CSS preset and clears the stored width; a dragged width hides the wide preset.
+    await act(async () => { handle.dispatchEvent(new dom.window.MouseEvent('dblclick', { bubbles: true })) })
+    expect(drawer.style.width).toBe('')
+    expect(dom.window.localStorage.getItem('dsh-dot:drawer-width')).toBeNull()
+    expect(drawer.hasAttribute('data-wide')).toBe(true)
+    await act(async () => { handle.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'ArrowLeft', bubbles: true })) })
+    expect(drawer.hasAttribute('data-wide')).toBe(false)
+
     // The gear closes its own drawer; the tasks button opens the other one, with no settings nav.
     await act(async () => { gear.click() })
     expect(document.querySelector('aside.dsh-dot-drawer')).toBeNull()

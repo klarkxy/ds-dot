@@ -94,6 +94,7 @@ export const zhUi = {
   closeDrawer: '关闭抽屉',
   widenDrawer: '加宽抽屉',
   narrowDrawer: '恢复抽屉宽度',
+  resizeDrawer: '调整抽屉宽度',
   filterAll: '全部',
   filterWaiting: '待你处理',
   filterActive: '进行中',

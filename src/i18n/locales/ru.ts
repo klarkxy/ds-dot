@@ -93,6 +93,7 @@ const ruUi: UiText = {
   closeDrawer: 'Закрыть панель',
   widenDrawer: 'Расширить панель',
   narrowDrawer: 'Восстановить ширину панели',
+  resizeDrawer: 'Изменить ширину панели',
   filterAll: 'Все',
   filterWaiting: 'Ждут вас',
   filterActive: 'В работе',

@@ -93,6 +93,7 @@ const frUi: UiText = {
   closeDrawer: 'Fermer le panneau',
   widenDrawer: 'Élargir le panneau',
   narrowDrawer: 'Rétablir la largeur du panneau',
+  resizeDrawer: 'Ajuster la largeur du panneau',
   filterAll: 'Tout',
   filterWaiting: 'À traiter',
   filterActive: 'En cours',

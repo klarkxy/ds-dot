@@ -139,6 +139,7 @@ const ptUi: UiText = {
   unread: 'não lida(s)',
   boardWaiting: 'Precisa de você',
   boardWatched: 'Sessões observadas',
+  watchClose: 'Parar de observar',
   priorityHigh: 'Alta prioridade',
   approval: 'Aprovação',
   question: 'Pergunta',

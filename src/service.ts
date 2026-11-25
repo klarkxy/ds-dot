@@ -1332,6 +1332,8 @@ export class DotService {
   reconcile(): Promise<void> { return this.track(() => this.reconcileNow()) }
 
   private async reconcileNow(): Promise<void> {
+    // A restart otherwise keeps showing watches the human already archived.
+    await this.syncWatched().catch(error => this.options.log?.(`dsh-dot: watched sessions were not reconciled: ${messageOf(error)}`))
     // Pending requests do not survive a restart, so a keep-alive approval card
     // left behind by one can never be answered again; expire it up front.
     const live = new Set(this.pending.list().map(row => row.id))
@@ -1459,7 +1461,9 @@ export class DotService {
   overview(signal: AbortSignal, limit = 30): Promise<string> { return this.track(() => this.overviewNow(signal, limit)) }
 
   private async overviewNow(signal: AbortSignal, limit: number): Promise<string> {
-    const rows = (await this.host.listSessions(signal))
+    const listed = await this.host.listSessions(signal)
+    await this.retireWatched(listed)
+    const rows = listed
       .filter(row => !row.subagent && !row.blank && !this.isDot(row.sessionId))
       .sort((a, b) => b.updatedAt - a.updatedAt)
     const shown = rows.filter(row => !row.archived).slice(0, limit)
@@ -1686,12 +1690,77 @@ export class DotService {
     return `Watching ${task.sessionId}.`
   }
 
+  /**
+   * The human dismissed a watch from the board. The host session stays as it is:
+   * this does not archive it, and a session dot started is not a watch.
+   */
+  unwatch(sessionId: string): Promise<boolean> { return this.serial(() => this.unwatchNow(sessionId)) }
+
+  private async unwatchNow(sessionId: string): Promise<boolean> {
+    if (this.closing) return false
+    return this.store.untrack(sessionId)
+  }
+
+  /** The host archived this session. A watched row stops looking idle; the host session is not archived again. */
+  noteSessionArchived(sessionId: string): Promise<void> {
+    return this.retireWatch(sessionId)
+  }
+
+  /**
+   * The host dropped a session from its live registry. Confirm against the
+   * current list so an unload that leaves the session visible does not retire it.
+   */
+  noteSessionRemoved(sessionId: string): Promise<void> {
+    const task = this.store.task(sessionId)
+    if (!task || task.origin !== 'watched' || task.status === 'archived') return Promise.resolve()
+    return this.syncWatched()
+  }
+
+  /**
+   * Mark watched sessions the host has archived or no longer lists. A failed
+   * list leaves every watch as it was. Sessions dot started are not touched.
+   */
+  async syncWatched(signal?: AbortSignal): Promise<void> {
+    if (this.closing) return
+    if (!this.store.list().some(task => task.origin === 'watched' && task.status !== 'archived')) return
+    let rows: Awaited<ReturnType<DotHost['listSessions']>>
+    try {
+      rows = await this.host.listSessions(signal ?? AbortSignal.timeout(15_000))
+    } catch {
+      return
+    }
+    await this.retireWatched(rows)
+  }
+
+  private async retireWatched(rows: readonly { readonly sessionId: string; readonly archived: boolean }[]): Promise<void> {
+    if (this.closing) return
+    const byId = new Map(rows.map(row => [row.sessionId, row]))
+    for (const task of this.store.list()) {
+      if (task.origin !== 'watched' || task.status === 'archived') continue
+      const row = byId.get(task.sessionId)
+      if (row && !row.archived) continue
+      await this.retireWatch(task.sessionId)
+    }
+  }
+
+  private retireWatch(sessionId: string): Promise<void> {
+    if (this.closing) return Promise.resolve()
+    const task = this.store.task(sessionId)
+    if (!task || task.origin !== 'watched' || task.status === 'archived') return Promise.resolve()
+    return this.store.apply({ type: 'archived', sessionId, at: this.now() }, this.pending.list()).then(() => undefined)
+  }
+
   read(sessionId: string, maxChars = 4000): Promise<string> { return this.track(() => this.readNow(sessionId, maxChars)) }
 
   private async readNow(sessionId: string, maxChars: number): Promise<string> {
     const reply = await this.host.latestReply(sessionId, Math.max(200, Math.min(maxChars, 20_000)))
-    const task = this.store.task(sessionId)
     this.assertOpen()
+    const watched = this.store.task(sessionId)
+    if (watched?.origin === 'watched' && watched.status !== 'archived') {
+      await this.syncWatched()
+      this.assertOpen()
+    }
+    const task = this.store.task(sessionId)
     if (task) await this.store.markSeen(sessionId)
     const head = task ? `${task.status.toUpperCase()} "${task.title}" goal: ${task.goal}` : 'untracked session'
     // A run that settled earns its cost on its own line; capture it first when

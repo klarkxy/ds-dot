@@ -34,6 +34,8 @@ export interface BoardProps {
   readonly onOpen: (sessionId: string) => void
   readonly onRetry: () => void
   readonly onRemoveSchedule: (id: string) => void
+  /** Dismiss a watch. Does not archive the host session. */
+  readonly onUnwatch?: (sessionId: string) => void
   /** Suppress the empty hint when WorkBoardPanel above already renders Changes. */
   readonly suppressEmpty?: boolean
 }
@@ -46,7 +48,7 @@ function GroupTitle({ title, count }: { title: string; count?: number }) {
  * Board: requests waiting on the human, watched sessions and Dorothy's reminders.
  * Pure render over a board snapshot; the work changes are drawn above by WorkBoardPanel.
  */
-export function Board({ locale, view, error, filter = 'all', onOpen, onRetry, onRemoveSchedule, suppressEmpty }: BoardProps) {
+export function Board({ locale, view, error, filter = 'all', onOpen, onRetry, onRemoveSchedule, onUnwatch, suppressEmpty }: BoardProps) {
   if (view === undefined) {
     return (
       <div className={BOARD_ROOT}>
@@ -87,16 +89,19 @@ export function Board({ locale, view, error, filter = 'all', onOpen, onRetry, on
           <section className="dsh-ui-stack" aria-label={t(locale, 'boardWatched')}>
             <GroupTitle title={t(locale, 'boardWatched')} count={filter === 'active' ? groups.watched.filter(task => task.status === 'running').length : groups.watched.length} />
             {(filter === 'active' ? groups.watched.filter(task => task.status === 'running') : groups.watched).map(task => (
-              <button key={task.sessionId} type="button" className="dsh-dot-row" onClick={() => onOpen(task.sessionId)}>
-                <StateDot state={DOT[task.status]} />
-                <span className="dsh-dot-main">
-                  <span className="dsh-ui-compact dsh-ui-truncate">{task.title}</span>
-                  {task.lastNote ? <span className="dsh-ui-hint dsh-ui-truncate">{task.lastNote}</span> : null}
-                </span>
-                <span className="dsh-ui-spacer" />
-                {task.unseenTurns > 0 ? <span className="dsh-ui-meta">{task.unseenTurns} {t(locale, 'unread')}</span> : null}
-                <Tag tone="outline">{t(locale, task.status)}</Tag>
-              </button>
+              <div key={task.sessionId} className="dsh-dot-row dsh-dot-watch">
+                <button type="button" className="dsh-dot-watch-open" onClick={() => onOpen(task.sessionId)}>
+                  <StateDot state={DOT[task.status]} />
+                  <span className="dsh-dot-main">
+                    <span className="dsh-ui-compact dsh-ui-truncate">{task.title}</span>
+                    {task.lastNote ? <span className="dsh-ui-hint dsh-ui-truncate">{task.lastNote}</span> : null}
+                  </span>
+                  <span className="dsh-ui-spacer" />
+                  {task.unseenTurns > 0 ? <span className="dsh-ui-meta">{task.unseenTurns} {t(locale, 'unread')}</span> : null}
+                  <Tag tone="outline">{t(locale, task.status)}</Tag>
+                </button>
+                <button type="button" className="dsh-dot-watch-close" aria-label={t(locale, 'watchClose')} title={t(locale, 'watchClose')} onClick={() => onUnwatch?.(task.sessionId)}>×</button>
+              </div>
             ))}
             {shows('watch') && groups.watchedArchived > 0 ? <span className="dsh-ui-hint">{t(locale, 'archived')} · {groups.watchedArchived}</span> : null}
           </section>
@@ -139,6 +144,20 @@ export const boardCss = `
 }
 .dsh-dot-board .dsh-dot-row:hover { background: var(--dsw-alias-interactive-bg-hover); }
 .dsh-dot-board .dsh-dot-row > [data-state] { flex-shrink: 0; }
+.dsh-dot-board .dsh-dot-watch { cursor: default; padding-right: 6px; }
+.dsh-dot-board .dsh-dot-watch-open {
+  display: flex; align-items: center; gap: 10px; flex: 1; min-width: 0;
+  padding: 0; border: 0; background: none; color: inherit; font: inherit; text-align: left; cursor: pointer;
+}
+.dsh-dot-board .dsh-dot-watch-open > [data-state] { flex-shrink: 0; }
+.dsh-dot-board .dsh-dot-watch-open > .dsh-ui-meta { white-space: nowrap; flex-shrink: 0; }
+.dsh-dot-board .dsh-dot-watch-close {
+  flex-shrink: 0; width: 28px; height: 28px; padding: 0;
+  border: 0; border-radius: var(--dsw-radius-sm);
+  background: none; color: var(--dsw-alias-label-secondary);
+  font: inherit; font-size: 16px; line-height: 1; cursor: pointer;
+}
+.dsh-dot-board .dsh-dot-watch-close:hover { background: var(--dsw-alias-interactive-bg-hover); color: var(--dsw-alias-label-primary); }
 .dsh-dot-board .dsh-dot-main { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .dsh-dot-board .dsh-dot-reminder {
   display: flex; align-items: center; gap: 10px; min-width: 0; padding: 8px 8px 8px 12px;

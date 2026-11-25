@@ -140,6 +140,7 @@ export const zhUi = {
   unread: '条未读',
   boardWaiting: '待处理',
   boardWatched: '关注会话',
+  watchClose: '取消关注',
   priorityHigh: '高优先级',
   approval: '审批',
   question: '提问',

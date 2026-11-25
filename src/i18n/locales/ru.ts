@@ -139,6 +139,7 @@ const ruUi: UiText = {
   unread: 'непрочит.',
   boardWaiting: 'Ждут вас',
   boardWatched: 'Отслеживаемые сеансы',
+  watchClose: 'Перестать отслеживать',
   priorityHigh: 'Высокий приоритет',
   approval: 'Утверждение',
   question: 'Вопрос',

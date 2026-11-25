@@ -363,6 +363,16 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
     const id = sessionIdOf(agent)
     if (id && (status === 'running' || status === 'idle')) service.onStatus(id, status)
   })), 'dot.status')
+  // Archive is not an agent status. The host keeps the session readable and
+  // Dorothy's last idle status would otherwise stay on the board forever.
+  const onHost = (name: string, listener: (...args: never[]) => void) => (ctx as unknown as { on(event: string, fn: (...args: never[]) => void): () => void }).on(name, listener)
+  ctx.effect(() => onHost('workspace/session-archived', ((request: { sessionId?: string }) => {
+    const id = request?.sessionId
+    if (typeof id === 'string' && id) guard(() => service.noteSessionArchived(id))
+  }) as never), 'dot.watch-archive')
+  ctx.effect(() => onHost('api-session/removed', ((sessionId: string) => {
+    if (typeof sessionId === 'string' && sessionId) guard(() => service.noteSessionRemoved(sessionId))
+  }) as never), 'dot.watch-removed')
   ctx.effect(() => ctx.on('agent/turn-stopping', ({ agent }: { agent: AgentLike }) => {
     const id = sessionIdOf(agent)
     // Read the reply after the boundary commits; the stopping hook must not wait on it.
@@ -523,7 +533,10 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
       }
       switch (endpoint) {
         case 'locale.sync': return { ok: true, value: await service.syncLocale(str(payload, 'locale') || str(payload, 'uiLocale')) }
-        case 'board': return { ok: true, value: service.board() }
+        case 'board': {
+          await service.syncWatched(signal)
+          return { ok: true, value: service.board() }
+        }
         case 'attention': return { ok: true, value: service.attention() }
         case 'ensure': return { ok: true, value: { sessionId: await ensureDot() } }
         case 'chat': {
@@ -639,6 +652,10 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
         case 'schedule.remove': {
           const id = field(payload, 'id')
           return { ok: true, value: typeof id === 'string' ? await service.removeSchedule(id) : false }
+        }
+        case 'watch.remove': {
+          const id = field(payload, 'id')
+          return { ok: true, value: typeof id === 'string' ? await service.unwatch(id) : false }
         }
         case 'work.list': {
           return { ok: true, value: service.workList() }

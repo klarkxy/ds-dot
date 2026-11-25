@@ -99,6 +99,24 @@ describe('Board', () => {
   it('draws the Chinese copy for the groups and states', async () => {
     const { root } = await render(full, {}, 'zh')
     expect(labels()).toEqual(['待处理', '关注会话', '提醒'])
+    expect(document.querySelector('button.dsh-dot-watch-close')?.getAttribute('aria-label')).toBe('取消关注')
+    await act(async () => root.unmount())
+  })
+
+  it('closes a watched session with X without opening it or removing a reminder', async () => {
+    const onUnwatch = vi.fn()
+    const { props, root } = await render(full, { onUnwatch })
+    const watched = document.querySelector('section[aria-label="Watched sessions"]')!
+    const close = watched.querySelector('button.dsh-dot-watch-close')!
+    expect(close.getAttribute('aria-label')).toBe('Stop watching')
+    expect(close.textContent).toBe('×')
+    expect(close.textContent).not.toBe('Remove')
+    await click(close)
+    expect(onUnwatch).toHaveBeenCalledWith('w-1')
+    expect(props.onOpen).not.toHaveBeenCalled()
+    expect(props.onRemoveSchedule).not.toHaveBeenCalled()
+    await click(watched.querySelector('button.dsh-dot-watch-open')!)
+    expect(props.onOpen).toHaveBeenCalledWith('w-1')
     await act(async () => root.unmount())
   })
 })

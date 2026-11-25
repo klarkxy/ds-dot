@@ -106,7 +106,7 @@ export function HelpTip({ locale, fieldLabel, text }: { locale: CopyLocale; fiel
   )
 }
 
-function Field({ label, tip, help, helpTone, trailing, children, locked, onLock }: {
+function Field({ label, tip, help, helpTone, trailing, children, locked, onLock, wide }: {
   label: string
   tip?: string | undefined
   help?: string | undefined
@@ -115,10 +115,12 @@ function Field({ label, tip, help, helpTone, trailing, children, locked, onLock 
   children: ReactNode
   locked?: boolean
   onLock?: (locked: boolean) => void
+  /** Spans every column of the responsive form grid (long pickers and lists). */
+  wide?: boolean
 }) {
   const locale = useContext(LocaleContext)
   return (
-    <div className="dsh-ui-field">
+    <div className={wide === true ? 'dsh-ui-field dsh-dot-field-wide' : 'dsh-ui-field'}>
       <div className="dsh-dot-setting-head">
         <span className="dsh-ui-label">
           <span>{label}</span>
@@ -131,6 +133,16 @@ function Field({ label, tip, help, helpTone, trailing, children, locked, onLock 
       </div>
       {children}
       {help ? <span className={helpTone === 'warn' ? 'dsh-ui-help dsh-ui-warn' : 'dsh-ui-help'}>{help}</span> : null}
+    </div>
+  )
+}
+
+/** Micro-headed group inside one settings card: separates topics without splitting the card. */
+export function Subgroup({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <div className="dsh-dot-subgroup">
+      <div className="dsh-dot-subhead">{label}</div>
+      <div className="dsh-ui-form">{children}</div>
     </div>
   )
 }
@@ -409,7 +421,7 @@ function FactoryResetField({ locale, api, onSaved }: { locale: CopyLocale; api: 
     })
   }
   return (
-    <div className="dsh-dot-pane-section dsh-dot-factory">
+    <div className="dsh-dot-pane-section dsh-dot-factory" data-tone="danger">
       <div className="dsh-dot-factory-head">
         <span className="dsh-ui-label">
           <span>{t(locale, 'sFactory')}</span>
@@ -607,8 +619,9 @@ export function SettingsPanel({ locale, api, settings, section = 'all', proposal
       {show('general') ? (
         <>
           <div className="dsh-dot-pane-section">
-            <div className="dsh-ui-form">
-              <Field label={t(locale, 'sModel')} help={modelHelp} helpTone={models.failed ? 'warn' : undefined} {...lock('model')}>
+            <div className="dsh-dot-subgroups">
+              <Subgroup label={t(locale, 'sGroupModel')}>
+              <Field label={t(locale, 'sModel')} help={modelHelp} helpTone={models.failed ? 'warn' : undefined} wide {...lock('model')}>
                 {renderModelPicker(renderFactorySlot, {
                   locale,
                   choices,
@@ -661,6 +674,8 @@ export function SettingsPanel({ locale, api, settings, section = 'all', proposal
                   </div>
                 ) : null}
               </Field>
+              </Subgroup>
+              <Subgroup label={t(locale, 'sGroupBehavior')}>
               <InlineField
                 label={t(locale, 'sReflection')}
                 tip={t(locale, 'sReflectionDesc')}
@@ -674,6 +689,7 @@ export function SettingsPanel({ locale, api, settings, section = 'all', proposal
                 below={api.updateStatus ? <AutoUpdateLine locale={locale} api={api} /> : null}
               />
               <DesktopNotifyField locale={locale} />
+              </Subgroup>
             </div>
           </div>
           {api.previewFactoryReset && api.confirmFactoryReset ? <FactoryResetField locale={locale} api={api} onSaved={onSaved} /> : null}
@@ -708,7 +724,7 @@ export function SettingsPanel({ locale, api, settings, section = 'all', proposal
             >
               <SegmentedChoice locale={locale} label={t(locale, 'sTaskPermission')} value={settings.taskPermission} options={permissionModes} labelKeyOf={opt => `sTaskPermission_${opt}`} onChange={next => save({ taskPermission: next })} />
             </Field>
-            <Field label={t(locale, 'sTaskModels')} help={taskModelsHelp} helpTone={taskModelsHelp ? 'warn' : undefined} {...lock('taskModels')}>
+            <Field label={t(locale, 'sTaskModels')} help={taskModelsHelp} helpTone={taskModelsHelp ? 'warn' : undefined} wide {...lock('taskModels')}>
               <SegmentedChoice locale={locale} label={t(locale, 'sTaskModels')} value={rule.mode} options={['all', 'allow', 'deny']} labelKeyOf={opt => `sTaskModels_${opt}`} onChange={next => save({ taskModels: { mode: next, list: rule.list } })} />
               {rule.mode === 'all' ? null : (
                 <div className="dsh-dot-model-picker" role="group" aria-label={t(locale, `sTaskModels_${rule.mode}`)}>
@@ -802,7 +818,7 @@ export function SettingsPanel({ locale, api, settings, section = 'all', proposal
         <div className="dsh-dot-pane-section">
           {allSections ? <h3 className="dsh-dot-pane-section-title">{t(locale, 'sCapabilities')}</h3> : null}
           <div className="dsh-ui-form">
-            <Field label={t(locale, 'sCapGrants')} tip={t(locale, 'sCapabilitiesDesc')} {...lock('capabilities')}>
+            <Field label={t(locale, 'sCapGrants')} tip={t(locale, 'sCapabilitiesDesc')} wide {...lock('capabilities')}>
               <CapabilitiesMcpPanel locale={locale} api={api} settings={settings} zone="capabilities" onSaved={onSaved} onPick={(selector, grant) => {
                 const grants = { ...settings.capabilities?.grants }
                 if (grant === undefined) delete grants[selector]
@@ -830,6 +846,25 @@ export function SettingsPanel({ locale, api, settings, section = 'all', proposal
 
 // Selectors spell the root out (.dsh-dot-chat = CHAT_ROOT) so the repository scope check can read them.
 export const settingsCss = `
+/* Settings layout: micro-headed subgroups inside each card, and a responsive
+   two-column form grid once the drawer content is wide enough for it. */
+.dsh-dot-chat .dsh-dot-subgroups { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.dsh-dot-chat .dsh-dot-subgroup { display: flex; flex-direction: column; min-width: 0; }
+.dsh-dot-chat .dsh-dot-subhead {
+  margin: 6px 0 0; padding: 0 0 2px; font-size: 11px; line-height: 16px; font-weight: 600;
+  letter-spacing: 0.05em; text-transform: uppercase; color: var(--dsw-alias-label-tertiary); user-select: none;
+}
+.dsh-dot-chat .dsh-dot-settings-pane .dsh-ui-form { display: flex; flex-direction: column; }
+.dsh-dot-chat .dsh-dot-settings-pane .dsh-ui-form > .dsh-ui-field { min-width: 0; }
+/* Wide drawer: sibling fields pair into two aligned columns; composite inner
+   bodies (the task-model browser, capability list) keep their flex column. */
+@container (min-width: 600px) {
+  .dsh-dot-chat .dsh-dot-settings-pane .dsh-ui-form:has(> .dsh-ui-field + .dsh-ui-field) {
+    display: grid; grid-template-columns: repeat(2, minmax(0, 1fr));
+    column-gap: 24px; align-items: start;
+  }
+  .dsh-dot-chat .dsh-dot-settings-pane .dsh-ui-form > .dsh-dot-field-wide { grid-column: 1 / -1; }
+}
 .dsh-dot-chat .dsh-dot-setting-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 22px; }
 .dsh-dot-chat .dsh-dot-setting-tools { display: inline-flex; align-items: center; gap: 8px; flex-shrink: 0; }
 .dsh-dot-chat .dsh-dot-help-tip {
@@ -877,6 +912,9 @@ export const settingsCss = `
 .dsh-dot-chat .dsh-dot-proposal-chip--next { color: var(--dsw-alias-label-primary); font-weight: 500; border: 0.5px solid var(--dsw-alias-border-l2); }
 .dsh-dot-chat .dsh-dot-proposal-arrow { color: var(--dsw-alias-label-tertiary); font-size: 12px; }
 .dsh-dot-chat .dsh-dot-proposal-blocks { display: grid; gap: 8px; }
+@container (min-width: 560px) {
+  .dsh-dot-chat .dsh-dot-proposal-blocks { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+}
 .dsh-dot-chat .dsh-dot-proposal-blocks > div { display: flex; flex-direction: column; gap: 4px; }
 .dsh-dot-chat .dsh-dot-proposal-blocks > div > span { font-size: 11px; line-height: 16px; color: var(--dsw-alias-label-tertiary); }
 .dsh-dot-chat .dsh-dot-proposal-blocks pre {
@@ -919,6 +957,9 @@ export const settingsCss = `
 .dsh-dot-chat .dsh-dot-keepalive-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 8px; padding-top: 8px; border-top: 0.5px solid var(--dsw-alias-border-l1); }
 .dsh-dot-chat .dsh-dot-keepalive-label { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; line-height: 18px; color: var(--dsw-alias-label-secondary); min-width: 0; }
 .dsh-dot-chat .dsh-dot-factory { display: flex; flex-direction: column; gap: 10px; }
+/* The factory-reset card reads as a danger zone: quiet until opened, then the
+   destructive confirm keeps its red fill while everything else stays muted. */
+.dsh-dot-chat .dsh-dot-factory .dsh-ui-label { color: var(--dsw-alias-state-error-primary); }
 .dsh-dot-chat .dsh-dot-factory-head { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px 12px; }
 .dsh-dot-chat .dsh-dot-factory-preview { display: flex; flex-direction: column; gap: 8px; margin: 8px 0; padding: 10px 12px; border-radius: var(--dsw-radius-md); background: var(--dsw-alias-bg-layer-1); box-shadow: var(--dsw-elevation-stroke); }
 .dsh-dot-chat .dsh-dot-factory-preview ul { margin: 0; padding-left: 18px; font-size: 12px; line-height: 18px; color: var(--dsw-alias-label-secondary); }

@@ -7,7 +7,7 @@ import { Button, Input, Tag } from '@deepseek-ai/dsh-client-ui-primitives'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { CognitionEntry, DotSettings, KnowledgeEdit, KnowledgeView, SettingField } from './contracts.ts'
 import { ADDRESS_MAX_CHARS, PERSONA_MAX_CHARS, defaultAddress, defaultPersona } from './persona.ts'
-import { HelpTip, LockToggle, PaneSkeleton, type SaveNotice, type SettingsApi, type SettingsPatch } from './settings-panel.tsx'
+import { HelpTip, LockToggle, PaneSkeleton, Subgroup, type SaveNotice, type SettingsApi, type SettingsPatch } from './settings-panel.tsx'
 import { formatWhen, t, type CopyLocale } from './ui-copy.ts'
 
 export interface KnowledgeApi {
@@ -368,7 +368,8 @@ export function PersonaPanel({ locale, api, settings, onSaved, onStatusChange, d
       {!onStatusChange && status?.kind === 'saved' ? <div className="dsh-ui-notice" role="status">{t(locale, 'saved')}</div> : null}
       {!onStatusChange && status?.kind === 'error' ? <div className="dsh-ui-error" role="alert">{t(locale, 'saveFailed')}{status.message}</div> : null}
       <div className="dsh-dot-pane-section">
-        <div className="dsh-ui-form">
+        <div className="dsh-dot-subgroups">
+        <Subgroup label={t(locale, 'sGroupVoice')}>
         <div className="dsh-ui-field">
           <div className="dsh-dot-setting-head">
             <span className="dsh-ui-label">{t(locale, 'pAddress')}</span>
@@ -403,6 +404,7 @@ export function PersonaPanel({ locale, api, settings, onSaved, onStatusChange, d
             <Button variant="outline" size="sm" disabled={!personaCustom && !personaChanged} onClick={() => { setPersona(defaultPers); save({ persona: null }) }}>{t(locale, 'pRestore')}</Button>
           </div>
         </div>
+        </Subgroup>
         </div>
       </div>
       <KnowledgeSection locale={locale} api={api} onStatus={reportStatus} locked={settings.locks?.agreements === true} onLock={onLock} {...discardSignal === undefined ? {} : { discardSignal }} onDirtyChange={setKnowledgeDirty} />
@@ -414,11 +416,11 @@ export function PersonaPanel({ locale, api, settings, onSaved, onStatusChange, d
 // Selectors spell the root out (.dsh-dot-chat = CHAT_ROOT) so the repository scope check can read them.
 export const personaCss = `
 .dsh-dot-chat .dsh-dot-persona-row { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
-.dsh-dot-chat .dsh-dot-persona-row > :first-child { flex: 1 1 160px; min-width: 0; max-width: 260px; }
+.dsh-dot-chat .dsh-dot-persona-row > :first-child { flex: 1 1 160px; min-width: 0; max-width: 340px; }
 .dsh-dot-chat .dsh-dot-persona-row > button { flex-shrink: 0; white-space: nowrap; }
 .dsh-dot-chat .dsh-dot-persona-text { min-height: 180px; font-family: inherit; font-size: 13px; line-height: 1.6; }
 .dsh-dot-chat .dsh-dot-entries { display: flex; flex-direction: column; gap: 6px; }
-.dsh-dot-chat .dsh-dot-entry { display: flex; flex-direction: column; gap: 6px; padding: 8px 10px; border-radius: var(--dsw-radius-sm); background: var(--dsw-alias-bg-layer-1); }
+.dsh-dot-chat .dsh-dot-entry { display: flex; flex-direction: column; gap: 6px; padding: 8px 10px; border-radius: var(--dsw-radius-sm); background: var(--dsw-alias-bg-layer-1); box-shadow: var(--dsw-elevation-stroke); }
 .dsh-dot-chat .dsh-dot-entry-row { display: flex; align-items: flex-start; gap: 8px; }
 .dsh-dot-chat .dsh-dot-entry-text { flex: 1 1 auto; min-width: 0; font-size: 13px; line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; }
 .dsh-dot-chat .dsh-dot-entry[data-dormant] .dsh-dot-entry-text { color: var(--dsw-alias-label-tertiary); }
@@ -428,7 +430,7 @@ export const personaCss = `
 .dsh-dot-chat .dsh-dot-entry-add > :first-child { flex: 1 1 auto; min-width: 0; }
 .dsh-dot-chat .dsh-dot-versions-head { margin-top: 14px; }
 .dsh-dot-chat .dsh-dot-versions { display: flex; flex-direction: column; gap: 8px; margin-top: 6px; }
-.dsh-dot-chat .dsh-dot-version { display: flex; flex-direction: column; gap: 4px; padding: 8px 10px; border-radius: var(--dsw-radius-sm); background: var(--dsw-alias-bg-layer-1); }
+.dsh-dot-chat .dsh-dot-version { display: flex; flex-direction: column; gap: 4px; padding: 8px 10px; border-radius: var(--dsw-radius-sm); background: var(--dsw-alias-bg-layer-1); box-shadow: var(--dsw-elevation-stroke); }
 .dsh-dot-chat .dsh-dot-version-head { display: flex; align-items: center; gap: 8px; }
 .dsh-dot-chat .dsh-dot-version-head > button { flex-shrink: 0; white-space: nowrap; }
 .dsh-dot-chat .dsh-dot-version-time { font-size: 12px; line-height: 18px; color: var(--dsw-alias-label-tertiary); font-variant-numeric: tabular-nums; }

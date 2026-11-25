@@ -221,11 +221,18 @@ export const chatCss = settingsCss + `
 .dsh-dot-chat .dsh-dot-settings-pane { gap: 0; }
 .dsh-dot-chat .dsh-dot-settings-pane > .dsh-ui-notice,
 .dsh-dot-chat .dsh-dot-settings-pane > .dsh-ui-error { margin-bottom: 16px; }
-.dsh-dot-chat .dsh-dot-pane-section { padding: 18px 0; border-bottom: 0.5px solid var(--dsw-alias-border-l2); }
-.dsh-dot-chat .dsh-dot-pane > .dsh-dot-pane-section:first-child { padding-top: 0; }
-.dsh-dot-chat .dsh-dot-pane > .dsh-dot-pane-section:last-child { padding-bottom: 0; border-bottom: 0; }
+/* Each settings topic is one quiet card on the drawer's base surface. */
+.dsh-dot-chat .dsh-dot-pane-section {
+  margin: 0 0 14px; padding: 14px 16px 4px;
+  border-radius: var(--dsw-radius-md); background: var(--dsw-alias-bg-base);
+  box-shadow: var(--dsw-elevation-stroke);
+}
+.dsh-dot-chat .dsh-dot-pane-section:last-child { margin-bottom: 0; }
+.dsh-dot-chat .dsh-dot-pane-section[data-tone='danger'] {
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--dsw-alias-state-error-primary) 30%, transparent);
+}
 .dsh-dot-chat .dsh-dot-pane-section .dsh-ui-form > .dsh-ui-field:first-child { padding-top: 4px; }
-.dsh-dot-chat .dsh-dot-pane-section .dsh-ui-form > .dsh-ui-field:last-child { padding-bottom: 0; }
+.dsh-dot-chat .dsh-dot-pane-section .dsh-ui-form > .dsh-ui-field:last-child { padding-bottom: 12px; }
 .dsh-dot-chat .dsh-dot-pane-section-title {
   margin: 0 0 8px; font-size: 12px; line-height: 18px; font-weight: 600;
   color: var(--dsw-alias-label-secondary);

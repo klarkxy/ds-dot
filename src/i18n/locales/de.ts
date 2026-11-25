@@ -139,6 +139,7 @@ const deUi: UiText = {
   unread: 'ungelesen',
   boardWaiting: 'Braucht dich',
   boardWatched: 'Beobachtete Sitzungen',
+  watchClose: 'Beobachtung beenden',
   priorityHigh: 'Hohe Priorität',
   approval: 'Genehmigung',
   question: 'Frage',

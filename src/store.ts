@@ -534,6 +534,23 @@ export class DotStore {
     return this.put(task).then(() => task)
   }
 
+  /**
+   * Drop a watched session from the ledger. A session dot started is left
+   * alone, and nothing here archives or edits the host session.
+   */
+  untrack(sessionId: string): Promise<boolean> {
+    const task = this.tasks.get(sessionId)
+    if (!task || task.origin !== 'watched') return Promise.resolve(false)
+    this.tasks.delete(sessionId)
+    this.changed()
+    const domain = this.domain
+    const op = this.tail.then(async () => {
+      if (domain) await this.durable(() => domain.table('tasks').delete(sessionId))
+    })
+    this.tail = op.catch(() => undefined)
+    return op.then(() => true)
+  }
+
   apply(event: LedgerEvent, pending: readonly PendingView[]): Promise<TaskRecord | undefined> {
     const current = this.tasks.get(event.sessionId)
     const blocked = pending.some(item => item.sessionId === event.sessionId)

@@ -139,6 +139,7 @@ const jaUi: UiText = {
   unread: '件の未読',
   boardWaiting: '要対応',
   boardWatched: '監視中のセッション',
+  watchClose: '監視をやめる',
   priorityHigh: '高優先度',
   approval: '承認',
   question: '質問',

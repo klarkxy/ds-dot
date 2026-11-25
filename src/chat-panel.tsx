@@ -50,6 +50,8 @@ export interface ChatApi extends SettingsApi, ContextApi, TrajectoryApi, Knowled
   board(signal: AbortSignal): Promise<BoardView>
   /** Remove one of Dorothy's reminders from the board. */
   removeSchedule(id: string): Promise<boolean>
+  /** Stop watching a session. Does not archive or change the host session. */
+  unwatch?(sessionId: string): Promise<boolean>
   /** Recipes with per-revision stats, in-flight changes and bound reminders. */
   recipes?(signal: AbortSignal): Promise<readonly RecipeBoardRow[]>
   /** Create + dispatch a recipe task from the Tasks panel. */
@@ -579,7 +581,7 @@ function TasksTab({ locale, view, api, workApi, boardError, pendingRemoveTitle, 
       ) : null}
       {filter === 'recipes' ? <RecipesView locale={locale} api={api} rows={recipes} {...recipesError === undefined ? {} : { error: recipesError }} onChanged={() => { refreshRecipes(); onRetry() }} /> : null}
       {workApi && filter !== 'watch' && filter !== 'recipes' ? <WorkBoardPanel locale={locale} api={workApi} filter={filter} items={view?.work ?? NO_WORK} pending={view?.pending ?? NO_PENDING} onChanged={onRetry} onOpenSession={onOpen} /> : null}
-      {filter !== 'recipes' ? <Board locale={locale} view={view} filter={filter} suppressEmpty={(view?.work?.length ?? 0) > 0 || (Boolean(workApi) && filter === 'all')} {...boardError === undefined ? {} : { error: boardError }} onOpen={onOpen} onRetry={onRetry} onRemoveSchedule={onRemoveSchedule} /> : null}
+      {filter !== 'recipes' ? <Board locale={locale} view={view} filter={filter} suppressEmpty={(view?.work?.length ?? 0) > 0 || (Boolean(workApi) && filter === 'all')} {...boardError === undefined ? {} : { error: boardError }} onOpen={onOpen} onRetry={onRetry} onRemoveSchedule={onRemoveSchedule} onUnwatch={sessionId => { if (!api.unwatch) return; void api.unwatch(sessionId).then(onRetry, onRetry) }} /> : null}
     </div>
   )
 }

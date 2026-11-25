@@ -159,6 +159,8 @@ export class DotService {
   private closing = false
   private disposal?: Promise<void>
   private readonly inFlight = new Set<Promise<unknown>>()
+  /** One host-list reconciliation at a time; overlapping board polls share it. */
+  private watchedSync?: Promise<void>
   private readonly now: () => number
   private idleSince?: number
   /** Changes to the agreements and cognition run one at a time, so two never start from the same text. */
@@ -1332,6 +1334,8 @@ export class DotService {
   reconcile(): Promise<void> { return this.track(() => this.reconcileNow()) }
 
   private async reconcileNow(): Promise<void> {
+    // A restart otherwise keeps showing watches the human already archived.
+    await this.syncWatched().catch(error => this.options.log?.(`dsh-dot: watched sessions were not reconciled: ${messageOf(error)}`))
     // Pending requests do not survive a restart, so a keep-alive approval card
     // left behind by one can never be answered again; expire it up front.
     const live = new Set(this.pending.list().map(row => row.id))
@@ -1459,7 +1463,10 @@ export class DotService {
   overview(signal: AbortSignal, limit = 30): Promise<string> { return this.track(() => this.overviewNow(signal, limit)) }
 
   private async overviewNow(signal: AbortSignal, limit: number): Promise<string> {
-    const rows = (await this.host.listSessions(signal))
+    const watchedAt = this.watchCandidates()
+    const listed = await this.host.listSessions(signal)
+    await this.retireWatched(listed, watchedAt)
+    const rows = listed
       .filter(row => !row.subagent && !row.blank && !this.isDot(row.sessionId))
       .sort((a, b) => b.updatedAt - a.updatedAt)
     const shown = rows.filter(row => !row.archived).slice(0, limit)
@@ -1686,12 +1693,120 @@ export class DotService {
     return `Watching ${task.sessionId}.`
   }
 
+  /**
+   * The human dismissed a watch from the board. The host session stays as it is:
+   * this does not archive it, and a session dot started is not a watch.
+   */
+  unwatch(sessionId: string): Promise<boolean> { return this.serial(() => this.unwatchNow(sessionId)) }
+
+  private async unwatchNow(sessionId: string): Promise<boolean> {
+    if (this.closing) return false
+    const removed = await this.store.untrack(sessionId)
+    if (removed) this.dropWatchNotices(sessionId)
+    return removed
+  }
+
+  /** The host archived this session. A watched row stops looking idle; the host session is not archived again. */
+  noteSessionArchived(sessionId: string): Promise<void> {
+    return this.retireWatch(sessionId)
+  }
+
+  /**
+   * The host dropped a session from its live registry. Confirm against the
+   * current list so an unload that leaves the session visible does not retire it.
+   */
+  noteSessionRemoved(sessionId: string): Promise<void> {
+    const task = this.store.task(sessionId)
+    if (!task || task.origin !== 'watched' || task.status === 'archived') return Promise.resolve()
+    return this.syncWatched()
+  }
+
+  /**
+   * Mark watched sessions the host has archived or no longer lists. A failed
+   * list leaves every watch as it was. Sessions dot started are not touched.
+   */
+  async syncWatched(signal?: AbortSignal): Promise<void> {
+    if (!this.watchedSync) {
+      const run = this.syncWatchedNow().finally(() => {
+        if (this.watchedSync === run) this.watchedSync = undefined
+      })
+      this.watchedSync = run
+    }
+    const shared = this.watchedSync
+    if (!signal) return shared
+    if (signal.aborted) return
+    return new Promise((resolve, reject) => {
+      const finish = () => { signal.removeEventListener('abort', finish); resolve() }
+      signal.addEventListener('abort', finish)
+      shared.then(finish, error => { signal.removeEventListener('abort', finish); reject(error) })
+    })
+  }
+
+  private async syncWatchedNow(): Promise<void> {
+    if (this.closing) return
+    const watchedAt = this.watchCandidates()
+    if (watchedAt.size === 0) return
+    let rows: Awaited<ReturnType<DotHost['listSessions']>>
+    try {
+      rows = await this.host.listSessions(AbortSignal.timeout(15_000))
+    } catch {
+      return
+    }
+    await this.retireWatched(rows, watchedAt)
+  }
+
+  /** Watched rows still idle when a host list starts, keyed by updatedAt. */
+  private watchCandidates(): Map<string, number> {
+    return new Map(
+      this.store.list()
+        .filter(task => task.origin === 'watched' && task.status !== 'archived')
+        .map(task => [task.sessionId, task.updatedAt]),
+    )
+  }
+
+  private async retireWatched(rows: readonly { readonly sessionId: string; readonly archived: boolean }[], watchedAt: ReadonlyMap<string, number>): Promise<void> {
+    if (this.closing) return
+    const byId = new Map(rows.map(row => [row.sessionId, row]))
+    for (const task of this.store.list()) {
+      if (task.origin !== 'watched' || task.status === 'archived') continue
+      // A watch created or rewritten while the list was in flight keeps its new state.
+      if (watchedAt.get(task.sessionId) !== task.updatedAt) continue
+      const row = byId.get(task.sessionId)
+      if (row && !row.archived) continue
+      await this.retireWatch(task.sessionId)
+    }
+  }
+
+  private retireWatch(sessionId: string): Promise<void> {
+    if (this.closing) return Promise.resolve()
+    const task = this.store.task(sessionId)
+    if (!task || task.origin !== 'watched' || task.status === 'archived') return Promise.resolve()
+    this.dropWatchNotices(sessionId)
+    return this.store.apply({ type: 'archived', sessionId, at: this.now() }, this.pending.list()).then(() => undefined)
+  }
+
+  /** Queued turn-end and error notes for a watch that is no longer active. Approvals stay until they settle. */
+  private dropWatchNotices(sessionId: string): void {
+    this.batcher.dropWhere(item => item.sessionId === sessionId && item.requestId === undefined)
+  }
+
+  /** A ledger row that still receives turn, error, and tracked-scope relay events. */
+  private liveTask(sessionId: string) {
+    const task = this.store.task(sessionId)
+    return task && task.status !== 'archived' ? task : undefined
+  }
+
   read(sessionId: string, maxChars = 4000): Promise<string> { return this.track(() => this.readNow(sessionId, maxChars)) }
 
   private async readNow(sessionId: string, maxChars: number): Promise<string> {
     const reply = await this.host.latestReply(sessionId, Math.max(200, Math.min(maxChars, 20_000)))
-    const task = this.store.task(sessionId)
     this.assertOpen()
+    const watched = this.store.task(sessionId)
+    if (watched?.origin === 'watched' && watched.status !== 'archived') {
+      await this.syncWatched()
+      this.assertOpen()
+    }
+    const task = this.store.task(sessionId)
     if (task) await this.store.markSeen(sessionId)
     const head = task ? `${task.status.toUpperCase()} "${task.title}" goal: ${task.goal}` : 'untracked session'
     // A run that settled earns its cost on its own line; capture it first when
@@ -2673,11 +2788,11 @@ export class DotService {
         this.options.log?.(`dsh-dot: run ${owned.id} was not observed: ${messageOf(error)}`)
       })
     }
-    if (this.isDot(sessionId) || !this.store.tracks(sessionId)) return
+    if (this.isDot(sessionId) || !this.liveTask(sessionId)) return
     const reply = await this.host.latestReply(sessionId, 600).catch(() => undefined)
     if (this.closing) return
     const task = await this.store.apply({ type: 'turn-end', sessionId, at: this.now(), ...reply ? { note: reply } : {} }, this.pending.list())
-    if (!task) return
+    if (!task || task.status === 'archived') return
     const ownedNow = this.store.work.sessionRun(sessionId)
     const change = ownedNow ? this.store.work.change(ownedNow.changeId) : undefined
     const older = ownedNow && change && (ownedNow.inputRef !== change.currentInputRef || ownedNow.inputRevision !== change.currentRevision)
@@ -2688,7 +2803,7 @@ export class DotService {
   }
 
   onError(sessionId: string, error: unknown): void {
-    if (this.closing || this.isDot(sessionId) || !this.store.tracks(sessionId)) return
+    if (this.closing || this.isDot(sessionId) || !this.liveTask(sessionId)) return
     const message = messageOf(error)
     void this.store.apply({ type: 'error', sessionId, at: this.now(), message }, this.pending.list())
     const owned = this.store.work.sessionRun(sessionId)
@@ -2704,7 +2819,7 @@ export class DotService {
    */
   relayRequest(input: { kind: PendingKind; sessionId: string; subject: string; detail?: string; cwd?: string; questions?: readonly PendingQuestionItem[]; signal?: AbortSignal; toolName?: string; reason?: string; arguments?: string; viaSubagent?: boolean }): RelayOutcome {
     if (this.closing || this.isDot(input.sessionId) || !this.store.dotSessionId) return { decided: 'skip' }
-    const tracked = this.store.tracks(input.sessionId)
+    const tracked = this.liveTask(input.sessionId) !== undefined
     if (!tracked && this.rules.scope === 'tracked') return { decided: 'skip' }
     const task = this.store.task(input.sessionId)
     const route = routeRequest(this.rules, input.kind)

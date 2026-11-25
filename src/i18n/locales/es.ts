@@ -139,6 +139,7 @@ const esUi: UiText = {
   unread: 'sin leer',
   boardWaiting: 'Te necesita',
   boardWatched: 'Sesiones seguidas',
+  watchClose: 'Dejar de seguir',
   priorityHigh: 'Prioridad alta',
   approval: 'Aprobación',
   question: 'Pregunta',

@@ -140,6 +140,7 @@ const enUi: UiText = {
   unread: 'unread',
   boardWaiting: 'Needs you',
   boardWatched: 'Watched sessions',
+  watchClose: 'Stop watching',
   priorityHigh: 'High priority',
   approval: 'Approval',
   question: 'Question',

@@ -305,22 +305,22 @@
         ja: 'いつものやり方はメモ済み、ロックした設定は触りません',
       },
       excerpt: {
-        zh: '设置抽屉现在浮在对话上面，拖左边就能调宽；里面按卡片分成几组，任务板也把状态和操作分开摆了。锁住的项我还是不会去提议改。',
-        en: 'The settings drawer now floats over the chat and drags wider from the left edge. Sections sit in cards, the task board separates status from actions, and a locked option still never gets a change proposal from me.',
-        ja: '設定の引き出しは会話の上に重なるようになって、左端をドラッグして幅を変えられます。中はカードで分かれ、タスク板も状態と操作を分けて置いてあります。鍵をかけた項目は今まで通り提案しません。',
+        zh: '设置抽屉现在浮在对话上面，拖左边就能调宽；里面按卡片分成几组，任务板也把状态和操作分开摆了。锁住的项我还是不会去提议改，归档过的关注不会再挂成空闲，不想盯了就点 ×。',
+        en: 'The settings drawer now floats over the chat and drags wider from the left edge. Sections sit in cards, the task board separates status from actions, a locked option still never gets a change proposal from me, and an archived watch no longer sits idle — × stops watching without touching the session.',
+        ja: '設定の引き出しは会話の上に重なるようになって、左端をドラッグして幅を変えられます。中はカードで分かれ、タスク板も状態と操作を分けて置いてあります。鍵をかけた項目は今まで通り提案せず、アーカイブ済みの監視は空きのまま残らず、× で監視だけやめられます。',
       },
       paragraphs: {
         zh: [
           '说真的，要是每次新开对话都得重新解释怎么称呼你、平时放多松，人烦我也记不过来。现在这些都收在设置抽屉里，抽屉浮在对话上面，点空白处就收起，嫌窄就拖左边那条边。里面按卡片分组，小标题把同一张卡里的话题隔开，宽了会自己排成几列；隔壁插件带过来的额外工具默认还是关着。',
-          '任务板也松快了些，状态单独摆着，相关按钮收在一起，做完的默认折起来。哪项你觉得不用再动了，点一下旁边的小锁，以后我连修改建议也不会提。选任务模型时我仍会参考固定的榜单快照，但你点名的模型绝不会擅自换掉；只想先聊两句不建任务，也随时说就行。',
+          '任务板也松快了些，状态单独摆着，相关按钮收在一起，做完的默认折起来。哪项你觉得不用再动了，点一下旁边的小锁，以后我连修改建议也不会提。关注列表里，已经在会话那边归档掉的不会再一直显示空闲；不想继续盯的，点那一行的 × 就取消关注，会话本身不动。选任务模型时我仍会参考固定的榜单快照，但你点名的模型绝不会擅自换掉；只想先聊两句不建任务，也随时说就行。',
         ],
         en: [
           'Nobody wants to re-explain tone or permissions every week. Those choices now live in a settings drawer that floats over the chat—click the backdrop and it folds away, and if it feels tight, drag the left edge. Inside, sections sit in cards with small headings, and a wider drawer lays the fields out in columns. Companion plugin tools stay off unless you turn them on.',
-          'The task board has more room too: status sits apart from the grouped actions, and finished work stays folded. Click the small lock beside any option you want left alone and I will not propose edits to it. I still consult a pinned ranking snapshot when weighing task models, and I never swap a model you named. If you just want to talk an idea through, we can do that without opening a task.',
+          'The task board has more room too: status sits apart from the grouped actions, and finished work stays folded. Click the small lock beside any option you want left alone and I will not propose edits to it. A watch you already archived no longer stays listed as idle, and the × on that row only stops watching — the session itself stays put. I still consult a pinned ranking snapshot when weighing task models, and I never swap a model you named. If you just want to talk an idea through, we can do that without opening a task.',
         ],
         ja: [
           '呼び方や任せる範囲を毎回言い直すのは大変ですよね。設定は会話の上に重なる引き出しにまとめてあって、余白を押すと閉じて、狭ければ左端をドラッグして幅を変えられます。中はカードで分かれ、小さな見出しで話題を区切り、幅が足りると項目は横に並びます。他プラグインの追加機能は今まで通り、既定ではオフです。',
-          'タスクの板も少しゆとりができて、状態と操作が分かれて置かれ、終わった仕事は折りたたんだままです。決めた項目の横の鍵を押せば、以後は変更の提案もしません。タスク用モデルは固定版の順位表を参考にしますが、あなたが指名したモデルを勝手に差し替えることはありません。雑談だけしたいときも、そのまま声をかけてください。',
+          'タスクの板も少しゆとりができて、状態と操作が分かれて置かれ、終わった仕事は折りたたんだままです。決めた項目の横の鍵を押せば、以後は変更の提案もしません。もうアーカイブした監視は空きのまま残らず、行の × は監視をやめるだけで、セッション自体はそのままです。タスク用モデルは固定版の順位表を参考にしますが、あなたが指名したモデルを勝手に差し替えることはありません。雑談だけしたいときも、そのまま声をかけてください。',
         ],
       },
     },

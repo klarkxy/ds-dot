@@ -139,6 +139,7 @@ const frUi: UiText = {
   unread: 'non lu(s)',
   boardWaiting: 'Requiert votre action',
   boardWatched: 'Sessions suivies',
+  watchClose: 'Ne plus suivre',
   priorityHigh: 'Priorité haute',
   approval: 'Approbation',
   question: 'Question',

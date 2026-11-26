@@ -572,4 +572,52 @@ describe('live agent backfill and unified managed session event stream', () => {
     await service.dispose()
     expect(service.retryHealth.list()).toEqual([])
   })
+
+  it('skips dot-watchdog in listPresets and isolates createInternal model from Dorothy model', async () => {
+    const createdArgs: Array<Record<string, unknown>> = []
+    const host = bindHost(
+      name => {
+        if (name === 'agentPresets') {
+          return {
+            defaultId: 'standard',
+            list: async () => [
+              { id: 'standard', name: 'Standard' },
+              { id: 'dot-reflection', name: 'Dot reflection' },
+              { id: 'dot-watchdog', name: 'Dot watchdog' },
+            ],
+            resolve: async (id?: string) => ({ id: id ?? 'standard' }),
+            mount: async () => {},
+          }
+        }
+        if (name === 'agentDefaultModel') {
+          return { currentSelection: () => ({ provider: 'host-prov', model: 'host-def' }) }
+        }
+        if (name === 'agents') {
+          return {
+            create: async (opts: Record<string, unknown>) => {
+              createdArgs.push(opts)
+              return { agent: { session: { id: opts.sessionId } }, dispose: async () => {} }
+            },
+          }
+        }
+        return undefined
+      },
+      undefined,
+      () => ({ provider: 'dorothy-prov', model: 'dorothy-model' }),
+    )
+
+    const catalog = await host.listPresets()
+    expect(catalog.presets.map(p => p.id)).toEqual(['standard'])
+
+    const dir = join(tmpdir(), `dot-host-wd-${Date.now()}`)
+    await host.createInternal(dir, 'dot-watchdog', { allow: [], model: null })
+    const opts1 = createdArgs[0]!.agentOptions as { provider: string; model: string }
+    expect(opts1.provider).toBe('host-prov')
+    expect(opts1.model).toBe('host-def')
+
+    await host.createInternal(dir, 'dot-watchdog', { allow: [], model: { provider: 'wd-prov', model: 'wd-model' } })
+    const opts2 = createdArgs[1]!.agentOptions as { provider: string; model: string }
+    expect(opts2.provider).toBe('wd-prov')
+    expect(opts2.model).toBe('wd-model')
+  })
 })

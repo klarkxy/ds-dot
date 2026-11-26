@@ -188,4 +188,40 @@ describe('old data directory', () => {
       await rm(root, { recursive: true, force: true })
     }
   })
+
+  it('opens a v11 directory cleanly under v12 and persists watchdog KV records', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dot-v11-open-'))
+    const backend = new JsonStorageBackend(root)
+    const facility = new DomainFacility({
+      storage: { backend: { get: (name: string) => {
+        if (name !== 'json') throw new Error('unexpected backend')
+        return backend
+      } } }, logger: { error() {}, warn() {} }, emit() {},
+    } as never, { backend: 'json' })
+    const v11Document = {
+      unit: { name: 'klarkxy_dsh_dot', version: 11 },
+      global: null,
+      tables: {
+        state: { [STATE_KEY]: { dotSessionId: 'dot-1' } },
+      },
+    }
+    await writeFile(join(root, 'klarkxy_dsh_dot.json'), JSON.stringify(v11Document), 'utf8')
+    try {
+      const domain = await openCompatibleDomain(spec => facility.open(spec), dotDomain)
+      const store = new DotStore(domain)
+      const wdTable = store.watchdogTable()
+      expect(wdTable).toBeDefined()
+      await wdTable!.put('meta', { kind: 'meta', watchdogStops: 3 })
+      await domain.close()
+
+      const again = await openCompatibleDomain(spec => facility.open(spec), dotDomain)
+      const store2 = new DotStore(again)
+      expect(store2.watchdogTable()!.get('meta')).toEqual({ kind: 'meta', watchdogStops: 3 })
+      await again.close()
+    } finally {
+      await facility.closeAll()
+      await backend.close()
+      await rm(root, { recursive: true, force: true })
+    }
+  })
 })

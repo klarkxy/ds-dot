@@ -355,6 +355,76 @@ describe('i18n locale resolution and pack completeness', () => {
         expect(pack.ui[key], `${loc}.ui.${key} should be localized`).not.toBe(ref.ui[key])
       }
     }
+
+    // Ensure PR-6 Run Watchdog UI keys are genuinely localized (not left as English stubs) in non-English locales.
+    const localizedPr6SampleKeys = [
+      'tool_dot_watchdog',
+      'field_watchdogMode',
+      'field_watchdogModel',
+      'sWatchdogDesc',
+      'sWatchdogMode',
+      'sWatchdogMode_off',
+      'sWatchdogMode_observe',
+      'sWatchdogMode_auto',
+      'sWatchdogModeDesc',
+      'sWatchdogModel',
+      'sWatchdogModelDesc',
+      'sWatchdogModelFollow',
+      'ctxWatchdogTitle',
+      'ctxWatchdogModeLabel',
+      'ctxWatchdogMode_off',
+      'ctxWatchdogMode_observe',
+      'ctxWatchdogMode_auto',
+      'ctxWatchdogModelLabel',
+      'ctxWatchdogModelDefault',
+      'ctxWatchdogStops',
+      'ctxWatchdogStopsCount',
+      'ctxWatchdogFallbackTitle',
+      'ctxWatchdogFallbackBody',
+      'ctxWatchdogFallbackReason_not-in-catalog',
+      'ctxWatchdogFallbackReason_invalid-format',
+      'ctxWatchdogFallbackReason_runtime-error',
+      'ctxWatchdogCalTitle',
+      'ctxWatchdogCalTargetHint',
+      'ctxWatchdogCalTotal',
+      'ctxWatchdogCalReviewed',
+      'ctxWatchdogCalAccurate',
+      'ctxWatchdogCalFalsePositive',
+      'ctxWatchdogCalFpRate',
+      'ctxWatchdogCalNoReviews',
+      'ctxWatchdogHitsTitle',
+      'ctxWatchdogHitsEmpty',
+      'ctxWatchdogAnnotateAccurate',
+      'ctxWatchdogAnnotateFalsePositive',
+      'ctxWatchdogAnnotateFailed',
+      'ctxWatchdogStoppedBadge',
+      'ctxWatchdogHardLimitBadge',
+      'ctxWatchdogJudgeBadge',
+      'ctxWatchdogVerdict_progressing',
+      'ctxWatchdogVerdict_spinning',
+      'ctxWatchdogVerdict_off-scope',
+      'ctxWatchdogConfidence_low',
+      'ctxWatchdogConfidence_medium',
+      'ctxWatchdogConfidence_high',
+      'ctxWatchdogSignal_repeat-tool-call',
+      'ctxWatchdogSignal_repeat-tool-error',
+      'ctxWatchdogSignal_no-progress',
+      'ctxWatchdogSignal_compaction-loop',
+      'ctxWatchdogSignal_budget-retry-stall',
+      'ctxWatchdogSignal_silent-stall',
+      'ctxWatchdogSignal_infra-failure',
+    ] as const
+    for (const loc of SUPPORTED_LOCALES) {
+      if (loc === 'en') continue
+      const pack = localePack(loc)
+      for (const key of localizedPr6SampleKeys) {
+        expect(pack.ui[key], `${loc}.ui.${key} should be localized`).not.toBe(ref.ui[key])
+      }
+      if (loc !== 'zh') {
+        expect(pack.ui.sGroupWatchdog, `${loc}.ui.sGroupWatchdog should be localized`).not.toBe(ref.ui.sGroupWatchdog)
+        expect(pack.ui.ctxWatchdogRunMeta, `${loc}.ui.ctxWatchdogRunMeta should be localized`).not.toBe(ref.ui.ctxWatchdogRunMeta)
+      }
+    }
   })
 
   it('has matching keys and {n}/{max} placeholders across all 8 locale/*.json files and valid meta.detail', () => {

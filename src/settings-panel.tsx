@@ -12,18 +12,20 @@ import { CapabilitiesMcpPanel, SegmentedChoice } from './capabilities-mcp-panel.
 import {
   DEFAULT_GITHUB_POLL_SETTINGS, GITHUB_ADMISSION_ACTIONS, GITHUB_EVENT_TYPES, GITHUB_POLL_DEFAULT_SOURCE_ID,
   GITHUB_POLL_MAX_INTERVAL_SEC, GITHUB_POLL_MIN_INTERVAL_SEC, GITHUB_SENDER_CLASSES, TASK_PRESET_OPTIONS,
+  WATCHDOG_MODES,
   type ApprovalMode, type CapabilityCatalogView, type CapabilityGrant, type DefaultTaskPreset, type DotMcpListView,
   type DotSettings, type FactoryResetPreview, type FactoryResetResult, type GithubAdmissionAction,
   type GithubAdmissionRule, type GithubEventType, type GithubPollSettings, type GithubPollStatusView,
   type GithubPollTestResult, type GithubSenderClass, type KeepaliveInfo, type ModelChoice, type SettingField,
-  type SettingProposal, type TakeoverMode, type TaskModelRule, type TaskPermission,
+  type SettingProposal, type TakeoverMode, type TaskModelRule, type TaskPermission, type WatchdogMode,
 } from './contracts.ts'
 import { DESKTOP_NOTIFY_KEY } from './attention-client.ts'
 import type { UpdateResult, UpdateStatus } from './auto-update.ts'
+import { parseWatchdogModelChoice } from './settings.ts'
 import { factoryResetScope, formatWhen, t, type CopyLocale, type TextKey } from './ui-copy.ts'
 
-/** null on model, persona, address, mcpServers or githubPoll goes back to the default. */
-export type SettingsPatch = { readonly [K in keyof DotSettings]?: K extends 'model' ? ModelChoice | null : K extends 'persona' | 'address' ? string | null : K extends 'mcpServers' | 'githubPoll' ? DotSettings[K] | null : DotSettings[K] }
+/** null on model, watchdogModel, persona, address, mcpServers or githubPoll goes back to the default. */
+export type SettingsPatch = { readonly [K in keyof DotSettings]?: K extends 'model' ? ModelChoice | null : K extends 'watchdogModel' ? string | ModelChoice | null : K extends 'persona' | 'address' ? string | null : K extends 'mcpServers' | 'githubPoll' ? DotSettings[K] | null : DotSettings[K] }
 export type SaveNotice = { readonly kind: 'saved' } | { readonly kind: 'error'; readonly message: string }
 
 export interface SettingsApi {
@@ -188,12 +190,28 @@ function InlineField({ label, tip, control, below, locked, onLock }: {
 
 function formatProposalValue(locale: CopyLocale, field: SettingProposal['field'], value: unknown, choices: readonly ModelMenuChoice[]): { text: string; block: boolean } {
   if (value === null || value === undefined || value === '') {
-    return { text: field === 'model' ? t(locale, 'sModelFollow') : t(locale, 'sProposalDefault'), block: false }
+    return {
+      text: field === 'model' ? t(locale, 'sModelFollow')
+        : field === 'watchdogModel' ? t(locale, 'sWatchdogModelFollow')
+        : t(locale, 'sProposalDefault'),
+      block: false,
+    }
   }
   switch (field) {
     case 'model': {
       const route = value as Partial<ModelChoice>
       if (typeof route.provider === 'string' && typeof route.model === 'string') {
+        const hit = choices.find(item => item.provider === route.provider && item.model === route.model)
+        return { text: hit?.label ?? `${route.provider} / ${route.model}`, block: false }
+      }
+      break
+    }
+    case 'watchdogMode':
+      if (value === 'off' || value === 'observe' || value === 'auto') return { text: t(locale, `sWatchdogMode_${value}`), block: false }
+      break
+    case 'watchdogModel': {
+      const route = typeof value === 'string' ? parseWatchdogModelChoice(value) : (value as Partial<ModelChoice>)
+      if (route && typeof route.provider === 'string' && typeof route.model === 'string') {
         const hit = choices.find(item => item.provider === route.provider && item.model === route.model)
         return { text: hit?.label ?? `${route.provider} / ${route.model}`, block: false }
       }
@@ -1137,6 +1155,18 @@ export function SettingsPanel({ locale, api, settings, section = 'all', proposal
     const choice = choices.find(item => keyOf(item) === key)
     if (choice) save({ model: { provider: choice.provider, model: choice.model } })
   }
+  const watchdogChosen = parseWatchdogModelChoice(settings.watchdogModel)
+  const watchdogChoices = [...models.choices ?? []]
+  if (watchdogChosen && !watchdogChoices.some(choice => choice.provider === watchdogChosen.provider && choice.model === watchdogChosen.model)) {
+    watchdogChoices.push({ provider: watchdogChosen.provider, model: watchdogChosen.model, label: `${watchdogChosen.provider} / ${watchdogChosen.model}`, efforts: [] })
+  }
+  const watchdogModelGroups = groupModelMenuChoices(watchdogChoices, '')
+  const pickWatchdogModel = (key: string) => {
+    if (key === FOLLOW) { save({ watchdogModel: null }); return }
+    const choice = watchdogChoices.find(item => keyOf(item) === key)
+    if (choice) save({ watchdogModel: `${choice.provider}/${choice.model}` })
+  }
+  const watchdogModes: readonly [WatchdogMode, WatchdogMode, WatchdogMode] = WATCHDOG_MODES
   const approvalModes: readonly [ApprovalMode, ApprovalMode, ApprovalMode] = ['dot', 'human', 'deny']
   const questionModes: readonly [TakeoverMode, TakeoverMode, TakeoverMode] = ['dot', 'human', 'off']
   const permissionModes: readonly [TaskPermission, ...TaskPermission[]] = (livePermissions.includes(settings.taskPermission)
@@ -1279,6 +1309,54 @@ export function SettingsPanel({ locale, api, settings, section = 'all', proposal
               />
               <DesktopNotifyField locale={locale} />
               </Subgroup>
+            </div>
+          </div>
+          <div className="dsh-dot-pane-section" data-section="watchdog">
+            <div className="dsh-dot-watchdog-card">
+              <div className="dsh-dot-watchdog-head">
+                <h3 className="dsh-dot-watchdog-title">{t(locale, 'sGroupWatchdog')}</h3>
+                <p className="dsh-dot-watchdog-desc">{t(locale, 'sWatchdogDesc')}</p>
+              </div>
+              <div className="dsh-ui-form">
+                <Field label={t(locale, 'sWatchdogMode')} tip={t(locale, 'sWatchdogModeDesc')} {...lock('watchdogMode')}>
+                  <SegmentedChoice
+                    locale={locale}
+                    label={t(locale, 'sWatchdogMode')}
+                    value={settings.watchdogMode ?? 'observe'}
+                    options={watchdogModes}
+                    labelKeyOf={opt => `sWatchdogMode_${opt}`}
+                    onChange={next => save({ watchdogMode: next })}
+                  />
+                </Field>
+                <Field label={t(locale, 'sWatchdogModel')} tip={t(locale, 'sWatchdogModelDesc')} help={modelHelp} helpTone={models.failed ? 'warn' : undefined} wide {...lock('watchdogModel')}>
+                  {renderModelPicker(renderFactorySlot, {
+                    locale,
+                    choices: watchdogChoices,
+                    selected: watchdogChosen ? { provider: watchdogChosen.provider, model: watchdogChosen.model } : undefined,
+                    onPick: picked => save({ watchdogModel: `${picked.provider}/${picked.model}` }),
+                    leading: [{ id: 'follow', label: t(locale, 'sWatchdogModelFollow'), selected: !watchdogChosen }],
+                    onPickLeading: () => save({ watchdogModel: null }),
+                    triggerLabel: watchdogChosen ? (watchdogChoices.find(item => item.provider === watchdogChosen.provider && item.model === watchdogChosen.model)?.label ?? `${watchdogChosen.provider} / ${watchdogChosen.model}`) : t(locale, 'sWatchdogModelFollow'),
+                    modelLabel: t(locale, 'sWatchdogModel'),
+                    searchPlaceholder: t(locale, 'sTaskModelsFilter'),
+                    emptyLabel: t(locale, 'sTaskModelsNoMatch'),
+                    clearSearchLabel: t(locale, 'sTaskModelsClear'),
+                    retryLabel: t(locale, 'retry'),
+                    listClassName: 'dsh-dot-chat',
+                  }, {
+                    fallback: (
+                      <select className="dsh-ui-select" aria-label={t(locale, 'sWatchdogModel')} value={watchdogChosen ? keyOf(watchdogChosen) : FOLLOW} onChange={event => pickWatchdogModel(event.target.value)}>
+                        <option value={FOLLOW}>{t(locale, 'sWatchdogModelFollow')}</option>
+                        {watchdogModelGroups.map(group => (
+                          <optgroup key={group.provider} label={group.name}>
+                            {group.items.map(choice => <option key={keyOf(choice)} value={keyOf(choice)}>{choice.label}</option>)}
+                          </optgroup>
+                        ))}
+                      </select>
+                    ),
+                  })}
+                </Field>
+              </div>
             </div>
           </div>
           {api.previewFactoryReset && api.confirmFactoryReset ? <FactoryResetField locale={locale} api={api} onSaved={onSaved} /> : null}
@@ -1776,4 +1854,8 @@ export const settingsCss = `
 .dsh-dot-chat .dsh-dot-gh-rule-select { margin-left: auto; width: auto; }
 .dsh-dot-chat .dsh-dot-gh-rule-form { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
 .dsh-dot-chat .dsh-dot-gh-rule-form > :first-child { flex: 1 1 120px; min-width: 100px; }
+.dsh-dot-chat .dsh-dot-watchdog-card { display: flex; flex-direction: column; gap: 10px; padding: 12px 14px; border-radius: var(--dsw-radius-md); background: var(--dsw-alias-bg-layer-1); box-shadow: var(--dsw-elevation-stroke); min-width: 0; }
+.dsh-dot-chat .dsh-dot-watchdog-head { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.dsh-dot-chat .dsh-dot-watchdog-title { margin: 0; font-size: 14px; line-height: 20px; font-weight: 600; color: var(--dsw-alias-label-primary); }
+.dsh-dot-chat .dsh-dot-watchdog-desc { margin: 0; font-size: 12px; line-height: 18px; color: var(--dsw-alias-label-secondary); }
 `

@@ -9,8 +9,22 @@ export const PLUGIN_NAME = 'dsh-dot'
 export const SERVICE_NAME = 'dot'
 export const PRESET_ID = 'dot'
 export const WORKER_PRESET_ID = 'dot-worker'
+export const WATCHDOG_PRESET_ID = 'dot-watchdog'
 export const TASK_PRESET_OPTIONS = ['standard', WORKER_PRESET_ID] as const
 export type DefaultTaskPreset = (typeof TASK_PRESET_OPTIONS)[number]
+export const WATCHDOG_MODES = ['off', 'observe', 'auto'] as const
+export type WatchdogMode = (typeof WATCHDOG_MODES)[number]
+export const WATCHDOG_SIGNALS = [
+  'repeat-tool-call',
+  'repeat-tool-error',
+  'no-progress',
+  'compaction-loop',
+  'budget-retry-stall',
+  'silent-stall',
+  'infra-failure',
+] as const
+export type WatchdogSignalType = (typeof WATCHDOG_SIGNALS)[number]
+export type WatchdogAnnotation = 'accurate' | 'false-positive'
 export const RPC_CHANNEL = '/dsh-dot'
 
 /** What self.status reports about this install and its newest kept pre-upgrade backup. */
@@ -40,13 +54,14 @@ export const TOOL = {
   settings: 'dot_settings',
   capabilities: 'dot_capabilities',
   recipe: 'dot_recipe',
+  watchdog: 'dot_watchdog',
 } as const
 
 /**
  * Settings Dorothy may propose changing; locks themselves are human-only.
  * `agreements` is the human's rules text, edited as one bulk value.
  */
-export const SETTING_FIELDS = ['model', 'approvals', 'questions', 'scope', 'taskModels', 'taskPermission', 'defaultTaskPreset', 'reflection', 'idleCheckMinutes', 'persona', 'address', 'agreements', 'capabilities'] as const
+export const SETTING_FIELDS = ['model', 'approvals', 'questions', 'scope', 'taskModels', 'taskPermission', 'defaultTaskPreset', 'reflection', 'idleCheckMinutes', 'watchdogMode', 'watchdogModel', 'persona', 'address', 'agreements', 'capabilities'] as const
 export type SettingField = typeof SETTING_FIELDS[number]
 export type SettingLocks = Readonly<Partial<Record<SettingField, boolean>>>
 
@@ -501,6 +516,10 @@ export interface DotSettings {
   /** Whether dot checks daily for a newer published version of itself and hot-updates. */
   readonly autoUpdate: boolean
   readonly idleCheckMinutes: number
+  /** Run Watchdog operating mode: off | observe (signals only, default) | auto (signals + read-only judge). */
+  readonly watchdogMode: WatchdogMode
+  /** Optional model override (`provider/model`) for the read-only dot-watchdog judge; absent follows host default. */
+  readonly watchdogModel?: string
   /** Prompt-cache TTL overrides by `provider/model` key, in minutes; 0 turns keepalive off for that model. */
   readonly cacheTtl?: Readonly<Record<string, number>>
   /** The human's own persona text for dot; absent uses the default persona. */
@@ -763,6 +782,7 @@ export const DEFAULT_SETTINGS: DotSettings = {
   reflection: true,
   autoUpdate: true,
   idleCheckMinutes: 10,
+  watchdogMode: 'observe',
   capabilities: { grants: {} },
 }
 
@@ -900,6 +920,60 @@ export interface DotContextView {
   readonly usage?: DotContextUsage
   readonly compactions: number
   readonly lastCompactionAt?: number
+  /** Optional Watchdog diagnostics & 14-day calibration summary, rendered even when Dorothy's session is not live. */
+  readonly watchdog?: WatchdogDiagnosticsView
+}
+
+export interface WatchdogVerdict {
+  readonly verdict: 'progressing' | 'spinning' | 'off-scope'
+  readonly confidence: 'low' | 'medium' | 'high'
+  readonly summary: string
+  readonly evidence: readonly string[]
+}
+
+export interface WatchdogHitRecord {
+  readonly id: string
+  readonly at: number
+  readonly runId: string
+  readonly changeId: string
+  readonly inputRef: string
+  readonly inputRevision: number
+  readonly sessionId: string
+  readonly signal: WatchdogSignalType
+  readonly runPhase: string
+  readonly mode: WatchdogMode
+  readonly evidence: readonly string[]
+  readonly hardLimitReached?: boolean
+  readonly judge?: WatchdogVerdict
+  readonly stopped?: boolean
+  readonly annotation?: WatchdogAnnotation
+  readonly annotatedAt?: number
+}
+
+export interface WatchdogModelFallbackNotice {
+  readonly configuredModel: string
+  readonly reason: 'not-in-catalog' | 'invalid-format' | 'runtime-error'
+  readonly detail?: string
+  readonly at: number
+}
+
+export interface WatchdogCalibrationStats {
+  readonly windowDays: 14
+  readonly total14d: number
+  readonly reviewed14d: number
+  readonly accurate14d: number
+  readonly falsePositive14d: number
+  /** Null when reviewed14d === 0 so UI distinguishes "no reviews yet" from 0%. */
+  readonly falsePositiveRate: number | null
+}
+
+export interface WatchdogDiagnosticsView {
+  readonly mode: WatchdogMode
+  readonly configuredModel?: string
+  readonly watchdogStops: number
+  readonly modelFallbackNotice?: WatchdogModelFallbackNotice
+  readonly calibration: WatchdogCalibrationStats
+  readonly hits: readonly WatchdogHitRecord[]
 }
 
 // ---- dot's trajectory, drawn by the plugin -----------------------------

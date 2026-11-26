@@ -34,7 +34,7 @@ import { approvalDisplay, parseNotice } from './chat-format.ts'
 import { cardText } from './cards.ts'
 import { NoticeBatcher, formatNotices, formatNoticeDisplay, realTimer, type Notice, type Timer } from './batcher.ts'
 import { ZERO_USAGE, addUsage, combineUsage, netSegmentUsage, totalUsage, usageFromEvents } from './context.ts'
-import { PRESET_ID, TOOL, type AttentionView, type BoardView, type DotContextSections, type DotContextUsage, type DotContextView, type FactoryResetPreview, type FactoryResetResult, type InboxEventInput, type InboxRecord, type InboxSubmitResult, type KeepaliveInfo, type KnowledgeView, type ModelChoice, type PendingKind, type PendingQuestionItem, type RecipeBody, type RecipeProposal, type RecipeProposalView, type RecipeRecord, type ReflectionRun, type RolloverReason, type RuleConfig, type TaskPermission, type TrajectoryView } from './contracts.ts'
+import { PRESET_ID, TOOL, type AttentionView, type BoardView, type DotContextSections, type DotContextUsage, type DotContextView, type FactoryResetPreview, type FactoryResetResult, type InboxEventInput, type InboxRecord, type InboxSubmitResult, type KeepaliveInfo, type KnowledgeView, type ModelChoice, type PendingKind, type PendingQuestionItem, type RecipeBody, type RecipeProposal, type RecipeProposalView, type RecipeRecord, type ReflectionRun, type RolloverReason, type RuleConfig, type TaskPermission, type TrajectoryView, type WatchdogAnnotation, type WatchdogDiagnosticsView } from './contracts.ts'
 import { SUMMARY_INSTRUCTION, SUMMARY_MAX_TOKENS, buildHandoff, type Handoff } from './handoff.ts'
 import { READ_ROWS_DEFAULT, READ_ROWS_MAX, SEARCH_LIMIT_DEFAULT, SEARCH_LIMIT_MAX, SEARCH_SESSIONS_MAX, formatRead, formatSearch, historyRows, queryTerms, searchRows, windowRows, type SessionHits } from './history.ts'
 import { InboxLedger, fenceUntrusted, inboxNotice, memoryInboxTable } from './inbox.ts'
@@ -104,6 +104,7 @@ import {
 } from './github-poll/index.ts'
 import { effectiveGithubPollSettings, normalizeGithubRepo } from './settings.ts'
 import type { GithubPollStatusView, GithubPollTestResult } from './contracts.ts'
+import { WatchdogRunner } from './watchdog.ts'
 
 export interface DotServiceOptions {
   readonly host: DotHost
@@ -241,6 +242,8 @@ export class DotService {
   readonly githubPollCursorStore: GithubPollCursorStore
   private readonly githubPollAdapter: GithubPollSourceAdapter
   private readonly githubPoller: GithubPoller
+  readonly watchdog: WatchdogRunner
+  private readonly watchdogListeners = new Set<() => void>()
 
   private get getService(): ServiceGetter | undefined { return this.options.get }
 
@@ -272,7 +275,10 @@ export class DotService {
       this.armIdleCheck()
       void this.store.syncPending(this.pending.list())
     })
-    this.retryHealth.onChange(() => { this.armIdleCheck() })
+    this.retryHealth.onChange(() => {
+      this.armIdleCheck()
+      this.syncRetryToWatchdog()
+    })
     this.ensureBackgroundJobsSubscription()
     this.idleChecker = new IdleChecker(
       () => this.canIdleCheck()
@@ -349,6 +355,71 @@ export class DotService {
       timer: options.githubPollTimer ?? options.timer,
       now: this.now,
       ...(options.ghExec ? { exec: options.ghExec } : {}),
+    })
+    this.watchdog = new WatchdogRunner({
+      host: options.host,
+      table: options.store.watchdogTable(),
+      homeDir: options.homeDir,
+      now: this.now,
+      timer: this.timer,
+      settings: () => this.store.settings,
+      runs: () => this.store.work.listRuns(),
+      sessionRun: sessionId => this.store.work.sessionRun(sessionId),
+      change: changeId => this.store.work.change(changeId),
+      input: inputRef => this.store.work.input(inputRef),
+      isQuietWaitActive: sessionId => this.quietWaits.has(sessionId),
+      pendingWaitIntervals: (sessionId, now) => this.pending.waitIntervals(sessionId, now),
+      hasOpenPending: sessionId => this.pending.forSession(sessionId).length > 0,
+      retryStatus: sessionId => {
+        const status = this.retryHealth.get(sessionId)
+        return status ? { kind: status.kind, since: status.since, accumulatedMs: status.accumulatedMs } : undefined
+      },
+      stopRun: async run => {
+        const sessionId = run.sessionId ?? run.requestedSessionId
+        if (sessionId) this.abortQuietWait(sessionId, 'watchdog', true)
+        const finished = await finishWork(this.store.work, this.runHost(), run.id, 'stopped', this.now(), 'watchdog')
+        if (finished.ok) await this.captureRunReport(run.id).catch(() => undefined)
+        this.store.workChanged()
+        return finished.ok
+      },
+      notifyDorothy: notice => {
+        let requestId: string | undefined
+        if (notice.humanRequired) {
+          const opened = this.pending.open({
+            kind: 'approval',
+            humanRequired: true,
+            sessionId: notice.sessionId,
+            subject: notice.subject,
+            detail: notice.detail ?? notice.summary,
+          })
+          requestId = opened.id
+        }
+        this.notify({
+          sessionId: notice.sessionId,
+          kind: 'task-human',
+          ...(requestId ? { requestId } : {}),
+          changeId: notice.changeId,
+          at: this.now(),
+          text: notice.text,
+          display: {
+            kind: 'task-human',
+            sessionId: notice.sessionId,
+            ...(requestId ? { requestId } : {}),
+            subject: notice.subject,
+            summary: notice.summary,
+          },
+        }, true)
+      },
+      trace: input => this.emit(input),
+      log: options.log,
+      onChange: () => {
+        for (const listener of [...this.watchdogListeners]) {
+          try { listener() } catch { /* observer only */ }
+        }
+      },
+    })
+    this.subscribeManagedSessionEvents((sessionId, event) => {
+      this.watchdog.onSessionEvent(sessionId, event)
     })
   }
 
@@ -427,9 +498,13 @@ export class DotService {
 
   private abortQuietWait(sessionId: string | undefined, reason: string, clearAbandoned = true): void {
     if (!sessionId) return
-    const aborted = this.quietWaits.abort(sessionId, this.now(), reason)
+    const now = this.now()
+    const aborted = this.quietWaits.abort(sessionId, now, reason)
     if (clearAbandoned) this.quietWaits.clearAbandoned(sessionId)
-    if (aborted) this.armIdleCheck()
+    if (aborted) {
+      this.watchdog.noteQuietWait(sessionId, false, now)
+      this.armIdleCheck()
+    }
   }
 
   private backgroundBusySessionIds(): ReadonlySet<string> {
@@ -468,6 +543,8 @@ export class DotService {
     if (this.closing || !sessionId || !this.isManagedSession(sessionId)) return
     this.retryHealth.restore(sessionId, events)
     if (status === 'idle') this.retryHealth.clear(sessionId)
+    this.watchdog.onAgentCreated(sessionId, status, events)
+    this.watchdog.noteRetryState(sessionId, this.retryHealth.get(sessionId))
   }
 
   backfillManagedRetryHealth(): void {
@@ -475,20 +552,36 @@ export class DotService {
     let live: ReturnType<NonNullable<DotHost['listLiveAgents']>>
     try {
       live = this.host.listLiveAgents?.() ?? []
-    } catch {
+    } catch (error) {
+      for (const run of this.store.work.occupying()) {
+        if (run.phase === 'active') this.watchdog.noteStreamBackfillFailure(run, messageOf(error))
+      }
       return
     }
     for (const agent of live) {
       if (!agent?.sessionId || !this.isManagedSession(agent.sessionId)) continue
       this.retryHealth.restore(agent.sessionId, agent.events)
       if (agent.status === 'idle') this.retryHealth.clear(agent.sessionId)
+      this.watchdog.onAgentCreated(agent.sessionId, agent.status, agent.events)
+      this.watchdog.noteRetryState(agent.sessionId, this.retryHealth.get(agent.sessionId))
     }
   }
 
   noteAgentDisposed(sessionId: string): void {
+    const now = this.now()
     this.retryHealth.remove(sessionId)
-    this.quietWaits.remove(sessionId, this.now())
+    this.quietWaits.remove(sessionId, now)
+    this.watchdog.noteQuietWait(sessionId, false, now)
+    this.watchdog.noteRetryState(sessionId, undefined, now)
+    this.watchdog.noteSessionDisposed(sessionId)
     this.armIdleCheck()
+  }
+
+  private syncRetryToWatchdog(): void {
+    for (const run of this.store.work.occupying()) {
+      const sessionId = run.sessionId ?? run.requestedSessionId
+      if (sessionId) this.watchdog.noteRetryState(sessionId, this.retryHealth.get(sessionId))
+    }
   }
 
   private retryingSessionIds(): ReadonlySet<string> {
@@ -1093,6 +1186,7 @@ export class DotService {
     this.armIdleCheck()
     this.updates.settingsChanged()
     this.githubPoller.settingsChanged()
+    this.watchdog.onSettingsChanged()
     // The ds-dot/mcp preset row reconciles its mounts against the new settings.
     sharedDotMcp().onSettingsChanged?.()
     // A grant revoked while its approval card waits settles the ask at once:
@@ -1177,13 +1271,27 @@ export class DotService {
     }
     const raw = await this.host.dotContext(id)
     const sections = this.contextSections()
-    if (!raw.live) return { ...raw, sections }
+    const watchdog = this.watchdogDiagnostics()
+    if (!raw.live) return { ...raw, sections, watchdog }
     const segmentRaw = raw.usage ?? usageFromEvents(await this.host.readEvents(id).catch(() => []))
     return {
       ...raw,
       sections,
       usage: combineUsage(segmentRaw, id, this.store.usageCarry, this.store.usageOffset),
+      watchdog,
     }
+  }
+
+  startWatchdog(): void { this.watchdog.start() }
+  patrolWatchdogNow() { return this.watchdog.patrolNow() }
+  watchdogDiagnostics(): WatchdogDiagnosticsView { return this.watchdog.diagnosticsView() }
+  annotateWatchdogHit(id: string, annotation: WatchdogAnnotation) { return this.watchdog.annotateHit(id, annotation) }
+  queryWatchdog(query?: { readonly runId?: string; readonly changeId?: string; readonly signal?: string; readonly limit?: number }): string {
+    return this.watchdog.formatDiagnosticsReport(query)
+  }
+  onWatchdogChange(listener: () => void): () => void {
+    this.watchdogListeners.add(listener)
+    return () => { this.watchdogListeners.delete(listener) }
   }
 
   /** The frozen prompt blocks of the current segment, or the live text before a segment exists. */
@@ -1331,10 +1439,12 @@ export class DotService {
       this.emittedClosures.clear()
       this.activeTurnOrigin = undefined
       await this.githubPollCursorStore.clear()
+      await this.watchdog.reset()
       this.releaseChildSeals()
       this.reminders.refresh()
       this.updates.settingsChanged()
       this.githubPoller.settingsChanged()
+      this.watchdog.onSettingsChanged()
       this.homeRegistered = false
       this.ensuring = undefined
       this.requestedSegment = undefined
@@ -1612,9 +1722,14 @@ export class DotService {
     }
     for (const run of this.store.work.occupying()) {
       if (this.closing) return
-      await reconcileRun(this.store.work, this.runHost(), run.id, this.now()).catch(error => {
+      try {
+        const res = await reconcileRun(this.store.work, this.runHost(), run.id, this.now())
+        if (res.ok) this.watchdog.noteReconcileSuccess(run)
+        else this.watchdog.noteReconcileFailure(run, res.message)
+      } catch (error) {
         this.options.log?.(`dsh-dot: run ${run.id} was not reconciled: ${messageOf(error)}`)
-      })
+        this.watchdog.noteReconcileFailure(run, messageOf(error))
+      }
       const current = this.store.work.run(run.id)
       if (current?.creation === 'confirmed' && current.sessionId && current.sessionId === current.requestedSessionId && !this.store.tracks(current.sessionId)) {
         await this.rememberRun(current.id)
@@ -1981,8 +2096,12 @@ export class DotService {
 
   /** The host archived this session. A watched row stops looking idle; the host session is not archived again. */
   noteSessionArchived(sessionId: string): Promise<void> {
+    const now = this.now()
     this.retryHealth.remove(sessionId)
-    this.quietWaits.remove(sessionId, this.now())
+    this.quietWaits.remove(sessionId, now)
+    this.watchdog.noteQuietWait(sessionId, false, now)
+    this.watchdog.noteRetryState(sessionId, undefined, now)
+    this.watchdog.noteSessionDisposed(sessionId)
     this.armIdleCheck()
     return this.retireWatch(sessionId)
   }
@@ -1992,8 +2111,12 @@ export class DotService {
    * current list so an unload that leaves the session visible does not retire it.
    */
   noteSessionRemoved(sessionId: string): Promise<void> {
+    const now = this.now()
     this.retryHealth.remove(sessionId)
-    this.quietWaits.remove(sessionId, this.now())
+    this.quietWaits.remove(sessionId, now)
+    this.watchdog.noteQuietWait(sessionId, false, now)
+    this.watchdog.noteRetryState(sessionId, undefined, now)
+    this.watchdog.noteSessionDisposed(sessionId)
     this.armIdleCheck()
     const task = this.store.task(sessionId)
     if (!task || task.origin !== 'watched' || task.status === 'archived') return Promise.resolve()
@@ -3054,6 +3177,7 @@ export class DotService {
   onStatus(sessionId: string, status: 'running' | 'idle'): void {
     if (this.closing) return
     if (status === 'idle') this.retryHealth.clear(sessionId)
+    this.watchdog.onAgentStatus(sessionId, status)
     if (this.isDot(sessionId)) {
       if (status === 'running') { this.idleSince = undefined; this.idleChecker.cancel() }
       else { this.idleSince ??= this.now(); this.batcher.wake(); this.armIdleCheck() }
@@ -3111,7 +3235,9 @@ export class DotService {
       const agentStatus = agent?.status ?? (this.host.isRunning(sessionId) ? 'running' : 'idle')
       if (agentStatus !== 'idle') return
       if (liveJobs.length > 0 || hasSubagents) {
-        const waitController = this.quietWaits.begin(sessionId, this.now())
+        const waitStartedAt = this.now()
+        const waitController = this.quietWaits.begin(sessionId, waitStartedAt)
+        this.watchdog.noteQuietWait(sessionId, true, waitStartedAt)
         const limitController = new AbortController()
         const limitMs = this.options.backgroundLimitMs ?? BACKGROUND_LIMIT_MS
         const limitHandle = this.timer.set(() => {
@@ -3128,8 +3254,10 @@ export class DotService {
             AbortSignal.any([waitController.signal, limitController.signal]),
           )
         } finally {
+          const waitEndedAt = this.now()
           this.timer.clear(limitHandle)
-          this.quietWaits.end(sessionId, waitController, this.now())
+          this.quietWaits.end(sessionId, waitController, waitEndedAt)
+          this.watchdog.noteQuietWait(sessionId, false, waitEndedAt)
           this.armIdleCheck()
         }
         if (this.closing || waitController.signal.aborted) return
@@ -3171,7 +3299,9 @@ export class DotService {
   }
 
   onError(sessionId: string, error: unknown): void {
-    if (this.closing || this.isDot(sessionId) || !this.liveTask(sessionId)) return
+    if (this.closing || this.isDot(sessionId)) return
+    this.watchdog.onAgentError(sessionId, error)
+    if (!this.liveTask(sessionId)) return
     const message = messageOf(error)
     void this.store.apply({ type: 'error', sessionId, at: this.now(), message }, this.pending.list())
     const owned = this.store.work.sessionRun(sessionId)
@@ -3476,6 +3606,7 @@ export class DotService {
     this.pending.dispose()
     this.disposal = (async () => {
       await this.selfDeployChain
+      await this.watchdog.dispose()
       await this.reflection.dispose()
       await this.lane
       await Promise.allSettled([...this.inFlight])
@@ -3484,6 +3615,7 @@ export class DotService {
       await this.knowledgeLane
       await this.store.flush()
     })()
+    this.watchdogListeners.clear()
     return this.disposal
   }
 

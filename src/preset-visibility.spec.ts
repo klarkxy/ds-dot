@@ -38,8 +38,9 @@ describe('preset visibility', () => {
   it('drops only the internal preset ids and keeps dot-worker public', () => {
     expect(isInternalPreset('dot')).toBe(true)
     expect(isInternalPreset('dot-reflection')).toBe(true)
+    expect(isInternalPreset('dot-watchdog')).toBe(true)
     expect(isInternalPreset('dot-worker')).toBe(false)
-    const rowsWithWorker: ListedPreset[] = [...ROWS, { id: 'dot-worker', name: 'Dot worker' }]
+    const rowsWithWorker: ListedPreset[] = [...ROWS, { id: 'dot-watchdog', name: 'Dot watchdog' }, { id: 'dot-worker', name: 'Dot worker' }]
     expect(visiblePresets(ROWS).map(row => row.id)).toEqual(['standard', 'ptc', 'mine'])
     expect(visiblePresets(rowsWithWorker).map(row => row.id)).toEqual(['standard', 'ptc', 'mine', 'dot-worker'])
     expect(publicDefaultId(rowsWithWorker, 'standard')).toBe('standard')
@@ -577,12 +578,14 @@ describe('session create guard', () => {
     try {
       await expect(controller.create({ cwd: '/w', agentPreset: 'dot' })).resolves.toEqual({ sessionId: 's1' })
       await expect(controller.create({ cwd: '/w', agentPreset: 'dot-reflection' })).resolves.toEqual({ sessionId: 's1' })
+      await expect(controller.create({ cwd: '/w', agentPreset: 'dot-watchdog' })).resolves.toEqual({ sessionId: 's1' })
       await expect(controller.create({ cwd: '/w', agentPreset: 'ptc' })).resolves.toEqual({ sessionId: 's1' })
       await expect(controller.create({ cwd: '/w' })).resolves.toEqual({ sessionId: 's1' })
     } finally {
       release()
     }
     expect(created).toEqual([
+      { cwd: '/w', agentPreset: 'standard' },
       { cwd: '/w', agentPreset: 'standard' },
       { cwd: '/w', agentPreset: 'standard' },
       { cwd: '/w', agentPreset: 'ptc' },

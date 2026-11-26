@@ -7,3 +7,4 @@
 - [factories.md](factories.md)：任务配方第一期刻意没做的部分
 - [im.md](im.md)：接入 IM 消息（飞书 / Telegram / Slack 等），含对 dsh-im-connect 的调研结论
 - [inbox-followups.md](inbox-followups.md)：收件箱第一期刻意没做的部分
+- [speculative-repro.md](speculative-repro.md)：在只读隔离沙箱中对未指派 GitHub Issue 静默尝试投机复现（P7 归档，待 P5/P6 稳定且 14 天误报率 < 10% 后立项）

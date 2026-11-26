@@ -48,6 +48,7 @@ export function runStoppedByUser(
   change?: Pick<ChangeRecord, 'control'>,
 ): boolean {
   if (change?.control === 'cancelled') return true
+  if (run.closeReason === 'watchdog') return false
   if (run.closeIntent === 'stopped') return true
   if (run.phase === 'stopped' && run.closeReason !== 'closeout' && run.closeReason !== 'rework') return true
   return false
@@ -2077,7 +2078,14 @@ export class WorkBook {
           ? { ...item, status: 'rejected' as const, evidence: 'superseded-by-verified-stop', updatedAt: at }
           : item)
         : run.deliveries
-      const next: RunRecord = { ...run, deliveries, phase, closureEvidence: evidence, closeReason: phase, updatedAt: at }
+      const next: RunRecord = {
+        ...run,
+        deliveries,
+        phase,
+        closureEvidence: evidence,
+        closeReason: phase === 'stopped' && run.closeReason ? run.closeReason : phase,
+        updatedAt: at,
+      }
       await this.commit('runs', next.id, next)
       this.runs.set(next.id, next)
       this.currentRevision += 1
@@ -2294,7 +2302,7 @@ export class WorkBook {
    * Close one run without cancelling its change. The stop itself happens outside
    * the lock; this only persists the settling gate.
    */
-  prepareFinish(runId: string, phase: 'completed' | 'failed', at = Date.now()): Promise<{ readonly ok: true; readonly updatedAt: number; readonly sessionId?: string; readonly requestedSessionId: string } | WorkRefusal> {
+  prepareFinish(runId: string, phase: 'completed' | 'failed' | 'stopped', at = Date.now(), closeReason?: string): Promise<{ readonly ok: true; readonly updatedAt: number; readonly sessionId?: string; readonly requestedSessionId: string } | WorkRefusal> {
     return this.exclusive(async () => {
       const refused = this.recoveryRefusal()
       if (refused) return refused
@@ -2303,13 +2311,13 @@ export class WorkBook {
       if (TERMINAL.has(run.phase)) return { ok: false, code: 'closed-run', message: `${runId} is ${run.phase}` }
       if (run.phase === 'settling') {
         if (run.closeIntent) return { ok: true, updatedAt: run.updatedAt, ...(run.sessionId ? { sessionId: run.sessionId } : {}), requestedSessionId: run.requestedSessionId }
-        const next: RunRecord = { ...run, closeIntent: phase, updatedAt: at }
+        const next: RunRecord = { ...run, closeIntent: phase, ...(closeReason ? { closeReason } : {}), updatedAt: at }
         await this.commit('runs', next.id, next)
         this.runs.set(next.id, next)
         this.currentRevision += 1
         return { ok: true, updatedAt: next.updatedAt, ...(next.sessionId ? { sessionId: next.sessionId } : {}), requestedSessionId: next.requestedSessionId }
       }
-      const next: RunRecord = { ...run, phase: 'settling', closeIntent: phase, updatedAt: at }
+      const next: RunRecord = { ...run, phase: 'settling', closeIntent: phase, ...(closeReason ? { closeReason } : {}), updatedAt: at }
       await this.commit('runs', next.id, next)
       this.runs.set(next.id, next)
       this.currentRevision += 1

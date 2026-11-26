@@ -1700,3 +1700,132 @@ describe('GitHub poll-primary settings', () => {
     await act(async () => root.unmount())
   })
 })
+
+describe('Run Watchdog settings', () => {
+  const catalog = {
+    groups: [
+      { id: 'deepseek', name: 'DeepSeek', models: [
+        { id: 'chat', name: 'DeepSeek Chat' },
+        { id: 'reasoner', name: 'DeepSeek Reasoner' },
+      ] },
+    ],
+  }
+  const selectChange = (el: HTMLSelectElement, value: string) => {
+    el.value = value
+    const propsKey = Object.keys(el).find(key => key.startsWith('__reactProps'))
+    const props = propsKey ? (el as unknown as Record<string, { onChange?: (event: { target: HTMLSelectElement }) => void }>)[propsKey] : undefined
+    props?.onChange?.({ target: el })
+  }
+
+  it('switches watchdogMode (off|observe|auto), picks/clears watchdogModel, toggles locks, and formats proposals', async () => {
+    const saves: Array<Partial<DotSettings>> = []
+    let current: DotSettings = { ...DEFAULT_SETTINGS }
+    const proposals = [
+      {
+        id: 'p-wd-mode',
+        field: 'watchdogMode' as const,
+        before: 'observe',
+        after: 'auto',
+        reason: 'enable read-only judge',
+        createdAt: 1,
+      },
+      {
+        id: 'p-wd-model',
+        field: 'watchdogModel' as const,
+        before: null,
+        after: 'deepseek/reasoner',
+        reason: 'use reasoner for judge',
+        createdAt: 2,
+      },
+    ]
+    const api = {
+      models: async () => catalog,
+      settings: async () => current,
+      settingProposals: async () => proposals,
+      decideSetting: async () => 'ok',
+      setSettings: async (patch: Partial<DotSettings>) => {
+        saves.push(patch)
+        if ('watchdogModel' in patch) {
+          if (patch.watchdogModel === null) {
+            const { watchdogModel: _drop, ...rest } = current
+            current = rest as DotSettings
+          } else {
+            current = { ...current, watchdogModel: patch.watchdogModel } as DotSettings
+          }
+        } else {
+          current = { ...current, ...patch } as DotSettings
+        }
+        return current
+      },
+    }
+    function Harness({ locale, section }: { locale: 'en' | 'zh'; section: 'general' | 'proposals' }) {
+      const [settings, setSettings] = useState<DotSettings>(current)
+      return <SettingsPanel locale={locale} section={section} api={api as never} settings={settings} onSaved={setSettings} />
+    }
+    const root = createRoot(document.getElementById('root')!)
+    await act(async () => root.render(<Harness locale="en" section="general" />))
+    await act(async () => { await Promise.resolve() })
+
+    const wdCard = document.querySelector('[data-section="watchdog"] .dsh-dot-watchdog-card')
+    expect(wdCard).not.toBeNull()
+    expect(wdCard?.textContent).toContain('Observe (default)')
+    expect(wdCard?.textContent).toContain('zero LLM judge calls')
+
+    // Default mode is observe.
+    const modeTab = (label: string) => [...document.querySelectorAll<HTMLButtonElement>('[role="tablist"][aria-label="Watchdog mode"] [role="tab"]')].find(el => el.textContent === label)!
+    expect(modeTab('Observe').getAttribute('aria-selected')).toBe('true')
+    await act(async () => modeTab('Auto').click())
+    expect(saves.at(-1)).toEqual({ watchdogMode: 'auto' })
+    await act(async () => modeTab('Off').click())
+    expect(saves.at(-1)).toEqual({ watchdogMode: 'off' })
+
+    // Model dropdown populated from catalog, supports provider/model and clearing to host default.
+    const modelSelect = () => document.querySelector<HTMLSelectElement>('select[aria-label="Watchdog judge model"]')!
+    expect([...modelSelect().options].map(o => o.textContent)).toEqual([
+      'Follow host default',
+      'DeepSeek / DeepSeek Chat',
+      'DeepSeek / DeepSeek Reasoner',
+    ])
+    await act(async () => selectChange(modelSelect(), JSON.stringify(['deepseek', 'reasoner'])))
+    expect(saves.at(-1)).toEqual({ watchdogModel: 'deepseek/reasoner' })
+    await act(async () => selectChange(modelSelect(), ''))
+    expect(saves.at(-1)).toEqual({ watchdogModel: null })
+
+    // Locks toggle for both watchdogMode and watchdogModel.
+    const modeLock = document.querySelector<HTMLButtonElement>('button.dsh-dot-lock[aria-label*="Watchdog mode"]')!
+    await act(async () => modeLock.click())
+    expect(saves.at(-1)).toEqual({ locks: { watchdogMode: true } })
+    const modelLock = document.querySelector<HTMLButtonElement>('button.dsh-dot-lock[aria-label*="Watchdog judge model"]')!
+    await act(async () => modelLock.click())
+    expect(saves.at(-1)).toEqual({ locks: { watchdogMode: true, watchdogModel: true } })
+
+    // SettingProposal formatting in en and zh.
+    await act(async () => root.render(<Harness locale="en" section="proposals" />))
+    await act(async () => { await Promise.resolve() })
+    expect([...document.querySelectorAll('.dsh-dot-proposal-head strong')].map(el => el.textContent)).toEqual([
+      'Run Watchdog mode',
+      'Watchdog judge model',
+    ])
+    expect([...document.querySelectorAll('.dsh-dot-proposal-chip')].map(el => el.textContent)).toEqual([
+      'Observe',
+      'Auto',
+      'Follow host default',
+      'DeepSeek / DeepSeek Reasoner',
+    ])
+
+    await act(async () => root.render(<Harness locale="zh" section="proposals" />))
+    expect([...document.querySelectorAll('.dsh-dot-proposal-head strong')].map(el => el.textContent)).toEqual([
+      '运行 Watchdog 模式',
+      'Watchdog 判官模型',
+    ])
+    expect([...document.querySelectorAll('.dsh-dot-proposal-chip')].map(el => el.textContent)).toEqual([
+      '仅观察',
+      '自动干预',
+      '跟随宿主默认模型',
+      'DeepSeek / DeepSeek Reasoner',
+    ])
+    expect(settingsCss).toContain('.dsh-dot-chat .dsh-dot-watchdog-card')
+
+    await act(async () => root.unmount())
+  })
+})

@@ -47,6 +47,7 @@ import { dotDomain, parseInboxRecord, parsePeerDelivery, parseTask } from './sto
 import { DotStore, type DotDomainHandle } from './store.ts'
 import { DOT_INHERITED_ALLOW } from './tools.ts'
 import { copyLocale, fillText, t } from './ui-copy.ts'
+import { WATCHDOG_INSTRUCTIONS, WATCHDOG_PRESET_ID } from './watchdog.ts'
 import { registerWorkerPreset } from './worker-preset.ts'
 
 export const name = PLUGIN_NAME
@@ -275,6 +276,7 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
     shouldAccept: (repo, receivedAt) => service.shouldAcceptWebhookDelivery(repo, receivedAt),
   })
   service.startGithubPoll()
+  service.startWatchdog()
   ctx.effect(() => () => {
     unfollow()
     unpending()
@@ -428,6 +430,43 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
   }, 'dot.reflection-preset')
 
   ctx.effect(() => registerWorkerPreset(ctx, logger), 'dot.worker-preset')
+
+  // The internal read-only watchdog judge preset: zero file/shell/task tools.
+  ctx.effect(() => {
+    const presets = safeAgentPresets()
+    let release: (() => Promise<void>) | undefined
+    let disposed = false
+    const onFailed = (error: unknown) => {
+      logger.error('preset.register-failed', 'Failed to register Dot watchdog preset.', error, { presetId: WATCHDOG_PRESET_ID })
+      safeWarn('dsh-dot: watchdog preset registration failed: %s', error)
+    }
+    try {
+      const register = presets?.register
+      if (typeof register !== 'function') return () => {}
+      void Promise.resolve(register.call(presets, {
+        id: WATCHDOG_PRESET_ID,
+        name: 'Dot watchdog',
+        description: 'Internal strictly read-only run-health judge used when watchdogMode is auto; never used for tasks.',
+        order: 92,
+        plugins: [
+          { id: 'persona', name: '@deepseek-ai/dsh-persona', config: { prefix: WATCHDOG_INSTRUCTIONS } },
+          { id: 'time-context', name: '@deepseek-ai/dsh-time-context' },
+        ] as never,
+      })).then((dispose: () => Promise<void>) => {
+        if (disposed) { invokePresetDispose(dispose); return }
+        release = dispose
+        logger.debug('preset.registered', 'Registered Dot watchdog preset.', { presetId: WATCHDOG_PRESET_ID })
+      }, onFailed)
+    } catch (error: unknown) {
+      onFailed(error)
+    }
+    return () => {
+      disposed = true
+      const current = release
+      release = undefined
+      invokePresetDispose(current)
+    }
+  }, 'dot.watchdog-preset')
 
   // Correlate the host audit id (not callId) with its in-memory dot request.
   const approvalWithdrawals = new Map<string, { sessionId: string; withdraw: () => void }>()
@@ -650,7 +689,7 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
   }
   // The kit's 64 KiB default answers 413 before `say` runs. A PNG of about
   // 51 KB does not fit after base64; the cap below fits the advertised images.
-  const PASSIVE_ENDPOINTS = new Set(['wait', 'board', 'attention', 'work.list', 'work.read', 'card.pending', 'card.detail', 'recipes', 'self.status', 'github.poll.status'])
+  const PASSIVE_ENDPOINTS = new Set(['wait', 'board', 'attention', 'work.list', 'work.read', 'card.pending', 'card.detail', 'recipes', 'self.status', 'github.poll.status', 'watchdog.diagnostics'])
   ctx.effect(() => registerHostRpc(ctx as unknown as HostRpcContext, RPC_CHANNEL, async (endpoint, payload, signal) => {
     try {
       const reqLocale = field(payload, 'uiLocale')
@@ -786,6 +825,19 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
         case 'context.clear': {
           await ensureDot()
           return { ok: true, value: await service.clearUsage() }
+        }
+        case 'watchdog.diagnostics': {
+          return { ok: true, value: service.watchdogDiagnostics() }
+        }
+        case 'watchdog.annotate': {
+          const id = str(payload, 'id').trim()
+          const annotation = field(payload, 'annotation')
+          if (!id || (annotation !== 'accurate' && annotation !== 'false-positive')) {
+            return { ok: false, error: { code: 'dot/invalid', message: 'watchdog.annotate requires id and annotation (accurate | false-positive)' } }
+          }
+          const updated = await service.annotateWatchdogHit(id, annotation)
+          if (!updated) return { ok: false, error: { code: 'dot/not-found', message: `unknown watchdog hit ${id}` } }
+          return { ok: true, value: service.watchdogDiagnostics() }
         }
         case 'recipes': return { ok: true, value: service.recipeBoard() }
         case 'recipe.run': {

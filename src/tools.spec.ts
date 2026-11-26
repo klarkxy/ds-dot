@@ -460,8 +460,18 @@ describe('settingsSnapshotBlock', () => {
   it('shows the fresh workspace-write default and reflection switch', () => {
     const snapshot = settingsSnapshotBlock(DEFAULT_SETTINGS)
     expect(snapshot).toContain('taskPermission: workspace-write')
+    expect(snapshot).toContain('defaultTaskPreset: standard')
     expect(snapshot).toContain('reflection: true')
     expect(settingsSnapshotBlock({ ...DEFAULT_SETTINGS, taskPermission: 'default', reflection: false })).toContain('taskPermission: default')
+    expect(settingsSnapshotBlock({ ...DEFAULT_SETTINGS, defaultTaskPreset: 'dot-worker' })).toContain('defaultTaskPreset: dot-worker')
     expect(settingsSnapshotBlock({ ...DEFAULT_SETTINGS, reflection: false })).toContain('reflection: false')
+  })
+
+  it('documents defaultTaskPreset and dot-worker in dot_settings and dot_task tool schemas', () => {
+    const tools = load()
+    const settingsTool = tools.find(row => row.name === TOOL.settings) as { description: string }
+    const taskTool = tools.find(row => row.name === TOOL.task) as { parameters: { properties: { preset: { description: string } } } }
+    expect(settingsTool.description).toContain('defaultTaskPreset')
+    expect(taskTool.parameters.properties.preset.description).toContain('dot-worker')
   })
 })

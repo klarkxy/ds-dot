@@ -41,23 +41,38 @@ export interface TaskPresetChoice {
   readonly named: boolean
 }
 
+const findPreset = (presets: readonly CatalogPreset[], id: string): CatalogPreset | undefined =>
+  presets.find(preset => preset.id === id) ?? presets.find(preset => preset.id.toLowerCase() === id.toLowerCase())
+
 /**
  * The preset a new task session runs on.
- * @param requested - what dot asked for: a preset id, or nothing / "default" for the host default.
- * @throws TaskPresetError when the request names no usable preset.
+ * Priority: explicit `requested` (non-empty and !== `'default'`) > `defaultPreset`
+ * (when present in catalog, non-internal, non-broken) > `catalog.fallback` > `'standard'` > first usable preset.
+ * @param requested - what dot asked for: a preset id, or nothing / "default" for the configured default.
+ * @param defaultPreset - configured default task preset (e.g. `settings.defaultTaskPreset`).
+ * @throws TaskPresetError when an explicit request names no usable preset or no usable preset exists.
  */
-export function pickTaskPreset(catalog: TaskPresetCatalog, requested?: string): TaskPresetChoice {
+export function pickTaskPreset(catalog: TaskPresetCatalog, requested?: string, defaultPreset?: string): TaskPresetChoice {
   const wanted = requested?.trim()
-  if (!wanted || wanted.toLowerCase() === 'default') {
-    const fallback = catalog.presets.find(preset => preset.id === catalog.fallback)
-    if (fallback && !isInternalPreset(fallback.id) && !fallback.broken) return { id: fallback.id, named: false }
-    const safe = usablePresets(catalog)[0]
-    if (!safe) throw new TaskPresetError('dot/unknown-preset', 'No usable preset is available for a task session.')
-    return { id: safe.id, named: true }
+  if (wanted && wanted.toLowerCase() !== 'default') {
+    const found = findPreset(catalog.presets, wanted)
+    if (!found || isInternalPreset(found.id)) throw new TaskPresetError('dot/unknown-preset', `no preset "${wanted}" for tasks. ${describe(catalog)} Leave preset out for the default.`)
+    if (found.broken) throw new TaskPresetError('dot/preset-broken', `preset ${found.id} cannot be used on this host: ${found.broken}. ${describe(catalog)}`)
+    // Naming the default is the same as leaving it out.
+    return { id: found.id, named: found.id !== catalog.fallback }
   }
-  const found = catalog.presets.find(preset => preset.id === wanted) ?? catalog.presets.find(preset => preset.id.toLowerCase() === wanted.toLowerCase())
-  if (!found || isInternalPreset(found.id)) throw new TaskPresetError('dot/unknown-preset', `no preset "${wanted}" for tasks. ${describe(catalog)} Leave preset out for the default.`)
-  if (found.broken) throw new TaskPresetError('dot/preset-broken', `preset ${found.id} cannot be used on this host: ${found.broken}. ${describe(catalog)}`)
-  // Naming the default is the same as leaving it out.
-  return { id: found.id, named: found.id !== catalog.fallback }
+  const preferred = defaultPreset?.trim()
+  if (preferred && preferred.toLowerCase() !== 'default') {
+    const chosen = findPreset(catalog.presets, preferred)
+    if (chosen && !isInternalPreset(chosen.id) && !chosen.broken) {
+      return { id: chosen.id, named: chosen.id !== catalog.fallback }
+    }
+  }
+  const fallback = catalog.fallback ? catalog.presets.find(preset => preset.id === catalog.fallback) : undefined
+  if (fallback && !isInternalPreset(fallback.id) && !fallback.broken) return { id: fallback.id, named: false }
+  const standard = catalog.presets.find(preset => preset.id === 'standard')
+  if (standard && !isInternalPreset(standard.id) && !standard.broken) return { id: standard.id, named: true }
+  const safe = usablePresets(catalog)[0]
+  if (!safe) throw new TaskPresetError('dot/unknown-preset', 'No usable preset is available for a task session.')
+  return { id: safe.id, named: true }
 }

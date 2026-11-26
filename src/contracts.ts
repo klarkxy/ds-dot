@@ -8,6 +8,9 @@
 export const PLUGIN_NAME = 'dsh-dot'
 export const SERVICE_NAME = 'dot'
 export const PRESET_ID = 'dot'
+export const WORKER_PRESET_ID = 'dot-worker'
+export const TASK_PRESET_OPTIONS = ['standard', WORKER_PRESET_ID] as const
+export type DefaultTaskPreset = (typeof TASK_PRESET_OPTIONS)[number]
 export const RPC_CHANNEL = '/dsh-dot'
 
 /** What self.status reports about this install and its newest kept pre-upgrade backup. */
@@ -43,7 +46,7 @@ export const TOOL = {
  * Settings Dorothy may propose changing; locks themselves are human-only.
  * `agreements` is the human's rules text, edited as one bulk value.
  */
-export const SETTING_FIELDS = ['model', 'approvals', 'questions', 'scope', 'taskModels', 'taskPermission', 'reflection', 'idleCheckMinutes', 'persona', 'address', 'agreements', 'capabilities'] as const
+export const SETTING_FIELDS = ['model', 'approvals', 'questions', 'scope', 'taskModels', 'taskPermission', 'defaultTaskPreset', 'reflection', 'idleCheckMinutes', 'persona', 'address', 'agreements', 'capabilities'] as const
 export type SettingField = typeof SETTING_FIELDS[number]
 export type SettingLocks = Readonly<Partial<Record<SettingField, boolean>>>
 
@@ -491,6 +494,8 @@ export interface DotSettings {
   readonly taskModels: TaskModelRule
   /** The permission preset a new task session starts with. */
   readonly taskPermission: TaskPermission
+  /** Default preset a new task session starts on when dot_task omits preset. */
+  readonly defaultTaskPreset: DefaultTaskPreset
   /** Whether dot may run her own background reflection pass. */
   readonly reflection: boolean
   /** Whether dot checks daily for a newer published version of itself and hot-updates. */
@@ -638,6 +643,7 @@ export const DEFAULT_SETTINGS: DotSettings = {
   scope: 'tracked',
   taskModels: { mode: 'all', list: [] },
   taskPermission: 'workspace-write',
+  defaultTaskPreset: 'standard',
   reflection: true,
   autoUpdate: true,
   idleCheckMinutes: 10,

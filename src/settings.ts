@@ -5,7 +5,7 @@
  */
 import { z } from 'zod'
 import { isTaskOnlySelector } from './capabilities.ts'
-import { DEFAULT_SETTINGS, SETTING_FIELDS, TASK_MODEL_LIST_MAX, isMcpServerHeaders, isMcpServerUrl, MCP_NEW_SERVER_NAME_PATTERN, MCP_SERVER_NAME_PATTERN, mcpServerOf, type CapabilityGroupView, type DotSettings, type SettingField, type TaskPermission } from './contracts.ts'
+import { DEFAULT_SETTINGS, SETTING_FIELDS, TASK_MODEL_LIST_MAX, TASK_PRESET_OPTIONS, isMcpServerHeaders, isMcpServerUrl, MCP_NEW_SERVER_NAME_PATTERN, MCP_SERVER_NAME_PATTERN, mcpServerOf, type CapabilityGroupView, type DotSettings, type SettingField, type TaskPermission } from './contracts.ts'
 import { type CopyLocale } from './i18n/index.ts'
 import { CACHE_TTL_MAX_ENTRIES, CACHE_TTL_MAX_MINUTES } from './keepalive.ts'
 import { ADDRESS_MAX_CHARS, PERSONA_MAX_CHARS, defaultAddress, defaultPersona } from './persona.ts'
@@ -32,6 +32,7 @@ const FIELDS = {
     list: z.array(z.string().trim().min(1).max(400)).max(TASK_MODEL_LIST_MAX),
   }).strict(),
   taskPermission: z.enum(['workspace-write', 'danger-full-access', 'safe-auto', 'auto']),
+  defaultTaskPreset: z.enum(TASK_PRESET_OPTIONS),
   reflection: z.boolean(),
   autoUpdate: z.boolean(),
   idleCheckMinutes: z.number().int().min(0).max(1440),

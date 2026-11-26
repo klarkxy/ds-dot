@@ -144,4 +144,20 @@ describe('Dorothy self settings', () => {
     await h.self.propose({ field: 'agreements', value: '- likes tea\r\n', reason: 'remember' })
     expect(h.store.settingProposals[0]!.after).toBe('- likes tea\n')
   })
+
+  it('reads, proposes, approves, and enforces locks on defaultTaskPreset', async () => {
+    const h = setup()
+    expect(await h.self.read()).toContain('defaultTaskPreset: standard')
+
+    await h.self.propose({ field: 'defaultTaskPreset', value: 'dot-worker', reason: 'prefer 5s auto-promote' })
+    const proposal = h.store.settingProposals[0]!
+    expect(proposal).toMatchObject({ field: 'defaultTaskPreset', before: 'standard', after: 'dot-worker' })
+    expect(parseSettingProposal(proposal)).toMatchObject({ field: 'defaultTaskPreset', after: 'dot-worker' })
+
+    expect(await h.self.decide(proposal.id, true)).toContain('defaultTaskPreset is now dot-worker')
+    expect(h.store.settings.defaultTaskPreset).toBe('dot-worker')
+
+    await h.store.setSettings({ ...h.store.settings, locks: { defaultTaskPreset: true } })
+    await expect(h.self.propose({ field: 'defaultTaskPreset', value: 'standard', reason: 'revert' })).rejects.toThrow(/locked by the human/)
+  })
 })

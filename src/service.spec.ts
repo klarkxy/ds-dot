@@ -23,6 +23,13 @@ import { TASK_BRANCH_PREFIX, TASK_WORKTREES_DIR, listTaskWorktrees, runGit } fro
 import { killProcessTree, libHashOf, runSelfBuild } from './self-root.ts'
 import { canonicalPath, onDiskPath } from './work.ts'
 import { upsertRecipeOutcome } from './recipes.ts'
+import { Context } from '@deepseek-ai/cordis'
+import { createScope } from '@deepseek-ai/dsh-scope'
+import { SystemPrompt } from '@deepseek-ai/dsh-system-prompt'
+import { ToolsService } from '@deepseek-ai/dsh-tools'
+import { ToolExecutionPipeline, executeToolBatch } from '@deepseek-ai/dsh-tools/pipeline'
+import { isTaskOnlySelector, TASK_ONLY_TOOLS } from './capabilities.ts'
+import { patchSettings } from './settings.ts'
 
 /** Manual timer: tests fire scheduled callbacks explicitly. */
 function manualTimer() {
@@ -6102,6 +6109,181 @@ describe('DotService background quiet wait', () => {
       expect(boardChanges).toHaveBeenCalledTimes(1)
       unsub()
     } finally {
+      await h.service.dispose()
+    }
+  })
+})
+
+describe('dot-worker preset selection and security hook parity', () => {
+  it('routes dispatches via defaultTaskPreset (overridden by dot_task preset and falling back when missing/broken)', async () => {
+    const h = setup({ defaultTaskPreset: 'dot-worker' })
+    let presets = [{ id: 'standard' }, { id: 'dot-worker' }, { id: 'ptc' }, { id: 'dot' }] as Array<{ id: string; broken?: string }>
+    h.host.listPresets = async () => ({ fallback: 'standard', presets })
+    try {
+      await h.service.ensureDot()
+
+      // 1. Omitting preset picks configured defaultTaskPreset ('dot-worker')
+      const c1 = await h.service.createWorkChange({ title: 'WorkerDefault', cwd: '/w1', goal: 'g', at: 1 })
+      const d1 = await h.service.manageTask({ action: 'dispatch', task_id: c1.id, access: 'read', instruction: 'run with default' })
+      const r1 = /started (run-\d+)/.exec(d1)![1]!
+      const run1 = h.store.work.run(r1)!
+      expect(run1.expectedPreset).toBe('dot-worker')
+      expect(h.calls.some(call => call.startsWith(`create ${run1.sessionId} `) && call.endsWith(' preset=dot-worker'))).toBe(true)
+      await expect(h.host.findSession(run1.sessionId!)).resolves.toMatchObject({ preset: 'dot-worker' })
+
+      // 2. Explicit dot_task preset ('standard' or 'ptc') overrides defaultTaskPreset
+      const c2 = await h.service.createWorkChange({ title: 'ExplicitStandard', cwd: '/w2', goal: 'g', at: 1 })
+      const d2 = await h.service.manageTask({ action: 'dispatch', task_id: c2.id, access: 'read', preset: 'standard', instruction: 'override to standard' })
+      const r2 = /started (run-\d+)/.exec(d2)![1]!
+      const run2 = h.store.work.run(r2)!
+      expect(run2.expectedPreset).toBeUndefined()
+      expect(h.calls.some(call => call.startsWith(`create ${run2.sessionId} `) && !call.includes('preset='))).toBe(true)
+
+      const c3 = await h.service.createWorkChange({ title: 'ExplicitPtc', cwd: '/w3', goal: 'g', at: 1 })
+      const d3 = await h.service.manageTask({ action: 'dispatch', task_id: c3.id, access: 'read', preset: 'ptc', instruction: 'override to ptc' })
+      const r3 = /started (run-\d+)/.exec(d3)![1]!
+      expect(h.store.work.run(r3)!.expectedPreset).toBe('ptc')
+
+      // 3. Broken or absent dot-worker falls back to host 'standard' without throwing
+      presets = [{ id: 'standard' }, { id: 'dot-worker', broken: 'mount error' }]
+      const c4 = await h.service.createWorkChange({ title: 'BrokenWorkerFallback', cwd: '/w4', goal: 'g', at: 1 })
+      const d4 = await h.service.manageTask({ action: 'dispatch', task_id: c4.id, access: 'read', instruction: 'fallback check' })
+      const r4 = /started (run-\d+)/.exec(d4)![1]!
+      expect(h.store.work.run(r4)!.expectedPreset).toBeUndefined()
+    } finally {
+      await h.service.dispose()
+    }
+  })
+
+  it('enforces guardRunWriteTool, sealChildSession, TASK_ONLY_TOOLS isolation, and approval/question relay on dot-worker runs identically to standard', async () => {
+    const h = setup({ defaultTaskPreset: 'dot-worker', approvals: 'dot', questions: 'dot' })
+    h.host.listPresets = async () => ({
+      fallback: 'standard',
+      presets: [{ id: 'standard' }, { id: 'dot-worker' }],
+    })
+
+    const ctx = new Context()
+    new SystemPrompt(ctx, {})
+    new ToolsService(ctx)
+    const pipeline = new ToolExecutionPipeline(ctx)
+    ctx.tools.setExecutor({
+      describe: tools => ({
+        schemas: tools.map(t => ({
+          name: t.name,
+          description: t.description,
+          parameters: { type: 'object', properties: {} },
+        })),
+      }),
+      execute: input => executeToolBatch(input, pipeline, () => 4),
+    })
+
+    const disposers: Array<() => void> = []
+    disposers.push(ctx.tools.register({
+      name: 'subagent',
+      description: 'spawn subagent',
+      parameters: { type: 'object', properties: {} },
+      output: { schema: { type: 'string' }, render: (_a, v) => [{ type: 'text', text: String(v) }] },
+      execute: () => 'subagent-ok',
+    } as never))
+    disposers.push(ctx.tools.register({
+      name: 'write',
+      description: 'write file',
+      parameters: { type: 'object', properties: { path: { type: 'string' }, content: { type: 'string' } } },
+      output: { schema: { type: 'string' }, render: (_a, v) => [{ type: 'text', text: String(v) }] },
+      execute: () => 'write-ok',
+    } as never))
+
+    const liveAgents = new Map<string, { id: string; ctx: Context; session: { id: string } }>()
+    const scopes: Array<ReturnType<typeof createScope>> = []
+    const origCreate = h.host.createSession.bind(h.host)
+    h.host.createSession = async place => {
+      const id = await origCreate(place)
+      const agent: { id: string; ctx?: Context; session: { id: string } } = { id, session: { id } }
+      const scope = createScope(ctx, agent)
+      agent.ctx = scope.ctx
+      scopes.push(scope)
+      liveAgents.set(id, agent as { id: string; ctx: Context; session: { id: string } })
+      h.service.sealAgent(agent)
+      return id
+    }
+
+    try {
+      await h.service.ensureDot()
+
+      // 1. Read-only dot-worker run: denies child tools, registers dot_peer, blocks write tool
+      const readChange = await h.service.createWorkChange({ title: 'ReadWorker', cwd: '/repo', goal: 'inspect', at: 1 })
+      const readRes = await h.service.manageTask({ action: 'dispatch', task_id: readChange.id, access: 'read', instruction: 'inspect safely' })
+      const readRunId = /started (run-\d+)/.exec(readRes)![1]!
+      const readSid = h.store.work.run(readRunId)!.sessionId!
+      const readAgent = liveAgents.get(readSid)!
+      expect(h.store.work.run(readRunId)!.expectedPreset).toBe('dot-worker')
+      expect(ctx.tools.get('dot_peer', readAgent as never)).toBeDefined()
+      expect(ctx.tools.get('subagent', readAgent as never)).toBeUndefined()
+
+      const readExec = await ctx.tools.execute({
+        agent: readAgent as never,
+        signal: new AbortController().signal,
+        calls: [
+          { id: 'c-sub', name: 'subagent', arguments: '{}' },
+          { id: 'c-write', name: 'write', arguments: JSON.stringify({ path: 'src/a.ts', content: 'x' }) },
+        ] as never,
+      })
+      expect(readExec.results[0]?.result).toMatchObject({ isError: true })
+      expect(readExec.results[1]?.result).toMatchObject({ isError: true })
+
+      // 2. Scoped write dot-worker run: allows declared file, blocks undeclared file
+      const writeChange = await h.service.createWorkChange({ title: 'WriteWorker', cwd: '/repo', goal: 'edit one file', at: 1 })
+      const writeRes = await h.service.manageTask({
+        action: 'dispatch',
+        task_id: writeChange.id,
+        access: 'write',
+        paths: JSON.stringify([{ path: 'src/ok.ts', type: 'file' }]),
+        instruction: 'edit src/ok.ts',
+      })
+      const writeRunId = /started (run-\d+)/.exec(writeRes)![1]!
+      const writeSid = h.store.work.run(writeRunId)!.sessionId!
+      const writeAgent = liveAgents.get(writeSid)!
+      expect(h.store.work.run(writeRunId)!.expectedPreset).toBe('dot-worker')
+
+      const writeExec = await ctx.tools.execute({
+        agent: writeAgent as never,
+        signal: new AbortController().signal,
+        calls: [
+          { id: 'c-bad-path', name: 'write', arguments: JSON.stringify({ path: 'src/other.ts', content: 'nope' }) },
+          { id: 'c-good-path', name: 'write', arguments: JSON.stringify({ path: 'src/ok.ts', content: 'ok' }) },
+        ] as never,
+      })
+      expect(writeExec.results[0]?.result).toMatchObject({ isError: true })
+      expect(writeExec.results[1]?.result).toMatchObject({ isError: false, value: 'write-ok' })
+
+      // 3. TASK_ONLY_TOOLS isolation remains blocked on Dorothy's own settings
+      for (const toolName of ['bash', 'pwsh', 'write', 'edit', 'apply_patch']) {
+        expect(TASK_ONLY_TOOLS.has(toolName)).toBe(true)
+        expect(isTaskOnlySelector(`tool:${toolName}`)).toBe(true)
+        expect(() => patchSettings(h.store.settings, { capabilities: { grants: { [`tool:${toolName}`]: 'auto' } } })).toThrow(/task runs/)
+      }
+
+      // 4. Approval & user-question relay works identically on dot-worker sessions
+      const approvalRoute = h.service.relayRequest({
+        kind: 'approval',
+        sessionId: writeSid,
+        subject: 'pwsh',
+        toolName: 'pwsh',
+        arguments: '{"command":"pnpm test"}',
+      })
+      expect(approvalRoute.decided).toBe('pending')
+      const questionRoute = h.service.relayRequest({
+        kind: 'question',
+        sessionId: writeSid,
+        subject: 'Choose branch',
+        questions: [{ id: 'q1', question: 'Which branch?' }],
+      })
+      expect(questionRoute.decided).toBe('pending')
+      expect(h.service.runTaskPermission(writeSid)).toBe('workspace-write')
+    } finally {
+      for (const scope of scopes) await scope.dispose()
+      for (const dispose of disposers) dispose()
+      await ctx.fiber.dispose()
       await h.service.dispose()
     }
   })

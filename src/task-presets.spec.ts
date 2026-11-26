@@ -36,4 +36,37 @@ describe('task presets', () => {
     expect(() => pickTaskPreset(CATALOG, 'mine')).toThrowError(expect.objectContaining({ code: 'dot/preset-broken', message: expect.stringContaining('a row does not load') }))
     expect(() => pickTaskPreset({ presets: [{ id: 'dot' }] }, 'ptc')).toThrow(/lists no preset a task can run on/)
   })
+
+  it('applies 3-tier priority: explicit requested > defaultPreset > standard/fallback', () => {
+    const withWorker: TaskPresetCatalog = {
+      fallback: 'standard',
+      presets: [{ id: 'standard', name: 'Standard' }, { id: 'dot-worker', name: 'Dot worker' }, { id: 'ptc' }, { id: 'dot' }],
+    }
+    // Configured defaultTaskPreset = 'dot-worker' selects dot-worker when preset is omitted or 'default'.
+    expect(pickTaskPreset(withWorker, undefined, 'dot-worker')).toEqual({ id: 'dot-worker', named: true })
+    expect(pickTaskPreset(withWorker, '  ', 'dot-worker')).toEqual({ id: 'dot-worker', named: true })
+    expect(pickTaskPreset(withWorker, 'default', 'dot-worker')).toEqual({ id: 'dot-worker', named: true })
+
+    // Explicit requested preset overrides defaultTaskPreset.
+    expect(pickTaskPreset(withWorker, 'standard', 'dot-worker')).toEqual({ id: 'standard', named: false })
+    expect(pickTaskPreset(withWorker, 'ptc', 'dot-worker')).toEqual({ id: 'ptc', named: true })
+
+    // When defaultPreset is 'standard' and catalog lacks 'standard' (e.g. only 'ptc'), falls back gracefully.
+    expect(pickTaskPreset({ fallback: 'ptc', presets: [{ id: 'ptc' }] }, undefined, 'standard')).toEqual({ id: 'ptc', named: false })
+
+    // When defaultPreset ('dot-worker') is missing, broken, or internal, falls back gracefully without throwing.
+    expect(pickTaskPreset(CATALOG, undefined, 'dot-worker')).toEqual({ id: 'standard', named: false })
+    expect(pickTaskPreset({
+      fallback: 'standard',
+      presets: [{ id: 'standard' }, { id: 'dot-worker', broken: 'failed to mount' }],
+    }, undefined, 'dot-worker')).toEqual({ id: 'standard', named: false })
+    expect(pickTaskPreset(withWorker, undefined, 'dot')).toEqual({ id: 'standard', named: false })
+
+    // Explicit broken/unknown request still throws even if defaultPreset is valid.
+    expect(() => pickTaskPreset({
+      fallback: 'standard',
+      presets: [{ id: 'standard' }, { id: 'dot-worker', broken: 'failed to mount' }],
+    }, 'dot-worker', 'standard')).toThrowError(expect.objectContaining({ code: 'dot/preset-broken' }))
+    expect(() => pickTaskPreset(CATALOG, 'dot-worker', 'standard')).toThrowError(expect.objectContaining({ code: 'dot/unknown-preset' }))
+  })
 })

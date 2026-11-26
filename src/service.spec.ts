@@ -5728,8 +5728,7 @@ describe('DotService background quiet wait', () => {
 
       mockJobs.start('job-1', runSessionId, 'pnpm test')
       const turnEndP = h.service.onTurnEnd(runSessionId)
-      await new Promise(r => setTimeout(r, 15))
-      expect(h.service.hasActiveQuietWait(runSessionId)).toBe(true)
+      await vi.waitFor(() => expect(h.service.hasActiveQuietWait(runSessionId)).toBe(true), { timeout: 2000, interval: 5 })
       expect(watchCalls).toBe(1) // Phase-1 observeRun ran before quiet wait
       expect(h.store.work.run(runId)?.cursor?.seq).toBe(10)
       await h.service.flushNotices()
@@ -5773,8 +5772,7 @@ describe('DotService background quiet wait', () => {
       // 1) supplementWorkRun aborts quiet wait cleanly (relays supplement to sid, zero turn-end notify to dot)
       mockJobs.start('j-sup', sid, 'bg')
       const p1 = h.service.onTurnEnd(sid)
-      await new Promise(r => setTimeout(r, 10))
-      expect(h.service.hasActiveQuietWait(sid)).toBe(true)
+      await vi.waitFor(() => expect(h.service.hasActiveQuietWait(sid)).toBe(true), { timeout: 2000, interval: 5 })
       await h.service.supplementWorkRun(runId, 'extra info', dot, { inputRef: run.inputRef, inputRevision: run.inputRevision })
       await p1
       expect(h.service.hasActiveQuietWait(sid)).toBe(false)
@@ -5783,8 +5781,7 @@ describe('DotService background quiet wait', () => {
 
       // 2) onStatus('running') aborts quiet wait cleanly
       const p2 = h.service.onTurnEnd(sid)
-      await new Promise(r => setTimeout(r, 10))
-      expect(h.service.hasActiveQuietWait(sid)).toBe(true)
+      await vi.waitFor(() => expect(h.service.hasActiveQuietWait(sid)).toBe(true), { timeout: 2000, interval: 5 })
       h.service.onStatus(sid, 'running')
       await p2
       expect(h.service.hasActiveQuietWait(sid)).toBe(false)
@@ -5793,8 +5790,7 @@ describe('DotService background quiet wait', () => {
 
       // 3) cancelWorkChange aborts quiet wait cleanly
       const p3 = h.service.onTurnEnd(sid)
-      await new Promise(r => setTimeout(r, 10))
-      expect(h.service.hasActiveQuietWait(sid)).toBe(true)
+      await vi.waitFor(() => expect(h.service.hasActiveQuietWait(sid)).toBe(true), { timeout: 2000, interval: 5 })
       await h.service.cancelWorkChange(change.id)
       await p3
       expect(h.service.hasActiveQuietWait(sid)).toBe(false)
@@ -5843,16 +5839,14 @@ describe('DotService background quiet wait', () => {
     agents2.set(s2, { id: s2, status: 'idle', session: { id: s2, seq: 1 } })
     mockJobs2.start('j-peer', s1, 'bg')
     const waitPeer = service2.onTurnEnd(s1)
-    await new Promise(r => setTimeout(r, 10))
-    expect(service2.hasActiveQuietWait(s1)).toBe(true)
+    await vi.waitFor(() => expect(service2.hasActiveQuietWait(s1)).toBe(true), { timeout: 2000, interval: 5 })
     await service2.peerSend({ senderSessionId: s2, targetSessionId: s1, text: 'hello peer', deliveryId: 'del-peer-1' })
     await waitPeer
     expect(service2.hasActiveQuietWait(s1)).toBe(false)
 
     // noteSessionArchived aborts active quiet wait cleanly
     const waitArchive = service2.onTurnEnd(s1)
-    await new Promise(r => setTimeout(r, 10))
-    expect(service2.hasActiveQuietWait(s1)).toBe(true)
+    await vi.waitFor(() => expect(service2.hasActiveQuietWait(s1)).toBe(true), { timeout: 2000, interval: 5 })
     await service2.noteSessionArchived(s1)
     await waitArchive
     expect(service2.hasActiveQuietWait(s1)).toBe(false)
@@ -5860,8 +5854,7 @@ describe('DotService background quiet wait', () => {
     // dispose aborts active quiet wait before inFlight settles
     mockJobs2.start('j-disp', s2, 'bg')
     const waitDispose = service2.onTurnEnd(s2)
-    await new Promise(r => setTimeout(r, 10))
-    expect(service2.hasActiveQuietWait(s2)).toBe(true)
+    await vi.waitFor(() => expect(service2.hasActiveQuietWait(s2)).toBe(true), { timeout: 2000, interval: 5 })
     await service2.dispose()
     await waitDispose
     expect(service2.hasActiveQuietWait(s2)).toBe(false)
@@ -5893,16 +5886,16 @@ describe('DotService background quiet wait', () => {
 
       mockJobs.start('j-long', sid, 'npm run build', 'compiling...\nstill running')
       const turnEndP = h.service.onTurnEnd(sid)
-      await new Promise(r => setTimeout(r, 10))
-      expect(h.service.hasActiveQuietWait(sid)).toBe(true)
+      await vi.waitFor(() => expect(h.service.hasActiveQuietWait(sid)).toBe(true), { timeout: 2000, interval: 5 })
       expect(h.delays()).toContain(30 * 60_000)
 
       // maxConcurrentRuns=1 blocks a second run while in quiet wait
       await expect(h.service.manageTask({ action: 'dispatch', task_id: change.id, access: 'read', instruction: 'second' })).rejects.toThrow(/already has 1 open runs/)
 
-      // Fire the 30-min timeout timer; settle shortly after kill is called
-      setTimeout(() => mockJobs.settle('j-long', 'killed'), 15)
+      // Fire the 30-min timeout timer; settle once kill is requested
       h.fire()
+      await vi.waitFor(() => expect(mockJobs.killCalls).toHaveLength(1), { timeout: 2000, interval: 5 })
+      mockJobs.settle('j-long', 'killed')
       await turnEndP
 
       expect(mockJobs.waitCalls[0]).toEqual({ id: 'j-long', timeoutMs: 10_000, caller: sid })
@@ -5967,8 +5960,7 @@ describe('DotService background quiet wait', () => {
       runSid = store1.work.run(runId)!.sessionId!
       mockJobs1.start('j-restart', runSid, 'long')
       const waiting = s1.onTurnEnd(runSid)
-      await new Promise(r => setTimeout(r, 10))
-      expect(s1.hasActiveQuietWait(runSid)).toBe(true)
+      await vi.waitFor(() => expect(s1.hasActiveQuietWait(runSid)).toBe(true), { timeout: 2000, interval: 5 })
       await s1.dispose()
       await waiting
     } finally {

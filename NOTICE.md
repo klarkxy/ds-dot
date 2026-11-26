@@ -9,6 +9,15 @@ Source revision: https://github.com/bowenliang123/dsh-context/tree/432c5cbb99117
 
 The components were adapted and scoped to Dorothy's panel.
 
+## dsh-superagent-prototype
+
+Dorothy's coordinator/worker communication disciplines and selected runtime capabilities adapt modules from **dsh-superagent-prototype**, under the MIT License.
+
+Upstream: https://github.com/deepseek-ai/dsh-superagent-prototype
+Source revision: https://github.com/deepseek-ai/dsh-superagent-prototype/tree/8c32a9dc5d72c033816c6a8110b37f40cf94fba4
+
+Selected prompts and capability modules were adapted to Dorothy's `WorkBook`, `submitInbox`, and `@deepseek-ai/dsh-*` plugin architecture.
+
 ## LMArena leaderboard data
 
 The bundled `src/model-arena.json` contains normalized and aggregated data from **LMArena's `lmarena-ai/leaderboard-dataset`**, licensed **CC BY 4.0**.

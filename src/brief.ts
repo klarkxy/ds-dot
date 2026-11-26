@@ -1,3 +1,4 @@
+// Adapted from deepseek-ai/dsh-superagent-prototype@8c32a9d (MIT).
 /**
  * The messages a run receives from dot. The contract part (goal, scope,
  * requirements, constraints, tasks, report format) is rendered here from the
@@ -98,6 +99,12 @@ function roleLine(run: BriefRun): string {
   return 'You are executing this work order.'
 }
 
+export const WORKER_DISCIPLINES = [
+  'Stop at the impact boundary once the local change is reviewable and test-verified; if you hit a cross-module contract change, architectural trade-off, or requirement gap, pause and ask Dorothy instead of guessing or expanding scope.',
+  'Report blockers and failures honestly: never delete or skip tests, weaken type checks, or bypass write-scope limits to work around a question.',
+  'When a human decision is needed, escalate one structured question (question, options, and recommendation) for Dorothy to relay verbatim without rewriting or answering for the human; use dot_peer only for active peer task runs, and bounce out-of-scope follow-ups back to Dorothy to re-triage rather than expanding scope.',
+] as const
+
 /** How a run chooses reversible details and how it reports a real blocker. */
 function conductLines(kind: BriefRun['kind']): string[] {
   if (kind === 'review') {
@@ -108,6 +115,7 @@ function conductLines(kind: BriefRun['kind']): string[] {
     'When the next step is inside this order and authorized, do it; do not end with a plan or with instructions for someone else to run. Before writing the Report, account for every required scenario and any check you could not run, and cite concrete evidence in the Report itself: dot verifies from it.',
     'Pause only the dependent part when a wrong guess would materially change the result, requirements conflict, only the requester knows the intent, authority is missing, or the effect would be irreversible, external, or costly. Report what happened, what you tried, the evidence, and one recommended next step. Do not invent a requirement to get past it.',
     'A patch or an intermediate finding is not delivery. Do not repeat a failed approach without a new hypothesis.',
+    ...WORKER_DISCIPLINES,
   ]
 }
 

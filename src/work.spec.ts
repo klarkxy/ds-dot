@@ -1,10 +1,16 @@
 import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, existsSync, rmSync, symlinkSync, realpathSync } from 'node:fs'
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { execFileSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
+import { DomainFacility } from '@deepseek-ai/dsh-storage-domain'
+import { JsonStorageBackend } from '@deepseek-ai/dsh-storage-json'
+import { openCompatibleDomain } from '@klarkxy/dsh-plugin-kit/domain'
 import { readSnapshot, saveSnapshot, sha256, baselineCaptures } from './artifacts.ts'
-import { WorkBook, canonicalPath, judgeVerification, occupantsConflict, onDiskPath, parseInput, workspaceIdentity, type ExternalOccupant, type WorkPersist } from './work.ts'
+import { STATE_KEY, dotDomain } from './storage.ts'
+import { DotStore } from './store.ts'
+import { DEFAULT_RUN_ORIGIN, WorkBook, canonicalPath, effectiveRunOrigin, judgeVerification, occupantsConflict, onDiskPath, parseInput, parseRun, runOriginSchema, workspaceIdentity, type ExternalOccupant, type RunOrigin, type WorkPersist } from './work.ts'
 
 function memoryPersist(fail?: () => boolean): { persist: WorkPersist; rows: Map<string, unknown> } {
   const rows = new Map<string, unknown>()
@@ -783,6 +789,165 @@ describe('onDiskPath and Windows session cwd matching', () => {
     } finally {
       rmSync(junction, { force: true })
       rmSync(rawBase, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('run origin provenance', () => {
+  it('writes DEFAULT_RUN_ORIGIN on reserveRun, restores legacy rows missing origin cleanly, and preserves explicit origins across mutations', async () => {
+    const { book, rows } = openBook()
+    const change = await book.createChange({ title: 'Origin', cwd: 'H:/proj', goal: 'track origin', maxConcurrentRuns: 5, at: 1 })
+
+    const defaultReserved = await book.reserveRun({
+      changeId: change.id, cwd: 'H:/proj', writeScope: { kind: 'paths', paths: [] }, at: 2,
+    })
+    if (!defaultReserved.ok) throw new Error(defaultReserved.message)
+    expect(defaultReserved.run.origin).toEqual(DEFAULT_RUN_ORIGIN)
+    expect(effectiveRunOrigin(defaultReserved.run)).toEqual({ strength: 'explicit', source: 'user' })
+
+    const origins: readonly RunOrigin[] = [
+      { strength: 'explicit', source: 'github-poll', sender: 'alice' },
+      { strength: 'explicit', source: 'inbox-github', sender: 'bob', policyVersion: 'p1' },
+      { strength: 'explicit', source: 'schedule' },
+      { strength: 'inferred', source: 'speculative', sender: 'carol', policyVersion: 'v2' },
+    ]
+    const reservedIds: string[] = []
+    for (const [index, origin] of origins.entries()) {
+      const res = await book.reserveRun({
+        changeId: change.id,
+        cwd: `H:/proj/sub-${index}`,
+        writeScope: index === 0 ? { kind: 'paths', paths: [{ path: `H:/proj/sub-${index}/a.ts`, type: 'file' }] } : { kind: 'paths', paths: [] },
+        origin,
+        at: 10 + index,
+      })
+      if (!res.ok) throw new Error(res.message)
+      expect(res.run.origin).toEqual(origin)
+      expect(effectiveRunOrigin(res.run)).toEqual(origin)
+      reservedIds.push(res.run.id)
+    }
+
+    // Mutate the first explicit-origin run across lifecycle transitions and verify origin survives.
+    const pollRunId = reservedIds[0]!
+    const published = await book.publishBaseline(pollRunId, book.revision, 'art-1', 20)
+    if (!published.applied) throw new Error(published.message)
+    expect(published.run.origin).toEqual(origins[0])
+    const confirmed = await book.confirmSession(pollRunId, { sessionId: published.run.requestedSessionId, cwd: 'H:/proj/sub-0' }, 21)
+    if (!confirmed.ok) throw new Error(confirmed.message)
+    expect(confirmed.run.origin).toEqual(origins[0])
+    const prepared = await book.prepareFinish(pollRunId, 'completed', 22)
+    if (!prepared.ok) throw new Error(prepared.message)
+    const finished = await book.finishSettled(pollRunId, prepared.updatedAt, 'completed', { queueCleared: true, agentIdle: true, jobsSettled: true }, 23)
+    if (!finished.ok) throw new Error(finished.message)
+    expect(book.run(pollRunId)?.origin).toEqual(origins[0])
+    const withUsage = await book.recordRunUsage(pollRunId, { input: 1, cacheRead: 2, cacheWrite: 0, output: 3 }, 500)
+    if (!('id' in withUsage)) throw new Error(withUsage.message)
+    expect(withUsage.origin).toEqual(origins[0])
+
+    // Strip `origin` to simulate a legacy v1..v10 persisted run row.
+    const rawDefault = rows.get(`runs:${defaultReserved.run.id}`) as Record<string, unknown>
+    const { origin: _dropped, ...legacyRunRow } = rawDefault
+    const restored = WorkBook.restore({
+      changes: [rows.get(`changes:${change.id}`)],
+      inputs: [...rows.values()].filter(value => value && typeof value === 'object' && 'goal' in value),
+      runs: [
+        legacyRunRow,
+        ...reservedIds.map(id => rows.get(`runs:${id}`)),
+      ],
+    }, async () => {}, 'win32')
+
+    expect(restored.recoveryError).toBeUndefined()
+    const restoredLegacy = restored.run(defaultReserved.run.id)!
+    expect(restoredLegacy).toBeDefined()
+    expect(restoredLegacy.origin).toBeUndefined()
+    expect(effectiveRunOrigin(restoredLegacy)).toEqual(DEFAULT_RUN_ORIGIN)
+    for (const [index, id] of reservedIds.entries()) {
+      expect(restored.run(id)?.origin).toEqual(origins[index])
+      expect(effectiveRunOrigin(restored.run(id)!)).toEqual(origins[index])
+    }
+  })
+
+  it('rejects invalid origin objects in parseRun and runOriginSchema', () => {
+    const validRun = {
+      id: 'run-1', changeId: 'c-1', kind: 'work', inputRevision: 1, inputRef: 'input-1',
+      stepRefs: [], cwd: 'H:/proj', workspaceRoot: 'H:/proj', exclusiveRoot: 'H:/proj',
+      uncertainBoundary: false, writeScope: { kind: 'paths', paths: [] }, baselineRefs: [],
+      requestedSessionId: 'session-run-1', creation: 'intent', deliveries: [], phase: 'reserved',
+      createdAt: 1, updatedAt: 1,
+    }
+    expect(parseRun(validRun)).toBeDefined()
+    expect(parseRun({ ...validRun, origin: { strength: 'explicit', source: 'user' } })).toBeDefined()
+    expect(parseRun({ ...validRun, origin: { strength: 'inferred', source: 'speculative', sender: 'alice', policyVersion: 'v1' } })).toBeDefined()
+
+    expect(parseRun({ ...validRun, origin: { strength: 'bogus', source: 'user' } })).toBeUndefined()
+    expect(parseRun({ ...validRun, origin: { strength: 'explicit', source: 'unknown-source' } })).toBeUndefined()
+    expect(parseRun({ ...validRun, origin: { strength: 'explicit', source: 'user', sender: '' } })).toBeUndefined()
+    expect(parseRun({ ...validRun, origin: { strength: 'explicit', source: 'user', policyVersion: '' } })).toBeUndefined()
+    expect(runOriginSchema.safeParse({ strength: 'explicit', source: 'github-poll' }).success).toBe(true)
+    expect(runOriginSchema.safeParse({ strength: 'auto', source: 'github-poll' }).success).toBe(false)
+  })
+
+  it('round-trips legacy runs missing origin and explicit-origin runs through dotDomain / openCompatibleDomain', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dot-origin-domain-'))
+    const backend = new JsonStorageBackend(root)
+    const facility = new DomainFacility({
+      storage: { backend: { get: (name: string) => {
+        if (name !== 'json') throw new Error('unexpected backend')
+        return backend
+      } } }, logger: { error() {}, warn() {} }, emit() {},
+    } as never, { backend: 'json' })
+
+    const legacyChange = {
+      id: 'c-1', title: 'Legacy', cwd: 'H:\\shared', currentRevision: 1, currentInputRef: 'input-1',
+      control: 'open', steps: [], maxConcurrentRuns: 2, priority: 1, createdAt: 1, updatedAt: 1,
+    }
+    const legacyInput = {
+      id: 'input-1', changeId: 'c-1', revision: 1, goal: 'legacy goal',
+      requirements: [{ requirementRef: 'goal', text: 'legacy goal', required: true }],
+      steps: [], source: 'create', createdAt: 1,
+    }
+    const legacyRun = {
+      id: 'run-1', changeId: 'c-1', kind: 'work', inputRevision: 1, inputRef: 'input-1', stepRefs: [],
+      cwd: 'H:\\shared', workspaceRoot: 'H:\\shared', exclusiveRoot: 'H:\\shared', uncertainBoundary: false,
+      writeScope: { kind: 'paths', paths: [] }, baselineRefs: [], requestedSessionId: 'session-run-1',
+      creation: 'intent', deliveries: [], phase: 'completed', createdAt: 2, updatedAt: 3,
+    }
+    const v9Document = {
+      unit: { name: 'klarkxy_dsh_dot', version: 9 },
+      global: null,
+      tables: {
+        state: { [STATE_KEY]: { dotSessionId: 'dot-1' } },
+        changes: { 'c-1': legacyChange },
+        inputs: { 'input-1': legacyInput },
+        runs: { 'run-1': legacyRun },
+      },
+    }
+    await writeFile(join(root, 'klarkxy_dsh_dot.json'), JSON.stringify(v9Document), 'utf8')
+    try {
+      const domain = await openCompatibleDomain(spec => facility.open(spec), dotDomain)
+      const store = new DotStore(domain)
+      expect(store.work.recoveryError).toBeUndefined()
+      const reopenedLegacy = store.work.run('run-1')!
+      expect(reopenedLegacy).toBeDefined()
+      expect(reopenedLegacy.origin).toBeUndefined()
+      expect(effectiveRunOrigin(reopenedLegacy)).toEqual(DEFAULT_RUN_ORIGIN)
+
+      const speculativeOrigin: RunOrigin = { strength: 'inferred', source: 'speculative', sender: 'bot', policyVersion: 'p-1' }
+      const reserved = await store.work.reserveRun({
+        changeId: 'c-1', cwd: 'H:\\shared', writeScope: { kind: 'paths', paths: [] }, origin: speculativeOrigin, at: 4,
+      })
+      if (!reserved.ok) throw new Error(reserved.message)
+      await domain.close()
+
+      const again = await openCompatibleDomain(spec => facility.open(spec), dotDomain)
+      const reloaded = new DotStore(again)
+      expect(reloaded.work.recoveryError).toBeUndefined()
+      expect(effectiveRunOrigin(reloaded.work.run('run-1')!)).toEqual(DEFAULT_RUN_ORIGIN)
+      expect(reloaded.work.run(reserved.run.id)?.origin).toEqual(speculativeOrigin)
+      await again.close()
+    } finally {
+      await facility.closeAll()
+      await backend.close()
+      await rm(root, { recursive: true, force: true })
     }
   })
 })

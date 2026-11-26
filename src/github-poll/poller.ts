@@ -43,6 +43,21 @@ export function cursorAt(startedIso: string): string {
   return new Date((Number.isFinite(ms) ? ms : Date.now()) - CURSOR_OVERLAP_MS).toISOString()
 }
 
+function floorSecondMs(ms: number): number {
+  return Math.floor(ms / 1000) * 1000
+}
+
+function floorSecondIso(ms: number): string {
+  return new Date(floorSecondMs(ms)).toISOString()
+}
+
+function isAbortError(error: unknown, signal?: AbortSignal): boolean {
+  if (signal?.aborted) return true
+  if (error && typeof error === 'object' && (error as { name?: unknown }).name === 'AbortError') return true
+  if (error && typeof error === 'object' && (error as { code?: unknown }).code === 'ABORT_ERR') return true
+  return false
+}
+
 export function clampHorizonSince(rawIso: string, nowMs: number): string {
   const horizonHour = Math.floor((nowMs - POLL_HORIZON_MS) / 3600_000) * 3600_000
   const parsed = Date.parse(rawIso)
@@ -304,12 +319,21 @@ export class GithubPoller {
 
     try {
       const cli = this.createCli(settings)
-      const avail = await testGhAvailability({
-        ghPath: settings.ghPath,
-        ...(settings.hostname ? { hostname: settings.hostname } : {}),
-        ...(this.deps.exec ? { exec: this.deps.exec } : {}),
-        signal: ac.signal,
-      })
+      let avail: GithubPollTestResult
+      try {
+        avail = await testGhAvailability({
+          ghPath: settings.ghPath,
+          ...(settings.hostname ? { hostname: settings.hostname } : {}),
+          ...(this.deps.exec ? { exec: this.deps.exec } : {}),
+          signal: ac.signal,
+        })
+      } catch (error) {
+        if (this.disposed || ac.signal.aborted || isAbortError(error, ac.signal)) {
+          return { ok: true, events: 0 }
+        }
+        throw error
+      }
+      if (this.disposed || ac.signal.aborted) return { ok: true, events: 0 }
       if (!avail.ghFound || !avail.authenticated) {
         hadFailure = true
         const msg = avail.error ?? (avail.ghFound ? 'GitHub CLI not authenticated' : 'GitHub CLI (gh) not found')
@@ -457,6 +481,7 @@ export class GithubPoller {
     } else {
       await this.deps.cursorStore.clearStreamCursor(repo, 'comments')
       await this.deps.cursorStore.clearStreamCursor(repo, 'review-comments')
+      await this.deps.cursorStore.clearPrReviewCursors(repo)
     }
 
     // 3. CI stream (default branch + polled PRs)
@@ -483,11 +508,11 @@ export class GithubPoller {
     return events
   }
 
-  private initialSinceForStream(nowIso: string, nowMs: number, handoffAt?: number): { readonly since: string; readonly coldStart: boolean } {
+  private initialSinceForStream(nowMs: number, handoffAt?: number): { readonly since: string; readonly coldStart: boolean } {
     if (handoffAt !== undefined && Number.isFinite(handoffAt)) {
-      return { since: clampHorizonSince(new Date(handoffAt).toISOString(), nowMs), coldStart: false }
+      return { since: clampHorizonSince(floorSecondIso(handoffAt), nowMs), coldStart: false }
     }
-    return { since: clampHorizonSince(nowIso, nowMs), coldStart: true }
+    return { since: clampHorizonSince(floorSecondIso(nowMs), nowMs), coldStart: true }
   }
 
   private async pollIssuesAndPullsStream(
@@ -496,32 +521,52 @@ export class GithubPoller {
     repo: string,
     sourceId: string,
     nowMs: number,
-    nowIso: string,
+    _nowIso: string,
     handoffAt: number | undefined,
     signal: AbortSignal,
   ): Promise<number> {
+    const floorIso = floorSecondIso(nowMs)
     const stored = this.deps.cursorStore.getStreamCursor(repo, 'issues')
-    const init = stored ? { since: clampHorizonSince(stored.since, nowMs), coldStart: false } : this.initialSinceForStream(nowIso, nowMs, handoffAt)
+    const init = stored ? { since: clampHorizonSince(stored.since, nowMs), coldStart: false } : this.initialSinceForStream(nowMs, handoffAt)
     const since = init.since
-    let startedIssues = stored?.startedIssues ?? (settings.streams.issues ? (handoffAt !== undefined ? init.since : nowIso) : undefined)
-    let startedPulls = stored?.startedPulls ?? (settings.streams.pulls ? (handoffAt !== undefined ? init.since : nowIso) : undefined)
+    let startedIssues = stored ? stored.startedIssues : (settings.streams.issues ? (handoffAt !== undefined ? init.since : floorIso) : undefined)
+    let startedPulls = stored ? stored.startedPulls : (settings.streams.pulls ? (handoffAt !== undefined ? init.since : floorIso) : undefined)
 
-    // Cold-start when there is no cursor and no handoff: establish baseline without historical flood.
+    // Cold-start when there is no cursor and no handoff: fetch baseline snapshot in the starting UTC second without historical flood.
     if (!stored && init.coldStart) {
+      const coldRes = await cli.repoPagesWithHeaders(
+        IssueSchema,
+        repo,
+        `issues?state=all&sort=updated&direction=asc&per_page=100&since=${encodeURIComponent(since)}`,
+        [],
+        undefined,
+        signal,
+      )
+      await this.recordHeaders(repo, coldRes.headers)
+      const coldFloorMs = floorSecondMs(nowMs)
+      const seenKeys = coldRes.notModified
+        ? []
+        : coldRes.items
+            .filter(item => Date.parse(item.updated_at ?? item.created_at) >= coldFloorMs)
+            .map(item => `${item.number}:${item.state}:${item.updated_at ?? item.created_at}`)
+            .slice(-200)
       await this.deps.cursorStore.setStreamCursor(repo, 'issues', {
         since,
+        ...(coldRes.headers.etag ? { etag: coldRes.headers.etag } : {}),
+        ...(coldRes.headers.lastModified ? { lastModified: coldRes.headers.lastModified } : {}),
         ...(startedIssues ? { startedIssues } : {}),
         ...(startedPulls ? { startedPulls } : {}),
+        ...(seenKeys.length > 0 ? { seenKeys } : {}),
         updatedAt: nowMs,
       })
       return 0
     }
 
-    // If a kind was just enabled after the other, initialize its started timestamp at nowIso so it cold-starts cleanly.
+    // If a kind was just enabled after the other, initialize its started timestamp at floorIso so it cold-starts cleanly.
     const newlyEnabledIssues = settings.streams.issues && !startedIssues
     const newlyEnabledPulls = settings.streams.pulls && !startedPulls
-    if (newlyEnabledIssues) startedIssues = nowIso
-    if (newlyEnabledPulls) startedPulls = nowIso
+    if (newlyEnabledIssues) startedIssues = floorIso
+    if (newlyEnabledPulls) startedPulls = floorIso
 
     const extraArgs = stored?.etag && stored.since === since ? ['-H', `If-None-Match: ${stored.etag}`] : []
     const res = await cli.repoPagesWithHeaders(
@@ -533,24 +578,45 @@ export class GithubPoller {
       signal,
     )
     await this.recordHeaders(repo, res.headers)
-    if (res.notModified) return 0
+    if (res.notModified) {
+      if (newlyEnabledIssues || newlyEnabledPulls) {
+        await this.deps.cursorStore.setStreamCursor(repo, 'issues', {
+          since: stored?.since ?? since,
+          ...(stored?.etag ? { etag: stored.etag } : {}),
+          ...(stored?.lastModified ? { lastModified: stored.lastModified } : {}),
+          ...(startedIssues ? { startedIssues } : {}),
+          ...(startedPulls ? { startedPulls } : {}),
+          ...(stored?.seenKeys?.length ? { seenKeys: stored.seenKeys } : {}),
+          updatedAt: nowMs,
+        })
+      }
+      return 0
+    }
 
     let newestUpdated = since
     let emitted = 0
     const horizonMs = nowMs - POLL_HORIZON_MS
+    const seenSet = new Set(stored?.seenKeys ?? [])
+    const coldSeededSet = new Set(stored?.seenKeys ?? [])
 
     for (const item of res.items) {
       if (signal.aborted) throw new DOMException('Aborted', 'AbortError')
       const isPr = Boolean(item.pull_request)
       const updatedIso = item.updated_at ?? item.created_at
       if (Date.parse(updatedIso) > Date.parse(newestUpdated)) newestUpdated = updatedIso
+      const itemSeenKey = `${item.number}:${item.state}:${updatedIso}`
 
       if (isPr) {
-        if (!settings.streams.pulls || newlyEnabledPulls || !startedPulls) continue
+        if (!settings.streams.pulls || newlyEnabledPulls || !startedPulls) {
+          if (newlyEnabledPulls && Date.parse(updatedIso) >= floorSecondMs(nowMs)) seenSet.add(itemSeenKey)
+          continue
+        }
+        if (coldSeededSet.has(itemSeenKey)) continue
         const floorMs = Math.max(Date.parse(startedPulls), horizonMs)
         const prCreatedMs = Date.parse(item.created_at)
         const prUpdatedMs = Date.parse(updatedIso)
         if (prUpdatedMs < floorMs) continue
+        if (item.state === 'closed' && item.closed_at && timestampMs(item.closed_at, prUpdatedMs) < floorMs) continue
         const subject = `${repo}#${item.number}`
         if (this.deps.cursorStore.is410Gone(repo, subject)) continue
         let pr: GhPull
@@ -561,9 +627,11 @@ export class GithubPoller {
           if (action === 'skip') continue
           throw error
         }
-        const action: 'opened' | 'reopened' | 'closed' = pr.state === 'closed'
-          ? 'closed'
+        const closedAtMs = timestampMs(pr.closed_at ?? pr.merged_at ?? item.closed_at ?? updatedIso, prUpdatedMs)
+        const action: 'opened' | 'reopened' | 'closed' | undefined = pr.state === 'closed'
+          ? (closedAtMs >= floorMs ? 'closed' : undefined)
           : prCreatedMs >= floorMs ? 'opened' : 'reopened'
+        if (!action) continue
         // Only emit 'reopened' if a link already exists and was closed/merged; otherwise emit 'opened' or 'closed'.
         if (action === 'reopened') {
           const existingLink = this.deps.links().find(l => l.repo === repo && l.number === pr.number)
@@ -587,7 +655,11 @@ export class GithubPoller {
           emitted += 1
         }
       } else {
-        if (!settings.streams.issues || newlyEnabledIssues || !startedIssues) continue
+        if (!settings.streams.issues || newlyEnabledIssues || !startedIssues) {
+          if (newlyEnabledIssues && Date.parse(updatedIso) >= floorSecondMs(nowMs)) seenSet.add(itemSeenKey)
+          continue
+        }
+        if (coldSeededSet.has(itemSeenKey)) continue
         const floorMs = Math.max(Date.parse(startedIssues), horizonMs)
         const createdMs = Date.parse(item.created_at)
         // Check created_at for new issue openings so editing an old issue does not re-ingest its body.
@@ -610,20 +682,29 @@ export class GithubPoller {
     const advanced = res.items.length > 0 ? clampHorizonSince(cursorAt(newestUpdated), nowMs) : since
     const nextSince = Date.parse(advanced) > Date.parse(since) ? advanced : since
     const nextEtag = res.headers.etag && nextSince === since ? res.headers.etag : undefined
+    const nextSeen = [...seenSet].slice(-200)
+    const changed = !stored
+      || nextSince !== stored.since
+      || nextEtag !== stored.etag
+      || (res.headers.lastModified ?? stored.lastModified) !== stored.lastModified
+      || startedIssues !== stored.startedIssues
+      || startedPulls !== stored.startedPulls
+      || JSON.stringify(nextSeen) !== JSON.stringify(stored.seenKeys ?? [])
     await this.deps.cursorStore.setStreamCursor(repo, 'issues', {
       since: nextSince,
       ...(nextEtag ? { etag: nextEtag } : {}),
       ...(res.headers.lastModified ? { lastModified: res.headers.lastModified } : {}),
       ...(startedIssues ? { startedIssues } : {}),
       ...(startedPulls ? { startedPulls } : {}),
-      updatedAt: nowMs,
+      ...(nextSeen.length > 0 ? { seenKeys: nextSeen } : {}),
+      updatedAt: changed ? nowMs : (stored?.updatedAt ?? nowMs),
     })
     return emitted
   }
 
   private async pollCommentsStream(
     cli: GhCli,
-    _settings: GithubPollSettings,
+    settings: GithubPollSettings,
     repo: string,
     sourceId: string,
     stream: Extract<StreamName, 'comments' | 'review-comments'>,
@@ -633,15 +714,35 @@ export class GithubPoller {
     handoffAt: number | undefined,
     signal: AbortSignal,
   ): Promise<number> {
+    const floorIso = floorSecondIso(nowMs)
     const stored = this.deps.cursorStore.getStreamCursor(repo, stream)
-    const init = stored ? { since: clampHorizonSince(stored.since, nowMs), coldStart: false } : this.initialSinceForStream(nowIso, nowMs, handoffAt)
+    const init = stored ? { since: clampHorizonSince(stored.since, nowMs), coldStart: false } : this.initialSinceForStream(nowMs, handoffAt)
     const since = init.since
-    const startedComments = stored?.startedComments ?? (handoffAt !== undefined ? init.since : nowIso)
+    const startedComments = stored?.startedComments ?? (handoffAt !== undefined ? init.since : floorIso)
 
     if (!stored && init.coldStart) {
+      const coldRes = await cli.repoPagesWithHeaders(
+        CommentSchema,
+        repo,
+        `${endpoint}?sort=updated&direction=asc&per_page=100&since=${encodeURIComponent(since)}`,
+        [],
+        undefined,
+        signal,
+      )
+      await this.recordHeaders(repo, coldRes.headers)
+      const coldFloorMs = floorSecondMs(nowMs)
+      const seenKeys = coldRes.notModified
+        ? []
+        : coldRes.items
+            .filter(c => Date.parse(c.updated_at ?? c.created_at ?? nowIso) >= coldFloorMs)
+            .map(c => `${c.id}:${c.updated_at ?? c.created_at ?? ''}`)
+            .slice(-200)
       await this.deps.cursorStore.setStreamCursor(repo, stream, {
         since,
+        ...(coldRes.headers.etag ? { etag: coldRes.headers.etag } : {}),
+        ...(coldRes.headers.lastModified ? { lastModified: coldRes.headers.lastModified } : {}),
         startedComments,
+        ...(seenKeys.length > 0 ? { seenKeys } : {}),
         updatedAt: nowMs,
       })
       return 0
@@ -662,15 +763,18 @@ export class GithubPoller {
     let newestUpdated = since
     let emitted = 0
     const floorMs = Math.max(Date.parse(startedComments), nowMs - POLL_HORIZON_MS)
+    const coldSeededSet = new Set(stored?.seenKeys ?? [])
 
     for (const comment of res.items) {
       if (signal.aborted) throw new DOMException('Aborted', 'AbortError')
       const updatedIso = comment.updated_at ?? comment.created_at ?? nowIso
       if (Date.parse(updatedIso) > Date.parse(newestUpdated)) newestUpdated = updatedIso
+      const commentSeenKey = `${comment.id}:${comment.updated_at ?? comment.created_at ?? ''}`
+      if (coldSeededSet.has(commentSeenKey)) continue
       if (Date.parse(updatedIso) < floorMs) continue
       if (this.deps.cursorStore.hasEcho(repo, String(comment.id), nowMs)) continue
 
-      const addr = githubAddress(comment.html_url, repo) ?? githubAddress(comment.issue_url ?? comment.pull_request_url, repo)
+      const addr = githubAddress(comment.html_url, repo, settings.hostname) ?? githubAddress(comment.issue_url ?? comment.pull_request_url, repo, settings.hostname)
       if (!addr) continue
       const subject = `${repo}#${addr.number}`
       if (this.deps.cursorStore.is410Gone(repo, subject)) continue
@@ -713,12 +817,19 @@ export class GithubPoller {
     const advanced = res.items.length > 0 ? clampHorizonSince(cursorAt(newestUpdated), nowMs) : since
     const nextSince = Date.parse(advanced) > Date.parse(since) ? advanced : since
     const nextEtag = res.headers.etag && nextSince === since ? res.headers.etag : undefined
+    const nextSeen = stored?.seenKeys ?? []
+    const changed = !stored
+      || nextSince !== stored.since
+      || nextEtag !== stored.etag
+      || (res.headers.lastModified ?? stored.lastModified) !== stored.lastModified
+      || startedComments !== stored.startedComments
     await this.deps.cursorStore.setStreamCursor(repo, stream, {
       since: nextSince,
       ...(nextEtag ? { etag: nextEtag } : {}),
       ...(res.headers.lastModified ? { lastModified: res.headers.lastModified } : {}),
       startedComments,
-      updatedAt: nowMs,
+      ...(nextSeen.length > 0 ? { seenKeys: nextSeen } : {}),
+      updatedAt: changed ? nowMs : (stored?.updatedAt ?? nowMs),
     })
     return emitted
   }
@@ -732,23 +843,68 @@ export class GithubPoller {
     signal: AbortSignal,
   ): Promise<number> {
     const targets = polledTargets(this.deps.links(), this.deps.changes(), this.deps.runs(), nowMs, repo)
+    const commentsCursor = this.deps.cursorStore.getStreamCursor(repo, 'comments')
+    const repoState = this.deps.cursorStore.getRepoState(repo)
+    const handoffAt = repoState?.lastDeliveredAt
+    const floorIso = floorSecondIso(nowMs)
     let emitted = 0
     for (const target of targets) {
       if (signal.aborted) throw new DOMException('Aborted', 'AbortError')
       const subject = `${repo}#${target.number}`
       if (this.deps.cursorStore.is410Gone(repo, subject)) continue
-      let reviews: GhComment[]
+      const stored = this.deps.cursorStore.getPrReviewCursor(repo, target.number)
+      const extraArgs = stored?.etag ? ['-H', `If-None-Match: ${stored.etag}`] : []
+      let res: Awaited<ReturnType<GhCli['repoPagesWithHeaders']>>
       try {
-        reviews = await cli.repoPages(CommentSchema, repo, `pulls/${target.number}/reviews?per_page=100`, undefined, signal)
+        res = await cli.repoPagesWithHeaders(CommentSchema, repo, `pulls/${target.number}/reviews?per_page=100`, extraArgs, undefined, signal)
       } catch (error) {
         const action = await this.handleTargetError(repo, subject, error, nowMs)
         if (action === 'skip') continue
         throw error
       }
+      await this.recordHeaders(repo, res.headers)
+      if (res.notModified) continue
+
+      const reviews = res.items as GhComment[]
+      let isColdStart = false
+      let startedComments: string
+      if (stored) {
+        startedComments = stored.startedComments
+      } else if (handoffAt !== undefined && Number.isFinite(handoffAt)) {
+        startedComments = clampHorizonSince(floorSecondIso(handoffAt), nowMs)
+      } else if (commentsCursor?.startedComments && commentsCursor.updatedAt < nowMs) {
+        startedComments = commentsCursor.startedComments
+      } else {
+        isColdStart = true
+        startedComments = floorIso
+      }
+
+      const seenSet = new Set(stored?.seenIds ?? [])
+      if (isColdStart) {
+        for (const review of reviews) {
+          seenSet.add(`${review.id}:${review.submitted_at ?? review.updated_at ?? review.created_at ?? ''}`)
+        }
+        const nextSeen = [...seenSet].slice(-200)
+        await this.deps.cursorStore.setPrReviewCursor(repo, target.number, {
+          ...(res.headers.etag ? { etag: res.headers.etag } : {}),
+          ...(res.headers.lastModified ? { lastModified: res.headers.lastModified } : {}),
+          startedComments,
+          ...(nextSeen.length > 0 ? { seenIds: nextSeen } : {}),
+          updatedAt: nowMs,
+        })
+        continue
+      }
+
+      const floorMs = Math.max(Date.parse(startedComments), nowMs - POLL_HORIZON_MS)
       for (const review of reviews) {
-        if (this.deps.cursorStore.hasEcho(repo, String(review.id), nowMs)) continue
+        const reviewKey = `${review.id}:${review.submitted_at ?? review.updated_at ?? review.created_at ?? ''}`
+        if (seenSet.has(reviewKey)) continue
+        if (this.deps.cursorStore.hasEcho(repo, String(review.id), nowMs)) {
+          seenSet.add(reviewKey)
+          continue
+        }
         const submittedMs = timestampMs(review.submitted_at ?? review.updated_at ?? review.created_at, 0)
-        if (submittedMs > 0 && submittedMs < nowMs - POLL_HORIZON_MS) continue
+        if (submittedMs > 0 && submittedMs < floorMs) continue
         const event = buildCommentInboxInput({
           repo,
           sourceId,
@@ -760,6 +916,7 @@ export class GithubPoller {
           now: nowMs,
         })
         if (!event) continue
+        seenSet.add(reviewKey)
         const outcome = await this.deps.adapter.receive(event, {
           repo,
           rawBody: review.body ?? '',
@@ -769,6 +926,20 @@ export class GithubPoller {
           emitted += 1
         }
       }
+
+      const nextSeen = [...seenSet].slice(-200)
+      const changed = !stored
+        || (res.headers.etag ?? stored.etag) !== stored.etag
+        || (res.headers.lastModified ?? stored.lastModified) !== stored.lastModified
+        || startedComments !== stored.startedComments
+        || JSON.stringify(nextSeen) !== JSON.stringify(stored.seenIds ?? [])
+      await this.deps.cursorStore.setPrReviewCursor(repo, target.number, {
+        ...(res.headers.etag ? { etag: res.headers.etag } : {}),
+        ...(res.headers.lastModified ? { lastModified: res.headers.lastModified } : {}),
+        startedComments,
+        ...(nextSeen.length > 0 ? { seenIds: nextSeen } : {}),
+        updatedAt: changed ? nowMs : (stored?.updatedAt ?? nowMs),
+      })
     }
     return emitted
   }

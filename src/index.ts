@@ -707,13 +707,17 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
           const hostname = typeof field(payload, 'hostname') === 'string' ? str(payload, 'hostname') : undefined
           const rawRepos = field(payload, 'repos')
           const repos = Array.isArray(rawRepos) ? rawRepos.filter((r): r is string => typeof r === 'string') : undefined
-          return {
-            ok: true,
-            value: await service.testGithubPollConnection({
-              ...(ghPath !== undefined ? { ghPath } : {}),
-              ...(hostname !== undefined ? { hostname } : {}),
-              ...(repos !== undefined ? { repos } : {}),
-            }),
+          try {
+            return {
+              ok: true,
+              value: await service.testGithubPollConnection({
+                ...(ghPath !== undefined ? { ghPath } : {}),
+                ...(hostname !== undefined ? { hostname } : {}),
+                ...(repos !== undefined ? { repos } : {}),
+              }),
+            }
+          } catch (error) {
+            return { ok: false, error: { code: error instanceof DotError ? error.code : 'dot/failed', message: messageOf(error) } }
           }
         }
         case 'settings.proposals': return { ok: true, value: store.settingProposals }

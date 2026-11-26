@@ -3267,7 +3267,7 @@ export class DotService {
 
   notify(notice: Notice, urgent = false): void {
     notice = { ...notice, display: notice.display ?? {
-      kind: notice.kind === 'result' ? 'task-human' : notice.kind, sessionId: notice.sessionId, summary: notice.text,
+      kind: notice.kind, sessionId: notice.sessionId, summary: notice.text,
       ...(notice.requestId ? { requestId: notice.requestId } : {}),
     } }
     const ownedRun = this.store.work.sessionRun(notice.sessionId)
@@ -3338,7 +3338,7 @@ export class DotService {
       wakeKey: closureKey,
       at: detail.at,
       text,
-      display: { kind: 'task-human', sessionId, taskTitle: change.title, subject: detail.ref, summary: text },
+      display: { kind: 'result', sessionId, taskTitle: change.title, subject: detail.ref, summary: text },
     })
     this.emit({
       event: DOT_TRACE.githubPollClosure,
@@ -3370,7 +3370,7 @@ export class DotService {
     // queueInboxNotice itself skips a record that already has a queued notice.
     if (done.record) this.queueInboxNotice(done.record)
     if (done.record && isWebhookGithub && repo) {
-      await this.githubPollCursorStore.recordDelivery(repo, 'webhook', input.receivedAt || this.now())
+      await this.githubPollCursorStore.recordDelivery(repo, 'webhook', input.receivedAt || this.now(), input.deliveryId, this.now())
       const closureMatch = /^pull_request\.(merged|closed)$/.exec(input.type)
       const numMatch = /^([^#\s]+)#(\d+)$/.exec(input.subject)
       if (closureMatch && numMatch) {

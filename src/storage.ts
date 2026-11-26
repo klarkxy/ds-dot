@@ -335,6 +335,7 @@ export const githubPollStreamCursorSchema = z.object({
   startedIssues: z.string().optional(),
   startedPulls: z.string().optional(),
   startedComments: z.string().optional(),
+  seenKeys: z.array(z.string()).optional(),
   updatedAt: z.number(),
 })
 
@@ -385,11 +386,34 @@ export const githubPollRepoStateSchema = z.object({
   retryDeadlines: z.record(z.string(), z.number()).optional(),
 })
 
+export const githubPollPrReviewCursorSchema = z.object({
+  kind: z.literal('pr-review'),
+  repo: z.string().min(1),
+  number: z.number().int().positive(),
+  etag: z.string().optional(),
+  lastModified: z.string().optional(),
+  startedComments: z.string().min(1),
+  seenIds: z.array(z.string()).optional(),
+  updatedAt: z.number(),
+})
+
+export const githubPollDeliveredSchema = z.object({
+  kind: z.literal('delivered'),
+  repo: z.string().min(1),
+  entries: z.array(z.object({
+    id: z.string().min(1),
+    deliveredAt: z.number(),
+  })),
+  updatedAt: z.number(),
+})
+
 export const githubPollEntrySchema = z.discriminatedUnion('kind', [
   githubPollStreamCursorSchema,
   githubPollCiBaselineSchema,
   githubPollPrCiBaselineSchema,
+  githubPollPrReviewCursorSchema,
   githubPollEchoLedgerSchema,
+  githubPollDeliveredSchema,
   githubPollRepoStateSchema,
 ])
 

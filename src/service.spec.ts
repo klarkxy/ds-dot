@@ -6350,6 +6350,18 @@ describe('dot-worker preset selection and security hook parity', () => {
       })
       expect(questionRoute.decided).toBe('pending')
       expect(h.service.runTaskPermission(writeSid)).toBe('workspace-write')
+
+      // 5. Live result notice projects display.kind === 'result' cleanly
+      h.service.notify({
+        sessionId: h.store.dotSessionId!,
+        kind: 'result',
+        text: 'PR acme/widgets#98 merged',
+        at: 100,
+      })
+      await h.service.flushNotices()
+      const relayedDisplays = h.relayed.map(r => r.notice).filter(Boolean)
+      const resultEntry = relayedDisplays.flatMap(d => d!.entries).find(e => e.kind === 'result')
+      expect(resultEntry).toMatchObject({ kind: 'result', summary: 'PR acme/widgets#98 merged' })
     } finally {
       for (const scope of scopes) await scope.dispose()
       for (const dispose of disposers) dispose()

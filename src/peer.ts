@@ -160,9 +160,16 @@ export async function deliverPeer(input: PeerSendInput, deps: PeerDeliveryDeps):
     const row = (status: PeerDelivery['status']): PeerDelivery => ({
       id: deliveryId, senderSessionId: sender, targetSessionId: bounceTarget, text, status, updatedAt: deps.now(),
     })
-    if (existing?.status === 'accepted') {
-      deps.trace?.('peer.duplicate', `Delivery ${deliveryId} already bounced to Dorothy.`, { senderSessionId: sender, targetSessionId: bounceTarget, deliveryId, status: 'accepted' })
-      return `delivery ${deliveryId} already bounced to Dorothy; not sent again.`
+    if (existing) {
+      if (existing.status === 'accepted') {
+        deps.trace?.('peer.duplicate', `Delivery ${deliveryId} already bounced to Dorothy.`, { senderSessionId: sender, targetSessionId: bounceTarget, deliveryId, status: 'accepted' })
+        return `delivery ${deliveryId} already bounced to Dorothy; not sent again.`
+      }
+      if (existing.status !== 'unknown') {
+        await deps.put(row('unknown'))
+      }
+      deps.trace?.('peer.unknown', `Bounce ${deliveryId} to Dorothy was not proved.`, { senderSessionId: sender, targetSessionId: bounceTarget, deliveryId, status: 'unknown' })
+      return `delivery ${deliveryId} is unknown and was not resent.`
     }
     try { await deps.put(row('intent')) } catch {
       return refuse('the delivery could not be recorded; nothing was sent.', 'dot/peer-failed')

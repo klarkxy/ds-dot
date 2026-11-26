@@ -149,7 +149,18 @@ export function validItems<T>(schema: z.ZodType<T>, list: readonly unknown[], ta
   return out
 }
 
-const UNSAFE_SUBPATH_RE = /^\/|^[a-z]+:|(^|\/)\.\.?(\/|\?|$)/i
+const UNSAFE_SUBPATH_RE = /^\/|^[a-z]+:|\\|%2e|(^|\/)\.\.?(\/|\?|$)/i
+
+function isAbortError(error: unknown, signal?: AbortSignal): boolean {
+  if (signal?.aborted) return true
+  if (error && typeof error === 'object' && (error as { name?: unknown }).name === 'AbortError') return true
+  if (error && typeof error === 'object' && (error as { code?: unknown }).code === 'ABORT_ERR') return true
+  return false
+}
+
+function abortErrorOf(error: unknown): Error {
+  return error instanceof Error && error.name === 'AbortError' ? error : Object.assign(new Error('Aborted'), { name: 'AbortError' })
+}
 
 /** Restrict GitHub API paths strictly to the configured `owner/repo` subtree. */
 export function repoPath(repo: string, subPath = ''): string {
@@ -464,6 +475,7 @@ export async function testGhAvailability(options: {
     const line = ver.stdout.split(/\r?\n/)[0]?.trim()
     version = line || undefined
   } catch (error) {
+    if (isAbortError(error, options.signal)) throw abortErrorOf(error)
     return {
       ok: false,
       ghFound: false,
@@ -482,7 +494,12 @@ export async function testGhAvailability(options: {
     const parsedJson = JSON.parse(auth.stdout) as unknown
     const parsed = authHostsSchema.safeParse(parsedJson)
     if (parsed.success && parsed.data.hosts) {
-      const entries = parsed.data.hosts[host] ?? Object.values(parsed.data.hosts).flat()
+      const matchingEntries = Object.entries(parsed.data.hosts)
+        .filter(([k]) => k.toLowerCase() === host.toLowerCase())
+        .flatMap(([, list]) => list)
+      const entries = cli.hostname
+        ? matchingEntries
+        : (matchingEntries.length > 0 ? matchingEntries : Object.values(parsed.data.hosts).flat())
       const active = entries.find(entry => entry.state === 'success' && (entry.active ?? true))
       if (active) {
         authenticated = true
@@ -494,6 +511,7 @@ export async function testGhAvailability(options: {
       authError = `Not authenticated to ${host}.`
     }
   } catch (error) {
+    if (isAbortError(error, options.signal)) throw abortErrorOf(error)
     // Fallback for older gh versions without `--json hosts`
     try {
       const legacy = await cli.exec(['auth', 'status', ...(cli.hostname ? ['--hostname', cli.hostname] : [])], options.signal)
@@ -506,6 +524,7 @@ export async function testGhAvailability(options: {
         authError = redactGithubTokens(combined.trim()) || `Not authenticated to ${host}.`
       }
     } catch (fallbackErr) {
+      if (isAbortError(fallbackErr, options.signal)) throw abortErrorOf(fallbackErr)
       authError = redactGithubTokens(fallbackErr instanceof Error ? fallbackErr.message : error instanceof Error ? error.message : String(error))
     }
   }
@@ -532,6 +551,7 @@ export async function testGhAvailability(options: {
       rateLimitLimit = core.limit
     }
   } catch (error) {
+    if (isAbortError(error, options.signal)) throw abortErrorOf(error)
     const message = redactGithubTokens(error instanceof Error ? error.message : String(error))
     return {
       ok: false,
@@ -553,6 +573,7 @@ export async function testGhAvailability(options: {
       await cli.repoApi(z.object({ full_name: z.string() }).loose(), repo, '', [], options.signal)
       repoChecks.push({ repo, ok: true })
     } catch (error) {
+      if (isAbortError(error, options.signal)) throw abortErrorOf(error)
       repoChecks.push({ repo, ok: false, error: redactGithubTokens(error instanceof Error ? error.message : String(error)) })
     }
   }

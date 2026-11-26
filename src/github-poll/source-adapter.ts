@@ -54,6 +54,9 @@ export class GithubPollSourceAdapter {
   constructor(private readonly deps: SourceAdapterDeps) {}
 
   private alreadyDeliveredDuringHandoff(repo: string, event: InboxEventInput): boolean {
+    if (this.deps.cursorStore.hasDelivered(repo, event.deliveryId, this.deps.now())) {
+      return true
+    }
     const repoState = this.deps.cursorStore.getRepoState(repo)
     if (repoState?.lastDeliveredAt !== undefined && event.receivedAt > 0 && event.receivedAt < repoState.lastDeliveredAt) {
       return true
@@ -198,15 +201,31 @@ export class GithubPollSourceAdapter {
     if (shouldSubmitInbox) {
       const auditTag = directRunIds.length > 0 ? ` [direct-delivered to ${directRunIds.join(', ')}]` : ''
       const readTag = inlineSpill.spillRelPath ? ` [read: ${inlineSpill.spillRelPath}]` : ''
-      const summary = clipText(`${inlineSpill.inboxSummary}${auditTag}${readTag}`, GITHUB_SUMMARY_MAX)
+      const tags = `${auditTag}${readTag}`
+      let summary: string
+      if (!tags) {
+        summary = inlineSpill.inboxSummary
+      } else if (tags.length >= GITHUB_SUMMARY_MAX) {
+        if (readTag && readTag.length < GITHUB_SUMMARY_MAX && auditTag) {
+          const auditBudget = GITHUB_SUMMARY_MAX - readTag.length
+          const clippedAudit = auditBudget >= 2 ? clipText(auditTag.trimStart(), auditBudget) : ''
+          summary = clippedAudit ? `${clippedAudit}${readTag}` : readTag.trimStart()
+        } else {
+          summary = clipText(tags, GITHUB_SUMMARY_MAX)
+        }
+      } else {
+        const bodyBudget = GITHUB_SUMMARY_MAX - tags.length
+        const bodyPart = bodyBudget >= 2 ? clipText(inlineSpill.inboxSummary, bodyBudget) : ''
+        summary = bodyPart ? `${bodyPart}${tags}` : tags.trimStart()
+      }
       inboxResult = await this.deps.submitInbox({
         ...event,
         summary,
         originSource: 'github-poll',
       })
-      await this.deps.cursorStore.recordDelivery(repo, 'poll', event.receivedAt || now)
+      await this.deps.cursorStore.recordDelivery(repo, 'poll', event.receivedAt || now, event.deliveryId, now)
     } else if (directRunIds.length > 0) {
-      await this.deps.cursorStore.recordDelivery(repo, 'poll', event.receivedAt || now)
+      await this.deps.cursorStore.recordDelivery(repo, 'poll', event.receivedAt || now, event.deliveryId, now)
     } else if (isBotOrCi && !hasNonStoppedFinishedRun && linkedChangeIds.length > 0 && admission === 'context-only') {
       // Context-only bot/CI event on finished runs has no active run to receive it -> dropped quietly.
     }

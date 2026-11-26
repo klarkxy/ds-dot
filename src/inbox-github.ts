@@ -83,7 +83,12 @@ export function installInboxIngress(
   if (typeof ctx.inject !== 'function') return
   void ctx.inject(['webhookRuntime'], inboxCtx => {
     inboxCtx.effect(() => {
-      const runtime = (inboxCtx as InboxHost).webhookRuntime
+      let runtime: WebhookRuntimeLike | undefined
+      try {
+        runtime = (inboxCtx as InboxHost).webhookRuntime
+      } catch {
+        return () => {}
+      }
       if (typeof runtime?.register !== 'function') return () => {}
       return runtime.register({
         id: INBOX_RULE_ID,

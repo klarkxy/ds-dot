@@ -81,15 +81,22 @@ export interface GithubAddressRef {
   readonly discussion?: number
 }
 
-const GITHUB_ADDRESS_RE = /^https:\/\/(?:api\.github\.com\/repos|github\.com)\/([^/]+\/[^/]+)\/(issues|pulls?)\/(\d+)\/?(?:#discussion_r(\d+)|#[\w-]*)?$/i
+const GITHUB_ADDRESS_RE = /^https:\/\/([^/]+)(?:\/(api\/v3\/repos|repos))?\/([^/]+\/[^/]+)\/(issues|pulls?)\/(\d+)\/?(?:#discussion_r(\d+)|#[\w-]*)?$/i
 
-export function githubAddress(url: string | null | undefined, repository: string): GithubAddressRef | undefined {
+export function githubAddress(url: string | null | undefined, repository: string, hostname?: string): GithubAddressRef | undefined {
   if (!url) return undefined
   const match = GITHUB_ADDRESS_RE.exec(url.trim())
-  if (!match || !sameName(match[1], repository)) return undefined
-  const kind = match[2]!.toLowerCase()
-  const number = Number(match[3])
-  const discussion = match[4] ? Number(match[4]) : undefined
+  if (!match || !sameName(match[3], repository)) return undefined
+  const host = match[1]!.toLowerCase()
+  const prefix = match[2]?.toLowerCase()
+  if (host === 'api.github.com' && prefix !== 'repos') return undefined
+  if (host === 'github.com' && prefix !== undefined) return undefined
+  const configured = hostname?.trim().toLowerCase()
+  const ghesHost = configured && configured !== 'github.com' ? configured : undefined
+  if (ghesHost && host !== ghesHost && host !== 'github.com' && host !== 'api.github.com') return undefined
+  const kind = match[4]!.toLowerCase()
+  const number = Number(match[5])
+  const discussion = match[6] ? Number(match[6]) : undefined
   return {
     number,
     pr: kind === 'pull' || kind === 'pulls',

@@ -171,6 +171,21 @@ describe('peer delivery', () => {
     const badSender = await ledger.run(() => deliverPeer({ action: 'bounce', senderSessionId: 'stranger', targetSessionId: 'dorothy', deliveryId: 'b-2', text: 'nope' }, deps))
     expect(badSender).toContain('nothing was sent')
     expect(bounced).toHaveLength(1)
+
+    let failCalls = 0
+    const flakyDeps: PeerDeliveryDeps = {
+      ...deps,
+      bounce: async () => {
+        failCalls += 1
+        throw new Error('transient error')
+      },
+    }
+    const firstUnknown = await ledger.run(() => deliverPeer({ action: 'bounce', senderSessionId: 'session-worker', targetSessionId: 'dorothy', deliveryId: 'b-unknown', text: 'out of scope' }, flakyDeps))
+    expect(firstUnknown).toContain('unknown and was not resent')
+    expect(ledger.read('b-unknown')?.status).toBe('unknown')
+    const secondUnknown = await ledger.run(() => deliverPeer({ action: 'bounce', senderSessionId: 'session-worker', targetSessionId: 'dorothy', deliveryId: 'b-unknown', text: 'out of scope' }, flakyDeps))
+    expect(secondUnknown).toContain('unknown and was not resent')
+    expect(failCalls).toBe(1)
   })
 })
 

@@ -898,10 +898,10 @@ describe('PR-5 mandatory 17+ polling, admission, routing & security scenarios', 
       }
       if (args[1] === 'repos/acme/widgets/pulls/12/reviews?per_page=100') {
         return {
-          stdout: JSON.stringify([[
+          stdout: httpInclude({}, [
             { id: 901, state: 'COMMENTED', body: '', user: { login: 'bob' }, submitted_at: new Date(now).toISOString() },
             { id: 902, state: 'APPROVED', body: '', user: { login: 'bob' }, commit_id: 'abcdef1234', html_url: 'https://github.com/acme/widgets/pull/12#pullrequestreview-902', submitted_at: new Date(now).toISOString() },
-          ]]),
+          ]),
           stderr: '',
         }
       }
@@ -954,5 +954,255 @@ describe('PR-5 mandatory 17+ polling, admission, routing & security scenarios', 
     })
     expect(ev?.originSource).toBe('inbox-github')
     expect(branchCiTriggerId('acme/widgets', 'main', 1)).toMatch(/^gh-poll:/)
+  })
+
+  it('remediation regressions: path traversal, GHES host isolation/URLs, context-only & review dedup, old closed PR guard, spill tag budget, dispose abort, same-second cold-start, and 304 stream toggle', async () => {
+    // 1. repoPath blocks backslashes & percent-encoded traversal
+    expect(() => repoPath('acme/widgets', 'issues\\..\\..\\users')).toThrow(/restricted/)
+    expect(() => repoPath('acme/widgets', 'issues/%2e%2e/users')).toThrow(/restricted/)
+    expect(() => repoPath('acme/widgets', 'issues/%2E%2E/users')).toThrow(/restricted/)
+
+    // 2. githubAddress supports GHES web & /api/v3/repos URLs and honors configured hostname
+    expect(githubAddress('https://ghes.example.com/acme/widgets/issues/5#issuecomment-1', 'acme/widgets', 'ghes.example.com')).toEqual({ number: 5, pr: false })
+    expect(githubAddress('https://ghes.example.com/api/v3/repos/acme/widgets/pulls/12#discussion_r9', 'acme/widgets', 'ghes.example.com')).toEqual({ number: 12, pr: true, discussion: 9 })
+    expect(githubAddress('https://other.example.com/acme/widgets/issues/5', 'acme/widgets', 'ghes.example.com')).toBeUndefined()
+
+    // 3. testGhAvailability with explicit GHES hostname never falls back to github.com
+    const ghesMiss = await testGhAvailability({
+      hostname: 'ghes.example.com',
+      exec: async (_bin, args) => {
+        if (args[0] === '--version') return { stdout: 'gh version 2.102.0\n', stderr: '' }
+        return { stdout: JSON.stringify({ hosts: { 'github.com': [{ state: 'success', active: true, login: 'wrong-user' }] } }), stderr: '' }
+      },
+    })
+    expect(ghesMiss.authenticated).toBe(false)
+    expect(ghesMiss.login).toBeUndefined()
+    expect(ghesMiss.host).toBe('ghes.example.com')
+
+    // 4. dispose() mid-poll during testGhAvailability exits cleanly with zero consecutiveFailures/lastError
+    let releaseVersion!: () => void
+    const versionGate = new Promise<void>(resolve => { releaseVersion = resolve })
+    const hAbort = makeHarness(async (_bin, args, opts) => {
+      if (args[0] === '--version') {
+        await new Promise<void>(resolve => {
+          if (opts.signal?.aborted) { resolve(); return }
+          opts.signal?.addEventListener('abort', () => resolve(), { once: true })
+          releaseVersion()
+        })
+        throw Object.assign(new Error('The operation was aborted'), { name: 'AbortError' })
+      }
+      return { stdout: '{}', stderr: '' }
+    })
+    try {
+      await hAbort.store.setSettings(patchSettings(DEFAULT_SETTINGS, {
+        reflection: false,
+        idleCheckMinutes: 0,
+        githubPoll: { enabled: true, repos: ['acme/widgets'], webhookRepos: [], ghPath: 'gh', intervalSec: 120, streams: { issues: true, pulls: false, comments: false, ci: false }, ignoredActors: [] },
+      }))
+      const pollPromise = hAbort.service.pollGithubNow()
+      await versionGate
+      await hAbort.service.dispose()
+      const abortedRes = await pollPromise
+      expect(abortedRes).toEqual({ ok: true, events: 0 })
+      expect(hAbort.service.githubPollStatus().consecutiveFailures).toBe(0)
+      expect(hAbort.service.githubPollStatus().lastError).toBeUndefined()
+      expect(hAbort.service.githubPollCursorStore.getRepoState('acme/widgets')?.consecutiveFailures ?? 0).toBe(0)
+    } finally {
+      hAbort.cleanup()
+    }
+
+    // 5. >500-char payload preserves both [direct-delivered to ...] and [read: ...] tags inside 500-char cap
+    const nowTag = 1_700_000_000_000
+    const hTag = makeHarness(async () => ({ stdout: '[]', stderr: '' }), () => nowTag)
+    try {
+      await hTag.service.ensureDot()
+      const change = await hTag.store.work.createChange({
+        title: 'Tag cap', cwd: hTag.home, goal: 'Tag cap',
+        requirements: [{ requirementRef: 'R1', text: 'Tag cap', required: true }], at: nowTag,
+      })
+      const runRes = await hTag.store.work.reserveRun({ changeId: change.id, kind: 'work', cwd: hTag.home, writeScope: { kind: 'paths', paths: [] }, at: nowTag })
+      if (!runRes.ok) throw new Error('reserve failed')
+      await hTag.store.work.confirmSession(runRes.run.id, { sessionId: runRes.run.requestedSessionId, cwd: hTag.home })
+      const claim = await hTag.store.work.claimPrompt(runRes.run.id, 'p1', nowTag)
+      if (!claim.ok) throw new Error('claim failed')
+      await hTag.store.work.settleDelivery(runRes.run.id, claim.deliveryId, 'accepted', undefined, nowTag)
+      await hTag.host.createSession({ sessionId: runRes.run.requestedSessionId })
+      await hTag.store.track({ sessionId: runRes.run.requestedSessionId, origin: 'started', title: 'R1', goal: 'G', cwd: hTag.home, at: nowTag })
+      await hTag.store.putLink(makeTaskLink(change.id, { repo: 'acme/widgets', number: 10 }, 'dot', nowTag))
+
+      const adapter = new GithubPollSourceAdapter({
+        settings: () => ({ enabled: true, repos: ['acme/widgets'], webhookRepos: [], ghPath: 'gh', intervalSec: 120, streams: { issues: true, pulls: true, comments: true, ci: true }, ignoredActors: ['dependabot[bot]'], admission: [] }),
+        cursorStore: hTag.service.githubPollCursorStore,
+        homeDir: hTag.home,
+        links: () => hTag.store.links,
+        putLink: l => hTag.store.putLink(l),
+        change: id => hTag.store.work.change(id),
+        runsForChange: cid => hTag.store.work.listRuns().filter(r => r.changeId === cid),
+        markClosureReady: (cid, d) => hTag.store.work.markClosureReady(cid, d),
+        emitResultNotice: () => {},
+        inboxList: () => hTag.inbox.list(),
+        submitInbox: ev => hTag.service.submitInbox(ev),
+        supplementWorkRun: (rid, text, sid, exp) => hTag.service.supplementWorkRun(rid, text, sid, exp),
+        dotSessionId: () => hTag.store.dotSessionId,
+        now: () => nowTag,
+      })
+      const longBody = `Line1 ghp_secret99999999 ${'A'.repeat(650)}`
+      const longRes = await adapter.receive({
+        source: 'github',
+        sourceId: 'primary-github',
+        deliveryId: 'gh-poll:c-tag-cap',
+        type: 'pull_request_review_comment.created',
+        subject: 'acme/widgets#10',
+        title: 'Long comment',
+        actor: 'alice',
+        url: 'https://github.com/acme/widgets/pull/10#discussion_r1',
+        summary: longBody,
+        receivedAt: nowTag,
+        originSource: 'github-poll',
+      }, { repo: 'acme/widgets', rawBody: longBody })
+      expect(longRes.directRunIds).toEqual([runRes.run.id])
+      const storedSummary = hTag.inbox.list()[0]!.summary
+      expect(storedSummary.length).toBeLessThanOrEqual(500)
+      expect(storedSummary).toContain(`[direct-delivered to ${runRes.run.id}]`)
+      expect(storedSummary).toContain('[read: artifacts/inbox/gh-poll_c-tag-cap.md]')
+      expect(storedSummary).not.toContain('ghp_secret99999999')
+    } finally {
+      await hTag.service.dispose()
+      hTag.cleanup()
+    }
+
+    // 6. context-only overlap dedup, pollLinkedPrReviews cold-start/cursor, old closed PR guard, same-second cold-start, and 304 stream toggle
+    let nowPoll = Date.parse('2026-11-26T10:00:00.800Z')
+    let phase = 1
+    let send304Issues = false
+    let send304Reviews = false
+    const hPoll = makeHarness(async (_bin, args) => {
+      if (args[0] === '--version') return { stdout: 'gh version 2.102.0\n', stderr: '' }
+      if (args[0] === 'auth') return { stdout: authSuccessStdout(), stderr: '' }
+      if (args[1] === 'rate_limit') return { stdout: JSON.stringify({ resources: { core: { remaining: 5000, limit: 5000 } } }), stderr: '' }
+      if (args[1]?.startsWith('repos/acme/widgets/issues/comments?')) {
+        if (phase === 1) {
+          return { stdout: httpInclude({}, [{ id: 100, body: 'pre-existing', user: { login: 'alice' }, html_url: 'https://github.com/acme/widgets/issues/1#issuecomment-100', created_at: '2026-11-26T10:00:00Z', updated_at: '2026-11-26T10:00:00Z' }]), stderr: '' }
+        }
+        return {
+          stdout: httpInclude({}, [
+            { id: 100, body: 'pre-existing', user: { login: 'alice' }, html_url: 'https://github.com/acme/widgets/issues/1#issuecomment-100', created_at: '2026-11-26T10:00:00Z', updated_at: '2026-11-26T10:00:00Z' },
+            { id: 101, body: 'bot context update', user: { login: 'dependabot[bot]', type: 'Bot' }, html_url: 'https://github.com/acme/widgets/pull/10#issuecomment-101', created_at: '2026-11-26T10:01:00Z', updated_at: '2026-11-26T10:01:00Z' },
+          ]),
+          stderr: '',
+        }
+      }
+      if (args[1]?.startsWith('repos/acme/widgets/issues?')) {
+        if (send304Issues) throw Object.assign(new Error('gh: HTTP 304'), { code: 1, stderr: 'gh: HTTP 304\n' })
+        if (phase === 1) {
+          return {
+            stdout: httpInclude({ Etag: 'W/"iss-1"' }, [
+              { id: 1, number: 1, title: 'Pre-existing same-second', state: 'open', created_at: '2026-11-26T10:00:00Z', updated_at: '2026-11-26T10:00:00Z', html_url: 'https://github.com/acme/widgets/issues/1', user: { login: 'alice' }, body: 'old' },
+            ]),
+            stderr: '',
+          }
+        }
+        const items: unknown[] = [
+          { id: 1, number: 1, title: 'Pre-existing same-second', state: 'open', created_at: '2026-11-26T10:00:00Z', updated_at: '2026-11-26T10:00:00Z', html_url: 'https://github.com/acme/widgets/issues/1', user: { login: 'alice' }, body: 'old' },
+          // New issue created 100ms after cold-start in the same UTC second!
+          { id: 2, number: 2, title: 'Same-second new issue', state: 'open', created_at: '2026-11-26T10:00:00Z', updated_at: '2026-11-26T10:00:00Z', html_url: 'https://github.com/acme/widgets/issues/2', user: { login: 'alice' }, body: 'fresh' },
+          // Old already-closed PR whose updated_at bumped due to a comment
+          { id: 5, number: 5, title: 'Old merged PR', state: 'closed', created_at: '2026-11-20T00:00:00Z', updated_at: '2026-11-26T10:01:00Z', closed_at: '2026-11-23T00:00:00Z', html_url: 'https://github.com/acme/widgets/pull/5', pull_request: { url: 'x' }, user: { login: 'alice' } },
+        ]
+        if (phase >= 4) {
+          items.push({ id: 11, number: 11, title: 'New PR after toggle', state: 'open', created_at: '2026-11-26T10:05:00Z', updated_at: '2026-11-26T10:05:00Z', html_url: 'https://github.com/acme/widgets/pull/11', pull_request: { url: 'x' }, user: { login: 'alice' } })
+        }
+        return { stdout: httpInclude({ Etag: 'W/"iss-2"' }, items), stderr: '' }
+      }
+      if (args[1] === 'repos/acme/widgets/pulls/5') {
+        return { stdout: JSON.stringify({ number: 5, state: 'closed', merged: true, created_at: '2026-11-20T00:00:00Z', updated_at: '2026-11-26T10:01:00Z', closed_at: '2026-11-23T00:00:00Z', merged_at: '2026-11-23T00:00:00Z', html_url: 'https://github.com/acme/widgets/pull/5', user: { login: 'alice' }, head: { sha: 'abc', ref: 'old' } }), stderr: '' }
+      }
+      if (args[1] === 'repos/acme/widgets/pulls/11') {
+        return { stdout: JSON.stringify({ number: 11, title: 'New PR after toggle', state: 'open', created_at: '2026-11-26T10:05:00Z', updated_at: '2026-11-26T10:05:00Z', html_url: 'https://github.com/acme/widgets/pull/11', user: { login: 'alice' }, head: { sha: 'def', ref: 'feat-11' } }), stderr: '' }
+      }
+      if (args[1] === 'repos/acme/widgets/pulls/10/reviews?per_page=100') {
+        if (send304Reviews) throw Object.assign(new Error('gh: HTTP 304'), { code: 1, stderr: 'gh: HTTP 304\n' })
+        return {
+          stdout: httpInclude({ Etag: 'W/"rev-1"' }, [
+            { id: 700, state: 'CHANGES_REQUESTED', body: 'historical review', user: { login: 'dependabot[bot]', type: 'Bot' }, html_url: 'https://github.com/acme/widgets/pull/10#pullrequestreview-700', submitted_at: '2026-11-25T10:00:00Z' },
+          ]),
+          stderr: '',
+        }
+      }
+      return { stdout: httpInclude({}, []), stderr: '' }
+    }, () => nowPoll)
+
+    try {
+      await hPoll.service.ensureDot()
+      const ch = await hPoll.store.work.createChange({
+        title: 'Active PR 10', cwd: hPoll.home, goal: 'PR 10',
+        requirements: [{ requirementRef: 'R1', text: 'PR 10', required: true }], at: nowPoll,
+      })
+      const run = await hPoll.store.work.reserveRun({ changeId: ch.id, kind: 'work', cwd: hPoll.home, writeScope: { kind: 'paths', paths: [] }, at: nowPoll })
+      if (!run.ok) throw new Error('reserve failed')
+      await hPoll.store.work.confirmSession(run.run.id, { sessionId: run.run.requestedSessionId, cwd: hPoll.home })
+      const claim = await hPoll.store.work.claimPrompt(run.run.id, 'p1', nowPoll)
+      if (!claim.ok) throw new Error('claim failed')
+      await hPoll.store.work.settleDelivery(run.run.id, claim.deliveryId, 'accepted', undefined, nowPoll)
+      await hPoll.host.createSession({ sessionId: run.run.requestedSessionId })
+      await hPoll.store.track({ sessionId: run.run.requestedSessionId, origin: 'started', title: 'R1', goal: 'G', cwd: hPoll.home, at: nowPoll })
+      await hPoll.store.putLink(makeTaskLink(ch.id, { repo: 'acme/widgets', number: 10 }, 'dot', nowPoll))
+
+      // Start with issues + comments enabled, pulls disabled
+      await hPoll.store.setSettings(patchSettings(DEFAULT_SETTINGS, {
+        reflection: false,
+        idleCheckMinutes: 0,
+        githubPoll: { enabled: true, repos: ['acme/widgets'], webhookRepos: [], ghPath: 'gh', intervalSec: 120, streams: { issues: true, pulls: false, comments: true, ci: false }, ignoredActors: [] },
+      }))
+
+      // Poll 1: cold-start at .800Z -> 0 events, historical review #700 and pre-existing issue #1/comment #100 suppressed!
+      const c1 = await hPoll.service.pollGithubNow()
+      expect(c1).toEqual({ ok: true, events: 0 })
+      expect(hPoll.inbox.list()).toHaveLength(0)
+      expect(hPoll.relayed.filter(r => r.target === run.run.requestedSessionId)).toHaveLength(0)
+
+      // Poll 2 (100ms + 1 poll later): same-second new issue #2 IS ingested; pre-existing #1 & #100 skipped; dependabot comment #101 delivered ONCE!
+      phase = 2
+      nowPoll += 60_000
+      const c2 = await hPoll.service.pollGithubNow()
+      expect(c2.ok).toBe(true)
+      expect(hPoll.inbox.list().map(i => i.subject)).toEqual(['acme/widgets#2'])
+      expect(hPoll.relayed.filter(r => r.target === run.run.requestedSessionId && r.text.includes('bot context update'))).toHaveLength(1)
+
+      // Poll 3: 5s overlap window re-fetches #101 -> MUST NOT re-deliver context-only comment #101!
+      phase = 3
+      nowPoll += 120_000
+      await hPoll.service.pollGithubNow()
+      expect(hPoll.relayed.filter(r => r.target === run.run.requestedSessionId && r.text.includes('bot context update'))).toHaveLength(1)
+      expect(hPoll.relayed.filter(r => r.target === run.run.requestedSessionId && r.text.includes('historical review'))).toHaveLength(0)
+
+      // Toggle pulls ON while /issues returns 304 -> startedPulls is persisted on 304, old closed PR #5 ignored, new PR #11 ingested on next 200 OK!
+      await hPoll.store.setSettings(patchSettings(hPoll.store.settings, {
+        githubPoll: { enabled: true, repos: ['acme/widgets'], webhookRepos: [], ghPath: 'gh', intervalSec: 120, streams: { issues: true, pulls: true, comments: true, ci: false }, ignoredActors: [] },
+      }))
+      send304Issues = true
+      send304Reviews = true
+      nowPoll += 60_000
+      await hPoll.service.pollGithubNow()
+      expect(hPoll.service.githubPollCursorStore.getStreamCursor('acme/widgets', 'issues')?.startedPulls).toBeDefined()
+
+      // Subsequent unchanged 304 does ZERO writes
+      hPoll.puts.length = 0
+      nowPoll += 60_000
+      await hPoll.service.pollGithubNow()
+      expect(hPoll.puts).toEqual([])
+
+      // Next 200 OK: PR #5 (closed 3 days ago, updated now) does NOT emit pull_request.merged; new PR #11 IS ingested!
+      send304Issues = false
+      phase = 4
+      nowPoll += 60_000
+      await hPoll.service.pollGithubNow()
+      const subjects = hPoll.inbox.list().map(i => i.subject)
+      expect(subjects).not.toContain('acme/widgets#5')
+      expect(subjects).toContain('acme/widgets#11')
+    } finally {
+      await hPoll.service.dispose()
+      hPoll.cleanup()
+    }
   })
 })

@@ -5,15 +5,19 @@ import { parseGithubPollEntry, type GithubPollEntry } from '../storage.ts'
 import type { DotTable } from '../store.ts'
 
 export const ECHO_TTL_MS = 24 * 60 * 60_000
+export const DELIVERED_TTL_MS = 14 * 24 * 60 * 60_000
 export const RETRY_WINDOW_MS = 24 * 60 * 60_000
 const MAX_ECHO_ENTRIES = 500
+const MAX_DELIVERED_ENTRIES = 500
 const MAX_410_SUBJECTS = 200
 
 export type StreamName = 'issues' | 'comments' | 'review-comments'
 export type StreamCursor = Extract<GithubPollEntry, { kind: 'stream' }>
 export type CiBaseline = Extract<GithubPollEntry, { kind: 'ci' }>
 export type PrCiBaseline = Extract<GithubPollEntry, { kind: 'pr-ci' }>
+export type PrReviewCursor = Extract<GithubPollEntry, { kind: 'pr-review' }>
 export type EchoLedger = Extract<GithubPollEntry, { kind: 'echo' }>
+export type DeliveredLedger = Extract<GithubPollEntry, { kind: 'delivered' }>
 export type RepoState = Extract<GithubPollEntry, { kind: 'repo' }>
 
 /** DomainFacility requires every table record key to match `/^[a-zA-Z0-9_-]+$/`. */
@@ -30,8 +34,14 @@ function ciKey(repo: string): string {
 function prCiKey(repo: string, number: number): string {
   return pollKey('prci', normalizeGithubRepo(repo), String(number))
 }
+function prReviewKey(repo: string, number: number): string {
+  return pollKey('prrev', normalizeGithubRepo(repo), String(number))
+}
 function echoKey(repo: string): string {
   return pollKey('echo', normalizeGithubRepo(repo))
+}
+function deliveredKey(repo: string): string {
+  return pollKey('delivered', normalizeGithubRepo(repo))
 }
 function repoKey(repo: string): string {
   return pollKey('repo', normalizeGithubRepo(repo))
@@ -127,6 +137,36 @@ export class GithubPollCursorStore {
     await this.deleteKey(prCiKey(repo, number))
   }
 
+  getPrReviewCursor(repo: string, number: number): PrReviewCursor | undefined {
+    const entry = this.cache.get(prReviewKey(repo, number))
+    return entry?.kind === 'pr-review' ? entry : undefined
+  }
+
+  async setPrReviewCursor(repo: string, number: number, cursor: Omit<PrReviewCursor, 'kind' | 'repo' | 'number'>): Promise<void> {
+    const norm = normalizeGithubRepo(repo)
+    await this.putIfChanged(prReviewKey(norm, number), {
+      kind: 'pr-review',
+      repo: norm,
+      number,
+      ...cursor,
+    })
+  }
+
+  async clearPrReviewCursors(repo: string): Promise<void> {
+    const norm = normalizeGithubRepo(repo)
+    const keys = [...this.cache.entries()]
+      .filter(([, entry]) => entry.kind === 'pr-review' && entry.repo === norm)
+      .map(([key]) => key)
+    for (const key of keys) await this.deleteKey(key)
+  }
+
+  hasDelivered(repo: string, deliveryId: string, now = Date.now(), ttlMs = DELIVERED_TTL_MS): boolean {
+    const entry = this.cache.get(deliveredKey(repo))
+    if (entry?.kind !== 'delivered') return false
+    const targetId = String(deliveryId)
+    return entry.entries.some(item => item.id === targetId && now - item.deliveredAt <= ttlMs)
+  }
+
   hasEcho(repo: string, id: string, now = Date.now(), ttlMs = ECHO_TTL_MS): boolean {
     const entry = this.cache.get(echoKey(repo))
     if (entry?.kind !== 'echo') return false
@@ -180,13 +220,35 @@ export class GithubPollCursorStore {
     return next
   }
 
-  async recordDelivery(repo: string, mode: 'poll' | 'webhook', deliveredAt: number): Promise<void> {
-    const prev = this.getRepoState(repo)
+  async recordDelivery(
+    repo: string,
+    mode: 'poll' | 'webhook',
+    deliveredAt: number,
+    deliveryId?: string,
+    recordedAt = Date.now(),
+    ttlMs = DELIVERED_TTL_MS,
+  ): Promise<void> {
+    const norm = normalizeGithubRepo(repo)
+    const prev = this.getRepoState(norm)
     const latest = Math.max(prev?.lastDeliveredAt ?? 0, deliveredAt)
-    await this.updateRepoState(repo, {
+    await this.updateRepoState(norm, {
       lastDeliveredAt: latest,
       lastMode: mode,
     })
+    if (deliveryId) {
+      const key = deliveredKey(norm)
+      const existing = this.cache.get(key)
+      const currentEntries = existing?.kind === 'delivered' ? existing.entries : []
+      const live = currentEntries.filter(item => recordedAt - item.deliveredAt <= ttlMs && item.id !== deliveryId)
+      live.push({ id: String(deliveryId), deliveredAt: recordedAt })
+      const bounded = live.slice(-MAX_DELIVERED_ENTRIES)
+      await this.putIfChanged(key, {
+        kind: 'delivered',
+        repo: norm,
+        entries: bounded,
+        updatedAt: recordedAt,
+      })
+    }
   }
 
   is410Gone(repo: string, subject: string): boolean {

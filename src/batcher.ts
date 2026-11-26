@@ -128,7 +128,7 @@ function foldedNotices(items: readonly Notice[]): readonly Notice[] {
 
 export function formatNoticeDisplay(items: readonly Notice[]): ParsedNotice {
   return { isReminder: false, entries: foldedNotices(items).map(item => item.display ?? {
-    kind: item.kind === 'result' ? 'task-human' : item.kind, sessionId: item.sessionId, ...item.requestId ? { requestId: item.requestId } : {}, summary: item.text,
+    kind: item.kind, sessionId: item.sessionId, ...item.requestId ? { requestId: item.requestId } : {}, summary: item.text,
   }) }
 }
 

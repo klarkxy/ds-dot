@@ -18,7 +18,7 @@
   const RECORDINGS = [
     {
       id: 'github-poll',
-      pr: 97,
+      pr: 98,
       date: '2026.11.26',
       post: 'github-watch',
       file: 'dot-pr5-github-poll.gif',

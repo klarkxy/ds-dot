@@ -1719,7 +1719,7 @@ export class DotService {
     try { catalog = await this.host.listPresets() } catch (error) {
       throw new DotError('dot/presets-unavailable', `the host's preset list could not be read: ${messageOf(error)}. Cannot safely select a task preset.`)
     }
-    try { return pickTaskPreset(catalog, requested) } catch (error) {
+    try { return pickTaskPreset(catalog, requested, this.store.settings.defaultTaskPreset) } catch (error) {
       if (error instanceof TaskPresetError) throw new DotError(error.code, error.message)
       throw error
     }

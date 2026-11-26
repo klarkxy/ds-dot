@@ -47,6 +47,7 @@ import { dotDomain, parseInboxRecord, parsePeerDelivery, parseTask } from './sto
 import { DotStore, type DotDomainHandle } from './store.ts'
 import { DOT_INHERITED_ALLOW } from './tools.ts'
 import { copyLocale, fillText, t } from './ui-copy.ts'
+import { registerWorkerPreset } from './worker-preset.ts'
 
 export const name = PLUGIN_NAME
 export const inject = ['storageDomain', 'sessions', 'sessionController', 'workspaceRegistry', 'sessionQuery', 'agentPresets', 'agents', 'agentDefaultModel', 'webServer', 'connection'] as const
@@ -346,6 +347,8 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
     })
     return () => { disposed = true; void release?.() }
   }, 'dot.reflection-preset')
+
+  ctx.effect(() => registerWorkerPreset(ctx, logger), 'dot.worker-preset')
 
   // Correlate the host audit id (not callId) with its in-memory dot request.
   const approvalWithdrawals = new Map<string, { sessionId: string; withdraw: () => void }>()

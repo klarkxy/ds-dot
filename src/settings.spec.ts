@@ -44,6 +44,23 @@ describe('parseSettings', () => {
 
 
 
+  it('defaults defaultTaskPreset to standard and validates known options', () => {
+    expect(DEFAULT_SETTINGS.defaultTaskPreset).toBe('standard')
+    expect(parseSettings({}).defaultTaskPreset).toBe('standard')
+    expect(parseSettings({ defaultTaskPreset: 'dot-worker' }).defaultTaskPreset).toBe('dot-worker')
+    expect(parseSettings({ defaultTaskPreset: 'ptc' }).defaultTaskPreset).toBe('standard')
+    expect(parseSettings({ defaultTaskPreset: 123 }).defaultTaskPreset).toBe('standard')
+
+    const updated = patchSettings(DEFAULT_SETTINGS, { defaultTaskPreset: 'dot-worker' })
+    expect(updated.defaultTaskPreset).toBe('dot-worker')
+    expect(patchSettings(updated, { defaultTaskPreset: 'standard' }).defaultTaskPreset).toBe('standard')
+    expect(() => patchSettings(DEFAULT_SETTINGS, { defaultTaskPreset: 'ptc' })).toThrow(/defaultTaskPreset/)
+    expect(() => patchSettings(DEFAULT_SETTINGS, { defaultTaskPreset: null })).toThrow(/defaultTaskPreset/)
+
+    const locked = patchSettings(DEFAULT_SETTINGS, { locks: { defaultTaskPreset: true } })
+    expect(locked.locks).toEqual({ defaultTaskPreset: true })
+    expect(parseSettings({ locks: { defaultTaskPreset: true } }).locks).toEqual({ defaultTaskPreset: true })
+  })
 })
 
 describe('patchSettings', () => {

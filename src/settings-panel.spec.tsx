@@ -339,15 +339,16 @@ describe('sectioned settings, switches, and help tips', () => {
     expect(document.querySelectorAll('.dsh-ui-help')).toHaveLength(0)
     expect(document.querySelectorAll('.dsh-dot-help-tip')).toHaveLength(3)
 
-    // Dispatch: task permissions, task models (with dynamic empty-allow-list warning inline), routine check.
+    // Dispatch: task permissions, default task preset, task models (with dynamic empty-allow-list warning inline), routine check.
     await act(async () => root.render(<Harness section="dispatch" />))
     await act(async () => { await Promise.resolve() })
     expect(document.querySelector('[role="tablist"][aria-label="Task permissions"]')).not.toBeNull()
+    expect(document.querySelector('select[aria-label="Default task preset"]')).not.toBeNull()
     expect(document.querySelector('[role="tablist"][aria-label="Allowed task models"]')).not.toBeNull()
     expect(document.querySelector('input[aria-label="Routine check"]')).not.toBeNull()
     const inlineHelps = [...document.querySelectorAll('.dsh-ui-help')].map(el => el.textContent)
     expect(inlineHelps).toEqual(['No models selected — cannot start new tasks.'])
-    expect(document.querySelectorAll('.dsh-dot-help-tip')).toHaveLength(2)
+    expect(document.querySelectorAll('.dsh-dot-help-tip')).toHaveLength(3)
 
     // Capabilities: single header without redundant outer section heading.
     await act(async () => root.render(<Harness section="capabilities" />))
@@ -1157,7 +1158,7 @@ describe('dispatch settings layout', () => {
     await act(async () => root.render(<Harness />))
     await act(async () => { await Promise.resolve() })
 
-    expect([...document.querySelectorAll('.dsh-dot-dispatch-group')].map(node => node.getAttribute('data-group'))).toEqual(['permission', 'models', 'routine'])
+    expect([...document.querySelectorAll('.dsh-dot-dispatch-group')].map(node => node.getAttribute('data-group'))).toEqual(['permission', 'preset', 'models', 'routine'])
     expect(document.querySelector('input[aria-label="Routine check"]')).not.toBeNull()
     expect(document.querySelector('[role="tablist"][aria-label="Task permissions"]')).not.toBeNull()
     const picker = document.querySelector('.dsh-dot-model-picker')!
@@ -1222,7 +1223,127 @@ describe('dispatch settings layout', () => {
     expect(rule('.dsh-dot-chat .dsh-dot-model-list {')).not.toMatch(/max-height|overflow/)
     expect(rule('.dsh-dot-chat .dsh-dot-model-chips {')).not.toMatch(/max-height|overflow/)
     expect(settingsCss).toContain(".dsh-dot-dispatch-group[data-group='models']")
+    expect(settingsCss).toContain(".dsh-dot-chat .dsh-dot-dispatch-group[data-group='preset']")
     expect(settingsCss).toContain('.dsh-dot-chat .dsh-dot-model-search { display: flex; width: 100%;')
     expect(settingsCss).toContain('.dsh-dot-chat .dsh-dot-model-chip-provider {')
+
+    const nonAtSelectors = settingsCss
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .replace(/@(container|media)\s*\([^)]*\)\s*\{([\s\S]*?\})\s*\}/g, '$2')
+      .split('}')
+      .map(block => block.split('{')[0]?.trim() ?? '')
+      .filter(Boolean)
+    for (const selectorList of nonAtSelectors) {
+      for (const selector of selectorList.split(',').map(part => part.trim()).filter(Boolean)) {
+        expect(selector.startsWith('.dsh-dot-chat')).toBe(true)
+      }
+    }
+  })
+
+  it('renders default task preset select, saves changes, keeps select enabled when locked, and formats proposals', async () => {
+    const saves: Array<Partial<DotSettings>> = []
+    const proposals = [
+      {
+        id: 'p-preset',
+        field: 'defaultTaskPreset' as const,
+        before: 'standard',
+        after: 'dot-worker',
+        reason: 'promote long shell commands after 5s',
+        createdAt: 1,
+      },
+      {
+        id: 'p-preset-fallback',
+        field: 'defaultTaskPreset' as const,
+        before: 'custom-preset',
+        after: 'standard',
+        reason: 'restore host default',
+        createdAt: 2,
+      },
+    ]
+    const decisions: Array<{ id: string; allow: boolean }> = []
+    let current: DotSettings = { ...DEFAULT_SETTINGS }
+    const api = {
+      models: async () => catalog,
+      settings: async () => current,
+      settingProposals: async () => proposals,
+      decideSetting: async (id: string, allow: boolean) => { decisions.push({ id, allow }); return 'ok' },
+      setSettings: async (patch: Partial<DotSettings>) => {
+        saves.push(patch)
+        current = { ...current, ...patch } as DotSettings
+        return current
+      },
+    }
+    function Harness({ locale, section }: { locale: 'en' | 'zh'; section: 'dispatch' | 'proposals' }) {
+      const [value, setValue] = useState<DotSettings>(current)
+      return <SettingsPanel locale={locale} section={section} api={api as never} settings={value} onSaved={setValue} />
+    }
+    const root = createRoot(document.getElementById('root')!)
+    await act(async () => root.render(<Harness locale="en" section="dispatch" />))
+    await act(async () => { await Promise.resolve() })
+
+    const select = () => document.querySelector<HTMLSelectElement>('select.dsh-ui-select[aria-label="Default task preset"]')!
+    expect(select()).not.toBeNull()
+    expect(select().value).toBe('standard')
+    expect(select().disabled).toBe(false)
+    expect([...select().options].map(opt => [opt.value, opt.textContent])).toEqual([
+      ['standard', 'standard (Host default)'],
+      ['dot-worker', 'dot-worker (5s background promotion)'],
+    ])
+    const helpBtn = document.querySelector('button.dsh-dot-help-tip[aria-label="About Default task preset"]')
+    expect(helpBtn).not.toBeNull()
+
+    await act(async () => {
+      const el = select()
+      el.value = 'dot-worker'
+      const propsKey = Object.keys(el).find(key => key.startsWith('__reactProps'))
+      const props = propsKey ? (el as unknown as Record<string, { onChange?: (event: { target: HTMLSelectElement }) => void }>)[propsKey] : undefined
+      props?.onChange?.({ target: el })
+    })
+    expect(saves.at(-1)).toEqual({ defaultTaskPreset: 'dot-worker' })
+    expect(select().value).toBe('dot-worker')
+
+    const lockBtn = [...document.querySelectorAll<HTMLButtonElement>('.dsh-dot-lock')].find(btn => btn.getAttribute('aria-label')?.includes('Default task preset'))!
+    expect(lockBtn).toBeDefined()
+    expect(lockBtn.getAttribute('aria-pressed')).toBe('false')
+    await act(async () => { lockBtn.click() })
+    expect(saves.at(-1)).toEqual({ locks: { defaultTaskPreset: true } })
+    expect(lockBtn.getAttribute('aria-pressed')).toBe('true')
+    expect(lockBtn.hasAttribute('data-locked')).toBe(true)
+    expect(select().disabled).toBe(false)
+
+    await act(async () => { lockBtn.click() })
+    expect(saves.at(-1)).toEqual({ locks: { defaultTaskPreset: false } })
+    expect(lockBtn.getAttribute('aria-pressed')).toBe('false')
+
+    await act(async () => root.render(<Harness locale="zh" section="dispatch" />))
+    const zhSelect = document.querySelector<HTMLSelectElement>('select.dsh-ui-select[aria-label="默认任务 preset"]')!
+    expect(zhSelect).not.toBeNull()
+    expect([...zhSelect.options].map(opt => opt.textContent)).toEqual([
+      'standard（宿主默认）',
+      'dot-worker（5s 前转后）',
+    ])
+
+    await act(async () => root.render(<Harness locale="en" section="proposals" />))
+    await act(async () => { await Promise.resolve() })
+    expect(document.querySelector('.dsh-dot-proposal-head strong')?.textContent).toBe('Default task preset')
+    expect([...document.querySelectorAll('.dsh-dot-proposal-chip')].map(node => node.textContent)).toEqual([
+      'standard (Host default)',
+      'dot-worker (5s background promotion)',
+      'custom-preset',
+      'standard (Host default)',
+    ])
+
+    await act(async () => root.render(<Harness locale="zh" section="proposals" />))
+    expect(document.querySelector('.dsh-dot-proposal-head strong')?.textContent).toBe('默认任务 preset')
+    expect([...document.querySelectorAll('.dsh-dot-proposal-chip')].map(node => node.textContent)).toEqual([
+      'standard（宿主默认）',
+      'dot-worker（5s 前转后）',
+      'custom-preset',
+      'standard（宿主默认）',
+    ])
+    await act(async () => document.querySelector<HTMLButtonElement>('.dsh-dot-proposal button')!.click())
+    expect(decisions).toEqual([{ id: 'p-preset', allow: true }])
+
+    await act(async () => root.unmount())
   })
 })

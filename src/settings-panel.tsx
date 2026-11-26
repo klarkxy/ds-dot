@@ -9,7 +9,7 @@ import { createContext, useCallback, useContext, useEffect, useRef, useState, ty
 import type { SettingsSection } from './chat-hooks.ts'
 export type { SettingsSection } from './chat-hooks.ts'
 import { CapabilitiesMcpPanel, SegmentedChoice } from './capabilities-mcp-panel.tsx'
-import { type ApprovalMode, type CapabilityCatalogView, type CapabilityGrant, type DotMcpListView, type DotSettings, type FactoryResetPreview, type FactoryResetResult, type KeepaliveInfo, type ModelChoice, type SettingField, type SettingProposal, type TakeoverMode, type TaskModelRule, type TaskPermission } from './contracts.ts'
+import { TASK_PRESET_OPTIONS, type ApprovalMode, type CapabilityCatalogView, type CapabilityGrant, type DefaultTaskPreset, type DotMcpListView, type DotSettings, type FactoryResetPreview, type FactoryResetResult, type KeepaliveInfo, type ModelChoice, type SettingField, type SettingProposal, type TakeoverMode, type TaskModelRule, type TaskPermission } from './contracts.ts'
 import { DESKTOP_NOTIFY_KEY } from './attention-client.ts'
 import type { UpdateResult, UpdateStatus } from './auto-update.ts'
 import { factoryResetScope, formatWhen, t, type CopyLocale, type TextKey } from './ui-copy.ts'
@@ -198,6 +198,9 @@ function formatProposalValue(locale: CopyLocale, field: SettingProposal['field']
       break
     case 'taskPermission':
       if (value === 'workspace-write' || value === 'danger-full-access' || value === 'safe-auto' || value === 'auto') return { text: t(locale, `sTaskPermission_${value}`), block: false }
+      break
+    case 'defaultTaskPreset':
+      if (value === 'standard' || value === 'dot-worker') return { text: t(locale, `sDefaultTaskPreset_${value}`), block: false }
       break
     case 'reflection':
       if (typeof value === 'boolean') return { text: t(locale, value ? 'sReflection_on' : 'sReflection_off'), block: false }
@@ -754,6 +757,24 @@ export function SettingsPanel({ locale, api, settings, section = 'all', proposal
                 <SegmentedChoice locale={locale} label={t(locale, 'sTaskPermission')} value={settings.taskPermission} options={permissionModes} labelKeyOf={opt => `sTaskPermission_${opt}`} onChange={next => save({ taskPermission: next })} />
               </Field>
             </div>
+            <div className="dsh-dot-dispatch-group" data-group="preset">
+              <Field
+                label={t(locale, 'sDefaultTaskPreset')}
+                tip={t(locale, 'sDefaultTaskPresetDesc')}
+                {...lock('defaultTaskPreset')}
+              >
+                <select
+                  className="dsh-ui-select"
+                  aria-label={t(locale, 'sDefaultTaskPreset')}
+                  value={settings.defaultTaskPreset ?? 'standard'}
+                  onChange={event => save({ defaultTaskPreset: event.target.value as DefaultTaskPreset })}
+                >
+                  {TASK_PRESET_OPTIONS.map(opt => (
+                    <option key={opt} value={opt}>{t(locale, `sDefaultTaskPreset_${opt}`)}</option>
+                  ))}
+                </select>
+              </Field>
+            </div>
             <div className="dsh-dot-dispatch-group" data-group="models">
               <Field label={t(locale, 'sTaskModels')} help={taskModelsHelp} helpTone={taskModelsHelp ? 'warn' : undefined} {...lock('taskModels')}>
                 <SegmentedChoice locale={locale} label={t(locale, 'sTaskModels')} value={rule.mode} options={['all', 'allow', 'deny']} labelKeyOf={opt => `sTaskModels_${opt}`} onChange={next => save({ taskModels: { mode: next, list: rule.list } })} />
@@ -967,6 +988,7 @@ export const settingsCss = `
 .dsh-dot-chat .dsh-dot-dispatch-stack { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
 .dsh-dot-chat .dsh-dot-dispatch-group { min-width: 0; }
 .dsh-dot-chat .dsh-dot-dispatch-group[data-group='permission'],
+.dsh-dot-chat .dsh-dot-dispatch-group[data-group='preset'],
 .dsh-dot-chat .dsh-dot-dispatch-group[data-group='models'] {
   padding: 12px 12px 14px; border-radius: var(--dsw-radius-md);
   background: var(--dsw-alias-bg-layer-2); box-shadow: var(--dsw-elevation-stroke);

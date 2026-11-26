@@ -1269,3 +1269,104 @@ describe('WorkBoard retry badge', () => {
     }
   })
 })
+
+describe('WorkBoard background job badge', () => {
+  const jobsBase: WorkBoardItem = {
+    ...item, id: 'c-jobs', title: 'Background task', status: 'running',
+    verification: undefined, oversight: undefined, humanAction: undefined,
+  }
+  const renderBoard = async (root: ReturnType<typeof createRoot>, locale: 'en' | 'zh', row: WorkBoardItem) => {
+    await act(async () => root.render(
+      <WorkBoard locale={locale} items={[row]} pending={[]} onAccept={vi.fn()} onReject={vi.fn()} onAnswer={vi.fn()} onResume={vi.fn()} />,
+    ))
+  }
+
+  it('renders subtle quiet badge in zh and en when backgroundJobCount > 0 (1, 3, multi-run sum)', async () => {
+    const oneJob: WorkBoardItem = {
+      ...jobsBase,
+      runs: [{ id: 'run-j1', kind: 'work', phase: 'active', cwd: 'H:/repo', backgroundJobCount: 1 }],
+    }
+    const root = createRoot(document.getElementById('root')!)
+    await renderBoard(root, 'zh', oneJob)
+    const zhOne = document.querySelector<HTMLElement>('.dsh-dot-work-meta .dsh-dot-work-jobs')
+    expect(zhOne).toBeTruthy()
+    expect(zhOne?.textContent).toBe('后台 1 个 job')
+    expect(zhOne?.getAttribute('data-tone')).toBe('quiet')
+    expect(zhOne?.getAttribute('data-tone')).not.toBe('danger')
+    expect(zhOne?.getAttribute('data-tone')).not.toBe('warning')
+
+    await renderBoard(root, 'en', oneJob)
+    const enOne = document.querySelector<HTMLElement>('.dsh-dot-work-meta .dsh-dot-work-jobs')
+    expect(enOne).toBeTruthy()
+    expect(enOne?.textContent).toBe('1 background job(s)')
+    expect(enOne?.getAttribute('data-tone')).toBe('quiet')
+
+    const threeJobs: WorkBoardItem = {
+      ...jobsBase,
+      runs: [{ id: 'run-j3', kind: 'work', phase: 'active', cwd: 'H:/repo', backgroundJobCount: 3 }],
+    }
+    await renderBoard(root, 'zh', threeJobs)
+    expect(document.querySelector('.dsh-dot-work-meta .dsh-dot-work-jobs')?.textContent).toBe('后台 3 个 job')
+    await renderBoard(root, 'en', threeJobs)
+    expect(document.querySelector('.dsh-dot-work-meta .dsh-dot-work-jobs')?.textContent).toBe('3 background job(s)')
+
+    const multiRun: WorkBoardItem = {
+      ...jobsBase,
+      runs: [
+        { id: 'run-m1', kind: 'work', phase: 'active', cwd: 'H:/repo', backgroundJobCount: 1 },
+        { id: 'run-m2', kind: 'review', phase: 'settling', cwd: 'H:/repo', backgroundJobCount: 2 },
+        { id: 'run-m3', kind: 'work', phase: 'completed', cwd: 'H:/repo', backgroundJobCount: 5 },
+      ],
+    }
+    await renderBoard(root, 'en', multiRun)
+    const multiBadge = document.querySelector<HTMLElement>('.dsh-dot-work-meta .dsh-dot-work-jobs')
+    expect(multiBadge?.textContent).toBe('3 background job(s)')
+    expect(multiBadge?.getAttribute('data-tone')).toBe('quiet')
+    expect(document.querySelectorAll('.dsh-dot-work-jobs')).toHaveLength(1)
+    await act(async () => root.unmount())
+  })
+
+  it('silently hides the badge when backgroundJobCount is undefined or 0', async () => {
+    const root = createRoot(document.getElementById('root')!)
+    await renderBoard(root, 'zh', {
+      ...jobsBase,
+      runs: [{ id: 'run-none', kind: 'work', phase: 'active', cwd: 'H:/repo' }],
+    })
+    expect(document.querySelector('.dsh-dot-work-jobs')).toBeNull()
+    expect(document.body.textContent).not.toContain('个 job')
+
+    await renderBoard(root, 'en', {
+      ...jobsBase,
+      runs: [{ id: 'run-zero', kind: 'work', phase: 'active', cwd: 'H:/repo', backgroundJobCount: 0 }],
+    })
+    expect(document.querySelector('.dsh-dot-work-jobs')).toBeNull()
+    expect(document.body.textContent).not.toContain('background job')
+    await act(async () => root.unmount())
+  })
+
+  it('updates cleanly from 1 to 0 on rerender', async () => {
+    const active: WorkBoardItem = {
+      ...jobsBase,
+      runs: [{ id: 'run-live', kind: 'work', phase: 'active', cwd: 'H:/repo', backgroundJobCount: 1 }],
+    }
+    const settled: WorkBoardItem = {
+      ...jobsBase,
+      runs: [{ id: 'run-live', kind: 'work', phase: 'active', cwd: 'H:/repo', backgroundJobCount: 0 }],
+    }
+    const root = createRoot(document.getElementById('root')!)
+    await renderBoard(root, 'zh', active)
+    expect(document.querySelector('.dsh-dot-work-meta .dsh-dot-work-jobs')?.textContent).toBe('后台 1 个 job')
+    await renderBoard(root, 'zh', settled)
+    expect(document.querySelector('.dsh-dot-work-jobs')).toBeNull()
+    expect(document.body.textContent).not.toContain('后台')
+    await act(async () => root.unmount())
+  })
+
+  it('scopes the background jobs badge style strictly under .dsh-dot-board', () => {
+    const jobLines = boardCss.split('\n').filter(line => line.includes('dsh-dot-work-jobs'))
+    expect(jobLines.length).toBeGreaterThan(0)
+    for (const line of jobLines) {
+      expect(line.trim().startsWith('.dsh-dot-board ')).toBe(true)
+    }
+  })
+})

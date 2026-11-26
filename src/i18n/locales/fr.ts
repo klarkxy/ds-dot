@@ -677,6 +677,7 @@ const frUi: UiText = {
   workSourceExpandAll: 'Tout déplier',
   workSourceCollapseAll: 'Tout replier',
   workRetryBadge: 'Nouvel essai du modèle ×{count}',
+  workBackgroundJobs: '{count} job(s) en arrière-plan',
   attentionTitle: 'Dorothy a besoin de vous',
   attentionBadge: '{n} ont besoin de vous',
   sNotify: 'Notifications de bureau',

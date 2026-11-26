@@ -170,6 +170,7 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
   const host = bindHost(name => ctx.get(name as never), log, () => store.settings.model, agent => { sealOwned?.(agent) }, capabilities)
   const service = new DotService({
     host,
+    get: name => ctx.get(name as never),
     store,
     capabilities,
     peers: new PeerLedger(domain.table('peers'), parsePeerDelivery),
@@ -232,6 +233,7 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
   const unfollow = store.onChange(follow)
   const unpending = service.pending.onChange(() => feed.boardChanged())
   const unretry = service.onRetryChange(() => feed.boardChanged())
+  const unjobs = service.onBackgroundJobsChange(() => feed.boardChanged())
   const ensureDot = async () => {
     const sessionId = await service.ensureDot()
     follow()
@@ -249,6 +251,7 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
     unfollow()
     unpending()
     unretry()
+    unjobs()
     const done = (async () => {
       service.releaseChildSeals()
       await service.dispose().catch(err => { logger.fault('service.dispose-failed', 'DotService disposal failed.', err) })

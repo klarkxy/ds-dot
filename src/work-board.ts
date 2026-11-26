@@ -48,6 +48,8 @@ export interface WorkRunView {
   readonly deliveries?: readonly WorkDeliveryView[]
   /** Active model-retry state for live runs, projected from RetryHealth. */
   readonly retryStatus?: WorkRunRetryStatus
+  /** Number of running/stopping background jobs owned by this run's session (present only when > 0). */
+  readonly backgroundJobCount?: number
 }
 
 export interface WorkVerificationView {
@@ -345,4 +347,19 @@ export function highlightedRetry(runs: readonly WorkRunView[]): WorkRunRetryStat
     }
   }
   return best
+}
+
+const TERMINAL_RUN_PHASES = new Set(['completed', 'failed', 'stopped'])
+
+/** Sum live background job counts across non-terminal runs of a change. */
+export function backgroundJobCount(runs: readonly WorkRunView[]): number {
+  let total = 0
+  for (const run of runs) {
+    if (TERMINAL_RUN_PHASES.has(run.phase)) continue
+    const count = run.backgroundJobCount
+    if (typeof count === 'number' && Number.isFinite(count) && count > 0) {
+      total += Math.floor(count)
+    }
+  }
+  return total
 }

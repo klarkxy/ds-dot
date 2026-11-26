@@ -678,6 +678,7 @@ export const zhUi = {
   workSourceExpandAll: '全部展开',
   workSourceCollapseAll: '全部收起',
   workRetryBadge: '模型重试中 ×{count}',
+  workBackgroundJobs: '后台 {count} 个 job',
   attentionTitle: '桃乐丝需要你',
   attentionBadge: '{n} 项待你处理',
   sNotify: '桌面通知',

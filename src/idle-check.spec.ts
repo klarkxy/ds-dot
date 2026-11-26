@@ -48,4 +48,14 @@ describe('idle checks', () => {
     expect(idleCandidates(tasks, [], changes, retrying).map(row => row.id)).toEqual(['idle-ready'])
     expect(idleCandidates(tasks, [], changes, new Set()).map(row => row.id)).toEqual(['retrying', 'idle-ready'])
   })
+  it('excludes changes whose session has an active quiet wait or running background job and re-includes once settled', () => {
+    const changes = [
+      change('quiet-wait', { status: 'rework', sessionIds: ['s-quiet'] }),
+      change('idle-ready', { status: 'waiting', sessionIds: ['s-free'] }),
+    ]
+    const tasks = [task('s-quiet', 'idle'), task('s-free', 'idle')]
+    const backgroundBusy = new Set(['s-quiet'])
+    expect(idleCandidates(tasks, [], changes, undefined, backgroundBusy).map(row => row.id)).toEqual(['idle-ready'])
+    expect(idleCandidates(tasks, [], changes, undefined, new Set()).map(row => row.id)).toEqual(['quiet-wait', 'idle-ready'])
+  })
 })

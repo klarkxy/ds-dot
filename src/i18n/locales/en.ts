@@ -677,6 +677,7 @@ const enUi: UiText = {
   workOpenSession: 'Open session',
   workSourceExpandAll: 'Expand all',
   workSourceCollapseAll: 'Collapse all',
+  workRetryBadge: 'Model retrying ×{count}',
   attentionTitle: 'Dorothy needs you',
   attentionBadge: '{n} need you',
   sNotify: 'Desktop notifications',

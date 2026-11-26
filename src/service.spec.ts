@@ -5382,3 +5382,143 @@ describe('DotService task permission pinning and Safe Auto read-only guard', () 
     }
   })
 })
+
+describe('DotService RetryHealth, idle suppression, and WorkRunView projection', () => {
+  it('projects retryStatus onto board(), workBoard(), and workList(), and clears on lifecycle events', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'dot-retry-proj-'))
+    const home = mkdtempSync(join(tmpdir(), 'dot-retry-proj-home-'))
+    const h = setup({}, undefined, home)
+    try {
+      const dotId = await h.service.ensureDot()
+      writeFileSync(join(dir, 'a.ts'), 'init')
+      const change = JSON.parse(await h.service.manageTask({ action: 'create', title: 'Retry Work', goal: 'finish', dir })) as { id: string }
+      const dispatched = await h.service.manageTask({ action: 'dispatch', task_id: change.id, access: 'read', instruction: 'inspect' })
+      const runId = /started (run-\d+)/.exec(dispatched)![1]!
+      const runSessionId = h.store.work.run(runId)!.sessionId!
+
+      // Managed stream accepts dot and run session, ignores watched & unmanaged sessions
+      await h.service.watch('watched-1', 'Human Chat')
+      const seen: string[] = []
+      const unsub = h.service.subscribeManagedSessionEvents((sid, ev) => { seen.push(`${sid}:${ev.type}`) })
+      const unsubThrow = h.service.subscribeManagedSessionEvents(() => { throw new Error('subscriber fault') })
+
+      h.service.onSessionEvent('watched-1', { type: 'llm/retry', seq: 1, time: 10_000, data: { retryId: 'w1', turn: 1, step: 1, provider: 'p', retry: 1, failure: { status: 429 } } })
+      h.service.onSessionEvent('unmanaged-1', { type: 'llm/retry', seq: 1, time: 10_000, data: { retryId: 'u1', turn: 1, step: 1, provider: 'p', retry: 1, failure: { status: 429 } } })
+      expect(h.service.retryHealth.get('watched-1')).toBeUndefined()
+      expect(h.service.retryHealth.get('unmanaged-1')).toBeUndefined()
+      expect(seen).toEqual([])
+
+      // Run session receives transient retry -> retry-started -> retry 2
+      h.service.onSessionEvent(runSessionId, { type: 'turn/start', seq: 1, time: 10_000, data: { turn: 1 } })
+      h.service.onSessionEvent(runSessionId, { type: 'step/start', seq: 2, time: 10_000, data: { turn: 1, step: 1 } })
+      h.service.onSessionEvent(runSessionId, { type: 'llm/retry', seq: 3, time: 11_000, data: { retryId: 'c1', turn: 1, step: 1, provider: 'deepseek', retry: 1, failure: { status: 429, code: 'RATE_LIMIT' } } })
+      h.service.onSessionEvent(runSessionId, { type: 'llm/retry-started', seq: 4, time: 13_500, data: { retryId: 'c1', turn: 1, step: 1, retry: 1 } })
+      h.service.onSessionEvent(runSessionId, { type: 'llm/retry', seq: 5, time: 14_000, data: { retryId: 'c1', turn: 1, step: 1, provider: 'deepseek', retry: 2, failure: { status: 503, code: 'SERVER' } } })
+      expect(seen.length).toBe(5)
+
+      const expectedStatus = {
+        kind: 'transient' as const,
+        attempts: 2,
+        since: new Date(11_000).toISOString(),
+        accumulatedMs: 2500,
+      }
+      expect(h.service.workBoard(change.id)?.runs[0]?.retryStatus).toEqual(expectedStatus)
+      expect(h.service.workList().find(row => row.id === change.id)?.runs[0]?.retryStatus).toEqual(expectedStatus)
+      expect(h.service.board().work?.find(row => row.id === change.id)?.runs[0]?.retryStatus).toEqual(expectedStatus)
+
+      // onStatus('idle') clears active retry and preserves accumulatedWaitMs; projections drop retryStatus
+      h.service.onStatus(runSessionId, 'idle')
+      expect(h.service.retryHealth.get(runSessionId)).toBeUndefined()
+      expect(h.service.retryHealth.accumulatedWaitMs(runSessionId)).toBe(2500)
+      expect(h.service.workBoard(change.id)?.runs[0]?.retryStatus).toBeUndefined()
+      expect(h.service.board().work?.find(row => row.id === change.id)?.runs[0]?.retryStatus).toBeUndefined()
+
+      // noteSessionRemoved clears run session retry even when origin !== 'watched'
+      h.service.onSessionEvent(runSessionId, { type: 'step/start', seq: 6, time: 20_000, data: { turn: 1, step: 2 } })
+      h.service.onSessionEvent(runSessionId, { type: 'llm/retry', seq: 7, time: 21_000, data: { retryId: 'c2', turn: 1, step: 2, provider: 'deepseek', retry: 1, failure: { type: 'budget_exceeded' } } })
+      expect(h.service.retryHealth.get(runSessionId)?.kind).toBe('budget')
+      await h.service.noteSessionRemoved(runSessionId)
+      expect(h.service.retryHealth.get(runSessionId)).toBeUndefined()
+
+      // Dorothy's own session events are tracked and cleared on dispose
+      h.service.onSessionEvent(dotId, { type: 'llm/retry', seq: 1, time: 30_000, data: { retryId: 'd1', turn: 1, step: 1, provider: 'deepseek', retry: 1, failure: { status: 429 } } })
+      expect(h.service.retryHealth.get(dotId)?.kind).toBe('transient')
+      unsub()
+      unsubThrow()
+    } finally {
+      await h.service.dispose()
+      expect(h.service.retryHealth.list()).toEqual([])
+      rmSync(dir, { recursive: true, force: true })
+      rmSync(home, { recursive: true, force: true })
+    }
+  })
+
+  it('backfills retryHealth before idleChecker.run() in reconcileNow() and suppresses idle check while Dorothy or run retries', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'dot-retry-idle-'))
+    const home = mkdtempSync(join(tmpdir(), 'dot-retry-idle-home-'))
+    const fake = fakeHost()
+    const clock = manualTimer()
+    const store = new DotStore(undefined)
+    await store.setSettings({ ...DEFAULT_SETTINGS, reflection: false, idleCheckMinutes: 1, autoUpdate: false, scope: 'all' })
+    let at = 1000
+    const liveAgents: Array<{ readonly sessionId: string; readonly status: 'idle' | 'running'; readonly events: readonly RawEvent[] }> = []
+    fake.host.listLiveAgents = () => liveAgents
+    const service = new DotService({ host: fake.host, store, homeDir: home, approvalGraceMs: 0, timer: clock.timer, now: () => at })
+
+    try {
+      const dotId = await service.ensureDot()
+      writeFileSync(join(dir, 'a.ts'), 'init')
+      const change = JSON.parse(await service.manageTask({ action: 'create', title: 'Stuck Retry', goal: 'finish', dir })) as { id: string }
+      const dispatched = await service.manageTask({ action: 'dispatch', task_id: change.id, access: 'read', instruction: 'inspect' })
+      const runId = /started (run-\d+)/.exec(dispatched)![1]!
+      const runSessionId = store.work.run(runId)!.sessionId!
+      // Mark task idle in store while session is actually actively retrying in host agent registry
+      await store.apply({ type: 'status', sessionId: runSessionId, status: 'idle', at: 1500 }, [])
+      await service.finishWorkRun(runId, 'failed')
+      // Create a second rework change with a live retrying session seeded in listLiveAgents
+      const change2 = JSON.parse(await service.manageTask({ action: 'create', title: 'Backfill Retrying', goal: 'finish', dir })) as { id: string }
+      const dispatched2 = await service.manageTask({ action: 'dispatch', task_id: change2.id, access: 'read', instruction: 'inspect' })
+      const runId2 = /started (run-\d+)/.exec(dispatched2)![1]!
+      const runSessionId2 = store.work.run(runId2)!.sessionId!
+      await store.apply({ type: 'status', sessionId: runSessionId2, status: 'idle', at: 1700 }, [])
+
+      liveAgents.push({
+        sessionId: runSessionId2,
+        status: 'running',
+        events: [
+          { type: 'turn/start', seq: 1, time: 2000, data: { turn: 1 } },
+          { type: 'step/start', seq: 2, time: 2000, data: { turn: 1, step: 1 } },
+          { type: 'llm/retry', seq: 3, time: 2500, data: { retryId: 'r-bf', turn: 1, step: 1, provider: 'p', retry: 1, failure: { status: 429 } } },
+        ],
+      })
+      // Also seed an already-idle agent whose stale retry must be cleared on backfill
+      liveAgents.push({
+        sessionId: runSessionId,
+        status: 'idle',
+        events: [
+          { type: 'llm/retry', seq: 1, time: 1800, data: { retryId: 'r-stale', turn: 1, step: 1, provider: 'p', retry: 1, failure: { status: 429 } } },
+        ],
+      })
+
+      // Dorothy is retrying -> reconcileNow() must NOT fire idle-check
+      service.onSessionEvent(dotId, { type: 'llm/retry', seq: 1, time: 3000, data: { retryId: 'd-retry', turn: 1, step: 1, provider: 'p', retry: 1, failure: { status: 429 } } })
+      await service.reconcile()
+      expect(service.retryHealth.get(runSessionId2)?.kind).toBe('transient')
+      expect(service.retryHealth.get(runSessionId)).toBeUndefined()
+      expect(fake.relayed.filter(item => item.notice?.entries?.some(e => e.kind === 'idle-check') || item.text.includes('Routine check'))).toHaveLength(0)
+
+      // Clear Dorothy's retry and run reconcile: change2 (retrying) is excluded, change (rework, idle) fires!
+      service.onStatus(dotId, 'idle')
+      expect(service.retryHealth.get(dotId)).toBeUndefined()
+      await service.reconcile()
+      await service.flushNotices()
+      const delivered = fake.relayed.map(s => s.text).join('\n')
+      expect(delivered).toContain(change.id)
+      expect(delivered).not.toContain(change2.id)
+    } finally {
+      await service.dispose()
+      rmSync(dir, { recursive: true, force: true })
+      rmSync(home, { recursive: true, force: true })
+    }
+  })
+})

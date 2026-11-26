@@ -677,6 +677,7 @@ export const zhUi = {
   workOpenSession: '打开会话',
   workSourceExpandAll: '全部展开',
   workSourceCollapseAll: '全部收起',
+  workRetryBadge: '模型重试中 ×{count}',
   attentionTitle: '桃乐丝需要你',
   attentionBadge: '{n} 项待你处理',
   sNotify: '桌面通知',

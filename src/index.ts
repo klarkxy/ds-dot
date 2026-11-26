@@ -83,8 +83,9 @@ interface SessionLike {
   readonly header?: { readonly parentSession?: string; readonly cwd?: string; readonly origin?: string }
   readonly seq?: number
   eventAt?(seq: number): RawEvent | undefined
+  snapshotEvents?(): readonly RawEvent[]
 }
-interface AgentLike { readonly id?: string; readonly session?: SessionLike }
+interface AgentLike { readonly id?: string; readonly status?: string; readonly session?: SessionLike }
 
 /** Tell Dorothy, in the chat, why a review was rejected. The decision is already committed, so the
  *  note is best effort: it must never fail the RPC or hold its acknowledgment while the chat queues. */
@@ -230,6 +231,7 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
   follow()
   const unfollow = store.onChange(follow)
   const unpending = service.pending.onChange(() => feed.boardChanged())
+  const unretry = service.onRetryChange(() => feed.boardChanged())
   const ensureDot = async () => {
     const sessionId = await service.ensureDot()
     follow()
@@ -246,6 +248,7 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
   ctx.effect(() => () => {
     unfollow()
     unpending()
+    unretry()
     const done = (async () => {
       service.releaseChildSeals()
       await service.dispose().catch(err => { logger.fault('service.dispose-failed', 'DotService disposal failed.', err) })
@@ -347,15 +350,39 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
 
   // Ledger and chat feed. Handlers never throw back into the agent loop.
   const guard = (work: () => unknown) => { try { void Promise.resolve(work()).catch(() => {}) } catch { /* observer only */ } }
+  const agentsSafe = (): { get?(id: string): AgentLike | undefined; list?(): readonly AgentLike[] } | undefined => {
+    try { return ctx.get('agents' as never) as { get?(id: string): AgentLike | undefined; list?(): readonly AgentLike[] } | undefined }
+    catch { return undefined }
+  }
+  const readSessionSnapshot = (session: SessionLike | undefined): readonly RawEvent[] => {
+    if (!session) return []
+    try {
+      if (typeof session.snapshotEvents === 'function') return session.snapshotEvents()
+      if (typeof session.seq === 'number' && typeof session.eventAt === 'function') {
+        const events: RawEvent[] = []
+        for (let seq = 0; seq < session.seq; seq++) {
+          const event = session.eventAt(seq)
+          if (event) events.push(event)
+        }
+        return events
+      }
+    } catch { /* best-effort snapshot */ }
+    return []
+  }
   ctx.effect(() => ctx.on('tools/change', () => service.refreshChildSeals()), 'dot.child-tools')
   ctx.effect(() => ctx.on('agent/disposed', ({ agent }: { agent: AgentLike }) => {
-    const id = agent.session?.id
-    if (id) service.releaseChildSeal(id)
+    const id = agent?.session?.id ?? agent?.id
+    if (id) {
+      service.releaseChildSeal(id)
+      service.noteAgentDisposed(id)
+    }
   }), 'dot.seal-release')
   ctx.effect(() => ctx.on('agent/status', ({ agent, status }: { agent: AgentLike; status: string }) => guard(() => {
     const own = agent.session?.id
     if (own) feed.onStatus(own)
-    if (own) service.sealIfOwned(agent)
+    if (own) {
+      try { service.sealIfOwned(agent) } catch { /* best-effort seal; must not block status transitions */ }
+    }
     if (own && service.isDot(own) && (status === 'running' || status === 'idle')) service.onStatus(own, status)
     // dot's own session is left out of the ledger; its finished turn is where a segment change is checked.
     // The check waits for the turn boundary to commit, like the reply read below.
@@ -366,6 +393,13 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
   // Archive is not an agent status. The host keeps the session readable and
   // Dorothy's last idle status would otherwise stay on the board forever.
   const onHost = (name: string, listener: (...args: never[]) => void) => (ctx as unknown as { on(event: string, fn: (...args: never[]) => void): () => void }).on(name, listener)
+  ctx.effect(() => onHost('agent/created', (({ agent }: { agent?: AgentLike }) => guard(() => {
+    const session = agent?.session
+    const id = typeof session?.id === 'string' ? session.id : typeof agent?.id === 'string' ? agent.id : undefined
+    if (!id) return
+    const status = agent?.status === 'idle' ? 'idle' : 'running'
+    service.onAgentCreated(id, status, readSessionSnapshot(session))
+  })) as never), 'dot.agent-created')
   ctx.effect(() => onHost('workspace/session-archived', ((request: { sessionId?: string }) => {
     const id = request?.sessionId
     if (typeof id === 'string' && id) guard(() => service.noteSessionArchived(id))
@@ -387,6 +421,12 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
   })), 'dot.error')
   ctx.effect(() => (ctx as unknown as { on(name: string, listener: (...args: never[]) => void): () => void }).on('session/event', ((session: { id?: string }, event: RawEvent) => {
     if (session?.id && feed.isDot(session.id)) guard(() => feed.onEvent(session.id!, event))
+    if (session?.id) {
+      const liveSession = agentsSafe()?.get?.(session.id)?.session
+      if (!liveSession || liveSession === session) {
+        guard(() => service.onSessionEvent(session.id!, event))
+      }
+    }
     if (event.type === 'approval/decided') {
       const id = (event.data as { id?: unknown } | undefined)?.id
       const linked = typeof id === 'string' ? approvalWithdrawals.get(id) : undefined
@@ -400,6 +440,7 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
     const id = payload?.agent?.session?.id
     if (id && payload.frame && feed.isDot(id)) guard(() => feed.onStream(id, payload.frame!))
   }) as never), 'dot.chat-stream')
+  service.backfillManagedRetryHealth()
 
   /** Top-level session a request belongs to: a subagent's popups show in its root session. */
   const agents = () => ctx.get('agents' as never) as unknown as { get(id: string): AgentLike | undefined } | undefined

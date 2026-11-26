@@ -173,6 +173,8 @@ export interface DotHost {
   /** dot's session log grouped into turns and steps. */
   dotTrajectory(sessionId: string): TrajectoryView
   isRunning(sessionId: string): boolean
+  /** Live agents in the host registry with their current status and session events, for startup/restart backfill. */
+  listLiveAgents?(): readonly { readonly sessionId: string; readonly status: 'idle' | 'running'; readonly events: readonly RawEvent[] }[]
   /** Stop the agents this host created or resumed for dot. */
   dispose(): Promise<void>
 }
@@ -979,6 +981,42 @@ export function bindHost(get: Get, log?: (message: string) => void, modelOf?: ()
     isRunning(sessionId) {
       const status = registryAgent(sessionId)?.status
       return status !== undefined && status !== 'idle'
+    },
+    listLiveAgents() {
+      let reg: AgentRegistry | undefined
+      try { reg = get('agents') as AgentRegistry | undefined } catch { return [] }
+      if (!reg || typeof reg.list !== 'function') return []
+      let list: readonly Agent[]
+      try { list = reg.list() } catch { return [] }
+      const out: Array<{ readonly sessionId: string; readonly status: 'idle' | 'running'; readonly events: readonly RawEvent[] }> = []
+      for (const agent of list) {
+        const session = agent?.session as {
+          id?: unknown
+          seq?: unknown
+          snapshotEvents?: () => readonly RawEvent[]
+          eventAt?: (seq: SessionSeq) => RawEvent | undefined
+        } | undefined
+        const sessionId = typeof session?.id === 'string' ? session.id : typeof agent?.id === 'string' ? agent.id : undefined
+        if (!sessionId) continue
+        const status = agent.status === 'idle' ? 'idle' : 'running'
+        let events: readonly RawEvent[] = []
+        try {
+          if (typeof session?.snapshotEvents === 'function') {
+            events = session.snapshotEvents()
+          } else if (session && typeof session.seq === 'number' && typeof session.eventAt === 'function') {
+            const collected: RawEvent[] = []
+            for (let seq = 0; seq < session.seq; seq++) {
+              const event = session.eventAt(seq as SessionSeq)
+              if (event) collected.push(event)
+            }
+            events = collected
+          }
+        } catch {
+          events = []
+        }
+        out.push({ sessionId, status, events })
+      }
+      return out
     },
     async dispose() {
       capabilities?.releaseAll()

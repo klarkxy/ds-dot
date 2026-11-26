@@ -676,6 +676,7 @@ const jaUi: UiText = {
   workOpenSession: 'セッションを開く',
   workSourceExpandAll: 'すべて展開',
   workSourceCollapseAll: 'すべて折りたたむ',
+  workRetryBadge: 'モデル再試行中 ×{count}',
   attentionTitle: 'ドロシーがあなたを待っています',
   attentionBadge: '{n} 件の要対応',
   sNotify: 'デスクトップ通知',

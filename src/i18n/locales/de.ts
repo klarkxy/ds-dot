@@ -676,6 +676,7 @@ const deUi: UiText = {
   workOpenSession: 'Sitzung öffnen',
   workSourceExpandAll: 'Alle ausklappen',
   workSourceCollapseAll: 'Alle einklappen',
+  workRetryBadge: 'Modell versucht erneut ×{count}',
   attentionTitle: 'Dorothy braucht dich',
   attentionBadge: '{n} brauchen dich',
   sNotify: 'Desktop-Benachrichtigungen',

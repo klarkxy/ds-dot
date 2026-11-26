@@ -676,6 +676,7 @@ const ptUi: UiText = {
   workOpenSession: 'Abrir sessão',
   workSourceExpandAll: 'Expandir tudo',
   workSourceCollapseAll: 'Recolher tudo',
+  workRetryBadge: 'Modelo tentando novamente ×{count}',
   attentionTitle: 'Dorothy precisa de você',
   attentionBadge: '{n} precisam de você',
   sNotify: 'Notificações de área de trabalho',

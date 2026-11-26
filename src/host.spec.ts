@@ -1,6 +1,14 @@
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { Context } from '@deepseek-ai/cordis'
+import { SessionId, SessionStore } from '@deepseek-ai/dsh-session'
 import { describe, expect, it, vi } from 'vitest'
+import { SERVICE_NAME } from './contracts.ts'
 import { bindRunSession, finishWork, launchReservedRun } from './execution.ts'
 import { bindHost } from './host.ts'
+import { apply as applyPlugin } from './index.ts'
+import type { DotService } from './service.ts'
+import type { DotDomainHandle } from './store.ts'
 import { WorkBook, type WorkPersist } from './work.ts'
 
 describe('running task permissions and relay', () => {
@@ -409,3 +417,159 @@ async function activeRun(write = false) {
   if (!run) throw new Error('run missing')
   return { work, run }
 }
+
+describe('live agent backfill and unified managed session event stream', () => {
+  it('reads listLiveAgents via snapshotEvents or eventAt fallback and degrades silently on missing/throwing APIs', () => {
+    const ev1 = { type: 'turn/start', seq: 1, time: 1000, data: { turn: 1 } }
+    const ev2 = { type: 'llm/retry', seq: 2, time: 2000, data: { retryId: 'r1', turn: 1, step: 1, provider: 'p', retry: 1, failure: { status: 429 } } }
+    const host = bindHost(name => name === 'agents' ? {
+      list: () => [
+        { id: 's-snap', status: 'running', session: { id: 's-snap', snapshotEvents: () => [ev1, ev2] } },
+        { id: 's-seq', status: 'idle', session: { id: 's-seq', seq: 2, eventAt: (seq: number) => [ev1, ev2][seq] } },
+        { id: 's-throw', status: 'running', session: { id: 's-throw', snapshotEvents: () => { throw new Error('boom') } } },
+      ],
+    } : undefined)
+    expect(host.listLiveAgents?.()).toEqual([
+      { sessionId: 's-snap', status: 'running', events: [ev1, ev2] },
+      { sessionId: 's-seq', status: 'idle', events: [ev1, ev2] },
+      { sessionId: 's-throw', status: 'running', events: [] },
+    ])
+
+    expect(bindHost(() => undefined).listLiveAgents?.()).toEqual([])
+    expect(bindHost(name => name === 'agents' ? {} : undefined).listLiveAgents?.()).toEqual([])
+    expect(bindHost(name => name === 'agents' ? { list: () => { throw new Error('offline') } } : undefined).listLiveAgents?.()).toEqual([])
+  })
+
+  it('wires Cordis session/event, agent/created, backfill, managed scoping, and lifecycle clears through apply()', async () => {
+    const tables: Record<string, Map<string, unknown>> = {
+      state: new Map(), tasks: new Map(), tickets: new Map(), schedules: new Map(),
+      recipes: new Map(), recipe_proposals: new Map(), proposals: new Map(),
+      changes: new Map(), inputs: new Map(), runs: new Map(), verifications: new Map(),
+      peers: new Map(), inbox: new Map(), links: new Map(),
+    }
+    const domain: DotDomainHandle = {
+      table: name => ({
+        entries: () => tables[name]!.entries(),
+        get: key => tables[name]!.get(key),
+        put: async (key, value) => { tables[name]!.set(key, value) },
+        delete: async key => tables[name]!.delete(key),
+      }),
+      close: async () => {},
+    }
+
+    const ctx = new Context()
+    new SessionStore(ctx)
+
+    // Pre-existing managed session (seed backfill) and pre-existing unmanaged session
+    const preRunSession = ctx.sessions.create(SessionId('run-pre'))
+    preRunSession.append('turn/start', { turn: 1 })
+    preRunSession.append('step/start', { turn: 1, step: 1 })
+    preRunSession.append('llm/retry' as never, {
+      retryId: 'r-pre', turn: 1, step: 1, provider: 'p', retry: 1, failure: { status: 429 },
+    } as never)
+    const preUnmanaged = ctx.sessions.create(SessionId('unmanaged-pre'))
+    preUnmanaged.append('llm/retry' as never, {
+      retryId: 'r-un', turn: 1, step: 1, provider: 'p', retry: 1, failure: { status: 429 },
+    } as never)
+    // Seed a started task in tables so run-pre is recognized as owned on startup
+    tables.tasks!.set('run-pre', {
+      sessionId: 'run-pre', origin: 'started', title: 'Pre Run', goal: 'g', cwd: '/', status: 'running', createdAt: 1, updatedAt: 1, unseenTurns: 0,
+    })
+
+    const liveAgents = new Map<string, { id: string; status: 'idle' | 'running'; session: unknown }>([
+      ['run-pre', { id: 'run-pre', status: 'running', session: preRunSession }],
+      ['unmanaged-pre', { id: 'unmanaged-pre', status: 'running', session: preUnmanaged }],
+    ])
+
+    let provided: DotService | undefined
+    ctx.provide('storageDomain' as never, { open: async () => domain } as never)
+    ctx.provide('sessionQuery' as never, { readSession: async () => ({ events: [] }) } as never)
+    ctx.provide('sessionController' as never, { list: async () => ({ items: [] }) } as never)
+    ctx.provide('workspaceRegistry' as never, { list: () => [] } as never)
+    ctx.provide('agentPresets' as never, { register: async () => async () => {}, list: async () => [] } as never)
+    ctx.provide('agents' as never, {
+      get: (id: string) => liveAgents.get(id),
+      list: () => [...liveAgents.values()],
+    } as never)
+    ctx.provide('agentDefaultModel' as never, { currentSelection: () => ({}) } as never)
+    ctx.provide('connection' as never, { requestRejection: () => undefined } as never)
+    ctx.provide('webServer' as never, { register: () => () => {} } as never)
+    const origProvide = ctx.provide.bind(ctx)
+    ctx.provide = ((key: string, value: unknown) => {
+      if (key === SERVICE_NAME) provided = value as DotService
+      return origProvide(key as never, value as never)
+    }) as typeof ctx.provide
+
+    await applyPlugin(ctx, { homeDir: join(tmpdir(), `dot-host-stream-${Date.now()}`) })
+    expect(provided).toBeDefined()
+    const service = provided!
+
+    // Startup backfill restored managed run-pre and ignored unmanaged-pre
+    expect(service.retryHealth.get('run-pre')?.kind).toBe('transient')
+    expect(service.retryHealth.get('unmanaged-pre')).toBeUndefined()
+
+    // Subscribe to unified managed session stream
+    const received: string[] = []
+    const unsub = service.subscribeManagedSessionEvents((sid, ev) => {
+      received.push(`${sid}:${ev.type}`)
+    })
+
+    // Dynamic attachment via agent/created for a new started run
+    const newRunSession = ctx.sessions.create(SessionId('run-dyn'))
+    await service.store.track({
+      sessionId: 'run-dyn', origin: 'started', title: 'Dyn', goal: 'g', cwd: '/', at: 10,
+    })
+    newRunSession.append('turn/start', { turn: 1 })
+    newRunSession.append('step/start', { turn: 1, step: 1 })
+    newRunSession.append('llm/retry' as never, {
+      retryId: 'r-dyn', turn: 1, step: 1, provider: 'p', retry: 1, failure: { type: 'budget_exceeded' },
+    } as never)
+    liveAgents.set('run-dyn', { id: 'run-dyn', status: 'running', session: newRunSession })
+    ;(ctx.emit as (name: string, ...args: unknown[]) => void)('agent/created', {
+      agent: { id: 'run-dyn', status: 'running', session: newRunSession },
+    })
+    expect(service.retryHealth.get('run-dyn')?.kind).toBe('budget')
+
+    // Live Cordis session/event updates managed session and skips unmanaged/watched sessions
+    newRunSession.append('llm/retry-started' as never, { retryId: 'r-dyn', turn: 1, step: 1, retry: 1 } as never)
+    preUnmanaged.append('llm/retry' as never, {
+      retryId: 'r-un', turn: 1, step: 1, provider: 'p', retry: 2, failure: { status: 429 },
+    } as never)
+    expect(received).toContain('run-dyn:llm/retry-started')
+    expect(received.some(item => item.startsWith('unmanaged-pre:'))).toBe(false)
+
+    // agent/status -> idle clears run-pre
+    ;(ctx.emit as (name: string, ...args: unknown[]) => void)('agent/status', {
+      agent: { id: 'run-pre', status: 'idle', session: preRunSession },
+      status: 'idle',
+    })
+    expect(service.retryHealth.get('run-pre')).toBeUndefined()
+
+    // api-session/removed clears run-dyn even though origin is 'started' (not 'watched')
+    ;(ctx.emit as (name: string, ...args: unknown[]) => void)('api-session/removed', 'run-dyn')
+    expect(service.retryHealth.get('run-dyn')).toBeUndefined()
+
+    // agent/disposed and workspace/session-archived clear retry health
+    newRunSession.append('step/start', { turn: 1, step: 2 })
+    newRunSession.append('llm/retry' as never, {
+      retryId: 'r-dyn-2', turn: 1, step: 2, provider: 'p', retry: 1, failure: { status: 503 },
+    } as never)
+    expect(service.retryHealth.get('run-dyn')?.kind).toBe('transient')
+    ;(ctx.emit as (name: string, ...args: unknown[]) => void)('agent/disposed', {
+      agent: { id: 'run-dyn', session: newRunSession },
+    })
+    expect(service.retryHealth.get('run-dyn')).toBeUndefined()
+
+    newRunSession.append('step/start', { turn: 1, step: 3 })
+    newRunSession.append('llm/retry' as never, {
+      retryId: 'r-dyn-3', turn: 1, step: 3, provider: 'p', retry: 1, failure: { status: 503 },
+    } as never)
+    expect(service.retryHealth.get('run-dyn')?.kind).toBe('transient')
+    ;(ctx.emit as (name: string, ...args: unknown[]) => void)('workspace/session-archived', { sessionId: 'run-dyn' })
+    expect(service.retryHealth.get('run-dyn')).toBeUndefined()
+
+    unsub()
+    await service.dispose()
+    expect(service.retryHealth.list()).toEqual([])
+  })
+})

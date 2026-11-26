@@ -80,6 +80,8 @@ function setup(opts: {
   reply?: string | (() => string | undefined)
   createThrows?: Error
   running?: boolean
+  omitIsRunning?: boolean
+  stopRun?: (run: RunRecord) => Promise<boolean>
 } = {}) {
   const clock = { value: 0 }
   const ft = fakeTimer(clock)
@@ -109,11 +111,11 @@ function setup(opts: {
       releaseInternal,
       latestReply,
       stop,
-      isRunning: () => opts.running ?? true,
+      ...(opts.omitIsRunning ? {} : { isRunning: () => opts.running ?? true }),
       listModels: async () => ({
         models: opts.catalogModels ?? [{ provider: 'openai', model: 'gpt-4o', name: 'GPT-4o' }],
       }),
-    },
+    } as never,
     table,
     homeDir: '/home',
     now: () => clock.value,
@@ -128,6 +130,7 @@ function setup(opts: {
     hasOpenPending: () => false,
     retryStatus: () => undefined,
     stopRun: async run => {
+      if (opts.stopRun) return opts.stopRun(run)
       stoppedRuns.push(run.id)
       return true
     },
@@ -243,13 +246,15 @@ describe('WatchdogRunner', () => {
     expect(h.stoppedRuns).toEqual(['run-1'])
     expect(h.runner.diagnosticsView().watchdogStops).toBe(1)
 
-    // 2nd auto-stop on the same run (via single-turn >=8 error hard cap) -> human circuit-breaker card!
-    h.runner.onSessionEvent('sess-1', { type: 'turn/start', time: h.clock.value + 100, data: { turn: 5 } })
+    // 2nd auto-stop on a resumed run for the same change/input/revision (via single-turn >=8 error hard cap) -> human circuit-breaker card!
+    h.runs[0] = makeRun({ phase: 'stopped', closeReason: 'watchdog' })
+    h.runs.push(makeRun({ id: 'run-2', requestedSessionId: 'sess-2', sessionId: 'sess-2' }))
+    h.runner.onSessionEvent('sess-2', { type: 'turn/start', time: h.clock.value + 100, data: { turn: 5 } })
     for (let i = 1; i <= 8; i++) {
-      h.runner.onSessionEvent('sess-1', { type: 'tool/result', time: h.clock.value + 100 + i, data: { turn: 5, message: { toolCallId: `h-${i}`, isError: true, content: 'fatal' } } })
+      h.runner.onSessionEvent('sess-2', { type: 'tool/result', time: h.clock.value + 100 + i, data: { turn: 5, message: { toolCallId: `h-${i}`, isError: true, content: 'fatal' } } })
     }
     await h.runner.flushJudge()
-    expect(h.stoppedRuns).toEqual(['run-1', 'run-1'])
+    expect(h.stoppedRuns).toEqual(['run-1', 'run-2'])
     expect(h.runner.diagnosticsView().watchdogStops).toBe(2)
     expect(h.notices.at(-1)?.humanRequired).toBe(true)
   })
@@ -319,5 +324,87 @@ describe('WatchdogRunner', () => {
     ], 20 * 86_400_000)
     expect(stats.total14d).toBe(0)
     expect(stats.falsePositiveRate).toBeNull()
+  })
+
+  it('guards synchronous >=8 same-turn error bursts so autoStopRun fires at most once per run without premature circuit breaker', async () => {
+    let resolveStop!: (value: boolean) => void
+    let stopCalls = 0
+    const h = setup({
+      mode: 'auto',
+      stopRun: run => {
+        stopCalls += 1
+        h.stoppedRuns.push(run.id)
+        return new Promise<boolean>(resolve => { resolveStop = resolve })
+      },
+    })
+    h.runner.onSessionEvent('sess-1', { type: 'turn/start', time: 100, data: { turn: 1 } })
+    for (let i = 1; i <= 9; i++) {
+      h.runner.onSessionEvent('sess-1', {
+        type: 'tool/result',
+        time: 100 + i,
+        data: { turn: 1, message: { toolCallId: `b-${i}`, isError: true, content: 'ENOENT: missing file' } },
+      })
+    }
+    expect(stopCalls).toBe(1)
+    resolveStop(true)
+    await h.runner.flushJudge()
+
+    // Even a trailing 10th error in the same turn/run cannot re-trigger autoStopRun
+    h.runner.onSessionEvent('sess-1', {
+      type: 'tool/result',
+      time: 120,
+      data: { turn: 1, message: { toolCallId: 'b-10', isError: true, content: 'ENOENT: missing file' } },
+    })
+    await h.runner.flushJudge()
+
+    expect(stopCalls).toBe(1)
+    expect(h.stoppedRuns).toEqual(['run-1'])
+    expect(h.runner.diagnosticsView().watchdogStops).toBe(1)
+    expect(h.runner.diagnosticsView().hits.filter(hit => hit.stopped)).toHaveLength(1)
+    expect(h.notices.some(n => n.humanRequired)).toBe(false)
+    expect(h.notices.filter(n => n.subject.startsWith('Watchdog stopped'))).toHaveLength(1)
+  })
+
+  it('does not increment watchdogStops, mark stopped, or send stop notice when stopRun returns false', async () => {
+    const h = setup({
+      mode: 'auto',
+      stopRun: async run => {
+        h.stoppedRuns.push(run.id)
+        return false
+      },
+    })
+    h.runs[0] = makeRun({ kind: 'review' })
+    h.runner.onSessionEvent('sess-1', { type: 'turn/start', time: 100, data: { turn: 1 } })
+    for (let i = 1; i <= 8; i++) {
+      h.runner.onSessionEvent('sess-1', {
+        type: 'tool/result',
+        time: 100 + i,
+        data: { turn: 1, message: { toolCallId: `r-${i}`, isError: true, content: 'review error' } },
+      })
+    }
+    await h.runner.flushJudge()
+
+    expect(h.stoppedRuns).toEqual(['run-1'])
+    expect(h.runner.diagnosticsView().watchdogStops).toBe(0)
+    expect(h.runner.diagnosticsView().hits.some(hit => hit.stopped)).toBe(false)
+    expect(h.traces.some(t => t.event === 'watchdog.stop')).toBe(false)
+    expect(h.notices.some(n => n.subject.includes('stopped') || n.subject.includes('circuit breaker') || n.humanRequired)).toBe(false)
+  })
+
+  it('prefers live host.isRunning(sessionId)=false over stale agentStatuses=running in patrolNow()', async () => {
+    const h = setup({ mode: 'observe', running: false })
+    h.runner.onAgentStatus('sess-1', 'running')
+    h.clock.value = SILENT_STALL_MS + 60_000
+    const hits = await h.runner.patrolNow()
+
+    expect(hits.some(hit => hit.signal === 'silent-stall')).toBe(false)
+    expect(h.runner.diagnosticsView().hits.some(hit => hit.signal === 'silent-stall')).toBe(false)
+
+    // When host.isRunning is absent, recorded agentStatuses still applies
+    const fallback = setup({ mode: 'observe', omitIsRunning: true })
+    fallback.runner.onAgentStatus('sess-1', 'running')
+    fallback.clock.value = SILENT_STALL_MS + 60_000
+    const fallbackHits = await fallback.runner.patrolNow()
+    expect(fallbackHits.some(hit => hit.signal === 'silent-stall')).toBe(true)
   })
 })

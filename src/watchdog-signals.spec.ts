@@ -251,4 +251,48 @@ describe('WatchdogSignalDetector', () => {
     expect(recovered.recovered).toBe(true)
     expect(detector.evaluatePatrol({ run: rev1, agentStatus: 'idle', now: 500 }).some(h => h.signal === 'infra-failure')).toBe(false)
   })
+
+  it('falls back to lastShellCommand for isTestRunnerCommand when synthetic shell tool/result omits callId', () => {
+    const detector = new WatchdogSignalDetector()
+    const run = runCtx({ startedAt: 0 })
+
+    // Primary callId path still wins when callId is present
+    detector.observeEvent(run, {
+      type: 'tool/call',
+      time: 1000,
+      data: { callId: 'c-echo', name: 'bash', arguments: JSON.stringify({ command: 'echo hello' }) },
+    })
+    const nonTest = detector.observeEvent(run, {
+      type: 'tool/result',
+      time: 1100,
+      data: { name: 'bash', message: { toolCallId: 'c-echo', isError: false, content: 'hello' } },
+    })
+    expect(nonTest.substantiveProgress).toBe(false)
+
+    // Synthetic shell tool/result without callId consumes lastShellCommand
+    detector.observeEvent(run, {
+      type: 'tool/call',
+      time: 2000,
+      data: { callId: 'c-test', name: 'bash', arguments: JSON.stringify({ command: 'pnpm test' }) },
+    })
+    const syntheticTest = detector.observeEvent(run, {
+      type: 'tool/result',
+      time: 2500,
+      data: { name: 'bash', message: { isError: false, content: 'all passed' } },
+    })
+    expect(syntheticTest.substantiveProgress).toBe(true)
+
+    // Consumed lastShellCommand does not leak into a subsequent non-test shell result without callId
+    detector.observeEvent(run, {
+      type: 'tool/call',
+      time: 3000,
+      data: { name: 'bash', arguments: JSON.stringify({ command: 'ls -la' }) },
+    })
+    const nextNonTest = detector.observeEvent(run, {
+      type: 'tool/result',
+      time: 3100,
+      data: { name: 'bash', message: { isError: false, content: 'files' } },
+    })
+    expect(nextNonTest.substantiveProgress).toBe(false)
+  })
 })

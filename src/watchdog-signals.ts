@@ -117,6 +117,7 @@ export interface RunSignalState {
   readonly seenCompactionIds: Set<string>
   compactionsSinceProgress: number
   readonly recentCalls: Map<string, RecentCall>
+  lastShellCommand?: string
   quietWaitIntervals: WaitInterval[]
   quietWaitOpenAt?: number
   retryWaitIntervals: WaitInterval[]
@@ -447,8 +448,11 @@ export class WatchdogSignalDetector {
       const name = typeof data.name === 'string' ? data.name.trim() : ''
       if (!name) return { hits, substantiveProgress, recovered }
       const callId = typeof data.callId === 'string' ? data.callId : ''
+      const command = SHELL_TOOLS.has(name.toLowerCase()) ? extractShellCommand(data.arguments) : undefined
+      if (command !== undefined) {
+        state.lastShellCommand = command
+      }
       if (callId) {
-        const command = SHELL_TOOLS.has(name.toLowerCase()) ? extractShellCommand(data.arguments) : undefined
         state.recentCalls.set(callId, { name, ...(command !== undefined ? { command } : {}) })
         if (state.recentCalls.size > MAX_RECENT_CALLS) {
           const oldest = state.recentCalls.keys().next().value
@@ -474,6 +478,27 @@ export class WatchdogSignalDetector {
     }
 
     if (event.type === 'tool/result') {
+      const msgObj = asRecord(data.message)
+      const callId = typeof msgObj?.toolCallId === 'string'
+        ? msgObj.toolCallId
+        : typeof data.callId === 'string'
+          ? data.callId
+          : ''
+      const callInfo = callId ? state.recentCalls.get(callId) : undefined
+      const toolName = callInfo?.name ?? (typeof data.name === 'string' ? data.name : typeof msgObj?.toolName === 'string' ? msgObj.toolName : '')
+      const isShellTool = SHELL_TOOLS.has(toolName.trim().toLowerCase())
+      const argCommand = extractShellCommand(data.arguments)
+      const shellCommand = callInfo
+        ? callInfo.command
+        : !callId && isShellTool
+          ? (argCommand || state.lastShellCommand)
+          : undefined
+      if (callInfo?.command !== undefined && state.lastShellCommand === callInfo.command) {
+        state.lastShellCommand = undefined
+      } else if (!callId && isShellTool) {
+        state.lastShellCommand = undefined
+      }
+
       const failed = toolResultFailed(data)
       if (failed) {
         const fp = errorFingerprint(data)
@@ -510,17 +535,9 @@ export class WatchdogSignalDetector {
       state.turnErrorCount = 0
       state.turnErrorFingerprint = undefined
 
-      const msgObj = asRecord(data.message)
-      const callId = typeof msgObj?.toolCallId === 'string'
-        ? msgObj.toolCallId
-        : typeof data.callId === 'string'
-          ? data.callId
-          : ''
-      const callInfo = callId ? state.recentCalls.get(callId) : undefined
-      const toolName = callInfo?.name ?? (typeof data.name === 'string' ? data.name : '')
       const isWrite = toolName ? isWriteOrEditTool(toolName) : false
-      const isTest = toolName && callInfo?.command !== undefined
-        ? isTestRunnerCommand(toolName, callInfo.command)
+      const isTest = toolName && shellCommand !== undefined
+        ? isTestRunnerCommand(toolName, shellCommand)
         : false
       const isPeer = toolName.trim().toLowerCase() === 'dot_peer'
 

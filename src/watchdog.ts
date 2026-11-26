@@ -347,6 +347,8 @@ export class WatchdogRunner {
   private activeJudgeSessionId: string | undefined
   private activeJudgeRun: Promise<void> | undefined
   private readonly activeStops = new Set<Promise<void>>()
+  private readonly stoppingRunKeys = new Set<string>()
+  private readonly stoppedRunKeys = new Set<string>()
   private hitSeq = 0
   private lastWatchedModel: string | undefined
 
@@ -516,15 +518,25 @@ export class WatchdogRunner {
       const ctx = runSignalContext(run)
       if (!ctx) continue
       const sessionId = ctx.sessionId
-      const liveRunning = this.options.host.isRunning(sessionId)
-      const recordedStatus = this.agentStatuses.get(sessionId)
-      const agentStatus: PatrolCheckInput['agentStatus'] = liveRunning
-        ? 'running'
-        : recordedStatus === 'running'
+      let agentStatus: PatrolCheckInput['agentStatus']
+      if (typeof this.options.host.isRunning === 'function') {
+        const liveRunning = this.options.host.isRunning(sessionId)
+        if (liveRunning) {
+          agentStatus = 'running'
+        } else {
+          agentStatus = 'idle'
+          if (this.agentStatuses.get(sessionId) === 'running') {
+            this.agentStatuses.set(sessionId, 'idle')
+          }
+        }
+      } else {
+        const recordedStatus = this.agentStatuses.get(sessionId)
+        agentStatus = recordedStatus === 'running'
           ? 'running'
-          : recordedStatus === 'idle' || !liveRunning
+          : recordedStatus === 'idle'
             ? 'idle'
             : 'unknown'
+      }
       const hits = this.detector.evaluatePatrol({
         run: ctx,
         agentStatus,
@@ -626,6 +638,8 @@ export class WatchdogRunner {
     this.lastJudgeAt.clear()
     this.consecutiveHighSpinning.clear()
     this.lastHitRecordedAt.clear()
+    this.stoppingRunKeys.clear()
+    this.stoppedRunKeys.clear()
     this.agentStatuses.clear()
     await this.store.clear()
     this.options.onChange?.()
@@ -650,9 +664,16 @@ export class WatchdogRunner {
     }
   }
 
+  private currentRun(run: RunRecord): RunRecord {
+    return this.options.runs().find(r => r.id === run.id) ?? run
+  }
+
   private handleHit(run: RunRecord, hit: WatchdogSignalHit): void {
     const mode = this.mode
     if (this.disposed || mode === 'off') return
+    const liveRun = this.currentRun(run)
+    if (liveRun.phase !== 'active') return
+    if (this.stoppingRunKeys.has(hit.runKey) || this.stoppedRunKeys.has(hit.runKey)) return
     const dedupKey = `${hit.runKey}:${hit.signal}`
     const prevAt = this.lastHitRecordedAt.get(dedupKey)
     if (prevAt !== undefined && hit.at - prevAt < this.cooldownMs && hit.hardLimitReached !== true) {
@@ -669,7 +690,7 @@ export class WatchdogRunner {
       inputRevision: hit.inputRevision,
       sessionId: hit.sessionId,
       signal: hit.signal,
-      runPhase: run.phase,
+      runPhase: liveRun.phase,
       mode,
       evidence: [...hit.evidence],
       ...(hit.hardLimitReached ? { hardLimitReached: true } : {}),
@@ -696,7 +717,10 @@ export class WatchdogRunner {
 
     // Auto mode: hard single-turn same-error limit (>= 8) bypasses cooldown & judge.
     if (hit.signal === 'repeat-tool-error' && hit.hardLimitReached === true) {
-      this.trackStop(this.autoStopRun(run, record, hit, 'Single-turn consecutive same-error hard limit reached (>= 8).'))
+      if (this.stoppingRunKeys.has(hit.runKey) || this.stoppedRunKeys.has(hit.runKey) || this.currentRun(liveRun).phase !== 'active') {
+        return
+      }
+      this.trackStop(this.autoStopRun(liveRun, record, hit, 'Single-turn consecutive same-error hard limit reached (>= 8).'))
       return
     }
 
@@ -883,41 +907,63 @@ export class WatchdogRunner {
 
   private async autoStopRun(run: RunRecord, record: WatchdogHitRecord, hit: WatchdogSignalHit, summary: string): Promise<void> {
     if (this.disposed) return
-    this.consecutiveHighSpinning.set(hit.runKey, 0)
-    const { totalStops, scopeStops, persisted } = this.store.incrementStops(run.id, run.changeId, run.inputRef, run.inputRevision)
-    await persisted
-    const stopped = await this.options.stopRun(run, hit, summary)
-    await this.store.recordHit({ ...record, stopped: true })
-    this.options.onChange?.()
-    this.options.trace({
-      event: DOT_TRACE.watchdogStop,
-      level: 'warn',
-      message: `Watchdog auto-stopped ${run.id} (totalStops=${totalStops}, scopeStops=${scopeStops}).`,
-      changeId: run.changeId,
-      sessionId: hit.sessionId,
-      data: {
-        hitId: record.id,
-        runId: run.id,
-        signal: hit.signal,
-        totalStops,
-        scopeStops,
-        stopped,
-      },
-    })
-    const humanRequired = scopeStops >= 2
-    this.options.notifyDorothy({
-      changeId: run.changeId,
-      runId: run.id,
-      sessionId: hit.sessionId,
-      subject: humanRequired ? `Watchdog circuit breaker: ${run.id}` : `Watchdog stopped ${run.id}`,
-      summary,
-      humanRequired,
-      ...(humanRequired ? {
-        detail: `Watchdog stopped ${run.id} (${scopeStops}x on ${run.inputRef}@${run.inputRevision}) [${hit.signal}]: ${summary}`,
-      } : {}),
-      text: humanRequired
-        ? `Watchdog circuit breaker: auto-stopped ${run.id} (${scopeStops}x on ${run.inputRef}@${run.inputRevision}, signal=${hit.signal}). Human review is required before retrying. Summary: ${summary}`
-        : `Watchdog auto-stopped ${run.id} (signal=${hit.signal}, watchdogStops=${totalStops}). Summary: ${summary}`,
-    })
+    const liveRun = this.currentRun(run)
+    if (liveRun.phase !== 'active') return
+    if (this.stoppingRunKeys.has(hit.runKey) || this.stoppedRunKeys.has(hit.runKey)) return
+
+    this.stoppingRunKeys.add(hit.runKey)
+    try {
+      const stopped = await this.options.stopRun(liveRun, hit, summary)
+      if (!stopped) {
+        this.options.log?.(`dsh-dot: watchdog stop refused or unconfirmed for ${liveRun.id} (${hit.signal})`)
+        this.options.notifyDorothy({
+          changeId: liveRun.changeId,
+          runId: liveRun.id,
+          sessionId: hit.sessionId,
+          subject: `Watchdog alert on ${liveRun.id}`,
+          summary: `Auto-stop not confirmed: ${summary}`,
+          text: `Watchdog detected ${hit.signal} on ${liveRun.id}, but auto-stop was refused or unconfirmed (run was not stopped). Summary: ${summary}`,
+        })
+        return
+      }
+      this.stoppedRunKeys.add(hit.runKey)
+      this.consecutiveHighSpinning.set(hit.runKey, 0)
+      const { totalStops, scopeStops, persisted } = this.store.incrementStops(liveRun.id, liveRun.changeId, liveRun.inputRef, liveRun.inputRevision)
+      await persisted
+      await this.store.recordHit({ ...record, stopped: true })
+      this.options.onChange?.()
+      this.options.trace({
+        event: DOT_TRACE.watchdogStop,
+        level: 'warn',
+        message: `Watchdog auto-stopped ${liveRun.id} (totalStops=${totalStops}, scopeStops=${scopeStops}).`,
+        changeId: liveRun.changeId,
+        sessionId: hit.sessionId,
+        data: {
+          hitId: record.id,
+          runId: liveRun.id,
+          signal: hit.signal,
+          totalStops,
+          scopeStops,
+          stopped: true,
+        },
+      })
+      const humanRequired = scopeStops >= 2
+      this.options.notifyDorothy({
+        changeId: liveRun.changeId,
+        runId: liveRun.id,
+        sessionId: hit.sessionId,
+        subject: humanRequired ? `Watchdog circuit breaker: ${liveRun.id}` : `Watchdog stopped ${liveRun.id}`,
+        summary,
+        humanRequired,
+        ...(humanRequired ? {
+          detail: `Watchdog stopped ${liveRun.id} (${scopeStops}x on ${liveRun.inputRef}@${liveRun.inputRevision}) [${hit.signal}]: ${summary}`,
+        } : {}),
+        text: humanRequired
+          ? `Watchdog circuit breaker: auto-stopped ${liveRun.id} (${scopeStops}x on ${liveRun.inputRef}@${liveRun.inputRevision}, signal=${hit.signal}). Human review is required before retrying. Summary: ${summary}`
+          : `Watchdog auto-stopped ${liveRun.id} (signal=${hit.signal}, watchdogStops=${totalStops}). Summary: ${summary}`,
+      })
+    } finally {
+      this.stoppingRunKeys.delete(hit.runKey)
+    }
   }
 }

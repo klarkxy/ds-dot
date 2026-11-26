@@ -118,15 +118,25 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
   )
   const store = new DotStore(domain, [...domain.table('tasks').entries()].map(([, value]) => parseTask(value)).filter((task): task is TaskRecord => task !== undefined))
   let sealOwned: ((agent: unknown) => void) | undefined
+  const safeAgentPresets = (): Context['agentPresets'] | undefined => {
+    try { return ctx.agentPresets }
+    catch { return undefined }
+  }
+  const invokePresetDispose = (dispose: (() => Promise<void>) | undefined) => {
+    if (typeof dispose !== 'function') return
+    try {
+      void Promise.resolve(dispose()).catch(() => {})
+    } catch { /* preset disposal is best-effort */ }
+  }
   /** Tool definitions published on dot's preset scope (the ds-dot/mcp mounts). */
   const presetScopeDefs = async (): Promise<readonly { readonly name: string; readonly description?: string }[]> => {
-    const presets = ctx.agentPresets as unknown as {
+    const presets = safeAgentPresets() as {
       acquireScope?(id: string): Promise<{ key: unknown } & { [Symbol.asyncDispose](): Promise<void> }>
-    }
+    } | undefined
     const toolsService = ctx.get('tools' as never) as
       | (CapabilityTools & { definitions?(key?: unknown): readonly { readonly name: string; readonly description?: string }[] })
       | undefined
-    const handle = await presets.acquireScope?.(PRESET_ID)
+    const handle = await presets?.acquireScope?.(PRESET_ID)
     if (handle === undefined || toolsService?.definitions === undefined) return []
     try { return toolsService.definitions(handle.key) } finally { await handle[Symbol.asyncDispose]() }
   }
@@ -266,86 +276,117 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
   }, 'dot.lifecycle')
 
   ctx.effect(() => {
-    const release = installPresetVisibility(ctx.agentPresets, ctx)
+    const presets = safeAgentPresets()
+    const release = installPresetVisibility(presets, ctx)
     // Warm the public-default cache so `@deepseek-ai/dsh-tool-schedule` can
     // rewrite `composedPreset` before the first roster read.
-    const warm = typeof (ctx.agentPresets as { remoteExportList?: () => Promise<unknown> }).remoteExportList === 'function'
-      ? ctx.agentPresets.remoteExportList()
-      : ctx.agentPresets.list()
-    void warm.catch(() => {})
+    if (presets) {
+      try {
+        const warm = typeof (presets as { remoteExportList?: () => Promise<unknown> }).remoteExportList === 'function'
+          ? presets.remoteExportList()
+          : typeof presets.list === 'function'
+            ? presets.list()
+            : undefined
+        void Promise.resolve(warm).catch(() => {})
+      } catch { /* cache warmup is best-effort */ }
+    }
     return release
   }, 'dot.preset-visibility')
-  ctx.effect(() => installInternalPresetCreateGuard(ctx.get('sessionController' as never), () => publicTaskPreset(ctx.agentPresets)), 'dot.public-session-create')
+  ctx.effect(() => installInternalPresetCreateGuard(ctx.get('sessionController' as never), () => publicTaskPreset(safeAgentPresets())), 'dot.public-session-create')
 
   // The dot preset: conversation, dot's tools, and in-place compaction for the
   // one turn that outgrows the window before a segment change. Choices go through
   // deep-view's show_view cards, which every session gets when it is installed.
   ctx.effect(() => {
+    const presets = safeAgentPresets()
+    if (typeof presets?.register !== 'function') return () => {}
     let release: (() => Promise<void>) | undefined
     let disposed = false
-    void ctx.agentPresets.register({
-      id: PRESET_ID,
-      name: 'Dorothy',
-      description: 'Dorothy (dot): coordinates workspaces and task sessions, settles routine requests, and reports back; carries no file or shell tools.',
-      order: 90,
-      plugins: [
-        { id: 'persona', name: '@deepseek-ai/dsh-persona', config: { prefix: DOT_INSTRUCTIONS } },
-        { id: 'time-context', name: '@deepseek-ai/dsh-time-context' },
-        {
-          id: 'compaction', name: 'cordis:group', group: true, isolate: { compaction: true },
-          config: [
-            // Spelled out so the context page draws the compaction line from the same numbers.
-            { id: 'compaction-basic', name: '@deepseek-ai/dsh-compaction-basic', config: { ...COMPACTION_POLICY } },
-            { id: 'command-compact', name: '@deepseek-ai/dsh-command-compact' },
-          ],
-        },
-        { id: 'dot-tools', name: 'ds-dot/tools' },
-        // Dot-local MCP servers, mounted on the preset scope from settings.
-        { id: 'dot-mcp', name: 'ds-dot/mcp' },
-        // Global-nature host built-ins, grantable through Extra capabilities;
-        // the agent-scope restrict masks them until granted.
-        { id: 'tool-skill', name: '@deepseek-ai/dsh-tool-skill' },
-        { id: 'tool-schedule', name: '@deepseek-ai/dsh-tool-schedule' },
-        { id: 'tool-plugin-manager', name: '@deepseek-ai/dsh-plugin-manager/tools', disabled: { __jsExpr: "!ctx.get('profileContext')" } },
-      ] as never,
-    }).then((dispose: () => Promise<void>) => {
-      if (disposed) { void dispose(); return }
-      release = dispose
-      logger.debug('preset.registered', 'Registered Dorothy preset.', { presetId: PRESET_ID })
-      // Reminders wake dot's session, which only opens once its preset exists.
-      service.startReminders()
-    }, (error: unknown) => {
+    try {
+      void Promise.resolve(presets.register({
+        id: PRESET_ID,
+        name: 'Dorothy',
+        description: 'Dorothy (dot): coordinates workspaces and task sessions, settles routine requests, and reports back; carries no file or shell tools.',
+        order: 90,
+        plugins: [
+          { id: 'persona', name: '@deepseek-ai/dsh-persona', config: { prefix: DOT_INSTRUCTIONS } },
+          { id: 'time-context', name: '@deepseek-ai/dsh-time-context' },
+          {
+            id: 'compaction', name: 'cordis:group', group: true, isolate: { compaction: true },
+            config: [
+              // Spelled out so the context page draws the compaction line from the same numbers.
+              { id: 'compaction-basic', name: '@deepseek-ai/dsh-compaction-basic', config: { ...COMPACTION_POLICY } },
+              { id: 'command-compact', name: '@deepseek-ai/dsh-command-compact' },
+            ],
+          },
+          { id: 'dot-tools', name: 'ds-dot/tools' },
+          // Dot-local MCP servers, mounted on the preset scope from settings.
+          { id: 'dot-mcp', name: 'ds-dot/mcp' },
+          // Global-nature host built-ins, grantable through Extra capabilities;
+          // the agent-scope restrict masks them until granted.
+          { id: 'tool-skill', name: '@deepseek-ai/dsh-tool-skill' },
+          { id: 'tool-schedule', name: '@deepseek-ai/dsh-tool-schedule' },
+          { id: 'tool-plugin-manager', name: '@deepseek-ai/dsh-plugin-manager/tools', disabled: { __jsExpr: "!ctx.get('profileContext')" } },
+        ] as never,
+      })).then((dispose: () => Promise<void>) => {
+        if (disposed) { invokePresetDispose(dispose); return }
+        release = dispose
+        logger.debug('preset.registered', 'Registered Dorothy preset.', { presetId: PRESET_ID })
+        // Reminders wake dot's session, which only opens once its preset exists.
+        service.startReminders()
+      }, (error: unknown) => {
+        logger.error('preset.register-failed', 'Failed to register Dorothy preset.', error, { presetId: PRESET_ID })
+        ctx.logger?.warn?.('dsh-dot: preset registration failed: %s', messageOf(error))
+      })
+    } catch (error: unknown) {
       logger.error('preset.register-failed', 'Failed to register Dorothy preset.', error, { presetId: PRESET_ID })
       ctx.logger?.warn?.('dsh-dot: preset registration failed: %s', messageOf(error))
-    })
-    return () => { disposed = true; void release?.() }
+    }
+    return () => {
+      disposed = true
+      const current = release
+      release = undefined
+      invokePresetDispose(current)
+    }
   }, 'dot.preset')
 
   // The internal reflection preset: a hidden subagent session mounts only the
   // read-only history tools and the cognition submission tool (never the
   // agreements tool). It is filtered out of the task preset roster in host.ts.
   ctx.effect(() => {
+    const presets = safeAgentPresets()
+    if (typeof presets?.register !== 'function') return () => {}
     let release: (() => Promise<void>) | undefined
     let disposed = false
-    void ctx.agentPresets.register({
-      id: REFLECTION_PRESET_ID,
-      name: 'Dot reflection',
-      description: 'Internal background reflection pass that updates Dorothy’s cognition; never used for tasks.',
-      order: 91,
-      plugins: [
-        { id: 'persona', name: '@deepseek-ai/dsh-persona', config: { prefix: REFLECTION_INSTRUCTIONS } },
-        { id: 'time-context', name: '@deepseek-ai/dsh-time-context' },
-        { id: 'dot-reflection-tools', name: 'ds-dot/reflection' },
-      ] as never,
-    }).then((dispose: () => Promise<void>) => {
-      if (disposed) { void dispose(); return }
-      release = dispose
-      logger.debug('preset.registered', 'Registered Dot reflection preset.', { presetId: REFLECTION_PRESET_ID })
-    }, (error: unknown) => {
+    try {
+      void Promise.resolve(presets.register({
+        id: REFLECTION_PRESET_ID,
+        name: 'Dot reflection',
+        description: 'Internal background reflection pass that updates Dorothy’s cognition; never used for tasks.',
+        order: 91,
+        plugins: [
+          { id: 'persona', name: '@deepseek-ai/dsh-persona', config: { prefix: REFLECTION_INSTRUCTIONS } },
+          { id: 'time-context', name: '@deepseek-ai/dsh-time-context' },
+          { id: 'dot-reflection-tools', name: 'ds-dot/reflection' },
+        ] as never,
+      })).then((dispose: () => Promise<void>) => {
+        if (disposed) { invokePresetDispose(dispose); return }
+        release = dispose
+        logger.debug('preset.registered', 'Registered Dot reflection preset.', { presetId: REFLECTION_PRESET_ID })
+      }, (error: unknown) => {
+        logger.error('preset.register-failed', 'Failed to register Dot reflection preset.', error, { presetId: REFLECTION_PRESET_ID })
+        ctx.logger?.warn?.('dsh-dot: reflection preset registration failed: %s', messageOf(error))
+      })
+    } catch (error: unknown) {
       logger.error('preset.register-failed', 'Failed to register Dot reflection preset.', error, { presetId: REFLECTION_PRESET_ID })
       ctx.logger?.warn?.('dsh-dot: reflection preset registration failed: %s', messageOf(error))
-    })
-    return () => { disposed = true; void release?.() }
+    }
+    return () => {
+      disposed = true
+      const current = release
+      release = undefined
+      invokePresetDispose(current)
+    }
   }, 'dot.reflection-preset')
 
   ctx.effect(() => registerWorkerPreset(ctx, logger), 'dot.worker-preset')

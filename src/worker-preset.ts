@@ -226,22 +226,29 @@ export function registerWorkerPreset(
   ctx: WorkerPresetHostContext | undefined,
   logger?: WorkerPresetLogger,
 ): () => void {
-  const registry = ctx?.agentPresets
-  const register = registry?.register
-  if (typeof register !== 'function') return () => {}
   let release: (() => Promise<void>) | undefined
   let disposed = false
   const reportFailure = (error: unknown) => {
     logger?.error?.('preset.register-failed', 'Failed to register Dot worker preset.', error, { presetId: WORKER_PRESET_ID })
     const message = error instanceof Error ? error.message : typeof error === 'string' ? error : 'unknown error'
-    ctx?.logger?.warn?.('dsh-dot: worker preset registration failed: %s', message)
+    try {
+      ctx?.logger?.warn?.('dsh-dot: worker preset registration failed: %s', message)
+    } catch { /* host logger is optional */ }
+  }
+  const invokeDispose = (fn: () => Promise<void>) => {
+    try {
+      void Promise.resolve(fn()).catch(() => {})
+    } catch { /* dispose is best-effort */ }
   }
   try {
+    const registry = ctx?.agentPresets
+    const register = registry?.register
+    if (typeof register !== 'function') return () => {}
     void Promise.resolve(register.call(registry, buildWorkerPresetDefinition() as never)).then(
       (dispose: (() => Promise<void>) | undefined) => {
         if (typeof dispose !== 'function') return
         if (disposed) {
-          void Promise.resolve(dispose()).catch(() => {})
+          invokeDispose(dispose)
           return
         }
         release = dispose
@@ -257,6 +264,6 @@ export function registerWorkerPreset(
     disposed = true
     const current = release
     release = undefined
-    if (current) void Promise.resolve(current()).catch(() => {})
+    if (current) invokeDispose(current)
   }
 }

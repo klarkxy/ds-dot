@@ -282,7 +282,69 @@ describe('dot-worker preset definition', () => {
     expect(normalDispose).toHaveBeenCalledTimes(1)
   })
 
-  it('registers and unregisters dot-worker through apply() without failing when optional services are missing', async () => {
+  it('degrades silently on throwing agentPresets/register getters and sync-throwing disposers without unhandled rejections', async () => {
+    const unhandled: unknown[] = []
+    const onUnhandled = (reason: unknown) => { unhandled.push(reason) }
+    process.on('unhandledRejection', onUnhandled)
+    try {
+      // 1. Throwing ctx.agentPresets getter
+      const getterWarn = vi.fn()
+      const getterErr = vi.fn()
+      const getterCtx = { logger: { warn: getterWarn } }
+      Object.defineProperty(getterCtx, 'agentPresets', {
+        get() { throw new Error('agentPresets getter boom') },
+      })
+      let getterRelease!: () => void
+      expect(() => {
+        getterRelease = registerWorkerPreset(getterCtx as never, { error: getterErr })
+      }).not.toThrow()
+      expect(getterWarn).toHaveBeenCalledTimes(1)
+      expect(getterErr).toHaveBeenCalledTimes(1)
+      expect(() => getterRelease()).not.toThrow()
+
+      // 2. Throwing agentPresets.register getter
+      const regGetterWarn = vi.fn()
+      const regGetterPresets = {}
+      Object.defineProperty(regGetterPresets, 'register', {
+        get() { throw new Error('register getter boom') },
+      })
+      let regGetterRelease!: () => void
+      expect(() => {
+        regGetterRelease = registerWorkerPreset({ agentPresets: regGetterPresets as never, logger: { warn: regGetterWarn } })
+      }).not.toThrow()
+      expect(regGetterWarn).toHaveBeenCalledTimes(1)
+      expect(() => regGetterRelease()).not.toThrow()
+
+      // 3. Sync-throwing disposer on normal release()
+      const syncThrowDispose = vi.fn(() => { throw new Error('sync dispose boom') })
+      const syncDisposeRelease = registerWorkerPreset({
+        agentPresets: { register: async () => syncThrowDispose as never },
+      })
+      await Promise.resolve()
+      await Promise.resolve()
+      expect(() => syncDisposeRelease()).not.toThrow()
+      expect(syncThrowDispose).toHaveBeenCalledTimes(1)
+
+      // 4. Sync-throwing disposer during async-dispose race (release() called before register() settles)
+      const raceSyncThrowDispose = vi.fn(() => { throw new Error('sync race dispose boom') })
+      let resolveRace!: (dispose: () => Promise<void>) => void
+      const raceRelease = registerWorkerPreset({
+        agentPresets: {
+          register: () => new Promise<() => Promise<void>>(resolve => { resolveRace = resolve }),
+        },
+      })
+      raceRelease()
+      expect(raceSyncThrowDispose).not.toHaveBeenCalled()
+      resolveRace(raceSyncThrowDispose as never)
+      await new Promise(resolve => setTimeout(resolve, 10))
+      expect(raceSyncThrowDispose).toHaveBeenCalledTimes(1)
+      expect(unhandled).toEqual([])
+    } finally {
+      process.off('unhandledRejection', onUnhandled)
+    }
+  })
+
+  function createApplyTestContext() {
     const tables: Record<string, Map<string, unknown>> = {
       state: new Map(), tasks: new Map(), tickets: new Map(), schedules: new Map(),
       recipes: new Map(), recipe_proposals: new Map(), proposals: new Map(),
@@ -298,13 +360,22 @@ describe('dot-worker preset definition', () => {
       }),
       close: async () => {},
     }
-    const registered: Array<{ id: string; disposed: boolean }> = []
     const ctx = new Context()
     ctx.provide('storageDomain' as never, { open: async () => domain } as never)
     ctx.provide('sessions' as never, {} as never)
     ctx.provide('sessionQuery' as never, { readSession: async () => ({ events: [] }) } as never)
     ctx.provide('sessionController' as never, { list: async () => ({ items: [] }) } as never)
     ctx.provide('workspaceRegistry' as never, { list: () => [] } as never)
+    ctx.provide('agents' as never, { get: () => undefined, list: () => [] } as never)
+    ctx.provide('agentDefaultModel' as never, { currentSelection: () => ({}) } as never)
+    ctx.provide('connection' as never, { requestRejection: () => undefined } as never)
+    ctx.provide('webServer' as never, { register: () => () => {} } as never)
+    return ctx
+  }
+
+  it('registers and unregisters dot-worker through apply() without failing when optional services are missing', async () => {
+    const registered: Array<{ id: string; disposed: boolean }> = []
+    const ctx = createApplyTestContext()
     ctx.provide('agentPresets' as never, {
       list: async () => registered.filter(r => !r.disposed).map(r => ({ id: r.id })),
       register: async (def: { id: string }) => {
@@ -313,10 +384,6 @@ describe('dot-worker preset definition', () => {
         return async () => { row.disposed = true }
       },
     } as never)
-    ctx.provide('agents' as never, { get: () => undefined, list: () => [] } as never)
-    ctx.provide('agentDefaultModel' as never, { currentSelection: () => ({}) } as never)
-    ctx.provide('connection' as never, { requestRejection: () => undefined } as never)
-    ctx.provide('webServer' as never, { register: () => () => {} } as never)
 
     const homeDir = mkdtempSync(join(tmpdir(), 'dot-worker-apply-'))
     try {
@@ -327,6 +394,27 @@ describe('dot-worker preset definition', () => {
       expect(registered.find(r => r.id === WORKER_PRESET_ID)?.disposed).toBe(false)
       await fiber.dispose()
       expect(registered.find(r => r.id === WORKER_PRESET_ID)?.disposed).toBe(true)
+    } finally {
+      rmSync(homeDir, { recursive: true, force: true })
+    }
+  })
+
+  it('degrades cleanly in applyPlugin(ctx) when ctx.agentPresets getter throws', async () => {
+    const ctx = createApplyTestContext()
+    const homeDir = mkdtempSync(join(tmpdir(), 'dot-worker-apply-getter-'))
+    try {
+      const fiber = ctx.plugin({
+        name: 'ds-dot-throwing-agent-presets',
+        apply: (c: Context) => {
+          Object.defineProperty(c, 'agentPresets', {
+            configurable: true,
+            get() { throw new Error('host agentPresets getter boom') },
+          })
+          return applyPlugin(c, { homeDir })
+        },
+      })
+      await expect(fiber.await().then(() => 'ok')).resolves.toBe('ok')
+      await expect(fiber.dispose().then(() => 'ok')).resolves.toBe('ok')
     } finally {
       rmSync(homeDir, { recursive: true, force: true })
     }

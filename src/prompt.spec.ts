@@ -67,7 +67,8 @@ describe('coordinator prompt contract', () => {
   it('draws the line between her own session and a task run', () => {
     expect(DOT_INSTRUCTIONS).toContain('What you do yourself and what goes to a run:')
     expect(DOT_INSTRUCTIONS).toContain('You never edit files or run commands yourself, even if a tool for it appears; those tools belong to runs.')
-    expect(DOT_INSTRUCTIONS).toContain(`reading a delivered file or two with ${TOOL.workspace} action=read`)
+    expect(DOT_INSTRUCTIONS).toContain(`reading a delivered file or two with read or ${TOOL.workspace} action=read`)
+    expect(DOT_INSTRUCTIONS).toContain('Files attached in chat arrive as saved read-only paths')
     expect(DOT_INSTRUCTIONS).toContain('Choose task presets by fit: "ptc" for scripted batch work, "cordis" for DSH plugin development.')
   })
   it('carries no leftover vocabulary from the removed regimes', () => {

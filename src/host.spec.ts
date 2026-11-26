@@ -57,6 +57,34 @@ describe('running task permissions and relay', () => {
     expect(messages[0]).toMatchObject({ source: { kind: 'agent-message', dshDot: { notices: notice } } })
     expect(messages[1]).toMatchObject({ source: { kind: 'user', dshDot: { carriedChars: 20, notices: notice } } })
   })
+  it('saves uploaded files and carries file blocks through prompt admission', async () => {
+    const messages: Array<{ content?: unknown }> = []
+    const agent = { status: 'idle', followup: (message: unknown) => messages.push(message as { content?: unknown }) }
+    const saved: Array<{ bytes: number; name?: string }> = []
+    const admitted: unknown[] = []
+    const ref = { attachmentId: 'att-1', name: 'notes.md', bytes: 5 }
+    const host = bindHost(name => {
+      if (name === 'agents') return { get: () => agent }
+      if (name === 'attachments') return {
+        async saveFile(input: { data: Uint8Array; name?: string }) {
+          saved.push({ bytes: input.data.length, ...(input.name ? { name: input.name } : {}) })
+          return ref
+        },
+        async admitPromptContent(parts: readonly unknown[]) {
+          admitted.push(parts)
+          return parts
+        },
+      }
+      return undefined
+    })
+    await expect(host.attachFile('notes.md', Buffer.from('hello').toString('base64'))).resolves.toEqual(ref)
+    expect(saved).toEqual([{ bytes: 5, name: 'notes.md' }])
+    await host.say('target', '', undefined, undefined, undefined, undefined, [ref])
+    expect(admitted).toEqual([[{ type: 'file', attachment: ref }]])
+    expect(messages[0]?.content).toEqual([{ type: 'file', attachment: ref }])
+    await expect(host.attachFile('bad.md', 'not canonical!')).rejects.toThrow()
+  })
+
   it('checks the caller gate after resolving and before followup', async () => {
     let follows = 0
     const host = bindHost(name => name === 'agents' ? { get: () => undefined }

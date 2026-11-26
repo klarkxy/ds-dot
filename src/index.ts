@@ -23,7 +23,8 @@ import { installPluginLogger } from '@klarkxy/dsh-plugin-kit/logger'
 import { approvalAuditId, raceApproval } from './approval-relay.ts'
 import type { RawEvent } from './chat.ts'
 import { COGNITION_PROMPT_ENTRIES_DEFAULT, COMPACTION_POLICY, dotOwnedCredentialRefs, mcpCredentialName, mcpGuess, mcpServerOf, MCP_CREDENTIAL_VALUE_MAX, MCP_SERVER_NAME_PATTERN, PLUGIN_NAME, PRESET_ID, RPC_CHANNEL, SERVICE_NAME, validateMcpCredentialSet, type ChatSnapshot, type PendingQuestionItem, type TaskPermission, type TaskRecord } from './contracts.ts'
-import { CHAT_SAY_BODY_BYTES, checkChatImages } from './chat-images.ts'
+import { checkChatImages } from './chat-images.ts'
+import { CHAT_RPC_BODY_BYTES, checkChatFileIds } from './chat-files.ts'
 import { ChatFeed } from './feed.ts'
 import { hostImport } from './host-import.ts'
 import { DotCapabilities, type CapabilityPluginManager, type CapabilityTools } from './capabilities.ts'
@@ -279,7 +280,7 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
     void ctx.agentPresets.register({
       id: PRESET_ID,
       name: 'Dorothy',
-      description: 'Dorothy (dot): coordinates workspaces and task sessions, settles routine requests, and reports back; carries no file or shell tools.',
+      description: 'Dorothy (dot): coordinates workspaces and task sessions, settles routine requests, and reports back; carries read-only file and Office tools, but no write or shell tools.',
       order: 90,
       plugins: [
         { id: 'persona', name: '@deepseek-ai/dsh-persona', config: { prefix: DOT_INSTRUCTIONS } },
@@ -292,6 +293,9 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
             { id: 'command-compact', name: '@deepseek-ai/dsh-command-compact' },
           ],
         },
+        { id: 'tool-fs', name: '@deepseek-ai/dsh-tool-fs', config: { write: false, edit: false, applyPatch: false } },
+        { id: 'tool-fs-search', name: '@deepseek-ai/dsh-tool-fs-search', config: { sampleOverCapGlobResults: false } },
+        { id: 'tool-office', name: '@deepseek-ai/dsh-tool-office' },
         { id: 'dot-tools', name: 'ds-dot/tools' },
         // Dot-local MCP servers, mounted on the preset scope from settings.
         { id: 'dot-mcp', name: 'ds-dot/mcp' },
@@ -522,8 +526,8 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
     const lastBackup = service.selfStatus().lastBackup
     return lastBackup ? { ...snapshot, lastBackup } : snapshot
   }
-  // The kit's 64 KiB default answers 413 before `say` runs. A PNG of about
-  // 51 KB does not fit after base64; the cap below fits the advertised images.
+  // The kit's 64 KiB default answers 413 before `say` or `attach` runs. The
+  // shared cap below fits advertised images and one maximum-size file upload.
   const PASSIVE_ENDPOINTS = new Set(['wait', 'board', 'attention', 'work.list', 'work.read', 'card.pending', 'card.detail', 'recipes', 'self.status'])
   ctx.effect(() => registerHostRpc(ctx as unknown as HostRpcContext, RPC_CHANNEL, async (endpoint, payload, signal) => {
     try {
@@ -551,8 +555,13 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
         case 'say': {
           const text = field(payload, 'text')
           const images = checkChatImages(field(payload, 'images'))
-          await service.say(typeof text === 'string' ? text.slice(0, 20_000) : '', undefined, images)
+          const files = checkChatFileIds(field(payload, 'files'))
+          await service.say(typeof text === 'string' ? text.slice(0, 20_000) : '', undefined, images, files)
           return { ok: true, value: true }
+        }
+        case 'attach': {
+          const receipt = await service.attachFile(str(payload, 'name') || 'file', field(payload, 'data') as string)
+          return { ok: true, value: receipt }
         }
         case 'card.pending': {
           const callId = field(payload, 'callId')
@@ -783,5 +792,5 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
       logger.error('rpc.handler-failed', 'Dot RPC request failed.', error, { endpoint })
       return { ok: false, error: { code: 'dot/failed', message: messageOf(error) } }
     }
-  }, { logger, maxBodyBytes: CHAT_SAY_BODY_BYTES }), 'dot.rpc')
+  }, { logger, maxBodyBytes: CHAT_RPC_BODY_BYTES }), 'dot.rpc')
 }

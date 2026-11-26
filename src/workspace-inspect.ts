@@ -93,13 +93,12 @@ export interface WorkspaceRead {
 }
 
 /**
- * Read a text file inside one of the authorized roots (workspace directories or
- * change roots). Relative targets resolve under `baseDir` and must stay inside
- * it; absolute targets may land in any authorized root. The realpath of the
- * target is what gets checked, so a symlink cannot smuggle the read out.
+ * Read a text file. Relative targets resolve under `baseDir` and must stay
+ * inside it; absolute targets may be anywhere. Credential-like paths, binary
+ * files, and large files remain refused, and the opened file is checked against
+ * the realpath that passed those checks.
  */
 export async function readWorkspaceText(
-  authorizedRoots: readonly string[],
   baseDir: string | undefined,
   target: string,
   options?: { readonly startLine?: number; readonly maxLines?: number },
@@ -121,13 +120,6 @@ export async function readWorkspaceText(
     const realBase = withoutNamespace(await realpath(baseDir!))
     if (!pathInsideRoot(realBase, real)) throw new Error(`${trimmed} is outside the workspace`)
   }
-  let allowed = false
-  for (const root of authorizedRoots) {
-    try {
-      if (pathInsideRoot(withoutNamespace(await realpath(root)), real)) { allowed = true; break }
-    } catch { /* a root that cannot be resolved cannot authorize */ }
-  }
-  if (!allowed) throw new Error(`${trimmed} is outside every workspace and change directory`)
   if (credentialLikePath(trimmed) || credentialLikePath(real)) throw new Error(`${trimmed} looks like a credential file and will not be read`)
   const info = await stat(real)
   if (info.isDirectory()) throw new Error(`${trimmed} is a directory; use action=files to list it`)

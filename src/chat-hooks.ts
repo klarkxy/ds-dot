@@ -7,6 +7,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import type React from 'react'
 import type { BoardView, ChatItem, ChatSnapshot, DotSettings, RecipeBoardRow } from './contracts.ts'
 import type { ChatImage } from './chat-images.ts'
+import type { ChatFileReceipt } from './chat-files.ts'
 import type { ChatApi } from './chat-panel.tsx'
 
 const BOARD_POLL_MS = 5_000
@@ -148,6 +149,7 @@ export interface LocalEcho {
   readonly text: string
   readonly at: number
   readonly images: readonly ChatImage[]
+  readonly files: readonly ChatFileReceipt[]
 }
 
 /**
@@ -157,11 +159,11 @@ export interface LocalEcho {
  */
 export function useLocalEchoes(items: readonly ChatItem[]): {
   pendingEchoes: readonly LocalEcho[]
-  pushEcho: (text: string, images: readonly ChatImage[]) => LocalEcho
+  pushEcho: (text: string, images: readonly ChatImage[], files: readonly ChatFileReceipt[]) => LocalEcho
   removeEcho: (echo: LocalEcho) => void
 } {
   const [echoes, setEchoes] = useState<LocalEcho[]>([])
-  const delivered = useCallback((echo: LocalEcho) => items.some(item => item.kind === 'user' && item.text.trim() === echo.text && (item.images?.length ?? 0) === echo.images.length && item.at >= echo.at - 5_000), [items])
+  const delivered = useCallback((echo: LocalEcho) => items.some(item => item.kind === 'user' && item.text.trim() === echo.text && (item.images?.length ?? 0) === echo.images.length && (item.files?.length ?? 0) === echo.files.length && echo.files.every((file, index) => item.files?.[index]?.name === file.name && item.files[index].bytes === file.bytes) && item.at >= echo.at - 5_000), [items])
   const pendingEchoes = useMemo(() => echoes.filter(echo => !delivered(echo)), [echoes, delivered])
   useEffect(() => {
     if (echoes.length === 0) return
@@ -169,8 +171,8 @@ export function useLocalEchoes(items: readonly ChatItem[]): {
     const left = echoes.filter(echo => now - echo.at < ECHO_MS && !delivered(echo))
     if (left.length !== echoes.length) setEchoes(left)
   }, [echoes, delivered])
-  const pushEcho = useCallback((text: string, images: readonly ChatImage[]) => {
-    const echo: LocalEcho = { text, at: Date.now(), images }
+  const pushEcho = useCallback((text: string, images: readonly ChatImage[], files: readonly ChatFileReceipt[]) => {
+    const echo: LocalEcho = { text, at: Date.now(), images, files }
     setEchoes(list => [...list, echo])
     return echo
   }, [])

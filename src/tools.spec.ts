@@ -34,6 +34,7 @@ const ids = (prefix: 'a' | 'c') => { let n = 0; return () => `${prefix}${++n}` }
 /** Load the preset row against a recording host: every definition must compile. */
 function load(settings: { current: DotSettings; segment?: Seg; notes?: string; cognition?: string } = { current: DEFAULT_SETTINGS }) {
   const registered: Array<Record<string, unknown>> = []
+  const listeners: Record<string, Array<(exec: { name: string; arguments?: unknown }, next: () => Promise<{ kind: string }>) => Promise<{ kind: string; reason?: string }>>> = {}
   const sections: Array<{ name: string; order: number; text: (context?: { agent?: { session?: { id?: string } } }) => string }> = []
   const store = new DotStore(undefined)
   const view = async () => ({
@@ -60,7 +61,7 @@ function load(settings: { current: DotSettings; segment?: Seg; notes?: string; c
       restrict: () => () => {},
       register(definition: Record<string, unknown>) { registered.push(definition); return () => {} },
     },
-    on: () => () => {},
+    on(event: string, listener: never) { (listeners[event] ??= []).push(listener); return () => {} },
     systemPrompt: { section(section: (typeof sections)[number]) { sections.push(section); return () => {} } },
     dot: {
       store: { get settings() { return settings.current }, get segment() { return settings.segment } },
@@ -92,7 +93,7 @@ function load(settings: { current: DotSettings; segment?: Seg; notes?: string; c
     effect(fn: () => unknown) { fn() },
   }
   apply(ctx as never)
-  return Object.assign(registered, { sections })
+  return Object.assign(registered, { sections, listeners })
 }
 
 /** The private preset gets the same schema guard as the public dot tools. */
@@ -122,6 +123,16 @@ describe('dot tools', () => {
     expect([...names].sort()).toEqual([...Object.values(TOOL), 'show_view'].sort())
     expect(names).toHaveLength(20)
     expect(new Set(names).size).toBe(20)
+  })
+
+  it('denies credential-like paths on the inherited read-only file tools', async () => {
+    const gate = load().listeners['tools/pre-execute']?.[0]
+    expect(gate).toBeTypeOf('function')
+    const next = async () => ({ kind: 'next' })
+    await expect(gate!({ name: 'read', arguments: { file_path: '/home/u/.ssh/id_rsa' } }, next)).resolves.toMatchObject({ kind: 'deny', reason: expect.stringMatching(/credential/) })
+    await expect(gate!({ name: 'glob', arguments: { pattern: '**/.env' } }, next)).resolves.toMatchObject({ kind: 'deny' })
+    await expect(gate!({ name: 'office_convert', arguments: JSON.stringify({ input: '/tmp/.aws/credentials' }) }, next)).resolves.toMatchObject({ kind: 'deny' })
+    await expect(gate!({ name: 'read', arguments: { file_path: '/tmp/notes.md' } }, next)).resolves.toEqual({ kind: 'next' })
   })
 
   it('marks only the reading tools read-only', () => {

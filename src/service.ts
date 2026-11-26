@@ -30,6 +30,7 @@ import { absoluteScopePath, canonicalPath, onDiskPath, changeIsTerminal, DEFAULT
 import type { ShownView, ViewAnswer } from '@klarkxy/dsh-deep-view/contracts'
 import { DotCards, cardAnswerText, type DotCardRecord } from './card-state.ts'
 import { checkChatImages, type ChatImage } from './chat-images.ts'
+import { CHAT_FILE_RECEIPT_LIMIT, CHAT_FILE_RECEIPT_TTL_MS, checkChatFileData, checkChatFileIds, checkChatFileRef, fileName, type ChatFileReceipt, type ChatFileRef } from './chat-files.ts'
 import { approvalDisplay, parseNotice } from './chat-format.ts'
 import { cardText } from './cards.ts'
 import { NoticeBatcher, formatNotices, formatNoticeDisplay, realTimer, type Notice, type Timer } from './batcher.ts'
@@ -171,6 +172,8 @@ export class DotService {
   private readonly pendingInstalls = new Map<string, { name: string; version: string; spec: string; reason: string; cardId?: string }>()
   /** Open capability asks, so a settings change that revokes the grant settles them before the human answers. */
   private readonly openCapabilityAsks = new Map<string, { readonly chain: readonly string[]; readonly withdraw: () => void }>()
+  /** Uploaded files not yet consumed by a sent chat message; insertion order is age order. */
+  private readonly fileReceipts = new Map<string, { readonly ref: ChatFileRef; readonly at: number }>()
   /** Decision wakes already queued in this process. The durable mark is notifiedAt. */
   private readonly decisionWakes = new Set<string>()
   /** Truncated approvals dot read in full; allowing one without a read is refused. */
@@ -427,11 +430,48 @@ export class DotService {
     return this.ensuring
   }
 
-  /** The human's message from dot's chat panel. Images are admitted with the text. */
-  async say(text: string, cardReply?: { card: DotCardRecord; answer: ViewAnswer }, images?: readonly ChatImage[]): Promise<void> {
+  /** Upload one file ahead of its message and issue the short-lived receipt the composer sends back. */
+  async attachFile(name: string, data: string): Promise<ChatFileReceipt> {
+    const canonical = checkChatFileData(data)
+    const clean = fileName(name) ?? 'file'
+    this.pruneFileReceipts()
+    const ref = checkChatFileRef(await this.host.attachFile(clean, canonical))
+    const id = randomUUID()
+    this.fileReceipts.set(id, { ref, at: this.now() })
+    this.pruneFileReceipts()
+    return { id, name: ref.name, bytes: ref.bytes }
+  }
+
+  private pruneFileReceipts(): void {
+    const cutoff = this.now() - CHAT_FILE_RECEIPT_TTL_MS
+    for (const [id, row] of this.fileReceipts) {
+      if (row.at < cutoff) this.fileReceipts.delete(id)
+    }
+    while (this.fileReceipts.size > CHAT_FILE_RECEIPT_LIMIT) {
+      const oldest = this.fileReceipts.keys().next().value as string | undefined
+      if (oldest === undefined) break
+      this.fileReceipts.delete(oldest)
+    }
+  }
+
+  private resolveFileReceipts(ids: readonly string[]): readonly ChatFileRef[] {
+    this.pruneFileReceipts()
+    const refs: ChatFileRef[] = []
+    for (const id of ids) {
+      const row = this.fileReceipts.get(id)
+      if (!row) throw new DotError('dot/invalid', 'That attachment upload is no longer available. Attach the file again and resend; nothing was sent.')
+      refs.push(row.ref)
+    }
+    return refs
+  }
+
+  /** The human's message from dot's chat panel. Images and files are admitted with the text. */
+  async say(text: string, cardReply?: { card: DotCardRecord; answer: ViewAnswer }, images?: readonly ChatImage[], files?: readonly string[]): Promise<void> {
     const body = text.trim()
     const pictures = checkChatImages(images)
-    if (!body && pictures.length === 0) throw new DotError('dot/invalid', 'message must be non-empty')
+    const fileIds = checkChatFileIds(files)
+    const documents = this.resolveFileReceipts(fileIds)
+    if (!body && pictures.length === 0 && documents.length === 0) throw new DotError('dot/invalid', 'message must be non-empty')
     await this.serial(async () => {
       const dot = await this.ready()
       // The human already wakes dot, so carried updates join the same message
@@ -447,11 +487,12 @@ export class DotService {
         notices.length > 0 ? this.formatQueuedNotices(notices) : '',
       ].filter(Boolean).join('\n\n')
       try {
-        await this.host.say(dot, message, carried || undefined, cardReply?.answer, pictures.length > 0 ? pictures : undefined, notices.length ? formatNoticeDisplay(notices) : undefined)
+        await this.host.say(dot, message, carried || undefined, cardReply?.answer, pictures.length > 0 ? pictures : undefined, notices.length ? formatNoticeDisplay(notices) : undefined, documents)
       } catch (error) {
         this.batcher.restore(this.liveNotices(notices))
         throw error
       }
+      for (const id of fileIds) this.fileReceipts.delete(id)
       await this.ackInboxWakes(notices).catch(error => this.options.log?.(`dsh-dot: inbox event was not marked delivered: ${messageOf(error)}`))
       this.recoverInbox()
       // Delivery already succeeded: a bookkeeping failure must never requeue
@@ -1154,13 +1195,8 @@ export class DotService {
       if (!row) throw new DotError('dot/unknown-workspace', key ? `no workspace ${key}` : 'no workspaces yet')
       baseDir = row.path
     }
-    const roots = [
-      ...rows.map(row => row.path),
-      ...this.store.work.listChanges().map(change => change.cwd),
-      ...this.store.work.listRuns().map(run => run.workspaceRoot),
-    ].filter((root): root is string => typeof root === 'string' && root.length > 0)
     try {
-      const read = await readWorkspaceText(roots, baseDir, trimmed, { startLine, maxLines })
+      const read = await readWorkspaceText(baseDir, trimmed, { startLine, maxLines })
       const width = String(read.totalLines).length
       const numbered = read.lines.map((line, index) => `${String(read.start + index).padStart(width)}│${line}`)
       const header = `${read.path} — ${read.totalLines} line${read.totalLines === 1 ? '' : 's'} total, showing ${read.lines.length === 0 ? 'none' : `${read.start}–${read.end}`}`

@@ -41,6 +41,7 @@ function makeApi(snapshot: ChatSnapshot): ChatApi {
   return {
     chat: async () => snapshot,
     wait: (_rev, _itemsRev, signal) => new Promise(resolve => { signal.addEventListener('abort', () => resolve(undefined), { once: true }) }),
+    attach: async (name, data) => ({ id: `receipt-${name}`, name, bytes: Math.floor(data.length * 3 / 4) }),
     say: async () => {},
     stop: async () => {},
     board: async () => ({ tasks: [], tickets: [], pending: [], schedules: [] }),
@@ -482,8 +483,7 @@ describe('ChatPanel activity and notice cards', () => {
 
       // The composer /settings shortcut is another drawer entrance: it must pass the
       // same guard instead of swapping tabs underneath the dirty draft.
-      const quickBtn = document.querySelector<HTMLButtonElement>('button[aria-label="快捷指令"]')!
-      await act(async () => { quickBtn.click() })
+      await openPlusAndClick('快捷指令', '添加')
       const settingsOption = [...document.querySelectorAll<HTMLButtonElement>('.dsh-dot-slash-item')].find(b => b.textContent?.includes('/settings'))!
       await act(async () => { settingsOption.click(); await Promise.resolve() })
       expect(document.querySelector('.dsh-dot-unsaved-bar')?.textContent).toContain('当前页有未保存的修改')
@@ -999,6 +999,15 @@ describe('ChatPanel bottom pin', () => {
   })
 })
 
+function plusMenuItem(label: string): HTMLButtonElement {
+  return [...document.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')].find(button => button.textContent?.includes(label))!
+}
+
+async function openPlusAndClick(label: string, plusLabel = 'Add') {
+  await act(async () => { document.querySelector<HTMLButtonElement>(`button[aria-label="${plusLabel}"]`)!.click() })
+  await act(async () => { plusMenuItem(label).click() })
+}
+
 describe('Composer images', () => {
   const proto = dom.window.HTMLElement.prototype as HTMLElement & { attachEvent?: () => void; detachEvent?: () => void }
   proto.attachEvent = () => {}
@@ -1020,7 +1029,10 @@ describe('Composer images', () => {
     await act(async () => { root.render(<ChatPanel locale="en" api={api} onOpenSession={() => {}} />) })
     await pick(new File([Uint8Array.from(Buffer.from(PNG_B64, 'base64'))], 'dot.png', { type: 'image/png' }))
     expect(document.body.textContent).toContain('dot.png')
-    await act(async () => { [...document.querySelectorAll('button')].find(button => button.textContent === 'Send')!.click() })
+    const addTile = document.querySelector<HTMLButtonElement>('.dsh-dot-attachment-add')!
+    expect(addTile.getAttribute('aria-label')).toBe('Add image or file')
+    expect(addTile.textContent).toBe('')
+    await act(async () => { document.querySelector<HTMLButtonElement>('button[aria-label="Send"]')!.click() })
     await act(async () => { await Promise.resolve() })
     expect(document.body.textContent).toContain('Not sent: That message is too large')
     expect(document.body.textContent).toContain('8 MB')
@@ -1029,13 +1041,19 @@ describe('Composer images', () => {
     await act(async () => root.unmount())
   })
 
-  it('says what is wrong with a file that is not an image', async () => {
+  it('accepts a text file as a generic attachment and sends its upload receipt', async () => {
     const snapshot: ChatSnapshot = { sessionId: 'dot-1', running: false, streaming: '', rev: 1, itemsRev: 1, items: [] }
+    const api = makeApi(snapshot)
+    api.attach = vi.fn(async (name: string) => ({ id: 'file-1', name, bytes: 4 }))
+    api.say = vi.fn(async () => {})
     const root = createRoot(document.getElementById('root')!)
-    await act(async () => { root.render(<ChatPanel locale="en" api={makeApi(snapshot)} onOpenSession={() => {}} />) })
+    await act(async () => { root.render(<ChatPanel locale="en" api={api} onOpenSession={() => {}} />) })
     await pick(new File([Uint8Array.from([1, 2, 3, 4])], 'note.txt', { type: 'text/plain' }))
-    expect(document.body.textContent).toContain('Only PNG, JPEG, WebP and GIF')
-    expect(document.body.textContent).not.toContain('note.txt')
+    expect(api.attach).toHaveBeenCalledWith('note.txt', 'AQIDBA==')
+    expect(document.body.textContent).toContain('note.txt')
+    expect(document.body.textContent).toContain('TXT · 4 B')
+    await act(async () => { document.querySelector<HTMLButtonElement>('button[aria-label="Send"]')!.click() })
+    expect(api.say).toHaveBeenCalledWith('', [], ['file-1'])
     await act(async () => root.unmount())
   })
 
@@ -1076,9 +1094,8 @@ describe('Composer images', () => {
     })
     expect(input.value).toBe('')
 
-    // Quick actions button opens the slash menu and inserts the structured task template.
-    const quickBtn = document.querySelector<HTMLButtonElement>('button[aria-label="Quick actions"]')!
-    await act(async () => { quickBtn.click() })
+    // The + menu opens quick actions, which inserts the structured task template.
+    await openPlusAndClick('Quick actions')
     const taskOption = [...document.querySelectorAll<HTMLButtonElement>('.dsh-dot-slash-item')].find(btn => btn.textContent?.includes('/task'))!
     expect(taskOption).toBeDefined()
     await act(async () => { taskOption.click() })
@@ -1089,19 +1106,18 @@ describe('Composer images', () => {
     const expandBtn = document.querySelector<HTMLButtonElement>('button[aria-label="Expand editor"]')!
     await act(async () => { expandBtn.click() })
     expect(document.querySelector('.dsh-dot-composer-card')?.hasAttribute('data-expanded')).toBe(true)
-    const clearBtn = document.querySelector<HTMLButtonElement>('button[aria-label="Clear input"]')!
-    await act(async () => { clearBtn.click() })
+    await openPlusAndClick('Clear input')
     expect(input.value).toBe('')
     expect(document.querySelector('.dsh-dot-composer-card')?.hasAttribute('data-expanded')).toBe(false)
 
     // Low-frequency /segment and /settings entries remain reachable via the / menu.
-    await act(async () => { quickBtn.click() })
+    await openPlusAndClick('Quick actions')
     const segOption = [...document.querySelectorAll<HTMLButtonElement>('.dsh-dot-slash-item')].find(btn => btn.textContent?.includes('/segment'))!
     await act(async () => { segOption.click(); await Promise.resolve() })
     expect(api.newSegment).toHaveBeenCalledOnce()
     expect(document.querySelector('.dsh-dot-seg-feedback')?.textContent).toContain('Started a new segment')
 
-    await act(async () => { quickBtn.click() })
+    await openPlusAndClick('Quick actions')
     const settingsOption = [...document.querySelectorAll<HTMLButtonElement>('.dsh-dot-slash-item')].find(btn => btn.textContent?.includes('/settings'))!
     await act(async () => { settingsOption.click(); await Promise.resolve() })
     expect(document.querySelector('aside.dsh-dot-drawer')?.getAttribute('data-kind')).toBe('settings')
@@ -1183,11 +1199,10 @@ describe('Composer images', () => {
     expect(input.value).toBe('/segment')
     expect(api.newSegment).not.toHaveBeenCalled()
 
-    const quickBtn = document.querySelector<HTMLButtonElement>('button[aria-label="Quick actions"]')!
     expect(document.querySelector('.dsh-dot-slash-menu')).not.toBeNull()
-    await act(async () => { quickBtn.click() })
+    await openPlusAndClick('Quick actions')
     expect(document.querySelector('.dsh-dot-slash-menu')).toBeNull()
-    await act(async () => { quickBtn.click() })
+    await openPlusAndClick('Quick actions')
     expect(document.querySelector('.dsh-dot-slash-menu')).not.toBeNull()
     expect(activeCmd()).toBe('/segment')
     await act(async () => root.unmount())

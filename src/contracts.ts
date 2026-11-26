@@ -968,7 +968,7 @@ export const RECIPE_OUTCOMES_MAX = 50
 export type ChatItem = ChatItemRow & { readonly turn?: number; readonly trigger?: 'human' | 'background' }
 
 type ChatItemRow =
-  | { readonly kind: 'user'; readonly key: string; readonly text: string; readonly at: number; readonly images?: readonly { readonly mediaType: string; readonly name?: string }[] }
+  | { readonly kind: 'user'; readonly key: string; readonly text: string; readonly at: number; readonly images?: readonly { readonly mediaType: string; readonly name?: string }[]; readonly files?: readonly { readonly name: string; readonly bytes: number }[] }
   /** The human's answer to one of dot's cards. */
   | { readonly kind: 'answer'; readonly key: string; readonly text: string; readonly at: number }
   /** A batch of task updates the host delivered to dot. */

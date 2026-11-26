@@ -24,6 +24,7 @@ import { BlockAssembler, createUserMessage, type MessageSource } from '@deepseek
 import type { Session, SessionId, SessionSeq } from '@deepseek-ai/dsh-session'
 import { extractSessionEventText } from '@deepseek-ai/dsh-session-query'
 import { checkChatImages, type ChatImage } from './chat-images.ts'
+import { checkChatFileData, checkChatFileRef, type ChatFileRef } from './chat-files.ts'
 import type { RawEvent } from './chat.ts'
 import type { ParsedNotice } from './chat-format.ts'
 import { contextView, EMPTY_SCAN, foldScan, type ContextScan, type PreTurnContext, type ProjectionValues } from './context.ts'
@@ -156,8 +157,10 @@ export interface DotHost {
   sessionModel(sessionId: string): { provider: string; model: string } | undefined
   /** The model dot's next segment would run on, as `provider/model@effort`; undefined when none is known. */
   modelKey(): string | undefined
+  /** Save one verbatim uploaded file and return its durable attachment reference. */
+  attachFile(name: string, data: string): Promise<ChatFileRef>
   /** The human's message to dot, optionally carrying notices into the same turn; steers a running turn, starts one when idle. */
-  say(sessionId: string, text: string, carriedNotices?: string, answer?: import('@klarkxy/dsh-deep-view/contracts').ViewAnswer, images?: readonly ChatImage[], notice?: ParsedNotice): Promise<void>
+  say(sessionId: string, text: string, carriedNotices?: string, answer?: import('@klarkxy/dsh-deep-view/contracts').ViewAnswer, images?: readonly ChatImage[], notice?: ParsedNotice, files?: readonly ChatFileRef[]): Promise<void>
   /** Stop dot's current turn; queued messages stay. */
   stop(sessionId: string): Promise<void>
   /**
@@ -798,25 +801,37 @@ export function bindHost(get: Get, log?: (message: string) => void, modelOf?: ()
         return false
       }
     },
-    async say(sessionId, text, carriedNotices, answer, images, notice) {
+    async attachFile(name, data) {
+      const attachments = get('attachments') as { saveFile?(input: { data: Uint8Array; name?: string }): Promise<ChatFileRef> } | undefined
+      if (typeof attachments?.saveFile !== 'function') throw new Error('file attachments are unavailable on this host')
+      const canonical = checkChatFileData(data)
+      const binary = Buffer.from(canonical, 'base64')
+      if (binary.toString('base64') !== canonical) throw new Error('file upload is not canonical base64')
+      return checkChatFileRef(await attachments.saveFile({ data: new Uint8Array(binary), ...(name ? { name } : {}) }))
+    },
+    async say(sessionId, text, carriedNotices, answer, images, notice, files) {
       const agent = await liveAgent(sessionId)
       const content = carriedNotices ? `${carriedNotices}\n\n${text}` : text
       // The character count lets the panel and history split the carried notices
       // back out without storing a second copy of their text in the source.
       const source = { kind: 'user', ...answer ? { deepView: { owner: 'dsh-deep-view', version: 1, answer } } : {}, ...carriedNotices || notice ? { dshDot: { ...carriedNotices ? { carriedChars: carriedNotices.length } : {}, ...notice ? { notices: notice } : {} } } : {} } as MessageSource
       const pictures = checkChatImages(images)
-      let blocks: Array<{ type: 'text'; text: string } | { type: 'image'; attachment: unknown }> = []
-      if (content.length > 0 || pictures.length === 0) blocks.push({ type: 'text', text: content })
-      if (pictures.length > 0) {
+      const documents = (files ?? []).map(checkChatFileRef)
+      let blocks: Array<{ type: 'text'; text: string } | { type: 'image'; attachment: unknown } | { type: 'file'; attachment: unknown }> = []
+      if (content.length > 0 || (pictures.length === 0 && documents.length === 0)) blocks.push({ type: 'text', text: content })
+      if (pictures.length > 0 || documents.length > 0) {
         const attachments = get('attachments') as { admitPromptContent?(content: readonly unknown[]): Promise<Array<{ type: string; text?: string; attachment?: unknown }>> } | undefined
-        if (typeof attachments?.admitPromptContent !== 'function') throw new Error('image input is unavailable on this host')
+        if (typeof attachments?.admitPromptContent !== 'function') throw new Error('file or image input is unavailable on this host')
         const admitted = await attachments.admitPromptContent([
           ...blocks,
           ...pictures.map(image => ({ type: 'image' as const, mediaType: image.mediaType, data: image.data, ...(image.name ? { name: image.name } : {}) })),
+          ...documents.map(file => ({ type: 'file' as const, attachment: file })),
         ])
-        blocks = admitted.filter(part => part.type === 'text' || part.type === 'image').map(part => part.type === 'text'
-          ? { type: 'text' as const, text: part.text ?? '' }
-          : { type: 'image' as const, attachment: part.attachment })
+        blocks = admitted.filter(part => part.type === 'text' || part.type === 'image' || part.type === 'file').map(part => {
+          if (part.type === 'text') return { type: 'text' as const, text: part.text ?? '' }
+          if (part.type === 'image') return { type: 'image' as const, attachment: part.attachment }
+          return { type: 'file' as const, attachment: part.attachment }
+        })
       }
       const message = createUserMessage({ content: blocks as [{ type: 'text'; text: string }], source })
       if (agent.status === 'idle') agent.followup(message)

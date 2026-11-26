@@ -6,18 +6,9 @@
 import { IconCheckOutlineRegular, IconCloseOutlineRegular, IconWarningOutlineRegular, Tooltip, useDismissOnOutsidePointer } from '@deepseek-ai/dsh-client-ui-primitives'
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ChangeEvent, type ClipboardEvent, type DragEvent, type KeyboardEvent, type MutableRefObject } from 'react'
 import type { ChatItem } from './contracts.ts'
-import { CHAT_IMAGE_LIMIT, ChatImageRejected, imageName, inspectImageBytes, type ChatImage, type ChatImageError } from './chat-images.ts'
-import { t, type CopyLocale } from './ui-copy.ts'
-
-function imageErrorText(locale: CopyLocale, code: ChatImageError): string {
-  switch (code) {
-    case 'unsupported': return t(locale, 'imageUnsupported')
-    case 'too-large': return t(locale, 'imageTooLarge')
-    case 'too-many': return t(locale, 'imageTooMany')
-    case 'mismatch': return t(locale, 'imageMismatch')
-    default: return t(locale, 'imageInvalid')
-  }
-}
+import { CHAT_IMAGE_LIMIT, imageName, inspectImageBytes, type ChatImage } from './chat-images.ts'
+import { CHAT_FILE_BYTES, CHAT_FILE_LIMIT, ChatFileRejected, fileName, humanBytes, type ChatFileReceipt } from './chat-files.ts'
+import { fillText, t, type CopyLocale } from './ui-copy.ts'
 
 function bytesToBase64(bytes: Uint8Array): string {
   let binary = ''
@@ -28,12 +19,21 @@ function bytesToBase64(bytes: Uint8Array): string {
   return btoa(binary)
 }
 
-async function readImageFile(file: File): Promise<ChatImage> {
-  const bytes = new Uint8Array(await file.arrayBuffer())
+async function readImageFile(file: File, bytes: Uint8Array): Promise<ChatImage> {
   const inspected = inspectImageBytes(bytes, file.type)
-  if (!inspected.ok) throw new ChatImageRejected(inspected.error)
+  if (!inspected.ok) throw new Error('not an admitted chat image')
   const name = imageName(file.name)
   return { mediaType: inspected.mediaType, data: bytesToBase64(bytes), ...(name ? { name } : {}) }
+}
+
+interface ComposerFile {
+  readonly key: string
+  readonly name: string
+  readonly bytes: number
+  readonly data: string
+  readonly status: 'uploading' | 'ready' | 'error'
+  readonly receipt?: ChatFileReceipt
+  readonly error?: string
 }
 
 const COMPOSER_TEXT_LIMIT = 20_000
@@ -86,7 +86,8 @@ interface ComposerProps {
   readonly onNewSegment: () => Promise<string>
   readonly onOpenTasks: () => void
   readonly onOpenSettings: () => void
-  readonly onSend: (text: string, images: readonly ChatImage[]) => Promise<void>
+  readonly onAttach: (name: string, data: string) => Promise<ChatFileReceipt>
+  readonly onSend: (text: string, images: readonly ChatImage[], files: readonly ChatFileReceipt[]) => Promise<void>
   readonly onStop: () => void
   readonly onDismissError: () => void
   /** Register the composer's draft-insertion handler so the panel's starter chips fill it. */
@@ -95,10 +96,12 @@ interface ComposerProps {
 
 export function Composer({
   locale, sessionId, running, disabled, items, error,
-  onNewSegment, onOpenTasks, onOpenSettings, onSend, onStop, onDismissError, insertRef,
+  onNewSegment, onOpenTasks, onOpenSettings, onAttach, onSend, onStop, onDismissError, insertRef,
 }: ComposerProps) {
   const [text, setText] = useState('')
   const [images, setImages] = useState<ChatImage[]>([])
+  const [files, setFiles] = useState<ComposerFile[]>([])
+  const [plusOpen, setPlusOpen] = useState(false)
   const [busy, setBusy] = useState(false)
   const [expanded, setExpanded] = useState(false)
   const [dragging, setDragging] = useState(false)
@@ -114,6 +117,8 @@ export function Composer({
   const hydratedSession = useRef('')
   const textRef = useRef('')
   const composerRef = useRef<HTMLDivElement>(null)
+  const plusRef = useRef<HTMLDivElement>(null)
+  const fileSeq = useRef(0)
   const slashList = useRef<HTMLDivElement>(null)
   const area = useRef<HTMLTextAreaElement>(null)
   const picker = useRef<HTMLInputElement>(null)
@@ -181,35 +186,74 @@ export function Composer({
     return out.slice(-30)
   }, [items])
 
-  const addFiles = useCallback(async (files: readonly File[]) => {
+  const uploadOne = useCallback(async (row: ComposerFile) => {
+    try {
+      const receipt = await onAttach(row.name, row.data)
+      setFiles(list => list.map(item => item.key === row.key && item.status === 'uploading' ? { ...item, status: 'ready' as const, receipt, name: receipt.name, bytes: receipt.bytes } : item))
+    } catch (failure) {
+      const message = failure instanceof Error ? failure.message : String(failure)
+      setFiles(list => list.map(item => item.key === row.key && item.status === 'uploading' ? { ...item, status: 'error' as const, error: message } : item))
+      setLocalError(fillText(t(locale, 'fileUploadFailed'), { message }))
+    }
+  }, [onAttach, locale])
+
+  const addFiles = useCallback(async (picked: readonly File[]) => {
     setLocalError(undefined)
-    const next = [...images]
-    for (const file of files) {
-      if (next.length >= CHAT_IMAGE_LIMIT) { setLocalError(imageErrorText(locale, 'too-many')); break }
-      try { next.push(await readImageFile(file)) } catch (failure) {
-        setLocalError(failure instanceof ChatImageRejected ? imageErrorText(locale, failure.code) : imageErrorText(locale, 'invalid'))
+    let imageCount = images.length
+    let fileCount = files.length
+    for (const file of picked) {
+      const bytes = new Uint8Array(await file.arrayBuffer())
+      const inspected = inspectImageBytes(bytes, file.type)
+      if (inspected.ok && imageCount < CHAT_IMAGE_LIMIT) {
+        imageCount += 1
+        try {
+          const image = await readImageFile(file, bytes)
+          setImages(list => [...list, image])
+          continue
+        } catch { imageCount -= 1 }
+      }
+      if (bytes.length > CHAT_FILE_BYTES) {
+        setLocalError(fillText(t(locale, 'fileTooLarge'), { max: humanBytes(CHAT_FILE_BYTES) }))
+        continue
+      }
+      if (fileCount >= CHAT_FILE_LIMIT) {
+        setLocalError(fillText(t(locale, 'fileTooMany'), { max: String(CHAT_FILE_LIMIT) }))
         break
       }
+      fileCount += 1
+      fileSeq.current += 1
+      const clean = fileName(file.name) ?? `file-${fileSeq.current}`
+      const row: ComposerFile = {
+        key: `${Date.now()}:${fileSeq.current}`,
+        name: clean,
+        bytes: bytes.length,
+        data: bytesToBase64(bytes),
+        status: 'uploading',
+      }
+      setFiles(list => [...list, row])
+      void uploadOne(row)
     }
-    setImages(next)
-  }, [images, locale])
+  }, [images.length, files.length, uploadOne, locale])
+
 
   const submit = useCallback(() => {
     const body = text.trim()
-    if ((!body && images.length === 0) || busy || disabled) return
+    if ((!body && images.length === 0 && files.length === 0) || busy || disabled || files.some(file => file.status !== 'ready')) return
     setBusy(true)
     setSlashPinned(false)
     const sending = images
-    onSend(body, sending)
+    const receipts = files.map(file => file.receipt).filter((receipt): receipt is ChatFileReceipt => receipt !== undefined)
+    onSend(body, sending, receipts)
       .then(() => {
         setText('')
         writeDraft(sessionId, '')
         setImages([])
+        setFiles([])
         setHistoryCursor(-1)
         setExpanded(false)
       }, () => {})
       .finally(() => { setBusy(false); area.current?.focus() })
-  }, [text, images, busy, disabled, sessionId, onSend])
+  }, [text, images, files, busy, disabled, sessionId, onSend])
 
   const startNewSegment = useCallback(() => {
     if (disabled || running || segmentBusy) return
@@ -348,6 +392,14 @@ export function Composer({
     }
   })
 
+  useDismissOnOutsidePointer(plusRef, plusOpen, open => { if (!open) setPlusOpen(false) })
+  useEffect(() => {
+    if (!plusOpen) return
+    const close = (event: globalThis.KeyboardEvent) => { if (event.key === 'Escape') setPlusOpen(false) }
+    window.addEventListener('keydown', close)
+    return () => window.removeEventListener('keydown', close)
+  }, [plusOpen])
+
   const onKeyDown = useCallback((event: KeyboardEvent<HTMLTextAreaElement>) => {
     if (event.nativeEvent.isComposing || event.keyCode === 229) return
     if (slashOpen) {
@@ -454,9 +506,17 @@ export function Composer({
     if (files.length > 0) void addFiles(files)
   }, [disabled, addFiles])
 
+  const retryFile = useCallback((row: ComposerFile) => {
+    const reset: ComposerFile = { ...row, status: 'uploading', error: undefined }
+    setFiles(list => list.map(item => item.key === row.key ? reset : item))
+    setLocalError(undefined)
+    void uploadOne(reset)
+  }, [uploadOne])
+
   const clearAll = useCallback(() => {
     updateText('')
     setImages([])
+    setFiles([])
     setLocalError(undefined)
     setExpanded(false)
     onDismissError()
@@ -464,8 +524,9 @@ export function Composer({
   }, [updateText, onDismissError])
 
   const shownError = localError ?? error
-  const canSend = !disabled && !busy && (Boolean(text.trim()) || images.length > 0)
-  const hasContent = text.length > 0 || images.length > 0
+  const uploadsPending = files.some(file => file.status !== 'ready')
+  const canSend = !disabled && !busy && !uploadsPending && (Boolean(text.trim()) || images.length > 0 || files.length > 0)
+  const hasContent = text.length > 0 || images.length > 0 || files.length > 0
   const showExpandToggle = expanded || text.length > 100 || text.includes('\n')
   const charCount = text.length
 
@@ -530,12 +591,12 @@ export function Composer({
       >
         {dragging ? (
           <div className="dsh-dot-drop-mask" aria-hidden="true">
-            <ImageGlyph />
-            <span>{t(locale, 'dropImagesHint').replace('{max}', String(CHAT_IMAGE_LIMIT))}</span>
+            <DocumentGlyph />
+            <span>{t(locale, 'dropFilesHint')}</span>
           </div>
         ) : null}
 
-        {images.length > 0 ? (
+        {(images.length > 0 || files.length > 0) ? (
           <div className="dsh-dot-attachments">
             {images.map((image, index) => (
               <div key={`${image.name ?? image.mediaType}:${index}`} className="dsh-dot-attachment">
@@ -559,17 +620,50 @@ export function Composer({
                 </button>
               </div>
             ))}
-            {images.length < CHAT_IMAGE_LIMIT ? (
+            {files.map(file => {
+              const dot = file.name.lastIndexOf('.')
+              const ext = dot >= 0 ? file.name.slice(dot + 1).toUpperCase() : 'FILE'
+              return (
+                <div key={file.key} className="dsh-dot-attachment dsh-dot-file-attachment" data-state={file.status}>
+                  <span className="dsh-dot-file-icon"><DocumentGlyph /></span>
+                  <div className="dsh-dot-attachment-meta">
+                    <span className="dsh-dot-attachment-name">{file.name}</span>
+                    <span className="dsh-dot-attachment-ext">{ext} · {humanBytes(file.bytes)}</span>
+                  </div>
+                  {file.status === 'uploading' ? <span className="dsh-dot-file-spinner" role="status" aria-label={t(locale, 'fileUploading')} /> : null}
+                  {file.status === 'error' ? (
+                    <button
+                      type="button"
+                      className="dsh-dot-file-retry"
+                      aria-label={t(locale, 'retryUpload')}
+                      title={file.error ?? t(locale, 'retryUpload')}
+                      onClick={() => retryFile(file)}
+                    >
+                      ↻
+                    </button>
+                  ) : null}
+                  <button
+                    type="button"
+                    className="dsh-dot-attachment-remove"
+                    aria-label={t(locale, 'removeFile')}
+                    title={t(locale, 'removeFile')}
+                    onClick={() => setFiles(list => list.filter(item => item.key !== file.key))}
+                  >
+                    ×
+                  </button>
+                </div>
+              )
+            })}
+            {images.length < CHAT_IMAGE_LIMIT || files.length < CHAT_FILE_LIMIT ? (
               <button
                 type="button"
                 className="dsh-dot-attachment-add"
                 disabled={disabled || busy}
-                aria-label={t(locale, 'attachImage')}
-                title={`${t(locale, 'attachImage')} (${images.length}/${CHAT_IMAGE_LIMIT})`}
+                aria-label={t(locale, 'addImageOrFile')}
+                title={t(locale, 'addImageOrFile')}
                 onClick={() => picker.current?.click()}
               >
                 <PlusGlyph />
-                <span>{images.length}/{CHAT_IMAGE_LIMIT}</span>
               </button>
             ) : null}
           </div>
@@ -605,41 +699,54 @@ export function Composer({
 
         <div className="dsh-dot-composer-bar">
           <div className="dsh-dot-composer-tools">
-            <input ref={picker} className="dsh-dot-file" type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple onChange={onPick} />
-            <Tooltip label={t(locale, 'attachImage')} side="top">
-              <button
-                type="button"
-                className="dsh-dot-tool-btn"
-                disabled={disabled || busy || images.length >= CHAT_IMAGE_LIMIT}
-                aria-label={t(locale, 'attachImage')}
-                onClick={() => picker.current?.click()}
-              >
-                <ImageGlyph />
-                {images.length > 0 ? <span className="dsh-dot-tool-count">{images.length}</span> : null}
-              </button>
-            </Tooltip>
-
-            <Tooltip label={t(locale, 'quickActions')} side="top">
-              <button
-                type="button"
-                className="dsh-dot-tool-btn"
-                disabled={disabled}
-                aria-label={t(locale, 'quickActions')}
-                aria-expanded={slashOpen}
-                aria-pressed={slashOpen}
-                onClick={() => {
-                  if (slashOpen) {
-                    setSlashPinned(false)
-                    setSlashDismissed(true)
-                    return
-                  }
-                  setSlashDismissed(false)
-                  setSlashPinned(true)
-                }}
-              >
-                <SlashCommandGlyph />
-              </button>
-            </Tooltip>
+            <input ref={picker} className="dsh-dot-file" type="file" multiple onChange={onPick} />
+            <div className="dsh-dot-plus-wrap" ref={plusRef}>
+              <Tooltip label={t(locale, 'addMenu')} side="top">
+                <button
+                  type="button"
+                  className="dsh-dot-plus-btn"
+                  disabled={disabled}
+                  aria-label={t(locale, 'addMenu')}
+                  aria-haspopup="menu"
+                  aria-expanded={plusOpen}
+                  onClick={() => setPlusOpen(open => !open)}
+                >
+                  <PlusGlyph />
+                </button>
+              </Tooltip>
+              {plusOpen ? (
+                <div className="dsh-dot-plus-menu" role="menu" aria-label={t(locale, 'addMenu')}>
+                  <button type="button" role="menuitem" className="dsh-dot-plus-item" onClick={() => { setPlusOpen(false); picker.current?.click() }}>
+                    <DocumentGlyph />
+                    <span>{t(locale, 'addImageOrFile')}</span>
+                  </button>
+                  <button
+                    type="button"
+                    role="menuitem"
+                    className="dsh-dot-plus-item"
+                    onClick={() => {
+                      setPlusOpen(false)
+                      if (slashOpen) {
+                        setSlashPinned(false)
+                        setSlashDismissed(true)
+                        return
+                      }
+                      setSlashDismissed(false)
+                      setSlashPinned(true)
+                    }}
+                  >
+                    <SlashCommandGlyph />
+                    <span>{t(locale, 'quickActions')}</span>
+                  </button>
+                  {hasContent ? (
+                    <button type="button" role="menuitem" className="dsh-dot-plus-item" onClick={() => { setPlusOpen(false); clearAll() }}>
+                      <ClearGlyph />
+                      <span>{t(locale, 'clearInput')}</span>
+                    </button>
+                  ) : null}
+                </div>
+              ) : null}
+            </div>
 
             {segmentBusy || segmentDone ? (
               <span className="dsh-dot-seg-feedback" data-done={segmentDone ? '' : undefined} role="status">
@@ -650,57 +757,37 @@ export function Composer({
           </div>
 
           <div className="dsh-dot-composer-right">
-            {charCount >= 200 ? (
-              <span className="dsh-dot-char-count" data-warn={charCount >= COMPOSER_TEXT_LIMIT * 0.9 ? '' : undefined}>
+            {charCount >= COMPOSER_TEXT_LIMIT * 0.9 ? (
+              <span className="dsh-dot-char-count" data-warn="">
                 {charCount.toLocaleString()}/{COMPOSER_TEXT_LIMIT.toLocaleString()}
               </span>
-            ) : (
-              <span className="dsh-dot-composer-hint">{t(locale, 'composerHint')}</span>
-            )}
+            ) : null}
 
-            {hasContent && !busy ? (
-              <Tooltip label={t(locale, 'clearInput')} side="top">
-                <button
-                  type="button"
-                  className="dsh-dot-tool-btn dsh-dot-clear-btn"
-                  aria-label={t(locale, 'clearInput')}
-                  onClick={clearAll}
-                >
-                  <ClearGlyph />
+            <Tooltip label={busy ? t(locale, 'sending') : t(locale, 'send')} side="top">
+              <button
+                type="button"
+                className="dsh-dot-send-btn"
+                disabled={!canSend}
+                aria-label={busy ? t(locale, 'sending') : t(locale, 'send')}
+                onClick={submit}
+              >
+                <SendArrowGlyph />
+              </button>
+            </Tooltip>
+
+            {running ? (
+              <Tooltip label={t(locale, 'stop')} side="top">
+                <button type="button" className="dsh-dot-stop-btn" aria-label={t(locale, 'stop')} onClick={onStop}>
+                  <StopSquareGlyph />
                 </button>
               </Tooltip>
             ) : null}
 
-            {running ? (
-              <button type="button" className="dsh-dot-stop-btn" onClick={onStop}>
-                <StopSquareGlyph />
-                <span>{t(locale, 'stop')}</span>
-              </button>
-            ) : null}
-
-            <button
-              type="button"
-              className="dsh-dot-send-btn"
-              disabled={!canSend}
-              onClick={submit}
-            >
-              <SendArrowGlyph />
-              <span>{busy ? t(locale, 'sending') : t(locale, 'send')}</span>
-            </button>
           </div>
+
         </div>
       </div>
     </div>
-  )
-}
-
-function ImageGlyph() {
-  return (
-    <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.35" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-      <rect x="2" y="2.5" width="12" height="11" rx="2" />
-      <circle cx="5.6" cy="6" r="1.1" />
-      <path d="M2.5 11.5 6 8.2a1 1 0 0 1 1.4 0L10 10.7l1.6-1.5a1 1 0 0 1 1.4 0l1 1" />
-    </svg>
   )
 }
 
@@ -717,6 +804,15 @@ function ClearGlyph() {
   return (
     <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.35" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
       <path d="M3 4.5h10M6 4.5V3.2c0-.4.3-.7.7-.7h2.6c.4 0 .7.3.7.7v1.3M4.5 4.5l.6 8.2c0 .7.6 1.3 1.3 1.3h3.2c.7 0 1.3-.6 1.3-1.3l.6-8.2" />
+    </svg>
+  )
+}
+
+function DocumentGlyph() {
+  return (
+    <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.35" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M4 1.8h5.2L12.2 5v9.2H4z" />
+      <path d="M9 2v3.2h3.2M6 8h4M6 10.5h4" />
     </svg>
   )
 }

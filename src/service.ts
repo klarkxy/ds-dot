@@ -26,7 +26,7 @@ import {
   occupantOf, pathScope, plannedOccupant, plannedScope, requirementList, samePathList,
   stepList, verifyRefusal,
 } from './work-actions.ts'
-import { absoluteScopePath, canonicalPath, onDiskPath, changeIsTerminal, MAX_COMPLETED_CHANGES, InputShapeError, inputContractError, isSameOrChildPath, occupantsConflict, runCostTotals, runIsTerminal, scopeWithinRoot, scopeWrites, type ChangeRecord, type Constraint, type Occupant, type Requirement, type RootHint, type RunRecord, type TaskIsolation, type WorkRefusal, type WriteScope } from './work.ts'
+import { absoluteScopePath, canonicalPath, onDiskPath, changeIsTerminal, DEFAULT_RUN_ORIGIN, MAX_COMPLETED_CHANGES, InputShapeError, inputContractError, isSameOrChildPath, occupantsConflict, runCostTotals, runIsTerminal, scopeWithinRoot, scopeWrites, type ChangeRecord, type Constraint, type Occupant, type Requirement, type RootHint, type RunOrigin, type RunRecord, type TaskIsolation, type WorkRefusal, type WriteScope } from './work.ts'
 import type { ShownView, ViewAnswer } from '@klarkxy/dsh-deep-view/contracts'
 import { DotCards, cardAnswerText, type DotCardRecord } from './card-state.ts'
 import { checkChatImages, type ChatImage } from './chat-images.ts'
@@ -1554,12 +1554,14 @@ export class DotService {
   manageTask(args: Record<string, unknown>): Promise<string> {
     const action = typeof args.action === 'string' ? args.action : ''
     const awaitsHost = ['create', 'finish', 'cancel', 'supplement', 'dispatch', 'check', 'closeout', 'reject'].includes(action)
-    const work = awaitsHost ? this.manageWorkAction(args) : this.serial(() => this.manageWorkAction(args))
+    const work = awaitsHost
+      ? this.manageWorkAction(args, { origin: DEFAULT_RUN_ORIGIN })
+      : this.serial(() => this.manageWorkAction(args, { origin: DEFAULT_RUN_ORIGIN }))
     // Settling runs earn their token/wall cost whether or not the panel is open.
     return work.finally(() => this.scheduleRunUsage())
   }
 
-  private async manageWorkAction(args: Record<string, unknown>): Promise<string> {
+  private async manageWorkAction(args: Record<string, unknown>, internal?: { readonly origin?: RunOrigin }): Promise<string> {
     const action = typeof args.action === 'string' ? args.action : ''
     const changeId = typeof args.task_id === 'string' ? args.task_id : ''
     if (action === 'list') {
@@ -1598,6 +1600,7 @@ export class DotService {
         ...(typeof args.model === 'string' ? { model: args.model } : pinnedBody?.model !== undefined ? { model: pinnedBody.model } : {}),
         ...(typeof args.preset === 'string' ? { preset: args.preset } : pinnedBody?.preset !== undefined ? { preset: pinnedBody.preset } : {}),
         ...(jsonArray(args.step_refs) ? { stepRefs: jsonArray(args.step_refs)!.map(String) } : {}),
+        ...(internal?.origin ? { origin: internal.origin } : {}),
         checkOnly: action === 'check',
       })
     }
@@ -1929,9 +1932,15 @@ export class DotService {
         : `fresh change ${change.id} could not be cancelled`
       return { ok: false as const, reason: `${cancelledNote} — ${reason}` }
     }
+    const runOrigin: RunOrigin = opts.origin === 'reminder'
+      ? { strength: 'explicit', source: 'schedule' }
+      : DEFAULT_RUN_ORIGIN
     let dispatchText = ''
     try {
-      dispatchText = await this.manageWorkAction({ action: 'dispatch', task_id: change.id, ...(opts.note?.trim() ? { message: opts.note.trim() } : {}) })
+      dispatchText = await this.manageWorkAction(
+        { action: 'dispatch', task_id: change.id, ...(opts.note?.trim() ? { message: opts.note.trim() } : {}) },
+        { origin: runOrigin },
+      )
     } catch (error) {
       return cancelFresh(messageOf(error))
     } finally {
@@ -4114,7 +4123,7 @@ export class DotService {
     return { change, forcedIsolation }
   }
 
-  private async reserveFromTool(args: Record<string, unknown>): Promise<{ changeId: string; runId: string; phase: RunRecord['phase']; requestedSessionId: string }> {
+  private async reserveFromTool(args: Record<string, unknown>, origin?: RunOrigin): Promise<{ changeId: string; runId: string; phase: RunRecord['phase']; requestedSessionId: string }> {
     const changeId = typeof args.task_id === 'string' ? args.task_id : ''
     const role = typeof args.role === 'string' ? args.role : 'work'
     if (role !== 'work' && role !== 'rework' && role !== 'review') throw new DotError('dot/invalid', 'invalid role')
@@ -4130,6 +4139,7 @@ export class DotService {
     const reserved = await this.store.work.reserveRun({
       changeId, kind: role, cwd: change.cwd, root: this.rootHint(change.cwd),
       ...(stepRefs ? { stepRefs } : {}),
+      ...(origin ? { origin } : {}),
       writeScope: role === 'review'
         ? { kind: 'workspace-exclusive' }
         : { kind: 'paths', paths: paths ?? (write ? [{ path: change.cwd, type: 'directory' as const }] : []) },
@@ -4607,7 +4617,7 @@ export class DotService {
     return released.ok === true
   }
 
-  private async startWorkSession(input: { workspaceId?: string; cwd?: string; title: string; instruction: string; startFromWorkOrder?: boolean; goal?: string; model?: string; taskId?: string; role?: RunKind; access?: RunAccess; priority?: ChangePriority; preset?: string; checkOnly?: boolean; paths?: string; runId?: string; stepRefs?: readonly string[] }): Promise<string> {
+  private async startWorkSession(input: { workspaceId?: string; cwd?: string; title: string; instruction: string; startFromWorkOrder?: boolean; goal?: string; model?: string; taskId?: string; role?: RunKind; access?: RunAccess; priority?: ChangePriority; preset?: string; checkOnly?: boolean; paths?: string; runId?: string; stepRefs?: readonly string[]; origin?: RunOrigin }): Promise<string> {
     const role = input.role ?? 'work'
     if (role !== 'work' && role !== 'rework' && role !== 'review') throw new DotError('dot/invalid', 'invalid role')
     let changeId = input.taskId
@@ -4700,7 +4710,10 @@ export class DotService {
     let createdHere = false
     let runId = selected?.id
     if (!runId) {
-      const reserved = await this.reserveFromTool({ task_id: changeId, role, access: input.access ?? 'read', ...(paths ? { paths } : {}), ...(input.stepRefs ? { step_refs: input.stepRefs } : {}) })
+      const reserved = await this.reserveFromTool(
+        { task_id: changeId, role, access: input.access ?? 'read', ...(paths ? { paths } : {}), ...(input.stepRefs ? { step_refs: input.stepRefs } : {}) },
+        input.origin,
+      )
       runId = reserved.runId
       createdHere = true
     }

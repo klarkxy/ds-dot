@@ -1498,6 +1498,22 @@ describe('DotService WorkBook sessions', () => {
     await h.service.dispose()
   })
 
+  it('records explicit user origin on manageTask dispatch and ignores any spoofed origin in args', async () => {
+    const h = setup()
+    await h.service.ensureDot()
+    await h.service.manageTask({
+      action: 'dispatch',
+      dir: '/proj',
+      title: 'User task',
+      message: 'check status',
+      access: 'read',
+      origin: { strength: 'inferred', source: 'github-poll', sender: 'spoofed', policyVersion: 'evil' },
+    })
+    const run = h.store.work.listRuns()[0]!
+    expect(run.origin).toEqual({ strength: 'explicit', source: 'user' })
+    await h.service.dispose()
+  })
+
   it('creates the run session in the on-disk casing while the record stays canonical', async () => {
     const dir = realpathSync.native(mkdtempSync(join(tmpdir(), 'dot-CaSiNg-')))
     const h = setup()
@@ -3431,6 +3447,7 @@ describe('runRecipe', () => {
       expect(input.userRequest).toBe('Run recipe "report" (started from the Tasks panel)')
       expect(ran.runId).toBeTruthy()
       const run = h.store.work.run(ran.runId!)!
+      expect(run.origin).toEqual({ strength: 'explicit', source: 'user' })
       const prompt = h.calls.find(call => call.startsWith(`prompt ${run.sessionId} `))
       expect(prompt).toContain('Recipe notes:\nbe terse')
     }
@@ -3479,6 +3496,8 @@ describe('runRecipe', () => {
       const change = h.store.work.change(ran.changeId)!
       const input = h.store.work.input(change.currentInputRef)!
       expect(input.userRequest).toBe('[reminder "weekly report"] pull last week')
+      expect(ran.runId).toBeTruthy()
+      expect(h.store.work.run(ran.runId!)?.origin).toEqual({ strength: 'explicit', source: 'schedule' })
     }
     await h.service.dispose()
   })

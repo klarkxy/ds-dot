@@ -1,7 +1,7 @@
 import { existsSync, realpathSync } from 'node:fs'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
-import { renderBrief, renderSupplement, runTitle, type BriefInput, type BriefRun } from './brief.ts'
+import { WORKER_DISCIPLINES, renderBrief, renderSupplement, runTitle, type BriefInput, type BriefRun } from './brief.ts'
 
 const input: BriefInput = {
   id: 'input-2',
@@ -158,6 +158,22 @@ describe('renderBrief', () => {
       run: run({ cwd: 'c:\\progra~1\\dot-8dot3-proj' }),
     })
     expect(text).toContain(`Working directory: ${join(longBase, 'dot-8dot3-proj')}`)
+  })
+
+  it('includes the 3 worker execution disciplines within 1,200 chars for work/rework and excludes them from review', () => {
+    expect(WORKER_DISCIPLINES.join('\n').length).toBeLessThanOrEqual(1200)
+    const work = renderBrief({ changeId: 'c-1', title: 'Ship', input, run: run({ kind: 'work' }) })
+    const rework = renderBrief({ changeId: 'c-1', title: 'Ship', input, run: run({ kind: 'rework' }) })
+    const review = renderBrief({ changeId: 'c-1', title: 'Ship', input, run: run({ kind: 'review', access: 'read', writeScope: { kind: 'workspace-exclusive' } }) })
+    for (const line of WORKER_DISCIPLINES) {
+      expect(work).toContain(line)
+      expect(rework).toContain(line)
+      expect(review).not.toContain(line)
+    }
+    expect(work).toMatch(/impact boundary/i)
+    expect(work).toMatch(/never delete or skip tests/i)
+    expect(work).toMatch(/dot_peer/i)
+    expect(review).not.toMatch(/dot_peer/i)
   })
 })
 

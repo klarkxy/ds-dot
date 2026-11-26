@@ -18,6 +18,21 @@ export type DeliveryStatus = 'intent' | 'accepted' | 'rejected' | 'unknown'
 export type CreationStatus = 'intent' | 'inflight' | 'confirmed' | 'rejected' | 'unknown'
 export type CheckVerdict = 'pass' | 'fail' | 'unverified' | 'not-applicable'
 export type VerificationVerdict = 'accept' | 'rework' | 'unverified'
+export type RunOriginStrength = 'explicit' | 'inferred'
+export type RunOriginSource = 'user' | 'inbox-github' | 'github-poll' | 'schedule' | 'speculative'
+
+export interface RunOrigin {
+  readonly strength: RunOriginStrength
+  readonly source: RunOriginSource
+  readonly sender?: string
+  readonly policyVersion?: string
+}
+
+export const DEFAULT_RUN_ORIGIN: RunOrigin = { strength: 'explicit', source: 'user' } as const
+
+export function effectiveRunOrigin(run: Pick<RunRecord, 'origin'>): RunOrigin {
+  return run.origin ?? DEFAULT_RUN_ORIGIN
+}
 
 const TERMINAL: ReadonlySet<RunPhase> = new Set(['completed', 'failed', 'stopped'])
 export const MAX_COMPLETED_CHANGES = 200
@@ -183,6 +198,8 @@ export interface RunRecord {
   readonly usage?: DotContextUsage
   /** Wall time of the run's session — first to last event, else updatedAt − createdAt. */
   readonly wallMs?: number
+  /** Provenance of who/what initiated the run. Absent on legacy records; use {@link effectiveRunOrigin}. */
+  readonly origin?: RunOrigin
 }
 export interface CheckRecord {
   readonly requirementRef: string
@@ -297,6 +314,13 @@ export const inputSchema = z.object({
   designNotes: z.string().optional(), supersedes: z.string().optional(),
   source: z.string(), createdAt: z.number(),
 })
+export const runOriginSchema = z.object({
+  strength: z.enum(['explicit', 'inferred']),
+  source: z.enum(['user', 'inbox-github', 'github-poll', 'schedule', 'speculative']),
+  sender: z.string().min(1).optional(),
+  policyVersion: z.string().min(1).optional(),
+})
+
 export const runSchema = z.object({
   id: z.string().min(1), changeId: z.string().min(1), kind: z.enum(['work', 'rework', 'review']),
   inputRevision: z.number().int(), inputRef: z.string().min(1), stepRefs: z.array(z.string()),
@@ -324,6 +348,7 @@ export const runSchema = z.object({
   createdAt: z.number(), updatedAt: z.number(),
   usage: z.object({ input: z.number(), cacheRead: z.number(), cacheWrite: z.number(), output: z.number() }).optional(),
   wallMs: z.number().optional(),
+  origin: runOriginSchema.optional(),
 })
 const subjectSchema = z.object({
   workspaceRoot: z.string().min(1), cwd: z.string().min(1),
@@ -698,6 +723,7 @@ export interface ReserveInput {
   readonly reworkOf?: string
   /** Writable permission to pin at reserve; ignored for read-only runs. */
   readonly taskPermission?: TaskPermission
+  readonly origin?: RunOrigin
 }
 
 export interface WorkPersist {
@@ -1210,6 +1236,7 @@ export class WorkBook {
         access: input.kind === 'review' ? 'read' : scopeWrites(input.writeScope) ? 'write' : 'read',
         deliveries: [delivery], phase: 'reserved', ...(input.reworkOf ? { reworkOf: input.reworkOf } : {}),
         ...input.kind !== 'review' && scopeWrites(input.writeScope) && input.taskPermission ? { taskPermission: input.taskPermission } : {},
+        origin: input.origin ?? DEFAULT_RUN_ORIGIN,
         createdAt: at, updatedAt: at,
       }
       await this.commit('runs', run.id, run)

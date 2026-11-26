@@ -358,7 +358,7 @@ describe('dot tools', () => {
     expect(tool.parameters.properties.action.enum).toEqual(['create', 'revise', 'dispatch', 'check', 'read', 'list', 'supplement', 'finish', 'step', 'closeout', 'pause', 'resume', 'cancel', 'decide', 'reject', 'link', 'unlink'])
     expect(tool.parameters.properties.action.enum).toEqual([...TASK_ACTIONS])
     for (const action of ['reserve', 'baseline', 'subject', 'evidence', 'verify', 'hold', 'accept', 'move', 'note', 'delete', 'board', 'update', 'start']) await expect(tool.execute({ action })).rejects.toThrow()
-    for (const field of ['subject', 'subject_ref', 'evidence_ref', 'to', 'status', 'summary', 'session_id']) expect(tool.parameters.properties).not.toHaveProperty(field)
+    for (const field of ['subject', 'subject_ref', 'evidence_ref', 'to', 'status', 'summary', 'session_id', 'origin']) expect(tool.parameters.properties).not.toHaveProperty(field)
     expect(loadReflection().map(row => row.name)).not.toContain(TOOL.task)
   })
 

@@ -2,7 +2,7 @@
 
 [Dorothy’s Notebook (Site & Live Clips)](https://klarkxy.github.io/ds-dot/) · [README](../README.md) · [简体中文](README.zh-CN.md) · [日本語](README.ja.md)
 
-This page collects the deeper configuration, security guardrail, GitHub webhook, and upgrade details linked from the README.
+This page collects the deeper configuration, security guardrail, GitHub event intake (local `gh` polling & optional webhook), and upgrade details linked from the README.
 
 ---
 
@@ -67,7 +67,26 @@ When `dot_task(action="create", isolation="worktree")` is used, Dorothy cuts a `
 
 ## GitHub events (optional)
 
-Dorothy can follow pull requests, issues, comments, reviews, CI runs, default-branch pushes, and releases (filtering out pings, stars, forks, watches, check runs, and successful/skipped/neutral CI). Events land in a durable inbox, coalesce per PR/issue, link automatically to the task owning that PR or branch, and never grant authorization on their own.
+Dorothy can follow issues, pull requests, comments, reviews, and CI checks, coalescing updates per PR or issue, linking automatically to the tasks owning that PR or branch, and **never granting execution authorization on their own**. Credentials (`gh auth token` output or environment tokens) are never injected into model context, and `gh` `stderr` is redacted before logging or notifying.
+
+### Primary: GitHub Polling (local `gh` CLI, no public URL or tunnel needed)
+
+Recommended for local and desktop setups: Dorothy polls GitHub directly via your signed-in `gh` CLI under **Settings → GitHub** (`githubPoll`), with no public webhook URL, reverse proxy, or tunnel required.
+
+- **Off by default:** `enabled` defaults to `false` and `repos` defaults to `[]` — nothing is polled until you turn it on and add `owner/repo` entries (normalized to lowercase).
+- **CLI, GHES & connection test:** `ghPath` defaults to `'gh'` (resolving `gh.exe` automatically on Windows); set optional `hostname` to pass `--hostname` for GitHub Enterprise Server (leave empty for `github.com`). Click **Test `gh` Connection** to verify CLI discovery, `gh auth status`, `/rate_limit` quota, and per-repo access.
+- **Interval & 4 observed streams:** `intervalSec` ranges from `60` to `3600` seconds (default `120`). All 4 streams default to on: `issues`, `pulls`, `comments` (issue comments, inline PR review comments, and PR reviews), and `ci` (default-branch failures and active or recent linked PR checks).
+- **Cold-start baseline & 304 caching:** On a repository's first poll with no stored cursor, Dorothy records the current timestamp and existing failing default-branch CI baseline without flooding old history. Conditional `ETag` / `Last-Modified` (`304 Not Modified`) and empty cycles make zero main-document writes.
+- **Local human login preservation & echo suppression:** Built-in ignored bots (`dependabot[bot]`, `github-actions[bot]`, `renovate[bot]`) and custom `ignoredActors` are filtered as bots, while your local `gh`-authenticated human account is preserved so your own PR/issue comments still arrive. Outgoing comments or reviews sent by Dorothy or tasks via `gh` are tracked for echo suppression so they do not loop back.
+- **Rate-limit auto-backoff & health alert:** Effective interval honors `Math.max(userIntervalSec, X-Poll-Interval)` and checks hourly request budget (`repos × enabledStreams × (3600 / interval) < 50%` of remaining API quota), automatically raising the interval and surfacing a warning when exceeded. Consecutive poll errors raise a health alert once `consecutiveFailures >= 3`.
+- **Single-repo mutual exclusion & Webhook ↔ Poll handoff:** Each `owner/repo` can use either Polling or Webhook, never both simultaneously. Switching a repository between modes hands off its last-delivered timestamp as the new cursor baseline and deduplicates by `sourceId` so events are neither missed nor duplicated.
+- **Fast-Path 3-state admission defaults (Advanced collapsible matrix):** Rules match `(repo or *, eventType: issue | pr | comment | review | ci, senderClass: human | listed-bot | unlisted-bot)` to `inbox`, `context-only`, or `ignore`. Defaults: `human → inbox`; `listed-bot → context-only` (direct context to active subscribed runs only, no inbox clutter); `unlisted-bot → ignore`; `ci → inbox` only for default-branch failures or linked PR failures.
+- **Many-to-many direct delivery, `dot_peer` bounce-back & Inline/Spill:** Comments and reviews matching a PR or issue are delivered directly via `supplementWorkRun` to **all** linked active runs (plus a low-priority inbox audit entry when admitted to `inbox`). If a follow-up is outside a worker run's scope, the worker bounces it back via `dot_peer` to Dorothy/inbox for re-dispatch. Payloads inline the object ID, author, up to **500** body characters, direct context (`file:line` or replied comment), linked IDs, and an explicit read pointer (spilling longer bodies to `<homeDir>/artifacts/inbox/`), batched per poll cycle.
+- **User-stopped run protection & PR closure acceptance check:** Bots and CI never wake finished runs, and human comments on finished (non-stopped) threads route to Dorothy's inbox; **user-stopped runs receive zero subsequent messages**. When polling or webhook observes a PR `merged` or `closed`, Dorothy marks the thread closed in `links.ts`, moves linked `WorkBook` changes into closure acceptance verification, and emits one `result` notice (opening a PR never triggers completion).
+
+### Advanced: Webhook real-time push (optional)
+
+For instant push when you already expose an HTTPS endpoint, configure `webhookRepos` and `sourceId` (default `primary-github`) under **Settings → GitHub → Advanced: Webhook Real-time Push** (mutually exclusive per `owner/repo` with Polling):
 
 1. Install the webhook runtime and GitHub adapter pinned to your DSH version:
    ```sh
@@ -125,4 +144,4 @@ Recipes saved from an isolated self-maintenance task store the original checkout
 
 ## Upgrading from earlier versions
 
-Reminders, agreements, cognition, settings, and current task records carry over (storage domain v10 still opens v1–v9 rows; back up your profile before upgrading if you might roll back). The `memory` settings lock is now `agreements` (re-lock agreements once if previously locked). Legacy tickets, `memory.md`, old custom-policy text, and retired settings field names are no longer read or migrated.
+Reminders, agreements, cognition, settings, and current task records carry over (storage domain v11 still opens v1–v10 rows; back up your profile before upgrading if you might roll back). The `memory` settings lock is now `agreements` (re-lock agreements once if previously locked). Legacy tickets, `memory.md`, old custom-policy text, and retired settings field names are no longer read or migrated.

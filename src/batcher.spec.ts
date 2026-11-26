@@ -65,4 +65,11 @@ describe('idle notice queue', () => {
     expect(formatNoticeDisplay(batch)).toEqual({ isReminder: false, entries: [{ kind: 'turn-end', sessionId: 's', summary: 'new' }, display] })
   })
 
+  it('formats result notices under Tasks and maps fallback display cleanly', () => {
+    const resNotice: Notice = { sessionId: 'dot-1', kind: 'result', changeId: 'chg-1', text: 'PR acme/widgets#1 merged', at: 10 }
+    const formatted = formatNotices([resNotice])
+    expect(formatted).toContain('Tasks:\n- result · dot-1: PR acme/widgets#1 merged')
+    expect(formatNoticeDisplay([resNotice]).entries[0]).toMatchObject({ kind: 'task-human', sessionId: 'dot-1', summary: 'PR acme/widgets#1 merged' })
+  })
+
 })

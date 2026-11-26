@@ -271,7 +271,10 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
   // A tool set change can mean a bundle came or went; refetch row mapping on the next catalog read.
   ctx.effect(() => (ctx as unknown as { on(name: string, listener: () => void): () => void }).on('tools/change', () => capabilities.invalidateBundles()), 'dot.capabilities-bundles')
   // Optional webhook ingress: only while the host provides webhookRuntime.
-  installInboxIngress(ctx, service, log)
+  installInboxIngress(ctx, service, log, {
+    shouldAccept: (repo, receivedAt) => service.shouldAcceptWebhookDelivery(repo, receivedAt),
+  })
+  service.startGithubPoll()
   ctx.effect(() => () => {
     unfollow()
     unpending()
@@ -647,7 +650,7 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
   }
   // The kit's 64 KiB default answers 413 before `say` runs. A PNG of about
   // 51 KB does not fit after base64; the cap below fits the advertised images.
-  const PASSIVE_ENDPOINTS = new Set(['wait', 'board', 'attention', 'work.list', 'work.read', 'card.pending', 'card.detail', 'recipes', 'self.status'])
+  const PASSIVE_ENDPOINTS = new Set(['wait', 'board', 'attention', 'work.list', 'work.read', 'card.pending', 'card.detail', 'recipes', 'self.status', 'github.poll.status'])
   ctx.effect(() => registerHostRpc(ctx as unknown as HostRpcContext, RPC_CHANNEL, async (endpoint, payload, signal) => {
     try {
       const reqLocale = field(payload, 'uiLocale')
@@ -698,6 +701,21 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
         }
         case 'stop': { await service.stop(); return { ok: true, value: true } }
         case 'settings': return { ok: true, value: store.settings }
+        case 'github.poll.status': return { ok: true, value: service.githubPollStatus() }
+        case 'github.poll.test': {
+          const ghPath = typeof field(payload, 'ghPath') === 'string' ? str(payload, 'ghPath') : undefined
+          const hostname = typeof field(payload, 'hostname') === 'string' ? str(payload, 'hostname') : undefined
+          const rawRepos = field(payload, 'repos')
+          const repos = Array.isArray(rawRepos) ? rawRepos.filter((r): r is string => typeof r === 'string') : undefined
+          return {
+            ok: true,
+            value: await service.testGithubPollConnection({
+              ...(ghPath !== undefined ? { ghPath } : {}),
+              ...(hostname !== undefined ? { hostname } : {}),
+              ...(repos !== undefined ? { repos } : {}),
+            }),
+          }
+        }
         case 'settings.proposals': return { ok: true, value: store.settingProposals }
         case 'settings.taskpermissions': {
           const live = host.taskPermissionOptions?.() ?? { safeAuto: false, auto: false }

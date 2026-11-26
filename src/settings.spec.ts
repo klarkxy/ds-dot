@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
-import { DEFAULT_SETTINGS, validateMcpCredentialSet } from './contracts.ts'
+import { DEFAULT_SETTINGS, SETTING_FIELDS, validateMcpCredentialSet } from './contracts.ts'
 import { DEFAULT_ADDRESS, DEFAULT_PERSONA, PERSONA_MAX_CHARS } from './persona.ts'
-import { parseSettings, patchSettings } from './settings.ts'
+import { lockedField, parseSettings, patchSettings } from './settings.ts'
 import { DotStore } from './store.ts'
 
 describe('parseSettings', () => {
@@ -246,5 +246,64 @@ describe('validateMcpCredentialSet', () => {
     expect(validateMcpCredentialSet('deepwiki', '', known)).toBe('bad-credential')
     expect(validateMcpCredentialSet('deepwiki', '   ', known)).toBe('bad-credential')
     expect(validateMcpCredentialSet('deepwiki', 'x'.repeat(4097), known)).toBe('bad-credential')
+  })
+})
+
+describe('githubPoll setting', () => {
+  it('normalizes repos, enforces single-repo mutual exclusion, validates bounds and admission matrix, and excludes githubPoll from SETTING_FIELDS', () => {
+    expect((SETTING_FIELDS as readonly string[]).includes('githubPoll')).toBe(false)
+    expect(() => lockedField(DEFAULT_SETTINGS, 'githubPoll')).toThrow(/unknown setting/)
+
+    const saved = patchSettings(DEFAULT_SETTINGS, {
+      githubPoll: {
+        enabled: true,
+        repos: ['Acme/Widgets', 'acme/widgets'],
+        webhookRepos: ['Acme/Other'],
+        ghPath: 'gh',
+        hostname: 'GHES.Example.COM',
+        intervalSec: 120,
+        streams: { issues: true, pulls: true, comments: true, ci: true },
+        ignoredActors: ['Bot[bot]'],
+        admission: [{ repo: 'Acme/Widgets', eventType: 'comment', senderClass: 'listed-bot', action: 'ignore' }],
+      },
+    })
+    expect(saved.githubPoll).toMatchObject({
+      enabled: true,
+      repos: ['acme/widgets'],
+      webhookRepos: ['acme/other'],
+      hostname: 'ghes.example.com',
+      intervalSec: 120,
+      ignoredActors: ['bot[bot]'],
+      admission: [{ repo: 'acme/widgets', eventType: 'comment', senderClass: 'listed-bot', action: 'ignore' }],
+    })
+    expect(parseSettings(saved).githubPoll).toEqual(saved.githubPoll)
+
+    // Mutual exclusion across Poll and Webhook
+    expect(() => patchSettings(DEFAULT_SETTINGS, {
+      githubPoll: {
+        enabled: true,
+        repos: ['Acme/Widgets'],
+        webhookRepos: ['acme/widgets'],
+        ghPath: 'gh',
+        intervalSec: 120,
+        streams: { issues: true, pulls: true, comments: true, ci: true },
+        ignoredActors: [],
+      },
+    })).toThrow(/invalid value/)
+
+    // Out-of-bounds interval
+    expect(() => patchSettings(DEFAULT_SETTINGS, {
+      githubPoll: {
+        enabled: true,
+        repos: ['acme/widgets'],
+        webhookRepos: [],
+        ghPath: 'gh',
+        intervalSec: 30,
+        streams: { issues: true, pulls: true, comments: true, ci: true },
+        ignoredActors: [],
+      },
+    })).toThrow(/invalid value/)
+
+    expect(patchSettings(saved, { githubPoll: null }).githubPoll).toBeUndefined()
   })
 })

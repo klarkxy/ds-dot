@@ -4,18 +4,26 @@
  */
 import { groupModelMenuChoices, modelMenuShortName, parseModelMenuChoices, type ModelMenuChoice } from '@klarkxy/dsh-plugin-kit/model-menu'
 import { renderModelPicker, type RenderFactorySlot } from '@klarkxy/dsh-plugin-kit/model-picker'
-import { Button, Checkbox, IconCheckCircleFillRegular, IconInfoOutlineRegular, IconSearchOutlineRegular, IconWarningOutlineRegular, Input, Switch, Tooltip } from '@deepseek-ai/dsh-client-ui-primitives'
+import { Button, Checkbox, IconCheckOutlineRegular, IconInfoOutlineRegular, IconSearchOutlineRegular, IconWarningOutlineRegular, Input, Switch, Tooltip } from '@deepseek-ai/dsh-client-ui-primitives'
 import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from 'react'
 import type { SettingsSection } from './chat-hooks.ts'
 export type { SettingsSection } from './chat-hooks.ts'
 import { CapabilitiesMcpPanel, SegmentedChoice } from './capabilities-mcp-panel.tsx'
-import { TASK_PRESET_OPTIONS, type ApprovalMode, type CapabilityCatalogView, type CapabilityGrant, type DefaultTaskPreset, type DotMcpListView, type DotSettings, type FactoryResetPreview, type FactoryResetResult, type KeepaliveInfo, type ModelChoice, type SettingField, type SettingProposal, type TakeoverMode, type TaskModelRule, type TaskPermission } from './contracts.ts'
+import {
+  DEFAULT_GITHUB_POLL_SETTINGS, GITHUB_ADMISSION_ACTIONS, GITHUB_EVENT_TYPES, GITHUB_POLL_DEFAULT_SOURCE_ID,
+  GITHUB_POLL_MAX_INTERVAL_SEC, GITHUB_POLL_MIN_INTERVAL_SEC, GITHUB_SENDER_CLASSES, TASK_PRESET_OPTIONS,
+  type ApprovalMode, type CapabilityCatalogView, type CapabilityGrant, type DefaultTaskPreset, type DotMcpListView,
+  type DotSettings, type FactoryResetPreview, type FactoryResetResult, type GithubAdmissionAction,
+  type GithubAdmissionRule, type GithubEventType, type GithubPollSettings, type GithubPollStatusView,
+  type GithubPollTestResult, type GithubSenderClass, type KeepaliveInfo, type ModelChoice, type SettingField,
+  type SettingProposal, type TakeoverMode, type TaskModelRule, type TaskPermission,
+} from './contracts.ts'
 import { DESKTOP_NOTIFY_KEY } from './attention-client.ts'
 import type { UpdateResult, UpdateStatus } from './auto-update.ts'
 import { factoryResetScope, formatWhen, t, type CopyLocale, type TextKey } from './ui-copy.ts'
 
-/** null on model, persona, address or mcpServers goes back to the default. */
-export type SettingsPatch = { readonly [K in keyof DotSettings]?: K extends 'model' ? ModelChoice | null : K extends 'persona' | 'address' ? string | null : K extends 'mcpServers' ? DotSettings[K] | null : DotSettings[K] }
+/** null on model, persona, address, mcpServers or githubPoll goes back to the default. */
+export type SettingsPatch = { readonly [K in keyof DotSettings]?: K extends 'model' ? ModelChoice | null : K extends 'persona' | 'address' ? string | null : K extends 'mcpServers' | 'githubPoll' ? DotSettings[K] | null : DotSettings[K] }
 export type SaveNotice = { readonly kind: 'saved' } | { readonly kind: 'error'; readonly message: string }
 
 export interface SettingsApi {
@@ -35,6 +43,10 @@ export interface SettingsApi {
   mcpCredentialUnset?(server: string): Promise<{ configured: boolean }>
   /** Live task-permission options; absent in tests. */
   taskPermissionOptions?(signal: AbortSignal): Promise<{ options: TaskPermission[] }>
+  /** Passive GitHub polling status snapshot; absent in tests. */
+  githubPollStatus?(signal: AbortSignal): Promise<GithubPollStatusView>
+  /** Interactive `gh` CLI & repo connectivity probe; absent in tests. */
+  githubPollTest?(request: { readonly ghPath?: string; readonly hostname?: string; readonly repos?: readonly string[] }): Promise<GithubPollTestResult>
   settings(signal: AbortSignal): Promise<DotSettings>
   previewFactoryReset?(): Promise<FactoryResetPreview>
   confirmFactoryReset?(token: string): Promise<FactoryResetResult>
@@ -507,6 +519,552 @@ export function PaneSkeleton({ label, rows = 4 }: { label: string; rows?: number
   )
 }
 
+const CLIENT_GITHUB_REPO_RE = /^[A-Za-z0-9][A-Za-z0-9_.-]*\/[A-Za-z0-9_.][A-Za-z0-9_.-]*$/
+
+function normalizeRepoInput(raw: string): string {
+  return raw.trim().toLowerCase()
+}
+
+function normalizeRepoListClient(repos: readonly string[]): string[] {
+  const seen = new Set<string>()
+  const out: string[] = []
+  for (const raw of repos) {
+    const norm = normalizeRepoInput(raw)
+    if (!norm || seen.has(norm)) continue
+    seen.add(norm)
+    out.push(norm)
+  }
+  return out
+}
+
+function effectiveGithubPollClient(settings: DotSettings): GithubPollSettings {
+  const raw = settings.githubPoll
+  if (!raw) return DEFAULT_GITHUB_POLL_SETTINGS
+  return {
+    ...DEFAULT_GITHUB_POLL_SETTINGS,
+    ...raw,
+    repos: normalizeRepoListClient(raw.repos ?? []),
+    webhookRepos: normalizeRepoListClient(raw.webhookRepos ?? []),
+    streams: {
+      issues: raw.streams?.issues ?? true,
+      pulls: raw.streams?.pulls ?? true,
+      comments: raw.streams?.comments ?? true,
+      ci: raw.streams?.ci ?? true,
+    },
+    ignoredActors: raw.ignoredActors ?? [],
+    sourceId: raw.sourceId || GITHUB_POLL_DEFAULT_SOURCE_ID,
+    admission: raw.admission ?? [],
+  }
+}
+
+/** Poll-primary GitHub intake settings, connection tester, Fast-Path admission matrix, and collapsed Webhook overrides. */
+function GithubSettingsSection({ locale, api, settings, onSave }: {
+  locale: CopyLocale
+  api: SettingsApi
+  settings: DotSettings
+  onSave: (next: GithubPollSettings) => void
+}) {
+  const gh = effectiveGithubPollClient(settings)
+  const [pollStatus, setPollStatus] = useState<GithubPollStatusView>()
+  const [statusTick, setStatusTick] = useState(0)
+
+  const [pollRepoDraft, setPollRepoDraft] = useState('')
+  const [pollRepoError, setPollRepoError] = useState('')
+  const [webhookRepoDraft, setWebhookRepoDraft] = useState('')
+  const [webhookRepoError, setWebhookRepoError] = useState('')
+
+  const [draftGhPath, setDraftGhPath] = useState(gh.ghPath)
+  const [draftHostname, setDraftHostname] = useState(gh.hostname ?? '')
+  const [draftInterval, setDraftInterval] = useState(String(gh.intervalSec))
+  const [draftActors, setDraftActors] = useState(gh.ignoredActors.join(', '))
+  const [draftSourceId, setDraftSourceId] = useState(gh.sourceId ?? GITHUB_POLL_DEFAULT_SOURCE_ID)
+
+  const [testBusy, setTestBusy] = useState(false)
+  const [testResult, setTestResult] = useState<GithubPollTestResult>()
+  const [testError, setTestError] = useState('')
+
+  const [admRepo, setAdmRepo] = useState('*')
+  const [admEvent, setAdmEvent] = useState<GithubEventType>('comment')
+  const [admSender, setAdmSender] = useState<GithubSenderClass>('human')
+  const [admAction, setAdmAction] = useState<GithubAdmissionAction>('inbox')
+  const [admError, setAdmError] = useState('')
+
+  useEffect(() => { setDraftGhPath(gh.ghPath) }, [gh.ghPath])
+  useEffect(() => { setDraftHostname(gh.hostname ?? '') }, [gh.hostname])
+  useEffect(() => { setDraftInterval(String(gh.intervalSec)) }, [gh.intervalSec])
+  useEffect(() => { setDraftActors(gh.ignoredActors.join(', ')) }, [gh.ignoredActors])
+  useEffect(() => { setDraftSourceId(gh.sourceId ?? GITHUB_POLL_DEFAULT_SOURCE_ID) }, [gh.sourceId])
+
+  const ghSig = JSON.stringify(gh)
+  useEffect(() => {
+    if (!api.githubPollStatus) return
+    const life = new AbortController()
+    const load = () => api.githubPollStatus!(life.signal).then(
+      next => { if (!life.signal.aborted) setPollStatus(next) },
+      () => {},
+    )
+    void load()
+    const timer = setInterval(load, 5000)
+    return () => { life.abort(); clearInterval(timer) }
+  }, [api, ghSig, statusTick])
+
+  const commit = (patch: Partial<GithubPollSettings>) => {
+    const rawHost = ('hostname' in patch ? patch.hostname : gh.hostname)?.trim().toLowerCase()
+    const cleanHost = rawHost && rawHost !== 'github.com' ? rawHost : undefined
+    const next: GithubPollSettings = {
+      enabled: patch.enabled ?? gh.enabled,
+      repos: normalizeRepoListClient(patch.repos ?? gh.repos),
+      webhookRepos: normalizeRepoListClient(patch.webhookRepos ?? gh.webhookRepos),
+      ghPath: (patch.ghPath ?? gh.ghPath).trim() || 'gh',
+      ...(cleanHost ? { hostname: cleanHost } : {}),
+      intervalSec: patch.intervalSec ?? gh.intervalSec,
+      streams: patch.streams ?? gh.streams,
+      ignoredActors: [...new Set((patch.ignoredActors ?? gh.ignoredActors).map(a => a.trim().toLowerCase()).filter(Boolean))],
+      sourceId: (patch.sourceId ?? gh.sourceId)?.trim() || GITHUB_POLL_DEFAULT_SOURCE_ID,
+      admission: patch.admission ?? gh.admission ?? [],
+    }
+    onSave(next)
+  }
+
+  const addPollRepo = () => {
+    const norm = normalizeRepoInput(pollRepoDraft)
+    if (!CLIENT_GITHUB_REPO_RE.test(norm)) {
+      setPollRepoError(t(locale, 'sGhErrRepoFormat'))
+      return
+    }
+    if (gh.webhookRepos.includes(norm)) {
+      setPollRepoError(t(locale, 'sGhErrMutualExclusionPoll').replace('{repo}', norm))
+      return
+    }
+    if (gh.repos.includes(norm)) {
+      setPollRepoError(t(locale, 'sGhErrDuplicateRepo').replace('{repo}', norm))
+      return
+    }
+    setPollRepoError('')
+    setPollRepoDraft('')
+    commit({ repos: [...gh.repos, norm] })
+  }
+
+  const addWebhookRepo = () => {
+    const norm = normalizeRepoInput(webhookRepoDraft)
+    if (!CLIENT_GITHUB_REPO_RE.test(norm)) {
+      setWebhookRepoError(t(locale, 'sGhErrRepoFormat'))
+      return
+    }
+    if (gh.repos.includes(norm)) {
+      setWebhookRepoError(t(locale, 'sGhErrMutualExclusionWebhook').replace('{repo}', norm))
+      return
+    }
+    if (gh.webhookRepos.includes(norm)) {
+      setWebhookRepoError(t(locale, 'sGhErrDuplicateRepo').replace('{repo}', norm))
+      return
+    }
+    setWebhookRepoError('')
+    setWebhookRepoDraft('')
+    commit({ webhookRepos: [...gh.webhookRepos, norm] })
+  }
+
+  const commitInterval = () => {
+    const text = draftInterval.trim()
+    const num = Number(text)
+    if (text === '' || !Number.isInteger(num) || num < GITHUB_POLL_MIN_INTERVAL_SEC || num > GITHUB_POLL_MAX_INTERVAL_SEC) {
+      setDraftInterval(String(gh.intervalSec))
+      return
+    }
+    if (num !== gh.intervalSec) commit({ intervalSec: num })
+  }
+
+  const commitGhPath = () => {
+    const clean = draftGhPath.trim()
+    if (!clean) { setDraftGhPath(gh.ghPath); return }
+    if (clean !== gh.ghPath) commit({ ghPath: clean })
+  }
+
+  const commitHostname = () => {
+    const clean = draftHostname.trim().toLowerCase()
+    const normalized = clean && clean !== 'github.com' ? clean : undefined
+    if (normalized !== gh.hostname) commit({ hostname: normalized })
+  }
+
+  const commitActors = () => {
+    const list = [...new Set(draftActors.split(/[,\n]+/).map(s => s.trim().toLowerCase()).filter(Boolean))]
+    if (JSON.stringify(list) !== JSON.stringify(gh.ignoredActors)) commit({ ignoredActors: list })
+  }
+
+  const commitSourceId = () => {
+    const clean = draftSourceId.trim() || GITHUB_POLL_DEFAULT_SOURCE_ID
+    setDraftSourceId(clean)
+    if (clean !== (gh.sourceId ?? GITHUB_POLL_DEFAULT_SOURCE_ID)) commit({ sourceId: clean })
+  }
+
+  const runTest = () => {
+    if (testBusy || !api.githubPollTest) return
+    setTestBusy(true)
+    setTestError('')
+    const hostVal = draftHostname.trim().toLowerCase()
+    api.githubPollTest({
+      ghPath: draftGhPath.trim() || gh.ghPath,
+      ...(hostVal && hostVal !== 'github.com' ? { hostname: hostVal } : {}),
+      repos: gh.repos,
+    }).then(
+      res => { setTestResult(res); setTestBusy(false); setStatusTick(v => v + 1) },
+      failure => { setTestResult(undefined); setTestError(failure instanceof Error ? failure.message : String(failure)); setTestBusy(false) },
+    )
+  }
+
+  const rules = gh.admission ?? []
+  const addAdmissionRule = () => {
+    const raw = admRepo.trim()
+    const norm = raw === '*' ? '*' : normalizeRepoInput(raw)
+    if (norm !== '*' && !CLIENT_GITHUB_REPO_RE.test(norm)) {
+      setAdmError(t(locale, 'sGhErrAdmissionRepo'))
+      return
+    }
+    setAdmError('')
+    const nextRule: GithubAdmissionRule = { repo: norm, eventType: admEvent, senderClass: admSender, action: admAction }
+    const idx = rules.findIndex(r => r.repo === norm && r.eventType === admEvent && r.senderClass === admSender)
+    const nextRules = idx >= 0
+      ? rules.map((r, i) => (i === idx ? nextRule : r))
+      : [...rules, nextRule]
+    commit({ admission: nextRules })
+  }
+
+  const statusErrorText = pollStatus?.lastError ?? pollStatus?.repos.find(r => r.lastError)?.lastError ?? ''
+  const showHealthAlert = Boolean(pollStatus && (pollStatus.alert || pollStatus.health === 'error'))
+  const showHealthDegraded = Boolean(pollStatus && !showHealthAlert && (pollStatus.health === 'degraded' || pollStatus.consecutiveFailures > 0))
+  const showBudgetWarn = Boolean(pollStatus && (pollStatus.budgetAdjusted || pollStatus.budgetWarning))
+
+  return (
+    <div className="dsh-dot-pane-section dsh-dot-gh">
+      <div className="dsh-dot-gh-card" data-gh-card="poll">
+        <div className="dsh-dot-gh-head">
+          <h4 className="dsh-dot-gh-title">{t(locale, 'sGhPollCardTitle')}</h4>
+          {pollStatus ? (
+            <span className="dsh-dot-gh-health" data-health={pollStatus.health}>
+              {t(locale, `sGhHealth_${pollStatus.health}` as TextKey)}
+            </span>
+          ) : null}
+        </div>
+        <p className="dsh-dot-gh-desc">{t(locale, 'sGhPollCardDesc')}</p>
+
+        {showHealthAlert && pollStatus ? (
+          <div className="dsh-dot-gh-banner dsh-dot-gh-banner--error" role="alert">
+            <IconWarningOutlineRegular size={14} />
+            <span>{t(locale, 'sGhHealthError').replace('{count}', String(pollStatus.consecutiveFailures)).replace('{error}', statusErrorText)}</span>
+          </div>
+        ) : null}
+        {showHealthDegraded && pollStatus ? (
+          <div className="dsh-dot-gh-banner dsh-dot-gh-banner--warn" role="status">
+            <IconWarningOutlineRegular size={14} />
+            <span>{t(locale, 'sGhHealthDegraded').replace('{count}', String(pollStatus.consecutiveFailures)).replace('{error}', statusErrorText)}</span>
+          </div>
+        ) : null}
+        {showBudgetWarn && pollStatus ? (
+          <div className="dsh-dot-gh-banner dsh-dot-gh-banner--warn" role="status" data-gh-budget="warn">
+            <IconWarningOutlineRegular size={14} />
+            <span>
+              {t(locale, 'sGhBudgetWarning')
+                .replace('{hourly}', String(pollStatus.hourlyRequests ?? '?'))
+                .replace('{limit}', String(pollStatus.budgetLimitPerHour ?? '?'))
+                .replace('{user}', String(pollStatus.userIntervalSec))
+                .replace('{effective}', String(pollStatus.effectiveIntervalSec))}
+            </span>
+          </div>
+        ) : null}
+
+        <div className="dsh-ui-form">
+          <InlineField
+            label={t(locale, 'sGhEnabled')}
+            tip={t(locale, 'sGhEnabledDesc')}
+            control={<Switch checked={gh.enabled} label={t(locale, 'sGhEnabled')} onChange={checked => commit({ enabled: checked })} />}
+          />
+
+          <Field
+            label={t(locale, 'sGhRepos')}
+            tip={t(locale, 'sGhReposDesc')}
+            help={pollRepoError || undefined}
+            helpTone={pollRepoError ? 'warn' : undefined}
+            wide
+          >
+            {gh.repos.length > 0 ? (
+              <div className="dsh-dot-gh-chips" data-gh-list="poll">
+                {gh.repos.map(repo => {
+                  const repoStatus = pollStatus?.repos.find(r => r.repo === repo && r.mode === 'poll')
+                  return (
+                    <span key={repo} className="dsh-dot-gh-chip" data-failures={repoStatus?.consecutiveFailures ?? 0}>
+                      <span className="dsh-dot-gh-chip-name">{repo}</span>
+                      <button
+                        type="button"
+                        className="dsh-dot-gh-chip-remove"
+                        aria-label={t(locale, 'sGhRepoRemove').replace('{repo}', repo)}
+                        onClick={() => commit({ repos: gh.repos.filter(r => r !== repo) })}
+                      >×</button>
+                    </span>
+                  )
+                })}
+              </div>
+            ) : (
+              <div className="dsh-dot-gh-empty">{t(locale, 'sGhReposEmpty')}</div>
+            )}
+            <div className="dsh-dot-gh-add-row">
+              <Input
+                aria-label={t(locale, 'sGhRepos')}
+                placeholder={t(locale, 'sGhRepoPlaceholder')}
+                value={pollRepoDraft}
+                onChange={event => { setPollRepoDraft(event.target.value); if (pollRepoError) setPollRepoError('') }}
+                onKeyDown={event => { if (event.key === 'Enter') { event.preventDefault(); addPollRepo() } }}
+              />
+              <Button variant="outline" size="sm" onClick={addPollRepo}>{t(locale, 'sGhRepoAdd')}</Button>
+            </div>
+          </Field>
+
+          <Field label={t(locale, 'sGhStreams')} tip={t(locale, 'sGhStreamsDesc')} wide>
+            <div className="dsh-dot-gh-streams" role="group" aria-label={t(locale, 'sGhStreams')}>
+              <Checkbox checked={gh.streams.issues} label={t(locale, 'sGhStreamIssues')} onChange={checked => commit({ streams: { ...gh.streams, issues: checked } })} />
+              <Checkbox checked={gh.streams.pulls} label={t(locale, 'sGhStreamPulls')} onChange={checked => commit({ streams: { ...gh.streams, pulls: checked } })} />
+              <Checkbox checked={gh.streams.comments} label={t(locale, 'sGhStreamComments')} onChange={checked => commit({ streams: { ...gh.streams, comments: checked } })} />
+              <Checkbox checked={gh.streams.ci} label={t(locale, 'sGhStreamCi')} onChange={checked => commit({ streams: { ...gh.streams, ci: checked } })} />
+            </div>
+          </Field>
+
+          <Field label={t(locale, 'sGhInterval')} tip={t(locale, 'sGhIntervalDesc')}>
+            <div className="dsh-dot-idle-check">
+              <Input
+                className="dsh-dot-idle-input"
+                type="number"
+                inputMode="numeric"
+                min={GITHUB_POLL_MIN_INTERVAL_SEC}
+                max={GITHUB_POLL_MAX_INTERVAL_SEC}
+                step={1}
+                aria-label={t(locale, 'sGhInterval')}
+                value={draftInterval}
+                onChange={event => setDraftInterval(event.target.value)}
+                onBlur={commitInterval}
+                onKeyDown={event => { if (event.key === 'Enter') event.currentTarget.blur() }}
+              />
+              <span className="dsh-ui-meta">{t(locale, 'sGhIntervalUnit')}</span>
+            </div>
+            <div className="dsh-dot-gh-meta-row">
+              <span className="dsh-ui-meta">{t(locale, 'sGhEffectiveInterval').replace('{sec}', String(pollStatus?.effectiveIntervalSec ?? gh.intervalSec))}</span>
+              {pollStatus?.xPollIntervalSec !== undefined ? (
+                <span className="dsh-ui-meta">{t(locale, 'sGhXPollInterval').replace('{sec}', String(pollStatus.xPollIntervalSec))}</span>
+              ) : null}
+              {pollStatus?.hourlyRequests !== undefined ? (
+                <span className="dsh-ui-meta">{t(locale, 'sGhHourlyEstimate').replace('{n}', String(pollStatus.hourlyRequests))}</span>
+              ) : null}
+              {pollStatus?.rateLimitRemaining !== undefined ? (
+                <span className="dsh-ui-meta">{t(locale, 'sGhRateQuota').replace('{remaining}', String(pollStatus.rateLimitRemaining)).replace('{limit}', String(pollStatus.rateLimitLimit ?? '?'))}</span>
+              ) : null}
+            </div>
+          </Field>
+
+          <Field label={t(locale, 'sGhGhPath')} tip={t(locale, 'sGhGhPathDesc')}>
+            <Input
+              aria-label={t(locale, 'sGhGhPath')}
+              value={draftGhPath}
+              onChange={event => setDraftGhPath(event.target.value)}
+              onBlur={commitGhPath}
+              onKeyDown={event => { if (event.key === 'Enter') event.currentTarget.blur() }}
+            />
+          </Field>
+
+          <Field label={t(locale, 'sGhHostname')} tip={t(locale, 'sGhHostnameDesc')}>
+            <Input
+              aria-label={t(locale, 'sGhHostname')}
+              placeholder={t(locale, 'sGhHostnamePlaceholder')}
+              value={draftHostname}
+              onChange={event => setDraftHostname(event.target.value)}
+              onBlur={commitHostname}
+              onKeyDown={event => { if (event.key === 'Enter') event.currentTarget.blur() }}
+            />
+          </Field>
+
+          <Field label={t(locale, 'sGhIgnoredActors')} tip={t(locale, 'sGhIgnoredActorsDesc')} wide>
+            <Input
+              aria-label={t(locale, 'sGhIgnoredActors')}
+              placeholder={t(locale, 'sGhIgnoredActorsPlaceholder')}
+              value={draftActors}
+              onChange={event => setDraftActors(event.target.value)}
+              onBlur={commitActors}
+              onKeyDown={event => { if (event.key === 'Enter') event.currentTarget.blur() }}
+            />
+          </Field>
+        </div>
+
+        <div className="dsh-dot-gh-test-bar">
+          <Button variant="outline" size="sm" disabled={testBusy || !api.githubPollTest} onClick={runTest}>
+            {testBusy ? t(locale, 'sGhTesting') : t(locale, 'sGhTestBtn')}
+          </Button>
+        </div>
+
+        {testError ? <div className="dsh-ui-error" role="alert">{testError}</div> : null}
+        {testResult ? (
+          <div className="dsh-dot-gh-test-result" data-ok={testResult.ok ? '' : undefined} role="status">
+            <div className="dsh-dot-gh-test-head">
+              {testResult.ok ? <IconCheckOutlineRegular size={14} /> : <IconWarningOutlineRegular size={14} />}
+              <strong>{t(locale, testResult.ok ? 'sGhTestOk' : 'sGhTestFail')}</strong>
+            </div>
+            <div className="dsh-dot-gh-test-lines">
+              <div>
+                {testResult.ghFound
+                  ? t(locale, 'sGhTestCliFound').replace('{path}', testResult.resolvedPath ?? gh.ghPath).replace('{version}', testResult.version ?? '?')
+                  : t(locale, 'sGhTestCliMissing')}
+              </div>
+              {testResult.ghFound ? (
+                <div>
+                  {testResult.authenticated
+                    ? t(locale, 'sGhTestAuthOk').replace('{login}', testResult.login ?? '?').replace('{host}', testResult.host)
+                    : t(locale, 'sGhTestAuthFail').replace('{host}', testResult.host)}
+                </div>
+              ) : null}
+              {testResult.rateLimitRemaining !== undefined ? (
+                <div>{t(locale, 'sGhRateQuota').replace('{remaining}', String(testResult.rateLimitRemaining)).replace('{limit}', String(testResult.rateLimitLimit ?? '?'))}</div>
+              ) : null}
+              {testResult.repoChecks?.map(chk => (
+                <div key={chk.repo} className="dsh-dot-gh-test-repo" data-ok={chk.ok ? '' : undefined}>
+                  <code>{chk.repo}</code>: {chk.ok ? t(locale, 'sGhTestRepoOk') : (chk.error ?? 'error')}
+                </div>
+              ))}
+              {testResult.error ? <div className="dsh-ui-error">{testResult.error}</div> : null}
+            </div>
+          </div>
+        ) : null}
+      </div>
+
+      <details className="dsh-dot-gh-details" data-gh-section="admission">
+        <summary className="dsh-dot-gh-details-summary">
+          <span>{t(locale, 'sGhAdvAdmissionTitle')}</span>
+          {rules.length > 0 ? <span className="dsh-dot-model-group-count">{rules.length}</span> : null}
+        </summary>
+        <div className="dsh-dot-gh-details-body">
+          <p className="dsh-dot-gh-desc">{t(locale, 'sGhAdmissionDefaults')}</p>
+          {rules.length > 0 ? (
+            <div className="dsh-dot-gh-rules">
+              {rules.map((rule, index) => (
+                <div key={`${rule.repo}:${rule.eventType}:${rule.senderClass}`} className="dsh-dot-gh-rule-row">
+                  <code className="dsh-dot-gh-rule-repo">{rule.repo}</code>
+                  <span className="dsh-dot-gh-rule-meta">{t(locale, `sGhEvent_${rule.eventType}` as TextKey)}</span>
+                  <span className="dsh-dot-gh-rule-meta">{t(locale, `sSender_${rule.senderClass}` as TextKey)}</span>
+                  <select
+                    className="dsh-ui-select dsh-dot-gh-rule-select"
+                    aria-label={`${rule.repo} ${rule.eventType} ${rule.senderClass}`}
+                    value={rule.action}
+                    onChange={event => {
+                      const nextAction = event.target.value as GithubAdmissionAction
+                      commit({ admission: rules.map((r, i) => (i === index ? { ...r, action: nextAction } : r)) })
+                    }}
+                  >
+                    {GITHUB_ADMISSION_ACTIONS.map(action => (
+                      <option key={action} value={action}>{t(locale, `sAction_${action}` as TextKey)}</option>
+                    ))}
+                  </select>
+                  <button
+                    type="button"
+                    className="dsh-dot-gh-chip-remove"
+                    aria-label={t(locale, 'sGhAdmissionRemove')}
+                    onClick={() => commit({ admission: rules.filter((_, i) => i !== index) })}
+                  >×</button>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="dsh-dot-gh-empty">{t(locale, 'sGhAdmissionEmpty')}</div>
+          )}
+          <div className="dsh-dot-gh-rule-form">
+            <Input
+              aria-label={t(locale, 'sGhAdmissionRepo')}
+              placeholder="*"
+              value={admRepo}
+              onChange={event => { setAdmRepo(event.target.value); if (admError) setAdmError('') }}
+            />
+            <select
+              className="dsh-ui-select"
+              aria-label={t(locale, 'sGhAdmissionEvent')}
+              value={admEvent}
+              onChange={event => setAdmEvent(event.target.value as GithubEventType)}
+            >
+              {GITHUB_EVENT_TYPES.map(ev => <option key={ev} value={ev}>{t(locale, `sGhEvent_${ev}` as TextKey)}</option>)}
+            </select>
+            <select
+              className="dsh-ui-select"
+              aria-label={t(locale, 'sGhAdmissionSender')}
+              value={admSender}
+              onChange={event => setAdmSender(event.target.value as GithubSenderClass)}
+            >
+              {GITHUB_SENDER_CLASSES.map(sc => <option key={sc} value={sc}>{t(locale, `sSender_${sc}` as TextKey)}</option>)}
+            </select>
+            <select
+              className="dsh-ui-select"
+              aria-label={t(locale, 'sGhAdmissionAction')}
+              value={admAction}
+              onChange={event => setAdmAction(event.target.value as GithubAdmissionAction)}
+            >
+              {GITHUB_ADMISSION_ACTIONS.map(act => <option key={act} value={act}>{t(locale, `sAction_${act}` as TextKey)}</option>)}
+            </select>
+            <Button variant="outline" size="sm" onClick={addAdmissionRule}>{t(locale, 'sGhAdmissionAdd')}</Button>
+          </div>
+          {admError ? <span className="dsh-ui-help dsh-ui-warn">{admError}</span> : null}
+        </div>
+      </details>
+
+      <details className="dsh-dot-gh-details" data-gh-section="webhook">
+        <summary className="dsh-dot-gh-details-summary">
+          <span>{t(locale, 'sGhAdvWebhookTitle')}</span>
+          {gh.webhookRepos.length > 0 ? <span className="dsh-dot-model-group-count">{gh.webhookRepos.length}</span> : null}
+        </summary>
+        <div className="dsh-dot-gh-details-body">
+          <p className="dsh-dot-gh-desc">{t(locale, 'sGhWebhookDesc')}</p>
+          <div className="dsh-ui-form">
+            <Field
+              label={t(locale, 'sGhWebhookRepos')}
+              help={webhookRepoError || undefined}
+              helpTone={webhookRepoError ? 'warn' : undefined}
+              wide
+            >
+              {gh.webhookRepos.length > 0 ? (
+                <div className="dsh-dot-gh-chips" data-gh-list="webhook">
+                  {gh.webhookRepos.map(repo => (
+                    <span key={repo} className="dsh-dot-gh-chip">
+                      <span className="dsh-dot-gh-chip-name">{repo}</span>
+                      <button
+                        type="button"
+                        className="dsh-dot-gh-chip-remove"
+                        aria-label={t(locale, 'sGhRepoRemove').replace('{repo}', repo)}
+                        onClick={() => commit({ webhookRepos: gh.webhookRepos.filter(r => r !== repo) })}
+                      >×</button>
+                    </span>
+                  ))}
+                </div>
+              ) : (
+                <div className="dsh-dot-gh-empty">{t(locale, 'sGhWebhookReposEmpty')}</div>
+              )}
+              <div className="dsh-dot-gh-add-row">
+                <Input
+                  aria-label={t(locale, 'sGhWebhookRepos')}
+                  placeholder={t(locale, 'sGhRepoPlaceholder')}
+                  value={webhookRepoDraft}
+                  onChange={event => { setWebhookRepoDraft(event.target.value); if (webhookRepoError) setWebhookRepoError('') }}
+                  onKeyDown={event => { if (event.key === 'Enter') { event.preventDefault(); addWebhookRepo() } }}
+                />
+                <Button variant="outline" size="sm" onClick={addWebhookRepo}>{t(locale, 'sGhRepoAdd')}</Button>
+              </div>
+            </Field>
+            <Field label={t(locale, 'sGhSourceId')} tip={t(locale, 'sGhSourceIdDesc')} wide>
+              <Input
+                aria-label={t(locale, 'sGhSourceId')}
+                value={draftSourceId}
+                onChange={event => setDraftSourceId(event.target.value)}
+                onBlur={commitSourceId}
+                onKeyDown={event => { if (event.key === 'Enter') event.currentTarget.blur() }}
+              />
+            </Field>
+          </div>
+        </div>
+      </details>
+    </div>
+  )
+}
+
 export function SettingsPanel({ locale, api, settings, section = 'all', proposals, onSaved, onStatusChange, onProposalCount, onSectionChange, renderFactorySlot }: {
   locale: CopyLocale
   api: SettingsApi
@@ -873,6 +1431,14 @@ export function SettingsPanel({ locale, api, settings, section = 'all', proposal
           </div>
         </div>
       ) : null}
+      {show('github') ? (
+        <GithubSettingsSection
+          locale={locale}
+          api={api}
+          settings={settings}
+          onSave={next => save({ githubPoll: next })}
+        />
+      ) : null}
       {show('capabilities') ? (
         <div className="dsh-dot-pane-section">
           {allSections ? <h3 className="dsh-dot-pane-section-title">{t(locale, 'sCapabilities')}</h3> : null}
@@ -1168,4 +1734,46 @@ export const settingsCss = `
 .dsh-dot-chat .dsh-dot-mcp-tools { display: flex; flex-direction: column; gap: 2px; }
 .dsh-dot-chat .dsh-dot-mcp-remove { color: var(--dsw-alias-state-error-primary, var(--dsw-alias-label-tertiary)); }
 .dsh-dot-chat .dsh-dot-mcp-remove:hover:not(:disabled) { color: var(--dsw-alias-state-error-primary, var(--dsw-alias-label-primary)); background: var(--dsw-alias-interactive-bg-hover); }
+/* GitHub poll-primary settings card, status banners, connection check, and collapsed advanced panels. */
+.dsh-dot-chat .dsh-dot-gh { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+.dsh-dot-chat .dsh-dot-gh-card { display: flex; flex-direction: column; gap: 10px; padding: 12px 14px; border-radius: var(--dsw-radius-md); background: var(--dsw-alias-bg-layer-1); box-shadow: var(--dsw-elevation-stroke); min-width: 0; }
+.dsh-dot-chat .dsh-dot-gh-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
+.dsh-dot-chat .dsh-dot-gh-title { margin: 0; font-size: 14px; line-height: 20px; font-weight: 600; color: var(--dsw-alias-label-primary); }
+.dsh-dot-chat .dsh-dot-gh-desc { margin: 0; font-size: 12px; line-height: 18px; color: var(--dsw-alias-label-secondary); }
+.dsh-dot-chat .dsh-dot-gh-health { padding: 1px 8px; border-radius: var(--dsw-radius-sm); font-size: 11px; line-height: 18px; font-weight: 500; background: var(--dsw-alias-bg-layer-2); color: var(--dsw-alias-label-secondary); }
+.dsh-dot-chat .dsh-dot-gh-health[data-health='ok'] { color: var(--dsw-alias-state-success-primary); }
+.dsh-dot-chat .dsh-dot-gh-health[data-health='degraded'] { color: var(--dsw-alias-state-warn-primary); }
+.dsh-dot-chat .dsh-dot-gh-health[data-health='error'] { color: var(--dsw-alias-state-error-primary); }
+.dsh-dot-chat .dsh-dot-gh-banner { display: flex; align-items: flex-start; gap: 8px; padding: 8px 10px; border-radius: var(--dsw-radius-sm); font-size: 12px; line-height: 18px; }
+.dsh-dot-chat .dsh-dot-gh-banner--warn { background: color-mix(in srgb, var(--dsw-alias-state-warn-primary) 12%, transparent); color: var(--dsw-alias-state-warn-primary); }
+.dsh-dot-chat .dsh-dot-gh-banner--error { background: color-mix(in srgb, var(--dsw-alias-state-error-primary) 12%, transparent); color: var(--dsw-alias-state-error-primary); }
+.dsh-dot-chat .dsh-dot-gh-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 6px; }
+.dsh-dot-chat .dsh-dot-gh-chip { display: inline-flex; align-items: center; gap: 4px; padding: 2px 4px 2px 8px; border-radius: var(--dsw-radius-sm); background: var(--dsw-alias-bg-layer-2); box-shadow: var(--dsw-elevation-stroke); font-size: 12px; line-height: 18px; color: var(--dsw-alias-label-primary); }
+.dsh-dot-chat .dsh-dot-gh-chip-name { font-family: var(--ds-font-family-code); }
+.dsh-dot-chat .dsh-dot-gh-chip-remove { display: inline-flex; align-items: center; justify-content: center; width: 18px; height: 18px; padding: 0; border: 0; border-radius: var(--dsw-radius-sm); background: transparent; color: var(--dsw-alias-label-tertiary); cursor: pointer; font-size: 13px; line-height: 1; }
+.dsh-dot-chat .dsh-dot-gh-chip-remove:hover { background: var(--dsw-alias-interactive-bg-hover); color: var(--dsw-alias-label-primary); }
+.dsh-dot-chat .dsh-dot-gh-empty { font-size: 12px; line-height: 18px; color: var(--dsw-alias-label-tertiary); margin-bottom: 6px; }
+.dsh-dot-chat .dsh-dot-gh-add-row { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.dsh-dot-chat .dsh-dot-gh-add-row > :first-child { flex: 1 1 auto; min-width: 0; }
+.dsh-dot-chat .dsh-dot-gh-streams { display: flex; flex-wrap: wrap; gap: 8px 16px; }
+.dsh-dot-chat .dsh-dot-gh-meta-row { display: flex; flex-wrap: wrap; gap: 6px 12px; margin-top: 4px; }
+.dsh-dot-chat .dsh-dot-gh-test-bar { display: flex; align-items: center; gap: 8px; padding-top: 4px; }
+.dsh-dot-chat .dsh-dot-gh-test-result { display: flex; flex-direction: column; gap: 6px; padding: 10px 12px; border-radius: var(--dsw-radius-sm); background: var(--dsw-alias-bg-layer-2); font-size: 12px; line-height: 18px; }
+.dsh-dot-chat .dsh-dot-gh-test-head { display: flex; align-items: center; gap: 6px; color: var(--dsw-alias-state-warn-primary); }
+.dsh-dot-chat .dsh-dot-gh-test-result[data-ok] .dsh-dot-gh-test-head { color: var(--dsw-alias-state-success-primary); }
+.dsh-dot-chat .dsh-dot-gh-test-lines { display: flex; flex-direction: column; gap: 2px; color: var(--dsw-alias-label-secondary); }
+.dsh-dot-chat .dsh-dot-gh-test-repo[data-ok] { color: var(--dsw-alias-state-success-primary); }
+.dsh-dot-chat .dsh-dot-gh-details { border-radius: var(--dsw-radius-md); background: var(--dsw-alias-bg-layer-1); box-shadow: var(--dsw-elevation-stroke); }
+.dsh-dot-chat .dsh-dot-gh-details-summary { display: flex; align-items: center; gap: 8px; padding: 10px 14px; font-size: 13px; line-height: 20px; font-weight: 500; color: var(--dsw-alias-label-primary); cursor: pointer; list-style: none; }
+.dsh-dot-chat .dsh-dot-gh-details-summary::-webkit-details-marker { display: none; }
+.dsh-dot-chat .dsh-dot-gh-details-summary::before { content: '▸'; color: var(--dsw-alias-label-tertiary); }
+.dsh-dot-chat .dsh-dot-gh-details[open] > .dsh-dot-gh-details-summary::before { content: '▾'; }
+.dsh-dot-chat .dsh-dot-gh-details-body { display: flex; flex-direction: column; gap: 10px; padding: 0 14px 12px; }
+.dsh-dot-chat .dsh-dot-gh-rules { display: flex; flex-direction: column; gap: 6px; }
+.dsh-dot-chat .dsh-dot-gh-rule-row { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 8px; padding: 6px 8px; border-radius: var(--dsw-radius-sm); background: var(--dsw-alias-bg-layer-2); font-size: 12px; }
+.dsh-dot-chat .dsh-dot-gh-rule-repo { font-family: var(--ds-font-family-code); color: var(--dsw-alias-label-primary); }
+.dsh-dot-chat .dsh-dot-gh-rule-meta { color: var(--dsw-alias-label-secondary); }
+.dsh-dot-chat .dsh-dot-gh-rule-select { margin-left: auto; width: auto; }
+.dsh-dot-chat .dsh-dot-gh-rule-form { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.dsh-dot-chat .dsh-dot-gh-rule-form > :first-child { flex: 1 1 120px; min-width: 100px; }
 `

@@ -141,6 +141,37 @@ describe('peer delivery', () => {
     expect(relays).toBe(0)
     expect(reopened.read('peer-1')?.status).toBe('unknown')
   })
+
+  it('bounces out-of-scope follow-ups idempotently to Dorothy and refuses unowned senders', async () => {
+    const bounced: string[] = []
+    const stored = table()
+    const ledger = new PeerLedger(stored, parsePeerDelivery)
+    const deps: PeerDeliveryDeps = {
+      now: () => 50,
+      owns: id => id === 'session-worker',
+      isDorothy: id => id === 'dot-1',
+      bounce: async ({ senderSessionId, deliveryId, text }) => {
+        bounced.push(`${senderSessionId}:${deliveryId}:${text}`)
+        return 'stored'
+      },
+      get: id => ledger.read(id),
+      put: row => ledger.write(row),
+      prove: async () => 0,
+      relay: async () => {},
+      admit: () => ({ ok: true }),
+      hold: async () => ({ ok: true }),
+      release: async () => {},
+    }
+    const ok1 = await ledger.run(() => deliverPeer({ action: 'bounce', senderSessionId: 'session-worker', targetSessionId: 'dorothy', deliveryId: 'b-1', text: 'out of scope' }, deps))
+    expect(ok1).toContain('bounced to Dorothy')
+    const ok2 = await ledger.run(() => deliverPeer({ action: 'bounce', senderSessionId: 'session-worker', targetSessionId: 'dorothy', deliveryId: 'b-1', text: 'out of scope' }, deps))
+    expect(ok2).toContain('already bounced')
+    expect(bounced).toEqual(['session-worker:b-1:out of scope'])
+
+    const badSender = await ledger.run(() => deliverPeer({ action: 'bounce', senderSessionId: 'stranger', targetSessionId: 'dorothy', deliveryId: 'b-2', text: 'nope' }, deps))
+    expect(badSender).toContain('nothing was sent')
+    expect(bounced).toHaveLength(1)
+  })
 })
 
 describe('owned sessions', () => {

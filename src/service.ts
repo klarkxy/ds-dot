@@ -94,6 +94,16 @@ import {
   type KilledJobSummary,
   type ServiceGetter,
 } from './background.ts'
+import {
+  GithubPollCursorStore,
+  GithubPollSourceAdapter,
+  GithubPoller,
+  observePullClosure,
+  redactGithubTokens,
+  type ExecFileRunner,
+} from './github-poll/index.ts'
+import { effectiveGithubPollSettings, normalizeGithubRepo } from './settings.ts'
+import type { GithubPollStatusView, GithubPollTestResult } from './contracts.ts'
 
 export interface DotServiceOptions {
   readonly host: DotHost
@@ -137,6 +147,10 @@ export interface DotServiceOptions {
   readonly selfInstall?: SelfInstall
   /** Rebuild run after a merged self-upgrade lands in the linked checkout; tests inject a fake. */
   readonly selfBuild?: (root: string, signal?: AbortSignal) => Promise<{ readonly ok: boolean; readonly output: string }>
+  /** Optional `gh` CLI exec runner override (used in mock-gh tests). */
+  readonly ghExec?: ExecFileRunner
+  /** Optional timer override for GitHub polling scheduler. */
+  readonly githubPollTimer?: Timer
 }
 
 /** The history tools themselves: their calls and results are not part of the record they read. */
@@ -222,6 +236,11 @@ export class DotService {
   private readonly backgroundJobsListeners = new Set<() => void>()
   private backgroundJobsUnsub?: () => void
   private backgroundJobsSubscribedTo?: unknown
+  private activeTurnOrigin: RunOrigin | undefined
+  private readonly emittedClosures = new Set<string>()
+  readonly githubPollCursorStore: GithubPollCursorStore
+  private readonly githubPollAdapter: GithubPollSourceAdapter
+  private readonly githubPoller: GithubPoller
 
   private get getService(): ServiceGetter | undefined { return this.options.get }
 
@@ -298,6 +317,39 @@ export class DotService {
       emit: input => this.emit(input),
     })
     this.startupSelfUpgrade = options.store.selfUpgrade
+    this.githubPollCursorStore = new GithubPollCursorStore(options.store.githubPollTable())
+    this.githubPollAdapter = new GithubPollSourceAdapter({
+      settings: () => effectiveGithubPollSettings(this.store.settings),
+      cursorStore: this.githubPollCursorStore,
+      homeDir: options.homeDir,
+      links: () => this.store.links,
+      putLink: link => this.store.putLink(link),
+      change: id => this.store.work.change(id),
+      runsForChange: changeId => this.store.work.listRuns().filter(run => run.changeId === changeId),
+      markClosureReady: (changeId, detail) => this.store.work.markClosureReady(changeId, detail),
+      emitResultNotice: (change, detail) => this.emitClosureResultNotice(change, detail),
+      inboxList: () => this.inbox.list(),
+      submitInbox: event => this.submitInbox(event),
+      supplementWorkRun: (runId, text, senderId, expected) => this.supplementWorkRun(runId, text, senderId, expected),
+      dotSessionId: () => this.store.dotSessionId,
+      trace: (event, message, data) => this.emit({ event, message, ...(data ? { data } : {}) }),
+      now: this.now,
+    })
+    this.githubPoller = new GithubPoller({
+      settings: () => effectiveGithubPollSettings(this.store.settings),
+      cursorStore: this.githubPollCursorStore,
+      adapter: this.githubPollAdapter,
+      links: () => this.store.links,
+      putLink: link => this.store.putLink(link),
+      changes: () => new Map(this.store.work.listChanges().map(c => [c.id, c])),
+      runs: () => this.store.work.listRuns(),
+      onCycleEvents: () => { this.batcher.wake() },
+      trace: (event, message, data) => this.emit({ event, message, ...(data ? { data } : {}) }),
+      log: options.log,
+      timer: options.githubPollTimer ?? options.timer,
+      now: this.now,
+      ...(options.ghExec ? { exec: options.ghExec } : {}),
+    })
   }
 
   get store(): DotStore { return this.options.store }
@@ -534,6 +586,31 @@ export class DotService {
     return ledger.run(() => deliverPeer(input, {
       now: () => this.now(),
       owns: id => this.store.ownsSession(id),
+      isDorothy: id => this.store.dotSessionId === id,
+      bounce: async ({ senderSessionId, deliveryId, text }) => {
+        const run = this.store.work.sessionRun(senderSessionId)
+        const subject = run ? `task:${run.changeId}` : `session:${senderSessionId}`
+        const title = run ? `Worker ${run.id} bounced out-of-scope follow-up` : 'Worker bounced out-of-scope follow-up'
+        const result = await this.submitInbox({
+          source: 'dot-peer',
+          sourceId: senderSessionId,
+          deliveryId,
+          type: 'peer.bounce',
+          subject,
+          title,
+          actor: senderSessionId,
+          summary: redactGithubTokens(text).replace(/\s+/g, ' ').trim().slice(0, 500),
+          receivedAt: this.now(),
+        })
+        this.emit({
+          event: DOT_TRACE.githubPollBounced,
+          message: `Worker ${senderSessionId} bounced follow-up ${deliveryId} to inbox.`,
+          sessionId: senderSessionId,
+          ...(run ? { changeId: run.changeId } : {}),
+          data: { deliveryId, result },
+        })
+        return result
+      },
       get: id => ledger.read(id),
       put: row => ledger.write(row),
       prove: async (target, sender, deliveryId, text) => {
@@ -612,6 +689,7 @@ export class DotService {
     const pictures = checkChatImages(images)
     if (!body && pictures.length === 0) throw new DotError('dot/invalid', 'message must be non-empty')
     await this.serial(async () => {
+      this.activeTurnOrigin = undefined
       const dot = await this.ready()
       // The human already wakes dot, so carried updates join the same message
       // instead of becoming a separate model turn of their own.
@@ -1014,6 +1092,7 @@ export class DotService {
   settingsChanged(): Promise<void> {
     this.armIdleCheck()
     this.updates.settingsChanged()
+    this.githubPoller.settingsChanged()
     // The ds-dot/mcp preset row reconciles its mounts against the new settings.
     sharedDotMcp().onSettingsChanged?.()
     // A grant revoked while its approval card waits settles the ask at once:
@@ -1063,6 +1142,7 @@ export class DotService {
    */
   onDotIdle(sessionId: string): Promise<void> {
     if (this.closing || !this.isDot(sessionId)) return Promise.resolve()
+    this.activeTurnOrigin = undefined
     this.idleSince ??= this.now()
     this.batcher.wake()
     this.armIdleCheck()
@@ -1248,9 +1328,13 @@ export class DotService {
       this.retryHealth.clearAll()
       this.quietWaits.clearAll(this.now())
       this.batcher.take()
+      this.emittedClosures.clear()
+      this.activeTurnOrigin = undefined
+      await this.githubPollCursorStore.clear()
       this.releaseChildSeals()
       this.reminders.refresh()
       this.updates.settingsChanged()
+      this.githubPoller.settingsChanged()
       this.homeRegistered = false
       this.ensuring = undefined
       this.requestedSegment = undefined
@@ -1737,9 +1821,10 @@ export class DotService {
   manageTask(args: Record<string, unknown>): Promise<string> {
     const action = typeof args.action === 'string' ? args.action : ''
     const awaitsHost = ['create', 'finish', 'cancel', 'supplement', 'dispatch', 'check', 'closeout', 'reject'].includes(action)
+    const origin = this.activeTurnOrigin ?? DEFAULT_RUN_ORIGIN
     const work = awaitsHost
-      ? this.manageWorkAction(args, { origin: DEFAULT_RUN_ORIGIN })
-      : this.serial(() => this.manageWorkAction(args, { origin: DEFAULT_RUN_ORIGIN }))
+      ? this.manageWorkAction(args, { origin })
+      : this.serial(() => this.manageWorkAction(args, { origin }))
     // Settling runs earn their token/wall cost whether or not the panel is open.
     return work.finally(() => this.scheduleRunUsage())
   }
@@ -3182,7 +3267,7 @@ export class DotService {
 
   notify(notice: Notice, urgent = false): void {
     notice = { ...notice, display: notice.display ?? {
-      kind: notice.kind, sessionId: notice.sessionId, summary: notice.text,
+      kind: notice.kind === 'result' ? 'task-human' : notice.kind, sessionId: notice.sessionId, summary: notice.text,
       ...(notice.requestId ? { requestId: notice.requestId } : {}),
     } }
     const ownedRun = this.store.work.sessionRun(notice.sessionId)
@@ -3203,12 +3288,77 @@ export class DotService {
     emitDotTrace(this.options.trace, input)
   }
 
+  /** Start background GitHub CLI polling when enabled; silently degrades if `gh` is unavailable. */
+  startGithubPoll(): void {
+    this.githubPoller.start()
+  }
+
+  pollGithubNow(): Promise<{ readonly ok: boolean; readonly events: number }> {
+    return this.githubPoller.pollNow()
+  }
+
+  githubPollStatus(): GithubPollStatusView {
+    return this.githubPoller.status()
+  }
+
+  testGithubPollConnection(override?: { readonly ghPath?: string; readonly hostname?: string; readonly repos?: readonly string[] }): Promise<GithubPollTestResult> {
+    return this.githubPoller.testConnection(override)
+  }
+
+  recordGithubEcho(repo: string, id: string, kind: 'issue_comment' | 'review_comment' | 'review'): Promise<void> {
+    return this.githubPollCursorStore.recordEcho(repo, { id, kind, sentAt: this.now() }, this.now())
+  }
+
+  shouldAcceptWebhookDelivery(repo: string, receivedAt: number): boolean {
+    const norm = normalizeGithubRepo(repo)
+    if (!norm) return true
+    const settings = effectiveGithubPollSettings(this.store.settings)
+    if (settings.repos.includes(norm)) return false
+    const state = this.githubPollCursorStore.getRepoState(norm)
+    if (state?.lastMode === 'poll' && state.lastDeliveredAt !== undefined && receivedAt < state.lastDeliveredAt) {
+      return false
+    }
+    return true
+  }
+
+  private emitClosureResultNotice(
+    change: ChangeRecord,
+    detail: { readonly ref: string; readonly outcome: 'merged' | 'closed'; readonly title?: string; readonly url?: string; readonly at: number },
+  ): void {
+    const closureKey = `${change.id}:${detail.ref}:${detail.outcome}`
+    if (this.emittedClosures.has(closureKey)) return
+    this.emittedClosures.add(closureKey)
+    const sessionId = this.store.dotSessionId ?? ''
+    const urlPart = detail.url ? ` (${detail.url})` : ''
+    const text = `PR ${detail.ref} was ${detail.outcome}${urlPart}; ready for closure acceptance check — inspect checks/evidence and close out with dot_task action=closeout.`
+    this.notify({
+      sessionId,
+      kind: 'result',
+      changeId: change.id,
+      wakeKey: closureKey,
+      at: detail.at,
+      text,
+      display: { kind: 'task-human', sessionId, taskTitle: change.title, subject: detail.ref, summary: text },
+    })
+    this.emit({
+      event: DOT_TRACE.githubPollClosure,
+      message: `PR ${detail.ref} ${detail.outcome} flagged ${change.id} for closure check.`,
+      changeId: change.id,
+      data: { ref: detail.ref, outcome: detail.outcome },
+    })
+  }
+
   /**
    * One external event for dot's inbox. Dedupe, subject coalescing and the
    * durable row all live in the ledger; this only queues the notice the
    * batcher will deliver. It never opens or resumes a session.
    */
   async submitInbox(input: InboxEventInput): Promise<InboxSubmitResult> {
+    const isWebhookGithub = input.source === 'github' && input.originSource !== 'github-poll'
+    const repo = input.source === 'github' ? (input.subject.split(/[#@:]/)[0] ?? '').trim().toLowerCase() : ''
+    if (isWebhookGithub && repo && !this.shouldAcceptWebhookDelivery(repo, input.receivedAt || 0)) {
+      return 'duplicate'
+    }
     const done = await this.serial(async () => {
       const preview = this.inbox.peek(input, this.now())
       if (!preview.record) return preview
@@ -3219,6 +3369,29 @@ export class DotService {
     })
     // queueInboxNotice itself skips a record that already has a queued notice.
     if (done.record) this.queueInboxNotice(done.record)
+    if (done.record && isWebhookGithub && repo) {
+      await this.githubPollCursorStore.recordDelivery(repo, 'webhook', input.receivedAt || this.now())
+      const closureMatch = /^pull_request\.(merged|closed)$/.exec(input.type)
+      const numMatch = /^([^#\s]+)#(\d+)$/.exec(input.subject)
+      if (closureMatch && numMatch) {
+        await observePullClosure({
+          links: this.store.links,
+          putLink: link => this.store.putLink(link),
+          change: id => this.store.work.change(id),
+          runsForChange: changeId => this.store.work.listRuns().filter(run => run.changeId === changeId),
+          markClosureReady: (changeId, detail) => this.store.work.markClosureReady(changeId, detail),
+          emitResultNotice: (change, detail) => this.emitClosureResultNotice(change, detail),
+        }, {
+          repo,
+          number: Number(numMatch[2]),
+          outcome: closureMatch[1] as 'merged' | 'closed',
+          title: input.title,
+          ...(input.url ? { url: input.url } : {}),
+          at: input.receivedAt || this.now(),
+          event: done.record,
+        })
+      }
+    }
     return done.result
   }
 
@@ -3285,6 +3458,7 @@ export class DotService {
     this.releaseChildSeals()
     if (this.disposal) return this.disposal
     this.closing = true
+    this.githubPoller.dispose()
     this.quietWaits.abortAll(this.now(), 'dispose')
     try { this.backgroundJobsUnsub?.() } catch { /* best effort */ }
     this.backgroundJobsUnsub = undefined
@@ -3342,13 +3516,45 @@ export class DotService {
       const live = this.liveNotices(initial)
       if (live.length === 0) return
       if (this.host.isRunning(dot)) throw new Error('dot is running')
-      await this.host.relay(dot, live[0]!.sessionId, this.formatQueuedNotices(live), undefined, undefined, formatNoticeDisplay(live))
+      const turnOrigin = this.inboxTurnOrigin(live)
+      this.activeTurnOrigin = turnOrigin
+      try {
+        await this.host.relay(dot, live[0]!.sessionId, this.formatQueuedNotices(live), undefined, undefined, formatNoticeDisplay(live))
+      } catch (error) {
+        this.activeTurnOrigin = undefined
+        throw error
+      }
       await this.ackDecisionWakes(live).catch(error => this.options.log?.(`dsh-dot: decision wake was not marked: ${messageOf(error)}`))
       await this.ackInboxWakes(live).catch(error => this.options.log?.(`dsh-dot: inbox event was not marked delivered: ${messageOf(error)}`))
       // Inbox records skipped by the per-batch cap get queued for the next flush.
       this.recoverInbox()
       this.emit({ event: DOT_TRACE.noticeDelivered, message: `Delivered ${live.length} notice(s).`, sessionId: dot, data: { count: live.length, kinds: live.map(item => item.kind).join(',') } })
     })
+  }
+
+  private inboxTurnOrigin(items: readonly Notice[]): RunOrigin | undefined {
+    for (let i = items.length - 1; i >= 0; i--) {
+      const item = items[i]!
+      if (item.kind !== 'inbox' || !item.wakeKey) continue
+      const record = this.inbox.get(item.wakeKey)
+      if (!record) continue
+      if (record.originSource === 'github-poll' || record.originSource === 'inbox-github') {
+        return {
+          strength: 'explicit',
+          source: record.originSource,
+          ...(record.actor ? { sender: record.actor } : {}),
+        }
+      }
+      if (record.source === 'github') {
+        const isPoll = record.deliveryIds.some(id => id.startsWith('gh-poll:'))
+        return {
+          strength: 'explicit',
+          source: isPoll ? 'github-poll' : 'inbox-github',
+          ...(record.actor ? { sender: record.actor } : {}),
+        }
+      }
+    }
+    return undefined
   }
 
   private formatQueuedNotices(items: readonly Notice[]): string {

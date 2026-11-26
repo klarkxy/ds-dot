@@ -5,10 +5,85 @@
  */
 import { z } from 'zod'
 import { isTaskOnlySelector } from './capabilities.ts'
-import { DEFAULT_SETTINGS, SETTING_FIELDS, TASK_MODEL_LIST_MAX, TASK_PRESET_OPTIONS, isMcpServerHeaders, isMcpServerUrl, MCP_NEW_SERVER_NAME_PATTERN, MCP_SERVER_NAME_PATTERN, mcpServerOf, type CapabilityGroupView, type DotSettings, type SettingField, type TaskPermission } from './contracts.ts'
+import { DEFAULT_GITHUB_POLL_SETTINGS, DEFAULT_SETTINGS, GITHUB_ADMISSION_ACTIONS, GITHUB_EVENT_TYPES, GITHUB_POLL_DEFAULT_INTERVAL_SEC, GITHUB_POLL_DEFAULT_SOURCE_ID, GITHUB_POLL_MAX_INTERVAL_SEC, GITHUB_POLL_MIN_INTERVAL_SEC, GITHUB_SENDER_CLASSES, SETTING_FIELDS, TASK_MODEL_LIST_MAX, TASK_PRESET_OPTIONS, isMcpServerHeaders, isMcpServerUrl, MCP_NEW_SERVER_NAME_PATTERN, MCP_SERVER_NAME_PATTERN, mcpServerOf, type CapabilityGroupView, type DotSettings, type GithubPollSettings, type SettingField, type TaskPermission } from './contracts.ts'
 import { type CopyLocale } from './i18n/index.ts'
 import { CACHE_TTL_MAX_ENTRIES, CACHE_TTL_MAX_MINUTES } from './keepalive.ts'
 import { ADDRESS_MAX_CHARS, PERSONA_MAX_CHARS, defaultAddress, defaultPersona } from './persona.ts'
+
+export const GITHUB_REPO_RE = /^[A-Za-z0-9][A-Za-z0-9_.-]*\/[A-Za-z0-9_.][A-Za-z0-9_.-]*$/
+export const GITHUB_POLL_MAX_REPOS = 50
+export const GITHUB_POLL_MAX_ACTORS = 100
+export const GITHUB_POLL_MAX_ADMISSION_RULES = 200
+const GITHUB_HOST_RE = /^[A-Za-z0-9][A-Za-z0-9.-]{0,252}$/
+
+export function normalizeGithubRepo(repo: string): string {
+  return repo.trim().toLowerCase()
+}
+
+function normalizeGithubRepoList(repos: readonly string[]): string[] {
+  const seen = new Set<string>()
+  const out: string[] = []
+  for (const raw of repos) {
+    const norm = normalizeGithubRepo(raw)
+    if (!norm || seen.has(norm)) continue
+    seen.add(norm)
+    out.push(norm)
+  }
+  return out
+}
+
+const githubAdmissionRuleSchema = z.object({
+  repo: z.string().trim().min(1).max(200).transform(v => v === '*' ? '*' : normalizeGithubRepo(v)).refine(v => v === '*' || GITHUB_REPO_RE.test(v)),
+  eventType: z.enum(GITHUB_EVENT_TYPES),
+  senderClass: z.enum(GITHUB_SENDER_CLASSES),
+  action: z.enum(GITHUB_ADMISSION_ACTIONS),
+}).strict()
+
+const githubRepoEntrySchema = z.string().trim().min(1).max(200).refine(v => GITHUB_REPO_RE.test(v)).transform(normalizeGithubRepo)
+
+const githubPollSchema = z.object({
+  enabled: z.boolean().default(false),
+  repos: z.array(githubRepoEntrySchema).max(GITHUB_POLL_MAX_REPOS).default([]).transform(normalizeGithubRepoList),
+  webhookRepos: z.array(githubRepoEntrySchema).max(GITHUB_POLL_MAX_REPOS).default([]).transform(normalizeGithubRepoList),
+  ghPath: z.string().trim().min(1).max(500).default('gh'),
+  hostname: z.string().trim().max(253).optional().transform(v => {
+    const norm = v?.trim().toLowerCase()
+    return norm && norm !== 'github.com' ? norm : undefined
+  }).refine(v => v === undefined || GITHUB_HOST_RE.test(v)),
+  intervalSec: z.number().int().min(GITHUB_POLL_MIN_INTERVAL_SEC).max(GITHUB_POLL_MAX_INTERVAL_SEC).default(GITHUB_POLL_DEFAULT_INTERVAL_SEC),
+  streams: z.object({
+    issues: z.boolean().default(true),
+    pulls: z.boolean().default(true),
+    comments: z.boolean().default(true),
+    ci: z.boolean().default(true),
+  }).strict().default({ issues: true, pulls: true, comments: true, ci: true }),
+  ignoredActors: z.array(z.string().trim().min(1).max(100)).max(GITHUB_POLL_MAX_ACTORS).default([]).transform(list => [...new Set(list.map(v => v.trim().toLowerCase()))]),
+  sourceId: z.string().trim().min(1).max(120).optional().transform(v => v || GITHUB_POLL_DEFAULT_SOURCE_ID),
+  admission: z.array(githubAdmissionRuleSchema).max(GITHUB_POLL_MAX_ADMISSION_RULES).optional().default([]),
+}).strict().refine(value => {
+  const webhookSet = new Set(value.webhookRepos)
+  return !value.repos.some(repo => webhookSet.has(repo))
+}, { message: 'a repository cannot be enabled for both GitHub polling and webhook simultaneously' })
+
+export function effectiveGithubPollSettings(settings?: Pick<DotSettings, 'githubPoll'>): GithubPollSettings {
+  const raw = settings?.githubPoll
+  if (!raw) return DEFAULT_GITHUB_POLL_SETTINGS
+  return {
+    ...DEFAULT_GITHUB_POLL_SETTINGS,
+    ...raw,
+    repos: normalizeGithubRepoList(raw.repos ?? []),
+    webhookRepos: normalizeGithubRepoList(raw.webhookRepos ?? []),
+    streams: {
+      issues: raw.streams?.issues ?? true,
+      pulls: raw.streams?.pulls ?? true,
+      comments: raw.streams?.comments ?? true,
+      ci: raw.streams?.ci ?? true,
+    },
+    ignoredActors: raw.ignoredActors ?? [],
+    sourceId: raw.sourceId || GITHUB_POLL_DEFAULT_SOURCE_ID,
+    admission: raw.admission ?? [],
+  }
+}
 
 /** One stored `mcpServers` row; patches parse the record as a whole, stored reads drop bad rows. */
 const MCP_SERVER_ROW = z.object({
@@ -48,6 +123,7 @@ const FIELDS = {
     z.string().regex(MCP_SERVER_NAME_PATTERN),
     MCP_SERVER_ROW,
   ).refine(map => Object.keys(map).length <= MCP_SERVERS_MAX),
+  githubPoll: githubPollSchema,
   locks: z.object(Object.fromEntries(SETTING_FIELDS.map(field => [field, z.boolean().optional()]))).strict(),
 } as const
 
@@ -58,7 +134,7 @@ export const CAPABILITY_GRANTS_MAX = 500
 export const MCP_SERVERS_MAX = 100
 
 /** Settings a patch may clear with null, going back to their defaults. */
-const CLEARABLE = new Set<string>(['model', 'persona', 'address', 'mcpServers'])
+const CLEARABLE = new Set<string>(['model', 'persona', 'address', 'mcpServers', 'githubPoll'])
 
 type Field = keyof typeof FIELDS
 

@@ -334,6 +334,27 @@ describe('i18n locale resolution and pack completeness', () => {
         }
       }
     }
+
+    // Ensure PR-5 GitHub Poll UI keys are genuinely localized (not left as English stubs) in non-English locales.
+    const localizedPr5SampleKeys = [
+      'resultNotice',
+      'sGithubTitle',
+      'sGhPollCardTitle',
+      'sGhEnabled',
+      'sGhTestBtn',
+      'sGhAdvAdmissionTitle',
+      'sGhAdvWebhookTitle',
+      'sSender_human',
+      'sAction_inbox',
+      'sAction_ignore',
+    ] as const
+    for (const loc of SUPPORTED_LOCALES) {
+      if (loc === 'en') continue
+      const pack = localePack(loc)
+      for (const key of localizedPr5SampleKeys) {
+        expect(pack.ui[key], `${loc}.ui.${key} should be localized`).not.toBe(ref.ui[key])
+      }
+    }
   })
 
   it('has matching keys and {n}/{max} placeholders across all 8 locale/*.json files and valid meta.detail', () => {

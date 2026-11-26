@@ -1521,6 +1521,76 @@ describe('DotService WorkBook sessions', () => {
     await h.service.dispose()
   })
 
+  it('propagates github-poll and inbox-github origin into manageTask during an inbox turn and clears on say/idle', async () => {
+    const h = setup()
+    await h.service.ensureDot()
+    await h.service.submitInbox({
+      source: 'github',
+      sourceId: 'primary-github',
+      deliveryId: 'gh-poll:ev-1',
+      type: 'issues.opened',
+      subject: 'acme/widgets#10',
+      title: 'Bug report',
+      actor: 'octocat',
+      summary: 'broken',
+      receivedAt: 1000,
+      originSource: 'github-poll',
+    })
+    await h.service.flushNotices()
+    await h.service.manageTask({
+      action: 'dispatch',
+      dir: '/proj',
+      title: 'Poll task',
+      message: 'investigate',
+      access: 'read',
+      origin: { strength: 'inferred', source: 'speculative', sender: 'spoof' },
+    })
+    expect(h.store.work.listRuns()[0]!.origin).toEqual({
+      strength: 'explicit',
+      source: 'github-poll',
+      sender: 'octocat',
+    })
+
+    // Turning idle clears inbox turn provenance so later dispatches default to user
+    await h.service.onDotIdle(h.store.dotSessionId!)
+    await h.service.manageTask({
+      action: 'dispatch',
+      dir: '/proj',
+      title: 'After idle',
+      message: 'normal user task',
+      access: 'read',
+    })
+    expect(h.store.work.listRuns()[1]!.origin).toEqual({ strength: 'explicit', source: 'user' })
+
+    // Webhook inbox delivery also propagates inbox-github provenance
+    await h.service.submitInbox({
+      source: 'github',
+      sourceId: 'primary-github',
+      deliveryId: 'wh-ev-2',
+      type: 'pull_request.opened',
+      subject: 'acme/widgets#11',
+      title: 'PR',
+      actor: 'alice',
+      summary: 'pr',
+      receivedAt: 2000,
+      originSource: 'inbox-github',
+    })
+    await h.service.flushNotices()
+    await h.service.manageTask({
+      action: 'dispatch',
+      dir: '/proj',
+      title: 'Webhook task',
+      message: 'check pr',
+      access: 'read',
+    })
+    expect(h.store.work.listRuns()[2]!.origin).toEqual({
+      strength: 'explicit',
+      source: 'inbox-github',
+      sender: 'alice',
+    })
+    await h.service.dispose()
+  })
+
   it('creates the run session in the on-disk casing while the record stays canonical', async () => {
     const dir = realpathSync.native(mkdtempSync(join(tmpdir(), 'dot-CaSiNg-')))
     const h = setup()

@@ -134,10 +134,10 @@ export function useContextUse(api: ChatApi, rev: number | undefined, running: bo
   return use
 }
 
-export type SettingsSection = 'proposals' | 'general' | 'takeover' | 'dispatch' | 'capabilities' | 'mcp'
+export type SettingsSection = 'proposals' | 'general' | 'takeover' | 'dispatch' | 'github' | 'capabilities' | 'mcp'
 export type DrawerTab = 'tasks' | SettingsSection | 'persona' | 'context' | 'trajectory'
 const CONFIG_TABS: ReadonlySet<DrawerTab> = new Set([
-  'proposals', 'general', 'takeover', 'dispatch', 'capabilities', 'mcp', 'persona', 'context', 'trajectory',
+  'proposals', 'general', 'takeover', 'dispatch', 'github', 'capabilities', 'mcp', 'persona', 'context', 'trajectory',
 ])
 
 /** A close or a tab switch; while the persona page holds unsaved edits the request waits for the human. */

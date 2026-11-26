@@ -4,7 +4,7 @@
  */
 import { describe, expect, it } from 'vitest'
 import type { InboxRecord } from './contracts.ts'
-import { applyLinkEvent, linkMatchesSubject, makeTaskLink, parseLinkRef, scanReportLinks, subjectTarget, taskLinkId } from './links.ts'
+import { applyLinkEvent, bindThread, linkMatchesSubject, makeTaskLink, parseLinkRef, polledTargets, scanReportLinks, subjectTarget, taskLinkId, threadClosed } from './links.ts'
 
 describe('parseLinkRef', () => {
   it('accepts pull and issue URLs, owner/repo#N, and owner/repo@branch', () => {
@@ -125,5 +125,29 @@ describe('applyLinkEvent', () => {
     expect(taskLinkId('c-1', { repo: 'acme/widgets', number: 12 })).toBe(taskLinkId('c-1', { repo: 'acme/widgets', number: 12 }))
     expect(taskLinkId('c-1', { repo: 'acme/widgets', number: 12 })).not.toBe(taskLinkId('c-2', { repo: 'acme/widgets', number: 12 }))
     expect(taskLinkId('c-1', { repo: 'acme/widgets', number: 12 })).not.toBe(taskLinkId('c-1', { repo: 'acme/widgets', branch: 'x' }))
+  })
+})
+
+describe('polledTargets, bindThread and threadClosed', () => {
+  it('selects active changes and recently active open links, binds threads, and closes PR links', () => {
+    const now = 10_000_000_000
+    const activeLink = makeTaskLink('c-active', { repo: 'acme/widgets', number: 10 }, 'dot', now - 1000)
+    const recentClosedChangeLink = makeTaskLink('c-recent', { repo: 'acme/widgets', number: 11 }, 'auto', now - 1000)
+    const staleLink = makeTaskLink('c-old', { repo: 'acme/widgets', number: 12 }, 'auto', now - 10 * 24 * 3600_000)
+
+    const changes = new Map([
+      ['c-active', { id: 'c-active', control: 'open' as const, updatedAt: now - 1000 }],
+      ['c-recent', { id: 'c-recent', control: 'open' as const, closeout: { verificationId: 'v-1', source: 'user' }, updatedAt: now - 1000 }],
+      ['c-old', { id: 'c-old', control: 'cancelled' as const, updatedAt: now - 10 * 24 * 3600_000 }],
+    ])
+    const targets = polledTargets([activeLink, recentClosedChangeLink, staleLink], changes, [], now)
+    expect(targets.map(t => t.number)).toEqual([10, 11])
+
+    const bound = bindThread([activeLink], 'c-active', { repo: 'acme/widgets', number: 99 }, 'auto', now)!
+    expect(bound.number).toBe(99)
+
+    const closed = threadClosed([activeLink, staleLink], 'Acme/Widgets', 10, 'merged', now)
+    expect(closed).toHaveLength(1)
+    expect(closed[0]!.state).toBe('merged')
   })
 })

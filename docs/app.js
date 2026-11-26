@@ -17,6 +17,23 @@
 
   const RECORDINGS = [
     {
+      id: 'github-poll',
+      pr: 97,
+      date: '2026.11.26',
+      post: 'github-watch',
+      file: 'dot-pr5-github-poll.gif',
+      title: {
+        zh: '用本机 gh 轮询 GitHub，免配公网回调',
+        en: 'Polling GitHub with local gh—no public URL',
+        ja: '手元の gh で GitHub 監視、公開 URL 不要',
+      },
+      desc: {
+        zh: '在 GitHub 设置卡里添上仓库、测过本机 gh 连接与配额，还能展开调整事件准入策略和可选的 Webhook 推送。',
+        en: 'Add repos on the GitHub card, test your local gh connection and quota, and expand advanced admission rules or optional webhook push.',
+        ja: 'GitHub 設定カードでリポジトリ追加と gh 接続テストを行い、詳細欄で取り込みルールや任意の Webhook も調整できます。',
+      },
+    },
+    {
       id: 'drawer-settings',
       pr: 90,
       date: '2026.11.25',
@@ -190,7 +207,7 @@
       id: 'inbox',
       pr: 56,
       date: '2026.11.22',
-      post: 'notes-and-quiet',
+      post: 'github-watch',
       file: 'dot-52-event-links.gif',
       title: {
         zh: 'PR 新动态自动回到原任务',
@@ -282,6 +299,47 @@
         ],
       },
       showInvite: true,
+    },
+    {
+      slug: 'github-watch',
+      date: '2026.11.26',
+      category: 'work',
+      image: 'images/chibi-dispatch.jpg',
+      aspect: 'square',
+      imageAlt: {
+        zh: '阳光书桌前的Q版桃乐丝写便条，身旁两只小粉鲸衔着纸飞机',
+        en: 'Chibi Dorothy at a sunny wooden desk with two tiny pink whales carrying paper airplanes',
+        ja: '机でメモを取りながらピンクの小クジラたちと紙飛行機を送り出すちびドロシー',
+      },
+      caption: {
+        zh: '不用拉公网隧道，本机有 gh 就能顺手替你看着仓库动态。',
+        en: 'No public tunnel needed—local gh is enough to watch your repos.',
+        ja: '公開トンネルなしでも、手元の gh だけでリポジトリを見守れます。',
+      },
+      title: {
+        zh: '不用公网地址，也能用本机 gh 帮着盯 GitHub',
+        en: 'Watching GitHub with your local gh—no public URL needed',
+        ja: '公開アドレスなしで、手元の gh から GitHub を見守る',
+      },
+      excerpt: {
+        zh: '以前想让我在仓库有新评论或 CI 挂掉时递话，得先搭公网回调地址；现在只要电脑里装了并登录过 gh，在设置里填上仓库名打开开关，我就能定期替你看着议题、PR、评论和检查结果。默认一个仓库都不盯，你点名加哪个才盯哪个。',
+        en: 'Getting PR comments or failed checks routed back to me used to mean wiring up a public webhook URL. Now, if the gh CLI is signed in on your machine, just add a repo in Settings and flip polling on—nothing gets watched until you ask.',
+        ja: 'PR のコメントや CI の失敗を受け取るには、これまで公開用の Webhook アドレスを用意する必要がありました。これからは手元で gh にログインしていれば、設定でリポジトリを追加してスイッチを入れるだけで、課題・PR・コメント・チェック結果を定期に見に行けます。',
+      },
+      paragraphs: {
+        zh: [
+          '打开设置里的 GitHub 一栏，点一下测试连接确认本机 gh 登录和配额都正常，再添上想盯的仓库就行。默认只从打开那一刻往后看，不会把陈年旧账一股脑翻出来；平时常见的机器人动态只顺手递给正在跑相关 PR 的任务，不刷屏收件箱，而你自己在 GitHub 上留的评论会照常留着，我或任务刚发出去的话也会自动避开，免得自己跟自己打回声。要是剩余配额快不够了，间隔会自己往后放宽一点，连续几次没连上也会在设置页提醒你。',
+          '来新评论时，跟这个 PR 绑在一起的活跃任务都会直接收到摘要（太长的正文自动收进文件留个读取路径），要是哪条消息不归某个任务管，它会退回给我再重新派人。被你手动停掉的任务绝对不会再被打扰，等到 PR 真的合并或关闭了，我再把对应任务带到最后一步验收，发一条结果通知给你。以后要是换到有公网环境的机器想改用实时推送，同一仓库只开一边就行，切过去时进度也会顺着接上，doro~',
+        ],
+        en: [
+          'Open the GitHub tab in Settings, hit Test gh Connection to check your sign-in and quota, and add the repositories you want watched. Polling only looks forward from the moment you enable it so old history never floods in; routine bot noise quietly stays out of your inbox, while your own human comments still come through—and replies sent from here are skipped so we never echo ourselves. If API quota gets tight the interval eases back on its own, and repeated failures raise a clear notice.',
+          'Fresh comments go straight as short context to every active task linked to that PR (with longer text tucked into a readable file), and anything outside a task’s lane gets handed back to me to re-route. Tasks you stopped yourself stay completely quiet, and once a PR merges or closes I move the matching work into a final check and send one tidy result note. If you ever switch a repo to real-time webhooks later, only one mode runs per repo and the handoff picks up right where it left off, doro~',
+        ],
+        ja: [
+          '設定の GitHub タブを開いて接続テストを押し、ログイン状態と残り枠を確かめたら、見守りたいリポジトリを足すだけです。有効にした時点から先だけを見に行くので過去の通知がどっと押し寄せることはありませんし、定番ボットの動きは必要なタスクへだけそっと届けます。ご自身のアカウントで書いたコメントはちゃんと拾い、こちらから送ったばかりの返信は聞き流して堂々巡りを防ぎます。残り枠が少なくなれば間隔を自動で緩め、何度か続けて失敗したときは設定画面でお知らせします。',
+          '新しいコメントが来ると、その PR に結び付いている進行中のタスクみんなへ短い要約が直接届き（長文はファイルに控えて場所を添えます）、担当外の話題はわたしの元へ戻して振り直します。あなたが手動で止めたタスクにはもう一切話しかけませんし、PR がマージまたはクローズされたら最終チェックへ進めて結果を一度だけお伝えします。あとから公開環境でリアルタイム通知へ切り替えるときも、同じリポジトリでは片方だけ動いて引き継ぎも途切れません、doro~',
+        ],
+      },
     },
     {
       slug: 'notes-and-quiet',
@@ -603,15 +661,15 @@
   const COMPANION_FRIENDS = [
     {
       name: {
-        zh: 'GitHub 消息联动',
-        en: 'GitHub Webhook',
-        ja: 'GitHub 連携',
+        zh: 'GitHub 实时推送（可选）',
+        en: 'GitHub Webhook (optional)',
+        ja: 'GitHub Webhook 連携（任意）',
       },
       plugin: '@deepseek-ai/dsh-webhook',
       desc: {
-        zh: '把 PR 新评论和检查结果直接归回当初那条任务底下，省得来回翻。',
-        en: 'Routes fresh PR comments and check failures straight back to the task that opened the PR.',
-        ja: 'PR のコメントやチェック結果を元のタスクの下へ自動でまとめてくれます。',
+        zh: '平时直接用内置的本机 gh 轮询就能盯仓库；如果已经有公网回调地址，再装它收实时推送。',
+        en: 'Built-in local gh polling works with zero public URL; add this only if you want real-time webhook push.',
+        ja: 'ふだんは内蔵のローカル gh 監視だけで使え、公開エンドポイントがあるときだけ即時通知用に足せます。',
       },
     },
     {

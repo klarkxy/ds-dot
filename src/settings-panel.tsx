@@ -599,6 +599,34 @@ export function SettingsPanel({ locale, api, settings, section = 'all', proposal
     const list = checked ? [...rule.list, ...keys.filter(key => !rule.list.includes(key))] : rule.list.filter(key => !drop.has(key))
     save({ taskModels: { mode: rule.mode, list } })
   }
+  /**
+   * Details expansion: automatic answer (searched or has selections) unless the
+   * user folded or unfolded the group by hand; that manual answer is forgotten
+   * when the automatic answer changes, so the list never sticks open or closed.
+   */
+  const manualOpen = useRef<Record<string, boolean | undefined>>({})
+  const manualAuto = useRef<Record<string, boolean | undefined>>({})
+  const [, bumpDetails] = useState(0)
+  const expandDetails = (id: string, auto: boolean): boolean => {
+    if (needle !== '') return auto
+    const picked = manualOpen.current[id]
+    if (picked === undefined) return auto
+    if (manualAuto.current[id] !== auto) {
+      delete manualOpen.current[id]
+      delete manualAuto.current[id]
+      return auto
+    }
+    return picked
+  }
+  const onDetailsClick = (id: string, auto: boolean) => (event: React.MouseEvent<HTMLElement>) => {
+    const target = event.target as { closest?: (selector: string) => unknown } | null
+    if (target && typeof target.closest === 'function' && target.closest('button, a, input, textarea, [role="tab"]')) return
+    const details = event.currentTarget.parentElement
+    if (!details || details.tagName !== 'DETAILS') return
+    manualOpen.current[id] = !(details as HTMLDetailsElement).open
+    manualAuto.current[id] = auto
+    bumpDetails(rev => rev + 1)
+  }
   const emptyAllowList = rule.mode === 'allow' && rule.list.length === 0
   const modelHelp = models.failed ? t(locale, 'sModelFailed')
     : models.choices ? undefined
@@ -757,7 +785,7 @@ export function SettingsPanel({ locale, api, settings, section = 'all', proposal
                             <span key={key} className="dsh-dot-model-chip" data-stale={stale ? '' : undefined} title={stale ? `${key} ${t(locale, 'sTaskModelsGone')}` : choice.label}>
                               <span className="dsh-dot-model-chip-name">{choice ? modelMenuShortName(choice) : key}</span>
                               {choice ? <span className="dsh-dot-model-chip-provider">{choice.providerLabel ?? choice.provider}</span> : null}
-                              <button type="button" className="dsh-dot-model-chip-remove" aria-label={t(locale, 'sTaskModelsRemove').replace('{name}', choice ? modelMenuShortName(choice) : key)} onClick={() => toggleTaskModel(key, false)}>×</button>
+                              <button type="button" className="dsh-dot-model-chip-remove" aria-label={t(locale, 'sTaskModelsRemove').replace('{name}', choice ? choice.label : key)} onClick={() => toggleTaskModel(key, false)}>×</button>
                             </span>
                           )
                         })}
@@ -770,11 +798,12 @@ export function SettingsPanel({ locale, api, settings, section = 'all', proposal
                       {filteredGroups.map(group => {
                         const keys = group.items.map(taskModelKey)
                         const selected = keys.filter(key => rule.list.includes(key))
+                        const auto = needle !== '' || selected.length > 0
                         return (
-                          <details className="dsh-dot-model-group" key={group.provider} open={modelFilter.trim() !== '' || selected.length > 0}>
-                            <summary className="dsh-dot-model-group-title">
-                              <span className="dsh-dot-model-group-label"><span className="dsh-dot-model-group-name">{group.name}</span><span className="dsh-dot-model-group-count">{selected.length}/{keys.length}</span></span>
-                              <button type="button" className="dsh-dot-model-group-toggle" onClick={event => { event.preventDefault(); event.stopPropagation(); toggleTaskGroup(keys, selected.length !== keys.length) }}>{t(locale, selected.length === keys.length ? 'sTaskModelsGroupNone' : 'sTaskModelsGroupAll')}</button>
+                          <details className="dsh-dot-model-group" key={group.provider} open={expandDetails(group.provider, auto)}>
+                            <summary className="dsh-dot-model-group-title" onClick={onDetailsClick(group.provider, auto)}>
+                              <span className="dsh-dot-model-group-label"><span className="dsh-dot-model-group-name" title={group.name}>{group.name}</span><span className="dsh-dot-model-group-count">{selected.length}/{keys.length}</span></span>
+                              <button type="button" className="dsh-dot-model-group-toggle" onClick={event => { event.preventDefault(); event.stopPropagation(); toggleTaskGroup(keys, selected.length !== keys.length) }} onKeyDown={event => event.stopPropagation()} onKeyUp={event => event.stopPropagation()}>{t(locale, selected.length === keys.length ? 'sTaskModelsGroupNone' : 'sTaskModelsGroupAll')}</button>
                             </summary>
                             {group.items.map(choice => {
                               const key = taskModelKey(choice)
@@ -943,7 +972,7 @@ export const settingsCss = `
   background: var(--dsw-alias-bg-layer-2); box-shadow: var(--dsw-elevation-stroke);
 }
 .dsh-dot-chat .dsh-dot-dispatch-group[data-group='routine'] {
-  padding: 10px 2px 0; border-top: 0.5px solid var(--dsw-alias-border-l2);
+  padding: 10px 2px 10px; border-top: 0.5px solid var(--dsw-alias-border-l2);
 }
 .dsh-dot-chat .dsh-dot-dispatch-group .dsh-ui-field { min-width: 0; padding-top: 0; padding-bottom: 0; }
 .dsh-dot-chat .dsh-dot-dispatch-group[data-group='routine'] .dsh-dot-inline-row { flex-wrap: wrap; }
@@ -973,12 +1002,14 @@ export const settingsCss = `
 .dsh-dot-chat .dsh-dot-model-chip[data-stale] .dsh-dot-model-chip-name { text-decoration: line-through; }
 .dsh-dot-chat .dsh-dot-model-chips[data-tone='deny'] .dsh-dot-model-chip { color: var(--dsw-alias-state-warn-primary); }
 .dsh-dot-chat .dsh-dot-model-chip-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dsh-dot-chat .dsh-dot-model-chip-provider { flex-shrink: 0; font-size: 10px; color: var(--dsw-alias-label-tertiary); }
 .dsh-dot-chat .dsh-dot-model-chip-remove {
   display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0;
   width: 18px; height: 18px; padding: 0; border: 0; border-radius: var(--dsw-radius-sm);
   background: transparent; color: var(--dsw-alias-label-tertiary); cursor: pointer; font-size: 13px; line-height: 1;
 }
 .dsh-dot-chat .dsh-dot-model-chip-remove:hover { background: var(--dsw-alias-interactive-bg-hover); color: var(--dsw-alias-label-primary); }
+.dsh-dot-chat .dsh-dot-model-chip-remove:focus-visible { background: var(--dsw-alias-interactive-bg-hover); color: var(--dsw-alias-label-primary); outline: 1.5px solid var(--dsw-alias-state-business-primary); outline-offset: 1px; }
 .dsh-dot-chat .dsh-dot-model-group {
   display: flex; flex-direction: column; gap: 1px; min-width: 0; padding: 4px;
   border-radius: var(--dsw-radius-sm); background: var(--dsw-alias-bg-base);
@@ -988,7 +1019,8 @@ export const settingsCss = `
   list-style: none; cursor: pointer; border-radius: var(--dsw-radius-sm);
 }
 .dsh-dot-chat .dsh-dot-model-group > summary::-webkit-details-marker { display: none; }
-.dsh-dot-chat .dsh-dot-model-group > summary:hover { background: var(--dsw-alias-interactive-bg-hover); }
+.dsh-dot-chat .dsh-dot-model-group > summary:hover:not(:has(.dsh-dot-model-group-toggle:hover)) { background: var(--dsw-alias-interactive-bg-hover); }
+.dsh-dot-chat .dsh-dot-model-group > summary:focus-visible { outline: 1.5px solid var(--dsw-alias-state-business-primary); outline-offset: 1px; }
 .dsh-dot-chat .dsh-dot-model-group > summary::before {
   content: '›'; display: inline-block; flex-shrink: 0; width: 12px; text-align: center;
   transition: transform var(--ds-transition-duration, 0.2s) var(--ds-ease-in-out, ease); color: var(--dsw-alias-label-tertiary);
@@ -1005,6 +1037,7 @@ export const settingsCss = `
   background: transparent; color: var(--dsw-alias-label-secondary); font: inherit; font-size: 12px; line-height: 18px; cursor: pointer;
 }
 .dsh-dot-chat .dsh-dot-model-group-toggle:hover { background: var(--dsw-alias-interactive-bg-hover); color: var(--dsw-alias-label-primary); }
+.dsh-dot-chat .dsh-dot-model-group-toggle:focus-visible { background: var(--dsw-alias-interactive-bg-hover); color: var(--dsw-alias-label-primary); outline: 1.5px solid var(--dsw-alias-state-business-primary); outline-offset: 1px; }
 .dsh-dot-chat .dsh-dot-model-empty { padding: 12px 8px; text-align: center; font-size: 12px; color: var(--dsw-alias-label-tertiary); }
 .dsh-dot-chat .dsh-dot-model-picker .dsh-dot-model-empty {
   padding: 18px 12px; border-radius: var(--dsw-radius-sm); background: var(--dsw-alias-bg-base); line-height: 18px;

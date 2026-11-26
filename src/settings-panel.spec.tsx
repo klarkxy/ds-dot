@@ -1182,13 +1182,18 @@ describe('dispatch settings layout', () => {
 
     await act(async () => { type(filter, '') })
     const remove = document.querySelector<HTMLButtonElement>('.dsh-dot-model-chip-remove')!
-    expect(remove.getAttribute('aria-label')).toBe('Remove Agnes 3.0 Flash · KLARKXY')
+    expect(remove.getAttribute('aria-label')).toBe('Remove Magpie / Agnes 3.0 Flash · KLARKXY')
     await act(async () => { remove.click() })
     expect(saves.at(-1)?.taskModels).toEqual({ mode: 'allow', list: selected.slice(1) })
 
     const toggle = [...document.querySelectorAll<HTMLElement>('.dsh-dot-model-group-toggle')].find(el => el.parentElement?.textContent?.includes('DeepSeek Account'))!
     await act(async () => { toggle.click() })
     expect(saves.at(-1)?.taskModels?.list).toEqual(expect.arrayContaining(['account/v4', 'account/flash']))
+
+    // Toggling the same group again removes only that group's models, keeping the others.
+    await act(async () => { toggle.click() })
+    expect(saves.at(-1)?.taskModels?.list).toEqual(expect.not.arrayContaining(['account/v4', 'account/flash']))
+    expect(saves.at(-1)?.taskModels?.list).toEqual(expect.arrayContaining(['magpie/ds-flash', 'magpie/glm', 'deepseek/chat']))
 
     await act(async () => { document.querySelector<HTMLButtonElement>('.dsh-dot-model-summary button')!.click() })
     expect(saves.at(-1)?.taskModels).toEqual({ mode: 'allow', list: [] })
@@ -1217,6 +1222,7 @@ describe('dispatch settings layout', () => {
     expect(rule('.dsh-dot-chat .dsh-dot-model-list {')).not.toMatch(/max-height|overflow/)
     expect(rule('.dsh-dot-chat .dsh-dot-model-chips {')).not.toMatch(/max-height|overflow/)
     expect(settingsCss).toContain(".dsh-dot-dispatch-group[data-group='models']")
-    expect(settingsCss).toContain('width: 100%')
+    expect(settingsCss).toContain('.dsh-dot-chat .dsh-dot-model-search { display: flex; width: 100%;')
+    expect(settingsCss).toContain('.dsh-dot-chat .dsh-dot-model-chip-provider {')
   })
 })

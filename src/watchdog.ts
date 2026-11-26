@@ -346,9 +346,11 @@ export class WatchdogRunner {
   private judgeBusy = false
   private activeJudgeSessionId: string | undefined
   private activeJudgeRun: Promise<void> | undefined
+  private readonly activePatrols = new Set<Promise<unknown>>()
   private readonly activeStops = new Set<Promise<void>>()
   private readonly stoppingRunKeys = new Set<string>()
   private readonly stoppedRunKeys = new Set<string>()
+  private resetEpoch = 0
   private hitSeq = 0
   private lastWatchedModel: string | undefined
 
@@ -383,7 +385,14 @@ export class WatchdogRunner {
     const { watchdogMode, watchdogModel } = this.options.settings()
     if (watchdogModel !== this.lastWatchedModel) {
       this.lastWatchedModel = watchdogModel
-      void this.store.setModelFallbackNotice(undefined).then(() => this.options.onChange?.())
+      const epoch = this.resetEpoch
+      void this.store.setModelFallbackNotice(undefined)
+        .then(() => {
+          if (!this.disposed && epoch === this.resetEpoch) this.options.onChange?.()
+        })
+        .catch(error => {
+          this.options.log?.(`dsh-dot: watchdog fallback notice clear failed: ${error instanceof Error ? error.message : String(error)}`)
+        })
     }
     if (watchdogMode === 'off') {
       this.clearPatrol()
@@ -400,9 +409,14 @@ export class WatchdogRunner {
     if (this.disposed || this.mode === 'off') return
     const handle = this.timer.set(() => {
       this.patrolHandle = undefined
-      void this.patrolNow().finally(() => {
-        if (!this.disposed && this.started && this.mode !== 'off') this.armPatrol()
-      })
+      void this.patrolNow()
+        .catch(error => {
+          this.options.log?.(`dsh-dot: watchdog patrol failed: ${error instanceof Error ? error.message : String(error)}`)
+        })
+        .finally(() => {
+          if (!this.disposed && this.started && this.mode !== 'off') this.armPatrol()
+        })
+        .catch(() => undefined)
     }, this.patrolMs)
     ;(handle as { unref?: () => void } | undefined)?.unref?.()
     this.patrolHandle = handle
@@ -509,11 +523,22 @@ export class WatchdogRunner {
   }
 
   async patrolNow(): Promise<WatchdogSignalHit[]> {
+    const run = this.runPatrol()
+    this.activePatrols.add(run)
+    try {
+      return await run
+    } finally {
+      this.activePatrols.delete(run)
+    }
+  }
+
+  private async runPatrol(): Promise<WatchdogSignalHit[]> {
+    const epoch = this.resetEpoch
     if (this.disposed || this.mode === 'off') return []
     const now = this.options.now()
     const allHits: WatchdogSignalHit[] = []
     for (const run of this.options.runs()) {
-      if (this.disposed) break
+      if (this.disposed || epoch !== this.resetEpoch) break
       if (runIsTerminal(run)) continue
       const ctx = runSignalContext(run)
       if (!ctx) continue
@@ -547,25 +572,30 @@ export class WatchdogRunner {
         retryStatus: this.options.retryStatus(sessionId),
       })
       for (const hit of hits) {
+        if (this.disposed || epoch !== this.resetEpoch) break
         allHits.push(hit)
         this.handleHit(run, hit)
       }
     }
+    if (this.disposed || epoch !== this.resetEpoch) return allHits
     await this.activeJudgeRun?.catch(() => undefined)
+    if (this.disposed || epoch !== this.resetEpoch) return allHits
     await this.store.flush()
     return allHits
   }
 
   async flushJudge(): Promise<void> {
+    await Promise.allSettled([...this.activePatrols])
     await this.activeJudgeRun?.catch(() => undefined)
     await Promise.allSettled([...this.activeStops])
     await this.store.flush()
   }
 
   async annotateHit(id: string, annotation: WatchdogAnnotation): Promise<WatchdogHitRecord | undefined> {
+    const epoch = this.resetEpoch
     const at = this.options.now()
     const updated = await this.store.annotateHit(id, annotation, at)
-    if (!updated) return undefined
+    if (!updated || this.disposed || epoch !== this.resetEpoch) return undefined
     this.options.trace({
       event: DOT_TRACE.watchdogAnnotate,
       message: `Annotated watchdog hit ${id} as ${annotation}.`,
@@ -629,11 +659,14 @@ export class WatchdogRunner {
   }
 
   async reset(): Promise<void> {
+    this.resetEpoch += 1
     this.clearPatrol()
     if (this.activeJudgeSessionId) {
       try { await this.options.host.stop(this.activeJudgeSessionId) } catch { /* best effort */ }
     }
+    await Promise.allSettled([...this.activePatrols])
     await this.activeJudgeRun?.catch(() => undefined)
+    await Promise.allSettled([...this.activeStops])
     this.detector.clear()
     this.lastJudgeAt.clear()
     this.consecutiveHighSpinning.clear()
@@ -642,16 +675,18 @@ export class WatchdogRunner {
     this.stoppedRunKeys.clear()
     this.agentStatuses.clear()
     await this.store.clear()
-    this.options.onChange?.()
+    if (!this.disposed) this.options.onChange?.()
     if (!this.disposed && this.started && this.mode !== 'off') this.armPatrol()
   }
 
   async dispose(): Promise<void> {
     this.disposed = true
+    this.resetEpoch += 1
     this.clearPatrol()
     if (this.activeJudgeSessionId) {
       try { await this.options.host.stop(this.activeJudgeSessionId) } catch { /* best effort */ }
     }
+    await Promise.allSettled([...this.activePatrols])
     await this.activeJudgeRun?.catch(() => undefined)
     this.activeJudgeRun = undefined
     await Promise.allSettled([...this.activeStops])
@@ -695,7 +730,14 @@ export class WatchdogRunner {
       evidence: [...hit.evidence],
       ...(hit.hardLimitReached ? { hardLimitReached: true } : {}),
     }
-    void this.store.recordHit(record).then(() => this.options.onChange?.())
+    const epoch = this.resetEpoch
+    void this.store.recordHit(record)
+      .then(() => {
+        if (!this.disposed && epoch === this.resetEpoch) this.options.onChange?.()
+      })
+      .catch(error => {
+        this.options.log?.(`dsh-dot: watchdog recordHit failed: ${error instanceof Error ? error.message : String(error)}`)
+      })
     this.options.trace({
       event: DOT_TRACE.watchdogHit,
       level: 'warn',
@@ -736,16 +778,21 @@ export class WatchdogRunner {
     this.lastJudgeAt.set(hit.runKey, hit.at)
     const work = this.invokeJudge(run, record, hit)
       .catch(error => {
-        this.options.log?.(`dsh-dot: watchdog judge failed: ${error instanceof Error ? error.message : String(error)}`)
+        try {
+          this.options.log?.(`dsh-dot: watchdog judge failed: ${error instanceof Error ? error.message : String(error)}`)
+        } catch {
+          // Never allow logger errors to produce unhandled rejections.
+        }
       })
       .finally(() => {
         this.judgeBusy = false
         if (this.activeJudgeRun === work) this.activeJudgeRun = undefined
       })
+      .catch(() => undefined)
     this.activeJudgeRun = work
   }
 
-  private async resolveJudgeModel(): Promise<{ readonly ok: true; readonly choice: ModelChoice | null; readonly configuredModel?: string } | { readonly ok: false }> {
+  private async resolveJudgeModel(epoch: number): Promise<{ readonly ok: true; readonly choice: ModelChoice | null; readonly configuredModel?: string } | { readonly ok: false }> {
     const configured = this.options.settings().watchdogModel?.trim()
     if (!configured) {
       return { ok: true, choice: null }
@@ -758,6 +805,7 @@ export class WatchdogRunner {
     if (typeof this.options.host.listModels === 'function') {
       try {
         const catalog = await this.options.host.listModels()
+        if (this.disposed || epoch !== this.resetEpoch) return { ok: false }
         if (catalog.models.length > 0 && !catalog.models.some(m => m.provider === parsed.provider && m.model === parsed.model)) {
           await this.recordModelFallback(configured, 'not-in-catalog', 'model not found in host catalog')
           return { ok: false }
@@ -803,9 +851,10 @@ export class WatchdogRunner {
   }
 
   private async invokeJudge(run: RunRecord, record: WatchdogHitRecord, hit: WatchdogSignalHit): Promise<void> {
+    const epoch = this.resetEpoch
     if (this.disposed || this.mode !== 'auto') return
-    const resolved = await this.resolveJudgeModel()
-    if (!resolved.ok || this.disposed) return
+    const resolved = await this.resolveJudgeModel(epoch)
+    if (!resolved.ok || this.disposed || epoch !== this.resetEpoch) return
 
     let sessionId: string | undefined
     try {
@@ -814,14 +863,16 @@ export class WatchdogRunner {
         model: resolved.choice,
       })
       this.activeJudgeSessionId = sessionId
-      if (this.disposed) return
+      if (this.disposed || epoch !== this.resetEpoch) return
       await this.options.host.promptInternal(sessionId, this.buildJudgePrompt(run, hit))
+      if (this.disposed || epoch !== this.resetEpoch) return
       await this.options.host.waitIdle(sessionId, this.timeoutMs)
-      if (this.disposed) return
+      if (this.disposed || epoch !== this.resetEpoch) return
 
       // Check for turn/end(error) in the internal judge session before reading latestReply.
       if (typeof this.options.host.readEvents === 'function') {
         const events = await this.options.host.readEvents(sessionId).catch(() => [])
+        if (this.disposed || epoch !== this.resetEpoch) return
         const failedTurn = [...events].reverse().find(ev => {
           if (ev.type !== 'turn/end') return false
           const reason = (ev.data as { reason?: { kind?: unknown; error?: { message?: unknown } } } | undefined)?.reason
@@ -839,6 +890,7 @@ export class WatchdogRunner {
       }
 
       const reply = await this.options.host.latestReply(sessionId, 4000)
+      if (this.disposed || epoch !== this.resetEpoch) return
       const verdict = parseWatchdogVerdict(reply)
       if (!verdict) {
         this.options.log?.(`dsh-dot: watchdog judge returned invalid verdict for ${run.id}`)
@@ -846,6 +898,7 @@ export class WatchdogRunner {
       }
       const updatedRecord: WatchdogHitRecord = { ...record, judge: verdict }
       await this.store.recordHit(updatedRecord)
+      if (this.disposed || epoch !== this.resetEpoch) return
       this.options.onChange?.()
       this.options.trace({
         event: DOT_TRACE.watchdogJudge,
@@ -876,7 +929,7 @@ export class WatchdogRunner {
         this.sendWatchdogAlert(run, hit, verdict)
       }
     } catch (error) {
-      if (!this.disposed) {
+      if (!this.disposed && epoch === this.resetEpoch) {
         const msg = error instanceof Error ? error.message : String(error)
         await this.recordModelFallback(resolved.configuredModel ?? '(host default)', 'runtime-error', msg)
       }
@@ -901,11 +954,23 @@ export class WatchdogRunner {
   }
 
   private trackStop(promise: Promise<void>): void {
-    this.activeStops.add(promise)
-    void promise.finally(() => { this.activeStops.delete(promise) })
+    const tracked = promise
+      .catch(error => {
+        try {
+          this.options.log?.(`dsh-dot: watchdog auto-stop failed: ${error instanceof Error ? error.message : String(error)}`)
+        } catch {
+          // Never allow logger errors to produce unhandled rejections.
+        }
+      })
+      .finally(() => {
+        this.activeStops.delete(tracked)
+      })
+      .catch(() => undefined)
+    this.activeStops.add(tracked)
   }
 
   private async autoStopRun(run: RunRecord, record: WatchdogHitRecord, hit: WatchdogSignalHit, summary: string): Promise<void> {
+    const epoch = this.resetEpoch
     if (this.disposed) return
     const liveRun = this.currentRun(run)
     if (liveRun.phase !== 'active') return
@@ -913,7 +978,14 @@ export class WatchdogRunner {
 
     this.stoppingRunKeys.add(hit.runKey)
     try {
-      const stopped = await this.options.stopRun(liveRun, hit, summary)
+      let stopped: boolean
+      try {
+        stopped = await this.options.stopRun(liveRun, hit, summary)
+      } catch (error) {
+        this.options.log?.(`dsh-dot: watchdog stopRun failed for ${liveRun.id} (${hit.signal}): ${error instanceof Error ? error.message : String(error)}`)
+        return
+      }
+      if (this.disposed || epoch !== this.resetEpoch) return
       if (!stopped) {
         this.options.log?.(`dsh-dot: watchdog stop refused or unconfirmed for ${liveRun.id} (${hit.signal})`)
         this.options.notifyDorothy({
@@ -930,7 +1002,9 @@ export class WatchdogRunner {
       this.consecutiveHighSpinning.set(hit.runKey, 0)
       const { totalStops, scopeStops, persisted } = this.store.incrementStops(liveRun.id, liveRun.changeId, liveRun.inputRef, liveRun.inputRevision)
       await persisted
+      if (this.disposed || epoch !== this.resetEpoch) return
       await this.store.recordHit({ ...record, stopped: true })
+      if (this.disposed || epoch !== this.resetEpoch) return
       this.options.onChange?.()
       this.options.trace({
         event: DOT_TRACE.watchdogStop,
@@ -963,7 +1037,9 @@ export class WatchdogRunner {
           : `Watchdog auto-stopped ${liveRun.id} (signal=${hit.signal}, watchdogStops=${totalStops}). Summary: ${summary}`,
       })
     } finally {
-      this.stoppingRunKeys.delete(hit.runKey)
+      if (epoch === this.resetEpoch) {
+        this.stoppingRunKeys.delete(hit.runKey)
+      }
     }
   }
 }

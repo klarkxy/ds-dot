@@ -407,4 +407,161 @@ describe('WatchdogRunner', () => {
     const fallbackHits = await fallback.runner.patrolNow()
     expect(fallbackHits.some(hit => hit.signal === 'silent-stall')).toBe(true)
   })
+
+  it('emits zero unhandledRejection events and does not record stops or modelFallbackNotice when stopRun throws during >=8 error burst', async () => {
+    const unhandled: unknown[] = []
+    const onUnhandled = (reason: unknown) => { unhandled.push(reason) }
+    process.on('unhandledRejection', onUnhandled)
+    try {
+      let stopCalls = 0
+      const h = setup({
+        mode: 'auto',
+        stopRun: async () => {
+          stopCalls += 1
+          throw new Error('stopRun boom')
+        },
+      })
+      h.runner.onSessionEvent('sess-1', { type: 'turn/start', time: 100, data: { turn: 1 } })
+      for (let i = 1; i <= 8; i++) {
+        h.runner.onSessionEvent('sess-1', {
+          type: 'tool/result',
+          time: 100 + i,
+          data: { turn: 1, message: { toolCallId: `u-${i}`, isError: true, content: 'boom' } },
+        })
+      }
+      await h.runner.flushJudge()
+      await new Promise(resolve => setTimeout(resolve, 20))
+
+      expect(stopCalls).toBe(1)
+      expect(unhandled).toEqual([])
+      expect(h.runner.diagnosticsView().watchdogStops).toBe(0)
+      expect(h.runner.diagnosticsView().modelFallbackNotice).toBeUndefined()
+      expect(h.runner.diagnosticsView().hits.some(hit => hit.stopped)).toBe(false)
+      expect(h.traces.some(t => t.event === 'watchdog.stop')).toBe(false)
+    } finally {
+      process.off('unhandledRejection', onUnhandled)
+    }
+  })
+
+  it('does not emit unhandledRejection or misclassify stopRun errors as modelFallbackNotice during invokeJudge', async () => {
+    const unhandled: unknown[] = []
+    const onUnhandled = (reason: unknown) => { unhandled.push(reason) }
+    process.on('unhandledRejection', onUnhandled)
+    try {
+      let stopCalls = 0
+      const h = setup({
+        mode: 'auto',
+        reply: JSON.stringify({ verdict: 'spinning', confidence: 'high', summary: 'stuck', evidence: ['loop'] }),
+        stopRun: async () => {
+          stopCalls += 1
+          throw new Error('stopRun boom')
+        },
+      })
+
+      // 1st high-confidence spinning verdict -> alert only
+      h.clock.value = 10_000
+      for (let i = 1; i <= 4; i++) {
+        h.runner.onSessionEvent('sess-1', { type: 'tool/call', time: 10_000, data: { callId: `j1-${i}`, name: 'grep', arguments: '{"q":"x"}' } })
+      }
+      await h.runner.flushJudge()
+      expect(h.createInternal).toHaveBeenCalledTimes(1)
+      expect(h.notices).toHaveLength(1)
+
+      // After cooldown, 2nd high-confidence spinning verdict invokes autoStopRun, where stopRun throws
+      h.clock.value = 10_000 + WATCHDOG_COOLDOWN_MS + 1000
+      for (let i = 1; i <= 3; i++) {
+        h.runner.onSessionEvent('sess-1', { type: 'tool/result', time: h.clock.value, data: { turn: 2, message: { toolCallId: `je-${i}`, isError: true, content: 'fail' } } })
+      }
+      await h.runner.flushJudge()
+      await new Promise(resolve => setTimeout(resolve, 20))
+
+      expect(h.createInternal).toHaveBeenCalledTimes(2)
+      expect(stopCalls).toBe(1)
+      expect(unhandled).toEqual([])
+      expect(h.runner.diagnosticsView().watchdogStops).toBe(0)
+      expect(h.runner.diagnosticsView().modelFallbackNotice).toBeUndefined()
+      expect(h.traces.some(t => t.event === 'watchdog.fallback')).toBe(false)
+      expect(h.traces.some(t => t.event === 'watchdog.stop')).toBe(false)
+    } finally {
+      process.off('unhandledRejection', onUnhandled)
+    }
+  })
+
+  it('awaits in-flight stopRun during reset() and discards stale post-reset continuation', async () => {
+    let resolveStop!: (value: boolean) => void
+    let stopCalls = 0
+    const h = setup({
+      mode: 'auto',
+      stopRun: () => {
+        stopCalls += 1
+        return new Promise<boolean>(resolve => { resolveStop = resolve })
+      },
+    })
+    h.runner.onSessionEvent('sess-1', { type: 'turn/start', time: 100, data: { turn: 1 } })
+    for (let i = 1; i <= 8; i++) {
+      h.runner.onSessionEvent('sess-1', {
+        type: 'tool/result',
+        time: 100 + i,
+        data: { turn: 1, message: { toolCallId: `rst-${i}`, isError: true, content: 'reset race' } },
+      })
+    }
+    expect(stopCalls).toBe(1)
+
+    const noticesBeforeReset = h.notices.length
+    const tracesBeforeReset = h.traces.length
+    let resetDone = false
+    const resetPromise = h.runner.reset().then(() => { resetDone = true })
+    await Promise.resolve()
+    expect(resetDone).toBe(false)
+
+    resolveStop(true)
+    await resetPromise
+    await h.runner.flushJudge()
+
+    expect(resetDone).toBe(true)
+    expect(h.runner.diagnosticsView().watchdogStops).toBe(0)
+    expect(h.runner.diagnosticsView().hits).toHaveLength(0)
+    expect(h.notices.slice(noticesBeforeReset)).toEqual([])
+    expect(h.traces.slice(tracesBeforeReset)).toEqual([])
+  })
+
+  it('re-checks disposed after await stopRun so dispose() prevents post-dispose hits, stops, traces, and notices', async () => {
+    let resolveStop!: (value: boolean) => void
+    let stopCalls = 0
+    const h = setup({
+      mode: 'auto',
+      stopRun: () => {
+        stopCalls += 1
+        return new Promise<boolean>(resolve => { resolveStop = resolve })
+      },
+    })
+    h.runner.onSessionEvent('sess-1', { type: 'turn/start', time: 100, data: { turn: 1 } })
+    for (let i = 1; i <= 8; i++) {
+      h.runner.onSessionEvent('sess-1', {
+        type: 'tool/result',
+        time: 100 + i,
+        data: { turn: 1, message: { toolCallId: `dsp-${i}`, isError: true, content: 'dispose race' } },
+      })
+    }
+    expect(stopCalls).toBe(1)
+
+    const hitsBeforeDispose = h.runner.diagnosticsView().hits.length
+    const noticesBeforeDispose = h.notices.length
+    const tracesBeforeDispose = h.traces.length
+    let disposeDone = false
+    const disposePromise = h.runner.dispose().then(() => { disposeDone = true })
+    await Promise.resolve()
+    expect(disposeDone).toBe(false)
+
+    resolveStop(true)
+    await disposePromise
+    await h.runner.flushJudge()
+
+    expect(disposeDone).toBe(true)
+    expect(h.runner.diagnosticsView().watchdogStops).toBe(0)
+    expect(h.runner.diagnosticsView().hits).toHaveLength(hitsBeforeDispose)
+    expect(h.runner.diagnosticsView().hits.some(hit => hit.stopped)).toBe(false)
+    expect(h.notices.slice(noticesBeforeDispose)).toEqual([])
+    expect(h.traces.slice(tracesBeforeDispose)).toEqual([])
+  })
 })

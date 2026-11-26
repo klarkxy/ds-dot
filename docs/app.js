@@ -17,6 +17,23 @@
 
   const RECORDINGS = [
     {
+      id: 'composer-files',
+      pr: 93,
+      date: '2026.11.26',
+      post: 'oranges-and-hello',
+      file: 'dot-93-composer-files.gif',
+      title: {
+        zh: '文件从小卡片递到我手里',
+        en: 'Files handed over from the little card',
+        ja: '小さなカードからファイルを手渡す',
+      },
+      desc: {
+        zh: '从“+”里选中 Markdown 和 PDF，我读完文本再请 Office 把 PDF 渲染出来，两个口令都回了。',
+        en: 'Pick a Markdown file and a PDF from “+”; I read the text, render the PDF through Office, and bring both passphrases back.',
+        ja: '「+」から Markdown と PDF を渡すと、テキストを読み、PDF は Office で描画して、ふたつの合言葉を返します。',
+      },
+    },
+    {
       id: 'drawer-settings',
       pr: 90,
       date: '2026.11.25',

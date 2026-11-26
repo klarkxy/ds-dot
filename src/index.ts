@@ -108,7 +108,7 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
   if (retiring) await retiring.catch(() => undefined)
   const logger = installPluginLogger(ctx, PLUGIN_NAME, { forwardHostWarnError: false })
   const log = (message: string) => {
-    ctx.logger?.info?.(message)
+    try { ctx.logger?.info?.(message) } catch { /* host logger is optional */ }
     logger.info('dot.runtime', message)
   }
   const domain = await openCompatibleDomain(
@@ -128,17 +128,31 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
       void Promise.resolve(dispose()).catch(() => {})
     } catch { /* preset disposal is best-effort */ }
   }
+  const safeWarn = (template: string, error: unknown) => {
+    try { ctx.logger?.warn?.(template, messageOf(error)) } catch { /* host logger is optional */ }
+  }
   /** Tool definitions published on dot's preset scope (the ds-dot/mcp mounts). */
   const presetScopeDefs = async (): Promise<readonly { readonly name: string; readonly description?: string }[]> => {
-    const presets = safeAgentPresets() as {
-      acquireScope?(id: string): Promise<{ key: unknown } & { [Symbol.asyncDispose](): Promise<void> }>
-    } | undefined
-    const toolsService = ctx.get('tools' as never) as
-      | (CapabilityTools & { definitions?(key?: unknown): readonly { readonly name: string; readonly description?: string }[] })
-      | undefined
-    const handle = await presets?.acquireScope?.(PRESET_ID)
-    if (handle === undefined || toolsService?.definitions === undefined) return []
-    try { return toolsService.definitions(handle.key) } finally { await handle[Symbol.asyncDispose]() }
+    try {
+      const presets = safeAgentPresets() as {
+        acquireScope?(id: string): Promise<{ key: unknown } & { [Symbol.asyncDispose](): Promise<void> }>
+      } | undefined
+      const toolsService = ctx.get('tools' as never) as
+        | (CapabilityTools & { definitions?(key?: unknown): readonly { readonly name: string; readonly description?: string }[] })
+        | undefined
+      const acquireScope = presets?.acquireScope
+      if (typeof acquireScope !== 'function') return []
+      const handle = await acquireScope.call(presets, PRESET_ID)
+      if (handle === undefined) return []
+      try {
+        const definitions = toolsService?.definitions
+        return typeof definitions === 'function' ? definitions.call(toolsService, handle.key) : []
+      } finally {
+        await handle[Symbol.asyncDispose]?.()
+      }
+    } catch {
+      return []
+    }
   }
   /** Global MCP server names: manager rows plus names guessed from root `mcp__x__y` tools. */
   const globalMcpNames = (): ReadonlySet<string> => {
@@ -277,33 +291,57 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
 
   ctx.effect(() => {
     const presets = safeAgentPresets()
-    const release = installPresetVisibility(presets, ctx)
+    let release: (() => void) = () => {}
+    try {
+      release = installPresetVisibility(presets, ctx)
+    } catch {
+      return () => {}
+    }
     // Warm the public-default cache so `@deepseek-ai/dsh-tool-schedule` can
     // rewrite `composedPreset` before the first roster read.
     if (presets) {
       try {
-        const warm = typeof (presets as { remoteExportList?: () => Promise<unknown> }).remoteExportList === 'function'
-          ? presets.remoteExportList()
-          : typeof presets.list === 'function'
-            ? presets.list()
+        const remoteExportList = (presets as { remoteExportList?: () => Promise<unknown> }).remoteExportList
+        const list = presets.list
+        const warm = typeof remoteExportList === 'function'
+          ? remoteExportList.call(presets)
+          : typeof list === 'function'
+            ? list.call(presets)
             : undefined
         void Promise.resolve(warm).catch(() => {})
       } catch { /* cache warmup is best-effort */ }
     }
-    return release
+    return () => {
+      try { release() } catch { /* visibility disposal is best-effort */ }
+    }
   }, 'dot.preset-visibility')
-  ctx.effect(() => installInternalPresetCreateGuard(ctx.get('sessionController' as never), () => publicTaskPreset(safeAgentPresets())), 'dot.public-session-create')
+  ctx.effect(() => {
+    let release: (() => void) = () => {}
+    try {
+      release = installInternalPresetCreateGuard(ctx.get('sessionController' as never), () => publicTaskPreset(safeAgentPresets()))
+    } catch {
+      return () => {}
+    }
+    return () => {
+      try { release() } catch { /* create-guard disposal is best-effort */ }
+    }
+  }, 'dot.public-session-create')
 
   // The dot preset: conversation, dot's tools, and in-place compaction for the
   // one turn that outgrows the window before a segment change. Choices go through
   // deep-view's show_view cards, which every session gets when it is installed.
   ctx.effect(() => {
     const presets = safeAgentPresets()
-    if (typeof presets?.register !== 'function') return () => {}
     let release: (() => Promise<void>) | undefined
     let disposed = false
+    const onFailed = (error: unknown) => {
+      logger.error('preset.register-failed', 'Failed to register Dorothy preset.', error, { presetId: PRESET_ID })
+      safeWarn('dsh-dot: preset registration failed: %s', error)
+    }
     try {
-      void Promise.resolve(presets.register({
+      const register = presets?.register
+      if (typeof register !== 'function') return () => {}
+      void Promise.resolve(register.call(presets, {
         id: PRESET_ID,
         name: 'Dorothy',
         description: 'Dorothy (dot): coordinates workspaces and task sessions, settles routine requests, and reports back; carries no file or shell tools.',
@@ -334,13 +372,9 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
         logger.debug('preset.registered', 'Registered Dorothy preset.', { presetId: PRESET_ID })
         // Reminders wake dot's session, which only opens once its preset exists.
         service.startReminders()
-      }, (error: unknown) => {
-        logger.error('preset.register-failed', 'Failed to register Dorothy preset.', error, { presetId: PRESET_ID })
-        ctx.logger?.warn?.('dsh-dot: preset registration failed: %s', messageOf(error))
-      })
+      }, onFailed)
     } catch (error: unknown) {
-      logger.error('preset.register-failed', 'Failed to register Dorothy preset.', error, { presetId: PRESET_ID })
-      ctx.logger?.warn?.('dsh-dot: preset registration failed: %s', messageOf(error))
+      onFailed(error)
     }
     return () => {
       disposed = true
@@ -355,11 +389,16 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
   // agreements tool). It is filtered out of the task preset roster in host.ts.
   ctx.effect(() => {
     const presets = safeAgentPresets()
-    if (typeof presets?.register !== 'function') return () => {}
     let release: (() => Promise<void>) | undefined
     let disposed = false
+    const onFailed = (error: unknown) => {
+      logger.error('preset.register-failed', 'Failed to register Dot reflection preset.', error, { presetId: REFLECTION_PRESET_ID })
+      safeWarn('dsh-dot: reflection preset registration failed: %s', error)
+    }
     try {
-      void Promise.resolve(presets.register({
+      const register = presets?.register
+      if (typeof register !== 'function') return () => {}
+      void Promise.resolve(register.call(presets, {
         id: REFLECTION_PRESET_ID,
         name: 'Dot reflection',
         description: 'Internal background reflection pass that updates Dorothy’s cognition; never used for tasks.',
@@ -373,13 +412,9 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
         if (disposed) { invokePresetDispose(dispose); return }
         release = dispose
         logger.debug('preset.registered', 'Registered Dot reflection preset.', { presetId: REFLECTION_PRESET_ID })
-      }, (error: unknown) => {
-        logger.error('preset.register-failed', 'Failed to register Dot reflection preset.', error, { presetId: REFLECTION_PRESET_ID })
-        ctx.logger?.warn?.('dsh-dot: reflection preset registration failed: %s', messageOf(error))
-      })
+      }, onFailed)
     } catch (error: unknown) {
-      logger.error('preset.register-failed', 'Failed to register Dot reflection preset.', error, { presetId: REFLECTION_PRESET_ID })
-      ctx.logger?.warn?.('dsh-dot: reflection preset registration failed: %s', messageOf(error))
+      onFailed(error)
     }
     return () => {
       disposed = true

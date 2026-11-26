@@ -344,7 +344,7 @@ describe('dot-worker preset definition', () => {
     }
   })
 
-  function createApplyTestContext() {
+  function createApplyTestContext(overrides?: { readonly sessionController?: unknown }) {
     const tables: Record<string, Map<string, unknown>> = {
       state: new Map(), tasks: new Map(), tickets: new Map(), schedules: new Map(),
       recipes: new Map(), recipe_proposals: new Map(), proposals: new Map(),
@@ -364,7 +364,7 @@ describe('dot-worker preset definition', () => {
     ctx.provide('storageDomain' as never, { open: async () => domain } as never)
     ctx.provide('sessions' as never, {} as never)
     ctx.provide('sessionQuery' as never, { readSession: async () => ({ events: [] }) } as never)
-    ctx.provide('sessionController' as never, { list: async () => ({ items: [] }) } as never)
+    ctx.provide('sessionController' as never, (overrides?.sessionController ?? { list: async () => ({ items: [] }) }) as never)
     ctx.provide('workspaceRegistry' as never, { list: () => [] } as never)
     ctx.provide('agents' as never, { get: () => undefined, list: () => [] } as never)
     ctx.provide('agentDefaultModel' as never, { currentSelection: () => ({}) } as never)
@@ -417,6 +417,111 @@ describe('dot-worker preset definition', () => {
       await expect(fiber.dispose().then(() => 'ok')).resolves.toBe('ok')
     } finally {
       rmSync(homeDir, { recursive: true, force: true })
+    }
+  })
+
+  it('degrades cleanly in applyPlugin(ctx) when agentPresets.register/list/create getters or ctx.logger throw without unhandled rejections', async () => {
+    const unhandled: unknown[] = []
+    const onUnhandled = (reason: unknown) => { unhandled.push(reason) }
+    process.on('unhandledRejection', onUnhandled)
+    try {
+      // 1. Throwing agentPresets.register, agentPresets.list, and sessionController.create getters
+      {
+        const createGetter = vi.fn(() => { throw new Error('sessionController.create getter boom') })
+        const listGetter = vi.fn(() => { throw new Error('agentPresets.list getter boom') })
+        const registerGetter = vi.fn(() => { throw new Error('agentPresets.register getter boom') })
+        const throwingController = { list: async () => ({ items: [] }) }
+        Object.defineProperty(throwingController, 'create', { get: createGetter })
+        const ctx = createApplyTestContext({ sessionController: throwingController })
+        const throwingPresets = {}
+        Object.defineProperty(throwingPresets, 'list', { get: listGetter })
+        Object.defineProperty(throwingPresets, 'register', { get: registerGetter })
+        ctx.provide('agentPresets' as never, throwingPresets as never)
+        const homeDir = mkdtempSync(join(tmpdir(), 'dot-worker-apply-reg-getter-'))
+        try {
+          const fiber = ctx.plugin({
+            name: 'ds-dot-throwing-reg-getter',
+            apply: (c: Context) => applyPlugin(c, { homeDir }),
+          })
+          await expect(fiber.await().then(() => 'ok')).resolves.toBe('ok')
+          await expect(fiber.dispose().then(() => 'ok')).resolves.toBe('ok')
+          expect(createGetter).toHaveBeenCalled()
+          expect(listGetter).toHaveBeenCalled()
+          expect(registerGetter).toHaveBeenCalled()
+        } finally {
+          rmSync(homeDir, { recursive: true, force: true })
+        }
+      }
+
+      // 2. Sync-throwing agentPresets.register() + throwing ctx.logger.warn
+      {
+        const warnSpy = vi.fn(() => { throw new Error('host logger.warn boom') })
+        const ctx = createApplyTestContext()
+        ctx.provide('agentPresets' as never, {
+          list: async () => [],
+          register: () => { throw new Error('sync register boom') },
+        } as never)
+        const homeDir = mkdtempSync(join(tmpdir(), 'dot-worker-apply-sync-warn-'))
+        try {
+          const fiber = ctx.plugin({
+            name: 'ds-dot-sync-throw-warn-throw',
+            apply: (c: Context) => {
+              Object.defineProperty(c, 'logger', {
+                configurable: true,
+                value: { info: vi.fn(), warn: warnSpy },
+              })
+              return applyPlugin(c, { homeDir })
+            },
+          })
+          await expect(fiber.await().then(() => 'ok')).resolves.toBe('ok')
+          await expect(fiber.dispose().then(() => 'ok')).resolves.toBe('ok')
+          expect(warnSpy).toHaveBeenCalledTimes(3)
+        } finally {
+          rmSync(homeDir, { recursive: true, force: true })
+        }
+      }
+
+      // 3. Async-rejecting agentPresets.register() + throwing ctx.logger.warn and throwing ctx.logger getter
+      for (const loggerMode of ['warn-throws', 'getter-throws'] as const) {
+        const asyncWarnSpy = vi.fn(() => { throw new Error('async host logger.warn boom') })
+        const loggerGetterSpy = vi.fn(() => { throw new Error('host logger getter boom') })
+        const ctx = createApplyTestContext()
+        ctx.provide('agentPresets' as never, {
+          list: async () => [],
+          register: async () => { throw new Error('async register boom') },
+        } as never)
+        const homeDir = mkdtempSync(join(tmpdir(), `dot-worker-apply-async-${loggerMode}-`))
+        try {
+          const fiber = ctx.plugin({
+            name: `ds-dot-async-reject-${loggerMode}`,
+            apply: (c: Context) => {
+              if (loggerMode === 'warn-throws') {
+                Object.defineProperty(c, 'logger', {
+                  configurable: true,
+                  value: { info: vi.fn(), warn: asyncWarnSpy },
+                })
+              } else {
+                Object.defineProperty(c, 'logger', {
+                  configurable: true,
+                  get: loggerGetterSpy,
+                })
+              }
+              return applyPlugin(c, { homeDir })
+            },
+          })
+          await expect(fiber.await().then(() => 'ok')).resolves.toBe('ok')
+          await new Promise(resolve => setTimeout(resolve, 25))
+          await expect(fiber.dispose().then(() => 'ok')).resolves.toBe('ok')
+          if (loggerMode === 'warn-throws') expect(asyncWarnSpy).toHaveBeenCalledTimes(3)
+          else expect(loggerGetterSpy).toHaveBeenCalled()
+        } finally {
+          rmSync(homeDir, { recursive: true, force: true })
+        }
+      }
+
+      expect(unhandled).toEqual([])
+    } finally {
+      process.off('unhandledRejection', onUnhandled)
     }
   })
 })

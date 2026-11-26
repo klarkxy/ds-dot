@@ -95,7 +95,12 @@ function safeGet<T extends object>(get: ServiceGetter | undefined, name: string)
 
 export function hasJobsService(get: ServiceGetter | undefined): boolean {
   const jobs = safeGet<BackgroundJobsApi>(get, 'jobs')
-  return jobs !== undefined && typeof jobs.list === 'function'
+  if (!jobs) return false
+  try {
+    return typeof jobs.list === 'function'
+  } catch {
+    return false
+  }
 }
 
 export function getAgentsService(get: ServiceGetter | undefined): BackgroundAgentsApi | undefined {
@@ -118,21 +123,20 @@ function ownedLiveJobs(
   sessionId: string,
   except?: ReadonlySet<string>,
 ): BackgroundJobView[] {
-  if (!jobs || typeof jobs.list !== 'function') return []
-  let rows: readonly BackgroundJobView[]
   try {
-    rows = jobs.list(sessionId)
+    if (!jobs || typeof jobs.list !== 'function') return []
+    const rows = jobs.list(sessionId)
+    if (!Array.isArray(rows)) return []
+    return rows.filter(job =>
+      job
+      && typeof job.id === 'string'
+      && job.owner === sessionId
+      && isLiveStatus(job.status)
+      && !except?.has(job.id),
+    )
   } catch {
     return []
   }
-  if (!Array.isArray(rows)) return []
-  return rows.filter(job =>
-    job
-    && typeof job.id === 'string'
-    && job.owner === sessionId
-    && isLiveStatus(job.status)
-    && !except?.has(job.id),
-  )
 }
 
 export function runningJobs(
@@ -141,7 +145,11 @@ export function runningJobs(
   except?: ReadonlySet<string>,
 ): RunningJobInfo[] {
   const jobs = safeGet<BackgroundJobsApi>(get, 'jobs')
-  return ownedLiveJobs(jobs, sessionId, except).map(job => ({ id: job.id, name: named(job) }))
+  try {
+    return ownedLiveJobs(jobs, sessionId, except).map(job => ({ id: job.id, name: named(job) }))
+  } catch {
+    return []
+  }
 }
 
 /** Race `work` against an optional `AbortSignal` and millisecond timeout. */
@@ -173,11 +181,11 @@ export function until<T>(work: Promise<T>, signal?: AbortSignal, ms?: number): P
 const joins = new WeakMap<object, Promise<boolean>>()
 
 function childrenEnd(subagents: BackgroundSubagentsApi, agent: BackgroundAgentLike): Promise<boolean> {
-  if (typeof subagents.waitForTreeWork !== 'function') return Promise.resolve(false)
   const existing = joins.get(agent)
   if (existing) return existing
   let pending: Promise<boolean>
   try {
+    if (typeof subagents.waitForTreeWork !== 'function') return Promise.resolve(false)
     pending = Promise.resolve(subagents.waitForTreeWork(agent))
       .then(result => result === true)
       .catch(() => false)
@@ -202,8 +210,13 @@ function jobsEnd(
   if (signal.aborted) return Promise.resolve('aborted')
   const jobs = safeGet<BackgroundJobsApi>(get, 'jobs')
   if (!jobs || ownedLiveJobs(jobs, sessionId, except).length === 0) return Promise.resolve('empty')
-  const subscribe = jobs.events?.subscribe
-  if (typeof subscribe !== 'function') return Promise.resolve('degraded')
+  let events: BackgroundJobsApi['events']
+  try {
+    events = jobs.events
+    if (!events || typeof events.subscribe !== 'function') return Promise.resolve('degraded')
+  } catch {
+    return Promise.resolve('degraded')
+  }
 
   return new Promise<JobsEndOutcome>(resolve => {
     let settled = false
@@ -218,11 +231,15 @@ function jobsEnd(
     const onAbort = () => done('aborted')
     signal.addEventListener('abort', onAbort, { once: true })
     try {
-      unsubscribe = jobs.events!.subscribe!({ owner: sessionId }, event => {
-        if (!event || (event.type !== 'settled' && event.type !== 'removed')) return
-        // rc.5 JobEventHub passes owner === undefined to { owner } filters: double-filter!
-        if (event.job?.owner !== sessionId) return
-        if (ownedLiveJobs(jobs, sessionId, except).length === 0) done('waited')
+      unsubscribe = events.subscribe!({ owner: sessionId }, event => {
+        try {
+          if (!event || (event.type !== 'settled' && event.type !== 'removed')) return
+          // rc.5 JobEventHub passes owner === undefined to { owner } filters: double-filter!
+          if (event.job?.owner !== sessionId) return
+          if (ownedLiveJobs(jobs, sessionId, except).length === 0) done('waited')
+        } catch {
+          done('degraded')
+        }
       })
     } catch {
       done('degraded')
@@ -251,8 +268,14 @@ export async function untilQuiet(
     if (signal.aborted) return false
     const idleSeq = agent.session?.seq
     const subagents = safeGet<BackgroundSubagentsApi>(get, 'subagents')
-    const children = subagents && typeof subagents.waitForTreeWork === 'function'
-      ? await until(childrenEnd(subagents, agent), signal).catch(() => false as const)
+    let hasWaitForTreeWork = false
+    try {
+      hasWaitForTreeWork = Boolean(subagents && typeof subagents.waitForTreeWork === 'function')
+    } catch {
+      hasWaitForTreeWork = false
+    }
+    const children = hasWaitForTreeWork
+      ? await until(childrenEnd(subagents!, agent), signal).catch(() => false as const)
       : false
     if (signal.aborted) return false
     const jobsOutcome = await jobsEnd(get, agent.id, signal, except)
@@ -268,8 +291,8 @@ export async function untilQuiet(
 }
 
 function readSafeTail(jobs: BackgroundJobsApi, jobId: string, sessionId: string): string | undefined {
-  if (typeof jobs.readAt !== 'function') return undefined
   try {
+    if (typeof jobs.readAt !== 'function') return undefined
     const read = jobs.readAt(jobId, 0, sessionId)
     const chunks = Array.isArray(read?.chunks) ? read.chunks : []
     const text = chunks.map(chunk => (typeof chunk?.text === 'string' ? chunk.text : '')).join('').trim()
@@ -299,8 +322,8 @@ export async function killJobs(
 
   const failures: unknown[] = []
   const waits = live.map(job => {
-    if (typeof jobs.wait !== 'function') return Promise.resolve(undefined)
     try {
+      if (typeof jobs.wait !== 'function') return Promise.resolve(undefined)
       return Promise.resolve(jobs.wait(job.id, KILL_WAIT_MS, sessionId)).catch(() => undefined)
     } catch {
       return Promise.resolve(undefined)
@@ -339,11 +362,11 @@ async function stopSubagents(
     // Missing or throwing subagents service degrades silently.
   } finally {
     try { agent.cancel?.({ kind: 'user' }, { keepInbox }) } catch { /* best effort */ }
-    if (typeof agent.whenIdle === 'function') {
-      try {
+    try {
+      if (typeof agent.whenIdle === 'function') {
         await until(Promise.resolve(agent.whenIdle()).catch(() => undefined), undefined, DRAIN_LIMIT_MS)
-      } catch { /* best effort */ }
-    }
+      }
+    } catch { /* best effort */ }
   }
 }
 
@@ -373,7 +396,9 @@ export async function stopBackground(
   const sessionIds = new Set<string>()
   if (typeof agentsOrSession === 'string') sessionIds.add(agentsOrSession)
   for (const agent of agents) {
-    if (agent?.id) sessionIds.add(agent.id)
+    try {
+      if (agent?.id) sessionIds.add(agent.id)
+    } catch { /* best effort */ }
   }
 
   await Promise.all([
@@ -388,10 +413,11 @@ export function subscribeJobsEvents(
   listener: (event: BackgroundJobEvent) => void,
 ): (() => void) | undefined {
   const jobs = safeGet<BackgroundJobsApi>(get, 'jobs')
-  const subscribe = jobs?.events?.subscribe
-  if (typeof subscribe !== 'function') return undefined
+  if (!jobs) return undefined
   try {
-    return jobs!.events!.subscribe!(filter, listener)
+    const events = jobs.events
+    if (!events || typeof events.subscribe !== 'function') return undefined
+    return events.subscribe(filter, listener)
   } catch {
     return undefined
   }

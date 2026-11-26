@@ -5987,4 +5987,122 @@ describe('DotService background quiet wait', () => {
       await h.service.dispose()
     }
   })
+
+  it('handles throwing jobs.events getter cleanly in DotService constructor, onTurnEnd, and onBackgroundJobsChange', async () => {
+    const throwingEventsJobs = new Proxy({
+      list: (caller?: string) => (caller ? [{ id: 'j-1', owner: caller, status: 'running' }] : []),
+    }, {
+      get(target, prop, receiver) {
+        if (prop === 'events') throw new Error('events getter exploded!')
+        return Reflect.get(target, prop, receiver)
+      },
+    })
+    const h = setup({ scope: 'all' }, undefined, undefined, {
+      get: name => (name === 'jobs' ? throwingEventsJobs : undefined),
+    })
+    try {
+      await h.service.ensureDot()
+      const unsub = h.service.onBackgroundJobsChange(() => {})
+      const change = await h.service.createWorkChange({ title: 'TrapEvents', cwd: '/trap', goal: 'g', at: 1 })
+      const d = await h.service.manageTask({ action: 'dispatch', task_id: change.id, access: 'read', instruction: 'go' })
+      const rId = /started (run-\d+)/.exec(d)![1]!
+      const sid = h.store.work.run(rId)!.sessionId!
+      await expect(h.service.onTurnEnd(sid)).resolves.toBeUndefined()
+      await h.service.flushNotices()
+      expect(h.relayed).toHaveLength(1)
+      unsub()
+    } finally {
+      await h.service.dispose()
+    }
+  })
+
+  it('does not notify Dorothy from onTurnEndNow while agent status is running', async () => {
+    const mockJobs = createMockJobsService()
+    const agents = new Map<string, { id: string; status: 'idle' | 'running'; session: { id: string; seq: number } }>()
+    const h = setup({ scope: 'all' }, undefined, undefined, {
+      get: name => {
+        if (name === 'jobs') return mockJobs.service
+        if (name === 'agents') return { get: (id: string) => agents.get(id) }
+        return undefined
+      },
+    })
+    try {
+      await h.service.ensureDot()
+      const change = await h.service.createWorkChange({ title: 'RunningRace', cwd: '/race', goal: 'g', at: 1 })
+      const d = await h.service.manageTask({ action: 'dispatch', task_id: change.id, access: 'read', instruction: 'go' })
+      const rId = /started (run-\d+)/.exec(d)![1]!
+      const sid = h.store.work.run(rId)!.sessionId!
+
+      // Case 1: live job + agent already running at Phase-1 completion
+      agents.set(sid, { id: sid, status: 'running', session: { id: sid, seq: 1 } })
+      mockJobs.start('j-live', sid, 'build')
+      await h.service.onTurnEnd(sid)
+      await h.service.flushNotices()
+      expect(h.service.hasActiveQuietWait(sid)).toBe(false)
+      expect(h.relayed).toHaveLength(0)
+
+      // Case 2: job settled & woke worker before Phase-1 completion (liveJobs === 0, status === 'running')
+      mockJobs.settle('j-live', 'completed')
+      await h.service.onTurnEnd(sid)
+      await h.service.flushNotices()
+      expect(h.relayed).toHaveLength(0)
+
+      // Case 3: once worker actually finishes running and goes idle, onTurnEnd notifies Dorothy
+      agents.set(sid, { id: sid, status: 'idle', session: { id: sid, seq: 2 } })
+      await h.service.onTurnEnd(sid)
+      await h.service.flushNotices()
+      expect(h.relayed).toHaveLength(1)
+    } finally {
+      await h.service.dispose()
+    }
+  })
+
+  it('ignores onBackgroundJobsChange job events for terminal (completed, failed, stopped) runs', async () => {
+    const mockJobs = createMockJobsService()
+    const h = setup({ scope: 'all' }, undefined, undefined, {
+      get: name => (name === 'jobs' ? mockJobs.service : undefined),
+    })
+    try {
+      await h.service.ensureDot()
+      const boardChanges = vi.fn()
+      const unsub = h.service.onBackgroundJobsChange(boardChanges)
+
+      const c1 = await h.service.createWorkChange({ title: 'CompletedRun', cwd: '/t1', goal: 'g', at: 1 })
+      const d1 = await h.service.manageTask({ action: 'dispatch', task_id: c1.id, access: 'read', instruction: 'r1' })
+      const r1 = /started (run-\d+)/.exec(d1)![1]!
+      const s1 = h.store.work.run(r1)!.sessionId!
+      await h.service.finishWorkRun(r1, 'completed')
+
+      const c2 = await h.service.createWorkChange({ title: 'FailedRun', cwd: '/t2', goal: 'g', at: 1 })
+      const d2 = await h.service.manageTask({ action: 'dispatch', task_id: c2.id, access: 'read', instruction: 'r2' })
+      const r2 = /started (run-\d+)/.exec(d2)![1]!
+      const s2 = h.store.work.run(r2)!.sessionId!
+      await h.service.finishWorkRun(r2, 'failed')
+
+      const c3 = await h.service.createWorkChange({ title: 'StoppedRun', cwd: '/t3', goal: 'g', at: 1 })
+      const d3 = await h.service.manageTask({ action: 'dispatch', task_id: c3.id, access: 'read', instruction: 'r3' })
+      const r3 = /started (run-\d+)/.exec(d3)![1]!
+      const s3 = h.store.work.run(r3)!.sessionId!
+      await h.service.cancelWorkChange(c3.id)
+
+      boardChanges.mockClear()
+      mockJobs.start('j-done', s1, 'late')
+      mockJobs.settle('j-done', 'completed')
+      mockJobs.start('j-fail', s2, 'late')
+      mockJobs.remove('j-fail')
+      mockJobs.start('j-stop', s3, 'late')
+      expect(boardChanges).toHaveBeenCalledTimes(0)
+
+      // Active run still triggers onBackgroundJobsChange
+      const c4 = await h.service.createWorkChange({ title: 'ActiveRun', cwd: '/t4', goal: 'g', at: 1 })
+      const d4 = await h.service.manageTask({ action: 'dispatch', task_id: c4.id, access: 'read', instruction: 'r4' })
+      const r4 = /started (run-\d+)/.exec(d4)![1]!
+      const s4 = h.store.work.run(r4)!.sessionId!
+      mockJobs.start('j-open', s4, 'live')
+      expect(boardChanges).toHaveBeenCalledTimes(1)
+      unsub()
+    } finally {
+      await h.service.dispose()
+    }
+  })
 })

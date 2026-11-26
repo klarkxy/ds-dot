@@ -364,7 +364,8 @@ export class DotService {
       if (this.closing) return
       if (!event || (event.type !== 'registered' && event.type !== 'settled' && event.type !== 'removed')) return
       const owner = event.job?.owner
-      if (typeof owner !== 'string' || !this.store.work.sessionRun(owner)) return
+      const run = typeof owner === 'string' ? this.store.work.sessionRun(owner) : undefined
+      if (!run || runIsTerminal(run)) return
       this.armIdleCheck()
       for (const listener of [...this.backgroundJobsListeners]) {
         try { listener() } catch { /* observer only */ }
@@ -3023,7 +3024,8 @@ export class DotService {
       })()
       const agent = this.lookupBackgroundAgent(sessionId)
       const agentStatus = agent?.status ?? (this.host.isRunning(sessionId) ? 'running' : 'idle')
-      if ((liveJobs.length > 0 || hasSubagents) && agentStatus === 'idle') {
+      if (agentStatus !== 'idle') return
+      if (liveJobs.length > 0 || hasSubagents) {
         const waitController = this.quietWaits.begin(sessionId, this.now())
         const limitController = new AbortController()
         const limitMs = this.options.backgroundLimitMs ?? BACKGROUND_LIMIT_MS

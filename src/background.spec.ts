@@ -5,9 +5,11 @@ import {
   DRAIN_LIMIT_MS,
   KILL_WAIT_MS,
   QuietWaitTracker,
+  hasJobsService,
   killJobs,
   runningJobs,
   stopBackground,
+  subscribeJobsEvents,
   untilQuiet,
   type BackgroundAgentLike,
   type BackgroundJobEvent,
@@ -500,6 +502,55 @@ describe('background quiet-wait engine', () => {
     expect(runningJobs(throwingGet, 'w1')).toEqual([])
     expect(await untilQuiet(throwingGet, agent, new AbortController().signal)).toBe(true)
     await expect(stopBackground(throwingGet, agent)).resolves.toBeUndefined()
+  })
+
+  it('degrades silently when Proxy getters on jobs, subagents, or agents throw', async () => {
+    const h = createRc5BackgroundHarness()
+    const agent = h.makeAgent('w1', 'idle')
+
+    const throwingEventsJobs = new Proxy({
+      list: () => [{ id: 'j-live', owner: 'w1', status: 'running' }],
+      wait: () => Promise.resolve(undefined),
+      kill: () => 'requested',
+      readAt: () => ({ chunks: [] }),
+    }, {
+      get(target, prop, receiver) {
+        if (prop === 'events') throw new Error('events getter exploded!')
+        return Reflect.get(target, prop, receiver)
+      },
+    })
+    const eventsTrapGet: ServiceGetter = name => (name === 'jobs' ? throwingEventsJobs : undefined)
+    expect(subscribeJobsEvents(eventsTrapGet, { owners: 'all' }, () => {})).toBeUndefined()
+    expect(await untilQuiet(eventsTrapGet, agent, new AbortController().signal)).toBe(true)
+
+    const allThrowingJobs = new Proxy({}, {
+      get(_target, prop) {
+        throw new Error(`jobs.${String(prop)} getter exploded!`)
+      },
+    })
+    const allThrowingSubagents = new Proxy({}, {
+      get(_target, prop) {
+        throw new Error(`subagents.${String(prop)} getter exploded!`)
+      },
+    })
+    const allThrowingAgents = new Proxy({}, {
+      get(_target, prop) {
+        throw new Error(`agents.${String(prop)} getter exploded!`)
+      },
+    })
+    const trapGet: ServiceGetter = name => {
+      if (name === 'jobs') return allThrowingJobs
+      if (name === 'subagents') return allThrowingSubagents
+      if (name === 'agents') return allThrowingAgents
+      return undefined
+    }
+    expect(hasJobsService(trapGet)).toBe(false)
+    expect(runningJobs(trapGet, 'w1')).toEqual([])
+    expect(subscribeJobsEvents(trapGet, { owners: 'all' }, () => {})).toBeUndefined()
+    expect(await untilQuiet(trapGet, agent, new AbortController().signal)).toBe(true)
+    expect(await killJobs(trapGet, 'w1')).toEqual([])
+    await expect(stopBackground(trapGet, 'w1')).resolves.toBeUndefined()
+    await expect(stopBackground(trapGet, agent)).resolves.toBeUndefined()
   })
 
   it('works with Proxy-wrapped prototype-method jobs registry without spreading', async () => {

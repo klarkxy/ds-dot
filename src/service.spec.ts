@@ -1362,6 +1362,8 @@ describe('DotService reminders', () => {
   it('carries held updates when a reminder wakes dot', async () => {
     const h = setup()
     const dot = await h.service.ensureDot()
+    // The host still lists this watch. An empty list would retire it, and a retired watch drops its held notes.
+    h.host.listSessions = async () => [{ sessionId: 'watched-task', running: false, updatedAt: 1, blank: false, subagent: false, archived: false }]
     await h.service.watch('watched-task', 'keep an eye on it')
     await h.service.onTurnEnd('watched-task')
     await h.service.scheduleAdd({ title: 'Pulse', prompt: 'Look at the board.', afterMinutes: 10 })

@@ -80,6 +80,7 @@ export function apply(ctx: Context): void {
     stop: async () => { await call('stop') },
     board: signal => call<BoardView>('board', {}, signal),
     removeSchedule: id => call<boolean>('schedule.remove', { id }),
+    unwatch: id => call<boolean>('watch.remove', { id }),
     recipes: signal => call<RecipeBoardRow[]>('recipes', {}, signal),
     recipeRun: id => call<{ ok: true; changeId: string; runId?: string } | { ok: false; reason: string }>('recipe.run', { id }),
     recipeProposalDecide: (id: string, allow: boolean) => call<string>('recipe.proposal.decide', { id, allow }),

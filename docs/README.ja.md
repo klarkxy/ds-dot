@@ -6,7 +6,7 @@
 
 **ドロシー（`dot`）** は **DeepSeek Harness（DSH）** のサイドバーに住む常駐パートナーです。ふだんの言葉で頼めば複数の作業を並行して整え、確認しやすい前後の差分で返してくれます。小さな確認は静かに通し、大事な操作の前だけ必ず止まって相談します。
 
-> **詳しい読み物と実機クリップ：** **[ドロシーの手帳](https://klarkxy.github.io/ds-dot/)** でイラスト付きの日記、[12 本の実機スクリーン録画](https://klarkxy.github.io/ds-dot/#clips)、[最初の一言サンプル](https://klarkxy.github.io/ds-dot/#about) をまとめて見られます。
+> **詳しい読み物と実機クリップ：** **[ドロシーの手帳](https://klarkxy.github.io/ds-dot/)** でイラスト付きの日記、[13 本の実機スクリーン録画](https://klarkxy.github.io/ds-dot/#clips)、[最初の一言サンプル](https://klarkxy.github.io/ds-dot/#about) をまとめて見られます。
 
 ## インストール
 

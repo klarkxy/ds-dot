@@ -62,7 +62,7 @@ export function WorkBoard({ locale, items, pending, notice, filter = 'all', onAc
   const [showDone, setShowDone] = useState(false)
   const section = (title: TextKey, rows: readonly WorkBoardItem[]) => rows.length === 0 ? null : (
     <section className="dsh-ui-stack" aria-label={t(locale, title)}>
-      <span className="dsh-ui-meta">{t(locale, title)} · {rows.length}</span>
+      <span className="dsh-ui-meta dsh-dot-section-title">{t(locale, title)} · {rows.length}</span>
       {rows.map(row => <WorkRow key={row.id} locale={locale} item={row} pending={pending} onAccept={onAccept} onReject={onReject} onAnswer={onAnswer} onResume={onResume} {...onForceRelease ? { onForceRelease } : {}} {...onIntegrate ? { onIntegrate } : {}} {...onRead ? { onRead } : {}} {...onOpenSession ? { onOpenSession } : {}} />)}
     </section>
   )
@@ -701,28 +701,40 @@ function WorkRow({ locale, item, pending, onAccept, onReject, onAnswer, onResume
       </div>
       {actions ? (
         <div className="dsh-dot-work-actions">
-          {lookOpen && typeof look === 'object' && look ? <Button variant="primary" size="sm" onClick={() => onAnswer({ id: look.id, allow: true })}>{t(locale, 'workLookAccept')}</Button> : null}
-          {lookOpen && typeof look === 'object' && look ? <Button variant="ghost" size="sm" aria-expanded={rejectMode === 'look'} onClick={() => setRejectMode(m => m === 'look' ? undefined : 'look')}>{t(locale, 'workLookReject')}</Button> : null}
-          {accept ? <Button variant="primary" size="sm" onClick={() => onAccept(accept)}>{t(locale, 'workAccept')}</Button> : null}
-          {reject ? <Button variant="ghost" size="sm" aria-expanded={rejectMode === 'reject'} onClick={() => setRejectMode(m => m === 'reject' ? undefined : 'reject')}>{t(locale, 'workReject')}</Button> : null}
-          {resume ? <Button variant="ghost" size="sm" onClick={() => onResume(resume)}>{t(locale, 'workResume')}</Button> : null}
-          {forceRelease && onForceRelease ? (
-            releaseArmed
-              ? <>
-                  <Button variant="primary" size="sm" className="dsh-dot-danger" onClick={() => { disarmRelease(); onForceRelease(forceRelease) }}>{t(locale, 'workForceReleaseConfirm')}</Button>
-                  <Button variant="ghost" size="sm" onClick={disarmRelease}>{t(locale, 'workRejectCancel')}</Button>
-                </>
-              : <Button variant="ghost" size="sm" onClick={armRelease}>{t(locale, 'workForceRelease')}</Button>
+          {(lookOpen && typeof look === 'object' && look) || accept || reject || integrates.includes('merge') ? (
+            <span className="dsh-dot-work-act-group" data-kind="primary">
+              {lookOpen && typeof look === 'object' && look ? <Button variant="primary" size="sm" onClick={() => onAnswer({ id: look.id, allow: true })}>{t(locale, 'workLookAccept')}</Button> : null}
+              {lookOpen && typeof look === 'object' && look ? <Button variant="ghost" size="sm" aria-expanded={rejectMode === 'look'} onClick={() => setRejectMode(m => m === 'look' ? undefined : 'look')}>{t(locale, 'workLookReject')}</Button> : null}
+              {accept ? <Button variant="primary" size="sm" onClick={() => onAccept(accept)}>{t(locale, 'workAccept')}</Button> : null}
+              {reject ? <Button variant="ghost" size="sm" aria-expanded={rejectMode === 'reject'} onClick={() => setRejectMode(m => m === 'reject' ? undefined : 'reject')}>{t(locale, 'workReject')}</Button> : null}
+              {integrates.includes('merge') ? <Button variant="primary" size="sm" disabled={integrateBusy} onClick={() => void runIntegrate('merge')}>{t(locale, 'workIntegrateMerge')}</Button> : null}
+            </span>
           ) : null}
-          {integrates.includes('merge') ? <Button variant="primary" size="sm" disabled={integrateBusy} onClick={() => void runIntegrate('merge')}>{t(locale, 'workIntegrateMerge')}</Button> : null}
-          {integrates.includes('keep') ? <Button variant="ghost" size="sm" disabled={integrateBusy} onClick={() => void runIntegrate('keep')}>{t(locale, 'workIntegrateKeep')}</Button> : null}
-          {integrates.includes('discard') ? (
-            discardArmed
-              ? <>
-                  <Button variant="primary" size="sm" className="dsh-dot-danger" disabled={integrateBusy} onClick={() => void runIntegrate('discard')}>{t(locale, 'workIntegrateDiscardConfirm')}</Button>
-                  <Button variant="ghost" size="sm" onClick={() => setDiscardArmed(false)}>{t(locale, 'workRejectCancel')}</Button>
-                </>
-              : <Button variant="ghost" size="sm" disabled={integrateBusy} onClick={() => setDiscardArmed(true)}>{t(locale, 'workIntegrateDiscard')}</Button>
+          {resume || integrates.includes('keep') ? (
+            <span className="dsh-dot-work-act-group" data-kind="secondary">
+              {resume ? <Button variant="ghost" size="sm" onClick={() => onResume(resume)}>{t(locale, 'workResume')}</Button> : null}
+              {integrates.includes('keep') ? <Button variant="ghost" size="sm" disabled={integrateBusy} onClick={() => void runIntegrate('keep')}>{t(locale, 'workIntegrateKeep')}</Button> : null}
+            </span>
+          ) : null}
+          {(forceRelease && onForceRelease) || integrates.includes('discard') ? (
+            <span className="dsh-dot-work-act-group" data-kind="danger">
+              {forceRelease && onForceRelease ? (
+                releaseArmed
+                  ? <>
+                      <Button variant="primary" size="sm" className="dsh-dot-danger" onClick={() => { disarmRelease(); onForceRelease(forceRelease) }}>{t(locale, 'workForceReleaseConfirm')}</Button>
+                      <Button variant="ghost" size="sm" onClick={disarmRelease}>{t(locale, 'workRejectCancel')}</Button>
+                    </>
+                  : <Button variant="ghost" size="sm" onClick={armRelease}>{t(locale, 'workForceRelease')}</Button>
+              ) : null}
+              {integrates.includes('discard') ? (
+                discardArmed
+                  ? <>
+                      <Button variant="primary" size="sm" className="dsh-dot-danger" disabled={integrateBusy} onClick={() => void runIntegrate('discard')}>{t(locale, 'workIntegrateDiscardConfirm')}</Button>
+                      <Button variant="ghost" size="sm" onClick={() => setDiscardArmed(false)}>{t(locale, 'workRejectCancel')}</Button>
+                    </>
+                  : <Button variant="ghost" size="sm" disabled={integrateBusy} onClick={() => setDiscardArmed(true)}>{t(locale, 'workIntegrateDiscard')}</Button>
+              ) : null}
+            </span>
           ) : null}
           {latestSessionId && onOpenSession ? (
             <Button variant="ghost" size="sm" className="dsh-dot-work-open" onClick={() => onOpenSession(latestSessionId)}>

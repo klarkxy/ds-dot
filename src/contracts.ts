@@ -183,6 +183,15 @@ export type RunKind = 'work' | 'rework' | 'review'
 export type RunAccess = 'read' | 'write'
 export type ChangePriority = 1 | 2 | 3
 
+export type RetryKind = 'budget' | 'transient'
+
+export interface WorkRunRetryStatus {
+  readonly kind: RetryKind
+  readonly attempts: number
+  readonly since: string
+  readonly accumulatedMs: number
+}
+
 export interface TaskRecord {
   readonly sessionId: string
   readonly origin: TaskOrigin

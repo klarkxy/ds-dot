@@ -193,6 +193,7 @@ export const boardCss = `
 .dsh-dot-board .dsh-dot-work-head > [data-state] { margin-top: 5px; flex-shrink: 0; }
 .dsh-dot-board .dsh-dot-work-main { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
 .dsh-dot-board .dsh-dot-work-meta { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; min-width: 0; }
+.dsh-dot-board .dsh-dot-work-retry { font-weight: 600; font-variant-numeric: tabular-nums; }
 .dsh-dot-board .dsh-dot-work-mono { font: 11px/16px var(--ds-font-family-code); color: var(--dsw-alias-label-tertiary); }
 .dsh-dot-board .dsh-dot-work-diag > summary { cursor: pointer; font-size: 11px; line-height: 16px; color: var(--dsw-alias-label-tertiary); }
 .dsh-dot-board .dsh-dot-work-facts-line { font: 11px/16px var(--ds-font-family-code); color: var(--dsw-alias-label-tertiary); overflow-wrap: anywhere; }

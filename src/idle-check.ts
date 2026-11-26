@@ -24,13 +24,15 @@ export function idleCandidates(
   tasks: readonly TaskRecord[],
   pending: readonly PendingView[],
   changes: readonly WorkIdleItem[] = [],
+  retryingSessionIds?: ReadonlySet<string>,
 ): IdleCandidate[] {
   const out: IdleCandidate[] = []
   for (const change of changes) {
     if (change.control !== 'open' || change.status === 'done' || change.status === 'cancelled') continue
     const running = change.sessionIds.some(sessionId => tasks.some(task => task.sessionId === sessionId && task.status === 'running'))
     const waiting = change.sessionIds.some(sessionId => pending.some(item => item.sessionId === sessionId))
-    if (running || waiting || change.awaitingHumanOversight) continue
+    const retrying = retryingSessionIds !== undefined && change.sessionIds.some(sessionId => retryingSessionIds.has(sessionId))
+    if (running || waiting || retrying || change.awaitingHumanOversight) continue
     let reason: string | undefined
     if (change.readyToAccept) reason = 'verified delivery ready to close out'
     else if (change.status === 'rework' || change.status === 'unverified') reason = `${change.status} needs follow-up`

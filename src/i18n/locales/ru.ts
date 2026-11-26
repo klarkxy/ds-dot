@@ -676,6 +676,7 @@ const ruUi: UiText = {
   workOpenSession: 'Открыть сессию',
   workSourceExpandAll: 'Развернуть всё',
   workSourceCollapseAll: 'Свернуть всё',
+  workRetryBadge: 'Повтор модели ×{count}',
   attentionTitle: 'Дороти ждёт вас',
   attentionBadge: '{n} ждут вас',
   sNotify: 'Уведомления рабочего стола',

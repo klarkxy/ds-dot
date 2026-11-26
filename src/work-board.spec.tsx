@@ -8,6 +8,7 @@ import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 import { DEFAULT_SETTINGS } from './contracts.ts'
 import { DotService } from './service.ts'
 import { DotStore } from './store.ts'
+import { boardCss } from './board.tsx'
 import { WorkBoard, WorkBoardPanel } from './work-board.tsx'
 import type { WorkBoardItem, WorkReadRequest } from './work-board.ts'
 
@@ -1111,5 +1112,160 @@ describe('WorkBoard link chips', () => {
     expect(document.body.textContent).toContain('closed')
     expect(document.querySelector('span.dsh-dot-work-link')).toBeTruthy()
     await act(async () => root.unmount())
+  })
+})
+
+describe('WorkBoard retry badge', () => {
+  const retryBase: WorkBoardItem = {
+    ...item, id: 'c-retry', title: 'Retry task', status: 'running',
+    verification: undefined, oversight: undefined, humanAction: undefined,
+  }
+  const renderBoard = async (root: ReturnType<typeof createRoot>, locale: 'en' | 'zh', row: WorkBoardItem) => {
+    await act(async () => root.render(
+      <WorkBoard locale={locale} items={[row]} pending={[]} onAccept={vi.fn()} onReject={vi.fn()} onAnswer={vi.fn()} onResume={vi.fn()} />,
+    ))
+  }
+
+  it('stays silent on the card header for transient first retry (attempts: 1)', async () => {
+    const row: WorkBoardItem = {
+      ...retryBase,
+      runs: [{
+        id: 'run-t1', kind: 'work', phase: 'active', cwd: 'H:/repo',
+        retryStatus: { kind: 'transient', attempts: 1, since: '2026-11-26T10:00:00.000Z', accumulatedMs: 0 },
+      }],
+    }
+    const root = createRoot(document.getElementById('root')!)
+    await renderBoard(root, 'en', row)
+    expect(document.querySelector('.dsh-dot-work-retry')).toBeNull()
+    expect(document.body.textContent).not.toContain('Model retrying')
+    await renderBoard(root, 'zh', row)
+    expect(document.querySelector('.dsh-dot-work-retry')).toBeNull()
+    expect(document.body.textContent).not.toContain('模型重试中')
+    await act(async () => root.unmount())
+  })
+
+  it('renders a warning fault badge when transient retries reach attempts >= 2 in zh and en', async () => {
+    const twice: WorkBoardItem = {
+      ...retryBase,
+      runs: [{
+        id: 'run-t2', kind: 'work', phase: 'active', cwd: 'H:/repo',
+        retryStatus: { kind: 'transient', attempts: 2, since: '2026-11-26T10:00:00.000Z', accumulatedMs: 1_500 },
+      }],
+    }
+    const root = createRoot(document.getElementById('root')!)
+    await renderBoard(root, 'zh', twice)
+    const zhBadge = document.querySelector<HTMLElement>('.dsh-dot-work-meta .dsh-dot-work-retry')
+    expect(zhBadge).toBeTruthy()
+    expect(zhBadge?.textContent).toBe('模型重试中 ×2')
+    expect(zhBadge?.getAttribute('data-tone')).toBe('warning')
+
+    await renderBoard(root, 'en', twice)
+    const enBadge = document.querySelector<HTMLElement>('.dsh-dot-work-meta .dsh-dot-work-retry')
+    expect(enBadge).toBeTruthy()
+    expect(enBadge?.textContent).toBe('Model retrying ×2')
+    expect(enBadge?.getAttribute('data-tone')).toBe('warning')
+
+    const thrice: WorkBoardItem = {
+      ...retryBase,
+      runs: [{
+        id: 'run-t3', kind: 'work', phase: 'active', cwd: 'H:/repo',
+        retryStatus: { kind: 'transient', attempts: 3, since: '2026-11-26T10:00:00.000Z', accumulatedMs: 4_500 },
+      }],
+    }
+    await renderBoard(root, 'en', thrice)
+    const badge3 = document.querySelector<HTMLElement>('.dsh-dot-work-meta .dsh-dot-work-retry')
+    expect(badge3?.textContent).toBe('Model retrying ×3')
+    expect(badge3?.getAttribute('data-tone')).toBe('warning')
+    await act(async () => root.unmount())
+  })
+
+  it('renders a danger fault badge immediately on first budget retry (attempts: 1)', async () => {
+    const budget: WorkBoardItem = {
+      ...retryBase,
+      runs: [{
+        id: 'run-b1', kind: 'work', phase: 'active', cwd: 'H:/repo',
+        retryStatus: { kind: 'budget', attempts: 1, since: '2026-11-26T10:00:00.000Z', accumulatedMs: 0 },
+      }],
+    }
+    const root = createRoot(document.getElementById('root')!)
+    await renderBoard(root, 'en', budget)
+    const badge = document.querySelector<HTMLElement>('.dsh-dot-work-meta .dsh-dot-work-retry')
+    expect(badge).toBeTruthy()
+    expect(badge?.textContent).toBe('Model retrying ×1')
+    expect(badge?.getAttribute('data-tone')).toBe('danger')
+
+    await renderBoard(root, 'zh', budget)
+    expect(document.querySelector('.dsh-dot-work-retry')?.textContent).toBe('模型重试中 ×1')
+    await act(async () => root.unmount())
+  })
+
+  it('removes the badge once retryStatus is cleared', async () => {
+    const retrying: WorkBoardItem = {
+      ...retryBase,
+      runs: [{
+        id: 'run-clear', kind: 'work', phase: 'active', cwd: 'H:/repo',
+        retryStatus: { kind: 'budget', attempts: 2, since: '2026-11-26T10:00:00.000Z', accumulatedMs: 2_000 },
+      }],
+    }
+    const cleared: WorkBoardItem = {
+      ...retryBase,
+      runs: [{ id: 'run-clear', kind: 'work', phase: 'active', cwd: 'H:/repo' }],
+    }
+    const root = createRoot(document.getElementById('root')!)
+    await renderBoard(root, 'en', retrying)
+    expect(document.querySelector('.dsh-dot-work-retry')).toBeTruthy()
+    await renderBoard(root, 'en', cleared)
+    expect(document.querySelector('.dsh-dot-work-retry')).toBeNull()
+    expect(document.body.textContent).not.toContain('Model retrying')
+    await act(async () => root.unmount())
+  })
+
+  it('selects the highest-severity highlighted retry across multiple runs (budget over transient, then highest attempts)', async () => {
+    const root = createRoot(document.getElementById('root')!)
+
+    // transient x1 + transient x3 -> transient x3 (warning)
+    await renderBoard(root, 'en', {
+      ...retryBase,
+      runs: [
+        { id: 'r-1', kind: 'work', phase: 'active', cwd: 'H:/repo', retryStatus: { kind: 'transient', attempts: 1, since: '2026-11-26T10:00:00.000Z', accumulatedMs: 0 } },
+        { id: 'r-2', kind: 'review', phase: 'active', cwd: 'H:/repo', retryStatus: { kind: 'transient', attempts: 3, since: '2026-11-26T10:01:00.000Z', accumulatedMs: 2_000 } },
+      ],
+    })
+    let badge = document.querySelector<HTMLElement>('.dsh-dot-work-retry')
+    expect(badge?.textContent).toBe('Model retrying ×3')
+    expect(badge?.getAttribute('data-tone')).toBe('warning')
+
+    // transient x4 + budget x1 -> budget x1 (danger)
+    await renderBoard(root, 'en', {
+      ...retryBase,
+      runs: [
+        { id: 'r-1', kind: 'work', phase: 'active', cwd: 'H:/repo', retryStatus: { kind: 'transient', attempts: 4, since: '2026-11-26T10:00:00.000Z', accumulatedMs: 5_000 } },
+        { id: 'r-2', kind: 'review', phase: 'active', cwd: 'H:/repo', retryStatus: { kind: 'budget', attempts: 1, since: '2026-11-26T10:02:00.000Z', accumulatedMs: 0 } },
+      ],
+    })
+    badge = document.querySelector<HTMLElement>('.dsh-dot-work-retry')
+    expect(badge?.textContent).toBe('Model retrying ×1')
+    expect(badge?.getAttribute('data-tone')).toBe('danger')
+
+    // budget x1 + budget x3 -> budget x3 (danger)
+    await renderBoard(root, 'en', {
+      ...retryBase,
+      runs: [
+        { id: 'r-1', kind: 'work', phase: 'active', cwd: 'H:/repo', retryStatus: { kind: 'budget', attempts: 1, since: '2026-11-26T10:00:00.000Z', accumulatedMs: 0 } },
+        { id: 'r-2', kind: 'review', phase: 'active', cwd: 'H:/repo', retryStatus: { kind: 'budget', attempts: 3, since: '2026-11-26T10:02:00.000Z', accumulatedMs: 3_000 } },
+      ],
+    })
+    badge = document.querySelector<HTMLElement>('.dsh-dot-work-retry')
+    expect(badge?.textContent).toBe('Model retrying ×3')
+    expect(badge?.getAttribute('data-tone')).toBe('danger')
+    await act(async () => root.unmount())
+  })
+
+  it('scopes the retry badge style strictly under .dsh-dot-board', () => {
+    const retryLines = boardCss.split('\n').filter(line => line.includes('dsh-dot-work-retry'))
+    expect(retryLines.length).toBeGreaterThan(0)
+    for (const line of retryLines) {
+      expect(line.trim().startsWith('.dsh-dot-board ')).toBe(true)
+    }
   })
 })

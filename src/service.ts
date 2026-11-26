@@ -78,6 +78,9 @@ import { dotOwnedCredentialRefs, mcpCredentialRefs } from './contracts.ts'
 import { MCP_CATALOG } from './mcp-catalog.ts'
 import { sharedDotMcp } from './mcp-shared.ts'
 import type { GateVerdict } from './tool-scope.ts'
+import { RetryHealth } from './retry-health.ts'
+import type { WorkRunRetryStatus } from './contracts.ts'
+import type { WorkBoardItem } from './work-board.ts'
 
 export interface DotServiceOptions {
   readonly host: DotHost
@@ -196,6 +199,8 @@ export class DotService {
    * instance writes in deploySelfBuild stays until a new process starts.
    */
   private readonly startupSelfUpgrade: SelfUpgradeMarker | undefined
+  readonly retryHealth = new RetryHealth()
+  private readonly sessionEventListeners = new Set<(sessionId: string, event: RawEvent) => void>()
 
   constructor(private readonly options: DotServiceOptions) {
     this.currentLocale = options.locale ?? options.store.uiLocale
@@ -225,8 +230,9 @@ export class DotService {
       this.armIdleCheck()
       void this.store.syncPending(this.pending.list())
     })
+    this.retryHealth.onChange(() => { this.armIdleCheck() })
     this.idleChecker = new IdleChecker(
-      () => this.canIdleCheck() ? idleCandidates(this.store.list(), this.pending.list(), this.store.workIdle()) : [],
+      () => this.canIdleCheck() ? idleCandidates(this.store.list(), this.pending.list(), this.store.workIdle(), this.retryingSessionIds()) : [],
       candidates => {
         this.emit({ event: DOT_TRACE.idleFired, message: 'Routine check fired.', data: { candidates: candidates.map(row => `${row.id}:${row.reason}`).join('; ') } })
         this.notify({ sessionId: this.store.dotSessionId!, kind: 'idle-check', text: `Routine check: ${candidates.map(row => `${row.id} "${row.title}": ${row.reason}`).join('; ')}\n  ${IDLE_SILENCE_HINT}`, at: this.now() })
@@ -292,6 +298,76 @@ export class DotService {
 
   isDot(sessionId: string | undefined): boolean {
     return sessionId !== undefined && sessionId === this.store.dotSessionId
+  }
+
+  /** Whether a session belongs to Dorothy's live segment or a dot-dispatched run. */
+  isManagedSession(sessionId: string | undefined): boolean {
+    if (!sessionId) return false
+    return this.isDot(sessionId) || this.store.ownsSession(sessionId) || this.store.work.sessionRun(sessionId) !== undefined
+  }
+
+  onRetryChange(listener: () => void): () => void {
+    return this.retryHealth.onChange(listener)
+  }
+
+  /** Shared active managed session event stream subscriber (used by PR-2, PR-3, PR-6). */
+  subscribeManagedSessionEvents(listener: (sessionId: string, event: RawEvent) => void): () => void {
+    this.sessionEventListeners.add(listener)
+    return () => { this.sessionEventListeners.delete(listener) }
+  }
+
+  onSessionEvent(sessionId: string, event: RawEvent): void {
+    if (this.closing || !sessionId || !this.isManagedSession(sessionId)) return
+    this.retryHealth.observe(sessionId, event)
+    for (const listener of [...this.sessionEventListeners]) {
+      try { listener(sessionId, event) } catch { /* observer only */ }
+    }
+  }
+
+  onAgentCreated(sessionId: string, status: 'idle' | 'running', events: readonly RawEvent[]): void {
+    if (this.closing || !sessionId || !this.isManagedSession(sessionId)) return
+    this.retryHealth.restore(sessionId, events)
+    if (status === 'idle') this.retryHealth.clear(sessionId)
+  }
+
+  backfillManagedRetryHealth(): void {
+    if (this.closing) return
+    let live: ReturnType<NonNullable<DotHost['listLiveAgents']>>
+    try {
+      live = this.host.listLiveAgents?.() ?? []
+    } catch {
+      return
+    }
+    for (const agent of live) {
+      if (!agent?.sessionId || !this.isManagedSession(agent.sessionId)) continue
+      this.retryHealth.restore(agent.sessionId, agent.events)
+      if (agent.status === 'idle') this.retryHealth.clear(agent.sessionId)
+    }
+  }
+
+  noteAgentDisposed(sessionId: string): void {
+    this.retryHealth.remove(sessionId)
+  }
+
+  private retryingSessionIds(): ReadonlySet<string> {
+    return new Set(this.retryHealth.list().map(row => row.sessionId))
+  }
+
+  private withRetryStatus(item: WorkBoardItem): WorkBoardItem {
+    let changed = false
+    const runs = item.runs.map(run => {
+      const status = run.sessionId ? this.retryHealth.get(run.sessionId) : undefined
+      if (!status) return run
+      changed = true
+      const retryStatus: WorkRunRetryStatus = {
+        kind: status.kind,
+        attempts: status.attempts,
+        since: status.since,
+        accumulatedMs: status.accumulatedMs,
+      }
+      return { ...run, retryStatus }
+    })
+    return changed ? { ...item, runs } : item
   }
 
   /** Deny child-session tools on one agent, enforce run write-scopes, and register dot_peer. A repeat is a no-op. */
@@ -1066,6 +1142,7 @@ export class DotService {
       }
       this.pending.reset()
       this.diffPriors.clear()
+      this.retryHealth.clearAll()
       this.batcher.take()
       this.releaseChildSeals()
       this.reminders.refresh()
@@ -1187,7 +1264,8 @@ export class DotService {
 
   board(): BoardView {
     this.scheduleRunUsage()
-    return this.store.board(this.pending.list())
+    const view = this.store.board(this.pending.list())
+    return view.work ? { ...view, work: view.work.map(item => this.withRetryStatus(item)) } : view
   }
 
   /** The background "needs you" projection the panel-less watcher polls. */
@@ -1250,7 +1328,7 @@ export class DotService {
   private canIdleCheck(): boolean {
     const dot = this.store.dotSessionId
     // Only waking notices gate the patrol; held items ride its delivery.
-    return !this.closing && this.store.settings.idleCheckMinutes > 0 && !!dot && !this.host.isRunning(dot) && this.batcher.waking === 0
+    return !this.closing && this.store.settings.idleCheckMinutes > 0 && !!dot && !this.host.isRunning(dot) && !this.retryHealth.get(dot) && this.batcher.waking === 0
   }
   private armIdleCheck(): void {
     if (this.canIdleCheck()) {
@@ -1354,6 +1432,7 @@ export class DotService {
         await this.rememberRun(current.id)
       }
     }
+    this.backfillManagedRetryHealth()
     if (this.canIdleCheck()) this.idleChecker.run()
     this.recoverDecisionWakes()
     this.recoverInbox()
@@ -1711,6 +1790,7 @@ export class DotService {
 
   /** The host archived this session. A watched row stops looking idle; the host session is not archived again. */
   noteSessionArchived(sessionId: string): Promise<void> {
+    this.retryHealth.remove(sessionId)
     return this.retireWatch(sessionId)
   }
 
@@ -1719,6 +1799,7 @@ export class DotService {
    * current list so an unload that leaves the session visible does not retire it.
    */
   noteSessionRemoved(sessionId: string): Promise<void> {
+    this.retryHealth.remove(sessionId)
     const task = this.store.task(sessionId)
     if (!task || task.origin !== 'watched' || task.status === 'archived') return Promise.resolve()
     return this.syncWatched()
@@ -2777,6 +2858,7 @@ export class DotService {
 
   onStatus(sessionId: string, status: 'running' | 'idle'): void {
     if (this.closing) return
+    if (status === 'idle') this.retryHealth.clear(sessionId)
     if (this.isDot(sessionId)) {
       if (status === 'running') { this.idleSince = undefined; this.idleChecker.cancel() }
       else { this.idleSince ??= this.now(); this.batcher.wake(); this.armIdleCheck() }
@@ -3011,6 +3093,8 @@ export class DotService {
     this.releaseChildSeals()
     if (this.disposal) return this.disposal
     this.closing = true
+    this.retryHealth.clearAll()
+    this.sessionEventListeners.clear()
     this.selfDeployAbort.abort()
     this.batcher.dispose()
     this.idleChecker.cancel()
@@ -3242,12 +3326,16 @@ export class DotService {
   reconcileWorkRun(runId: string) {
     return reconcileRun(this.store.work, this.runHost(), runId, this.now())
   }
-  workBoard(changeId: string) { return this.store.work.workView(changeId) }
+  workBoard(changeId: string) {
+    const item = this.store.work.workView(changeId)
+    return item ? this.withRetryStatus(item) : undefined
+  }
   /** Board-projection rows for work.list: the same view plus link chips the board shows. */
   workList() {
     return this.store.work.listChanges()
       .map(change => this.store.workViewWithLinks(change.id))
-      .filter(row => row !== undefined)
+      .filter((row): row is NonNullable<typeof row> => row !== undefined)
+      .map(item => this.withRetryStatus(item))
   }
   recordWorkVerification(changeId: string, checks: Parameters<DotStore['work']['recordVerification']>[1], runIds: readonly string[], detail?: Parameters<DotStore['work']['recordVerification']>[4]) {
     return this.store.work.recordVerification(changeId, checks, runIds, this.now(), detail)
@@ -4495,6 +4583,7 @@ export class DotService {
 
   /** A version-matched user decision wakes dot once. It does not call decide, accept, or reject, and it does not open a session. */
   private openedDot(sessionId: string): string {
+    this.backfillManagedRetryHealth()
     this.recoverDecisionWakes()
     if (this.store.selfUpgrade) {
       void this.resolveSelfUpgrade().catch(error => this.options.log?.(`dsh-dot: self-upgrade marker check failed: ${messageOf(error)}`))

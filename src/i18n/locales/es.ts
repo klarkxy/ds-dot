@@ -676,6 +676,7 @@ const esUi: UiText = {
   workOpenSession: 'Abrir sesión',
   workSourceExpandAll: 'Expandir todo',
   workSourceCollapseAll: 'Contraer todo',
+  workRetryBadge: 'Reintentando modelo ×{count}',
   attentionTitle: 'Dorothy te necesita',
   attentionBadge: '{n} te necesitan',
   sNotify: 'Notificaciones de escritorio',

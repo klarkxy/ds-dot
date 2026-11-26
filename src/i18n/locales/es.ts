@@ -677,6 +677,7 @@ const esUi: UiText = {
   workSourceExpandAll: 'Expandir todo',
   workSourceCollapseAll: 'Contraer todo',
   workRetryBadge: 'Reintentando modelo ×{count}',
+  workBackgroundJobs: '{count} trabajo(s) en segundo plano',
   attentionTitle: 'Dorothy te necesita',
   attentionBadge: '{n} te necesitan',
   sNotify: 'Notificaciones de escritorio',

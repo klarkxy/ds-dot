@@ -81,9 +81,26 @@ import type { GateVerdict } from './tool-scope.ts'
 import { RetryHealth } from './retry-health.ts'
 import type { WorkRunRetryStatus } from './contracts.ts'
 import type { WorkBoardItem } from './work-board.ts'
+import {
+  BACKGROUND_LIMIT_MS,
+  getAgentsService,
+  hasJobsService,
+  killJobs,
+  QuietWaitTracker,
+  runningJobs,
+  subscribeJobsEvents,
+  untilQuiet,
+  type BackgroundAgentLike,
+  type KilledJobSummary,
+  type ServiceGetter,
+} from './background.ts'
 
 export interface DotServiceOptions {
   readonly host: DotHost
+  /** Optional host service getter for duck-typed access to optional `jobs`, `subagents`, `agents`. */
+  readonly get?: ServiceGetter
+  /** Optional override for the 30-minute background quiet-wait cap (defaults to BACKGROUND_LIMIT_MS). */
+  readonly backgroundLimitMs?: number
   /** Ledger and the human's settings: rules are read live from it. */
   readonly store: DotStore
   /** Working directory of dot's own session. */
@@ -201,6 +218,12 @@ export class DotService {
   private readonly startupSelfUpgrade: SelfUpgradeMarker | undefined
   readonly retryHealth = new RetryHealth()
   private readonly sessionEventListeners = new Set<(sessionId: string, event: RawEvent) => void>()
+  private readonly quietWaits = new QuietWaitTracker()
+  private readonly backgroundJobsListeners = new Set<() => void>()
+  private backgroundJobsUnsub?: () => void
+  private backgroundJobsSubscribedTo?: unknown
+
+  private get getService(): ServiceGetter | undefined { return this.options.get }
 
   constructor(private readonly options: DotServiceOptions) {
     this.currentLocale = options.locale ?? options.store.uiLocale
@@ -231,8 +254,11 @@ export class DotService {
       void this.store.syncPending(this.pending.list())
     })
     this.retryHealth.onChange(() => { this.armIdleCheck() })
+    this.ensureBackgroundJobsSubscription()
     this.idleChecker = new IdleChecker(
-      () => this.canIdleCheck() ? idleCandidates(this.store.list(), this.pending.list(), this.store.workIdle(), this.retryingSessionIds()) : [],
+      () => this.canIdleCheck()
+        ? idleCandidates(this.store.list(), this.pending.list(), this.store.workIdle(), this.retryingSessionIds(), this.backgroundBusySessionIds())
+        : [],
       candidates => {
         this.emit({ event: DOT_TRACE.idleFired, message: 'Routine check fired.', data: { candidates: candidates.map(row => `${row.id}:${row.reason}`).join('; ') } })
         this.notify({ sessionId: this.store.dotSessionId!, kind: 'idle-check', text: `Routine check: ${candidates.map(row => `${row.id} "${row.title}": ${row.reason}`).join('; ')}\n  ${IDLE_SILENCE_HINT}`, at: this.now() })
@@ -310,6 +336,64 @@ export class DotService {
     return this.retryHealth.onChange(listener)
   }
 
+  hasActiveQuietWait(sessionId: string): boolean {
+    return this.quietWaits.has(sessionId)
+  }
+
+  quietWaitMs(sessionId: string, now = this.now()): number {
+    return this.quietWaits.quietWaitMs(sessionId, now)
+  }
+
+  onBackgroundJobsChange(listener: () => void): () => void {
+    this.backgroundJobsListeners.add(listener)
+    this.ensureBackgroundJobsSubscription()
+    return () => { this.backgroundJobsListeners.delete(listener) }
+  }
+
+  private ensureBackgroundJobsSubscription(): void {
+    if (this.closing) return
+    let jobsObj: unknown
+    try { jobsObj = this.getService?.('jobs') } catch { jobsObj = undefined }
+    if (jobsObj === this.backgroundJobsSubscribedTo && this.backgroundJobsUnsub !== undefined) return
+    if (jobsObj === undefined && this.backgroundJobsSubscribedTo === undefined) return
+    try { this.backgroundJobsUnsub?.() } catch { /* best effort */ }
+    this.backgroundJobsUnsub = undefined
+    this.backgroundJobsSubscribedTo = jobsObj
+    if (!jobsObj || typeof jobsObj !== 'object') return
+    this.backgroundJobsUnsub = subscribeJobsEvents(this.getService, { owners: 'all' }, event => {
+      if (this.closing) return
+      if (!event || (event.type !== 'registered' && event.type !== 'settled' && event.type !== 'removed')) return
+      const owner = event.job?.owner
+      const run = typeof owner === 'string' ? this.store.work.sessionRun(owner) : undefined
+      if (!run || runIsTerminal(run)) return
+      this.armIdleCheck()
+      for (const listener of [...this.backgroundJobsListeners]) {
+        try { listener() } catch { /* observer only */ }
+      }
+    })
+  }
+
+  private abortQuietWait(sessionId: string | undefined, reason: string, clearAbandoned = true): void {
+    if (!sessionId) return
+    const aborted = this.quietWaits.abort(sessionId, this.now(), reason)
+    if (clearAbandoned) this.quietWaits.clearAbandoned(sessionId)
+    if (aborted) this.armIdleCheck()
+  }
+
+  private backgroundBusySessionIds(): ReadonlySet<string> {
+    const busy = new Set<string>(this.quietWaits.activeSessionIds())
+    for (const item of this.store.workIdle()) {
+      for (const sessionId of item.sessionIds) {
+        if (!busy.has(sessionId) && runningJobs(this.getService, sessionId).length > 0) busy.add(sessionId)
+      }
+    }
+    for (const run of this.store.work.occupying()) {
+      const sessionId = run.sessionId ?? run.requestedSessionId
+      if (sessionId && !busy.has(sessionId) && runningJobs(this.getService, sessionId).length > 0) busy.add(sessionId)
+    }
+    return busy
+  }
+
   /** Shared active managed session event stream subscriber (used by PR-2, PR-3, PR-6). */
   subscribeManagedSessionEvents(listener: (sessionId: string, event: RawEvent) => void): () => void {
     this.sessionEventListeners.add(listener)
@@ -318,6 +402,10 @@ export class DotService {
 
   onSessionEvent(sessionId: string, event: RawEvent): void {
     if (this.closing || !sessionId || !this.isManagedSession(sessionId)) return
+    if (event.type === 'user/message') {
+      const sourceKind = (event.data as { source?: { kind?: unknown } } | undefined)?.source?.kind
+      if (sourceKind !== 'tool-jobs') this.quietWaits.clearAbandoned(sessionId)
+    }
     this.retryHealth.observe(sessionId, event)
     for (const listener of [...this.sessionEventListeners]) {
       try { listener(sessionId, event) } catch { /* observer only */ }
@@ -347,6 +435,8 @@ export class DotService {
 
   noteAgentDisposed(sessionId: string): void {
     this.retryHealth.remove(sessionId)
+    this.quietWaits.remove(sessionId, this.now())
+    this.armIdleCheck()
   }
 
   private retryingSessionIds(): ReadonlySet<string> {
@@ -354,18 +444,30 @@ export class DotService {
   }
 
   private withRetryStatus(item: WorkBoardItem): WorkBoardItem {
+    this.ensureBackgroundJobsSubscription()
+    const jobsAvailable = hasJobsService(this.getService)
     let changed = false
     const runs = item.runs.map(run => {
       const status = run.sessionId ? this.retryHealth.get(run.sessionId) : undefined
-      if (!status) return run
+      const liveRun = run.phase !== 'completed' && run.phase !== 'failed' && run.phase !== 'stopped'
+      const backgroundJobCount = jobsAvailable && liveRun && run.sessionId
+        ? runningJobs(this.getService, run.sessionId).length
+        : 0
+      if (!status && backgroundJobCount === 0) return run
       changed = true
-      const retryStatus: WorkRunRetryStatus = {
-        kind: status.kind,
-        attempts: status.attempts,
-        since: status.since,
-        accumulatedMs: status.accumulatedMs,
+      const retryStatus: WorkRunRetryStatus | undefined = status
+        ? {
+            kind: status.kind,
+            attempts: status.attempts,
+            since: status.since,
+            accumulatedMs: status.accumulatedMs,
+          }
+        : undefined
+      return {
+        ...run,
+        ...(retryStatus !== undefined ? { retryStatus } : {}),
+        ...(backgroundJobCount > 0 ? { backgroundJobCount } : {}),
       }
-      return { ...run, retryStatus }
     })
     return changed ? { ...item, runs } : item
   }
@@ -438,6 +540,7 @@ export class DotService {
         try { return countRelayInserts(await this.host.readEvents(target), deliveryId, sender, text) } catch { return undefined }
       },
       relay: async (target, sender, text, deliveryId) => {
+        this.abortQuietWait(target, 'peer', true)
         this.store.work.claimLiveRelay(deliveryId)
         try {
           await this.host.relay(target, sender, text, deliveryId, () => this.peerTarget(target).ok)
@@ -1143,6 +1246,7 @@ export class DotService {
       this.pending.reset()
       this.diffPriors.clear()
       this.retryHealth.clearAll()
+      this.quietWaits.clearAll(this.now())
       this.batcher.take()
       this.releaseChildSeals()
       this.reminders.refresh()
@@ -1724,6 +1828,7 @@ export class DotService {
   private async sendNow(sessionId: string, text: string): Promise<string> {
     this.assertTarget(sessionId)
     if (!text.trim()) throw new DotError('dot/invalid', 'message must be non-empty')
+    this.abortQuietWait(sessionId, 'send', true)
     const delivered = text.trim()
     try {
       await this.host.relay(sessionId, this.store.dotSessionId ?? sessionId, delivered)
@@ -1741,6 +1846,7 @@ export class DotService {
 
   private async interruptNow(sessionId: string): Promise<string> {
     this.assertTarget(sessionId)
+    this.abortQuietWait(sessionId, 'interrupt', true)
     await this.host.cancel(sessionId)
     return `Stopped the current turn of ${sessionId}; queued messages stay.`
   }
@@ -1791,6 +1897,8 @@ export class DotService {
   /** The host archived this session. A watched row stops looking idle; the host session is not archived again. */
   noteSessionArchived(sessionId: string): Promise<void> {
     this.retryHealth.remove(sessionId)
+    this.quietWaits.remove(sessionId, this.now())
+    this.armIdleCheck()
     return this.retireWatch(sessionId)
   }
 
@@ -1800,6 +1908,8 @@ export class DotService {
    */
   noteSessionRemoved(sessionId: string): Promise<void> {
     this.retryHealth.remove(sessionId)
+    this.quietWaits.remove(sessionId, this.now())
+    this.armIdleCheck()
     const task = this.store.task(sessionId)
     if (!task || task.origin !== 'watched' || task.status === 'archived') return Promise.resolve()
     return this.syncWatched()
@@ -2864,6 +2974,7 @@ export class DotService {
       else { this.idleSince ??= this.now(); this.batcher.wake(); this.armIdleCheck() }
       return
     }
+    if (status === 'running') this.abortQuietWait(sessionId, 'running', false)
     void this.store.apply({ type: 'status', sessionId, status, at: this.now() }, this.pending.list())
   }
 
@@ -2872,14 +2983,95 @@ export class DotService {
     return this.track(() => this.onTurnEndNow(sessionId))
   }
 
+  private lookupBackgroundAgent(sessionId: string): BackgroundAgentLike | undefined {
+    try {
+      const agent = getAgentsService(this.getService)?.get?.(sessionId)
+      if (agent && typeof agent.id === 'string' && typeof agent.status === 'string') return agent
+    } catch { /* optional host agents registry */ }
+    return undefined
+  }
+
+  private formatKilledJobsSummary(killed: readonly KilledJobSummary[]): string {
+    if (killed.length === 0) return ''
+    const lines = killed.map(job => job.outputTail ? `- ${job.name}: ${clip(job.outputTail, 160)}` : `- ${job.name}`)
+    return `\n[background timeout: stopped ${killed.length} job(s) after 30m limit]\n${lines.join('\n')}`
+  }
+
   private async onTurnEndNow(sessionId: string): Promise<void> {
+    if (this.closing) return
+    this.ensureBackgroundJobsSubscription()
     const owned = this.store.work.sessionRun(sessionId)
-    if (owned && owned.phase !== 'completed' && owned.phase !== 'failed' && owned.phase !== 'stopped') {
+    if (owned && this.quietWaits.isAbandoned(sessionId)) return
+
+    const isOpenOwned = owned !== undefined && owned.phase !== 'completed' && owned.phase !== 'failed' && owned.phase !== 'stopped'
+    if (isOpenOwned) {
       await observeRun(this.store.work, this.runHost(), owned.id, this.now()).catch(error => {
         this.options.log?.(`dsh-dot: run ${owned.id} was not observed: ${messageOf(error)}`)
       })
     }
-    if (this.isDot(sessionId) || !this.liveTask(sessionId)) return
+    if (this.closing || this.isDot(sessionId) || !this.liveTask(sessionId)) return
+
+    let timeoutSummary = ''
+    if (isOpenOwned) {
+      const liveJobs = runningJobs(this.getService, sessionId)
+      const hasSubagents = (() => {
+        try {
+          const sub = this.getService?.('subagents') as { waitForTreeWork?: unknown } | undefined
+          return typeof sub?.waitForTreeWork === 'function'
+        } catch {
+          return false
+        }
+      })()
+      const agent = this.lookupBackgroundAgent(sessionId)
+      const agentStatus = agent?.status ?? (this.host.isRunning(sessionId) ? 'running' : 'idle')
+      if (agentStatus !== 'idle') return
+      if (liveJobs.length > 0 || hasSubagents) {
+        const waitController = this.quietWaits.begin(sessionId, this.now())
+        const limitController = new AbortController()
+        const limitMs = this.options.backgroundLimitMs ?? BACKGROUND_LIMIT_MS
+        const limitHandle = this.timer.set(() => {
+          if (!limitController.signal.aborted) limitController.abort('background-timeout')
+        }, limitMs)
+        ;(limitHandle as { unref?: () => void } | undefined)?.unref?.()
+        this.armIdleCheck()
+        const waitAgent: BackgroundAgentLike = agent ?? { id: sessionId, status: 'idle' }
+        let quiet = false
+        try {
+          quiet = await untilQuiet(
+            this.getService,
+            waitAgent,
+            AbortSignal.any([waitController.signal, limitController.signal]),
+          )
+        } finally {
+          this.timer.clear(limitHandle)
+          this.quietWaits.end(sessionId, waitController, this.now())
+          this.armIdleCheck()
+        }
+        if (this.closing || waitController.signal.aborted) return
+        if (limitController.signal.aborted) {
+          this.quietWaits.markAbandoned(sessionId)
+          const preKill = runningJobs(this.getService, sessionId)
+          let killed: KilledJobSummary[] = []
+          try {
+            killed = await killJobs(this.getService, sessionId, 'background-timeout')
+          } catch {
+            killed = preKill
+          }
+          if (this.closing || waitController.signal.aborted) return
+          timeoutSummary = this.formatKilledJobsSummary(killed.length > 0 ? killed : preKill)
+        } else if (!quiet) {
+          return
+        }
+        const currentRun = this.store.work.sessionRun(sessionId)
+        if (currentRun && currentRun.phase !== 'completed' && currentRun.phase !== 'failed' && currentRun.phase !== 'stopped') {
+          await observeRun(this.store.work, this.runHost(), currentRun.id, this.now()).catch(error => {
+            this.options.log?.(`dsh-dot: run ${currentRun.id} was not observed: ${messageOf(error)}`)
+          })
+        }
+        if (this.closing || waitController.signal.aborted || this.isDot(sessionId) || !this.liveTask(sessionId)) return
+      }
+    }
+
     const reply = await this.host.latestReply(sessionId, 600).catch(() => undefined)
     if (this.closing) return
     const task = await this.store.apply({ type: 'turn-end', sessionId, at: this.now(), ...reply ? { note: reply } : {} }, this.pending.list())
@@ -2888,7 +3080,7 @@ export class DotService {
     const change = ownedNow ? this.store.work.change(ownedNow.changeId) : undefined
     const older = ownedNow && change && (ownedNow.inputRef !== change.currentInputRef || ownedNow.inputRevision !== change.currentRevision)
     const text = ownedNow
-      ? `${ownedNow.changeId} ${ownedNow.id} input ${ownedNow.inputRef}@${ownedNow.inputRevision}${older ? ' (older input; it does not advance the current one)' : ''}: ${clip(reply ?? '(no text)', 400)}`
+      ? `${ownedNow.changeId} ${ownedNow.id} input ${ownedNow.inputRef}@${ownedNow.inputRevision}${older ? ' (older input; it does not advance the current one)' : ''}: ${clip(reply ?? '(no text)', 400)}${timeoutSummary}`
       : `"${task.title}" finished a turn: ${clip(reply ?? '(no text)', 400)}`
     this.notify({ sessionId, kind: 'turn-end', text, at: this.now() })
   }
@@ -3093,6 +3285,11 @@ export class DotService {
     this.releaseChildSeals()
     if (this.disposal) return this.disposal
     this.closing = true
+    this.quietWaits.abortAll(this.now(), 'dispose')
+    try { this.backgroundJobsUnsub?.() } catch { /* best effort */ }
+    this.backgroundJobsUnsub = undefined
+    this.backgroundJobsSubscribedTo = undefined
+    this.backgroundJobsListeners.clear()
     this.retryHealth.clearAll()
     this.sessionEventListeners.clear()
     this.selfDeployAbort.abort()
@@ -3278,6 +3475,8 @@ export class DotService {
     })
   }
   supplementWorkRun(runId: string, text: string, senderId: string, expected: { readonly inputRef: string; readonly inputRevision: number }) {
+    const run = this.store.work.run(runId)
+    this.abortQuietWait(run?.sessionId ?? run?.requestedSessionId, 'supplement', true)
     return supplementRun(this.store.work, this.runHost(runId, 'verify'), runId, text, senderId, this.now(), expected)
   }
 
@@ -3306,6 +3505,11 @@ export class DotService {
     return `supplemented ${runId} delivery ${delivery?.id ?? 'recorded'} ${delivery?.status ?? sent.phase} for ${inputRef}@${inputRevision}`
   }
   async cancelWorkChange(changeId: string) {
+    for (const run of this.store.work.listRuns()) {
+      if (run.changeId === changeId && !['completed', 'failed', 'stopped'].includes(run.phase)) {
+        this.abortQuietWait(run.sessionId ?? run.requestedSessionId, 'cancel', true)
+      }
+    }
     const result = await cancelWork(this.store.work, this.runHost(), changeId, this.now())
     if (result.ok) {
       const isolation = this.store.work.change(changeId)?.isolation
@@ -3316,6 +3520,8 @@ export class DotService {
     return result
   }
   async finishWorkRun(runId: string, phase: 'completed' | 'failed') {
+    const run = this.store.work.run(runId)
+    this.abortQuietWait(run?.sessionId ?? run?.requestedSessionId, 'finish', true)
     const finished = await finishWork(this.store.work, this.runHost(), runId, phase, this.now())
     if (finished.ok) await this.captureRunReport(runId)
     return finished
@@ -3367,6 +3573,7 @@ export class DotService {
     }
     const runs = this.store.work.listRuns().filter(run => run.changeId === changeId && !['completed', 'failed', 'stopped'].includes(run.phase))
     for (const run of runs) {
+      this.abortQuietWait(run.sessionId ?? run.requestedSessionId, 'force-release', true)
       if (run.creation === 'confirmed' && run.sessionId) {
         try { await this.runHost().stop(run.sessionId) } catch { /* best-effort before local lock release */ }
       }
@@ -3848,8 +4055,11 @@ export class DotService {
 
   /** Check the review, close it to new deliveries, then stop. A late delivery cannot reuse this stop. */
   async holdWorkReview(runId: string) {
+    const review = this.store.work.run(runId)
+    this.abortQuietWait(review?.sessionId ?? review?.requestedSessionId, 'hold-review', true)
     const prepared = await this.store.work.prepareReviewHold(runId, this.now())
     if (!prepared.ok) return prepared
+    this.abortQuietWait(prepared.sessionId, 'hold-review', true)
     const current = this.store.work.run(runId)
     if (current?.phase === 'settling' && current.closureEvidence?.jobsSettled) return current
     let report: { queueCleared: boolean; idle: boolean; jobsSettled: boolean | 'unknown' }

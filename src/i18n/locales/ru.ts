@@ -677,6 +677,7 @@ const ruUi: UiText = {
   workSourceExpandAll: 'Развернуть всё',
   workSourceCollapseAll: 'Свернуть всё',
   workRetryBadge: 'Повтор модели ×{count}',
+  workBackgroundJobs: 'Фоновых заданий: {count}',
   attentionTitle: 'Дороти ждёт вас',
   attentionBadge: '{n} ждут вас',
   sNotify: 'Уведомления рабочего стола',

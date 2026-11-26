@@ -31,7 +31,7 @@ export interface QuestionRow {
 
 export type NoticeEntry =
   | {
-      readonly kind: 'approval' | 'question' | 'turn-end' | 'error' | 'task-human' | 'idle-check' | 'inbox' | 'recipe-run' | 'recipe-proposal'
+      readonly kind: 'approval' | 'question' | 'turn-end' | 'error' | 'task-human' | 'idle-check' | 'inbox' | 'recipe-run' | 'recipe-proposal' | 'result'
       readonly sessionId: string
       readonly requestId?: string
       readonly subject?: string
@@ -68,7 +68,7 @@ export interface ParsedNotice {
 const NOTICE_HEAD = /^\[dot notice\]/i
 const REMINDER_PREFIX = /^\[dot reminder\]/i
 const MODEL_FOOTER = /^Do what each one asks now\./
-const SESSION_BULLET = /^- (approval|question|turn-end|error|task-human|idle-check|inbox)\s*·\s*([^:]+):\s*(.*)$/
+const SESSION_BULLET = /^- (approval|question|turn-end|error|task-human|idle-check|inbox|result)\s*·\s*([^:]+):\s*(.*)$/
 const REMINDER_BULLET = /^- (\S+)\s+"([^"]+)"\s*\(([^)]*)\)(?:\s+recipe\s+\S+\s+"[^"]*")?(?:\s+\[dispatch refused:\s*([^\]]*)\])?(?::\s*(.*))?$/
 const REQUEST_HEAD = /^(\S+)\s*·\s*(?:approval|question) from (?:task "(.+?)"|untracked session(?: in (.+?))?)\s*·\s*"(.*)"$/
 const CHANGE_REQUEST_HEAD = /^(\S+) for task (\S+) "(.*?)": (?:approval|question)\s*·\s*"(.*)"$/
@@ -312,7 +312,7 @@ export function parseNotice(text: string): ParsedNotice {
     }
     if (MODEL_FOOTER.test(trimmed)) continue
     if (/^Ready to start(?: \(highest priority first\))?:$/.test(trimmed)) { skippingReady = true; continue }
-    if (/^(Requests waiting for you|Errors|External events|Tasks|Watched sessions):$/.test(trimmed)) { skippingReady = false; continue }
+    if (/^(Requests waiting for you|Errors|External events|Tasks|Recipes|Watched sessions):$/.test(trimmed)) { skippingReady = false; continue }
     if (skippingReady) continue
     if (line.startsWith('- ')) {
       rawItems.push({ section, head: line, sublines: [] })
@@ -347,7 +347,7 @@ export function parseNotice(text: string): ParsedNotice {
       stray.push([item.head.replace(/^- /, ''), ...item.sublines].join('\n').trim())
       continue
     }
-    const kind = sm[1] as 'approval' | 'question' | 'turn-end' | 'error' | 'task-human' | 'idle-check' | 'inbox'
+    const kind = sm[1] as 'approval' | 'question' | 'turn-end' | 'error' | 'task-human' | 'idle-check' | 'inbox' | 'result'
     const sessionId = sm[2]!.trim()
     const headline = sm[3]!.trim()
 
@@ -434,7 +434,12 @@ export function summarizeNotice(parsed: ParsedNotice, locale: CopyLocale, tasks:
     } else if (first.kind === 'error') {
       lead = `${badge.label} · ${t(locale, 'error')}`
     } else {
-      const label = first.kind === 'inbox' ? 'inboxEvent' : first.kind === 'task-human' ? 'taskHuman' : 'idleCheck'
+      const label: TextKey = first.kind === 'inbox' ? 'inboxEvent'
+        : first.kind === 'task-human' ? 'taskHuman'
+        : first.kind === 'result' ? 'resultNotice'
+        : first.kind === 'recipe-run' ? 'recipeRunTag'
+        : first.kind === 'recipe-proposal' ? 'recipeProposalTag'
+        : 'idleCheck'
       lead = `${badge.label} · ${t(locale, label)}`
     }
   }

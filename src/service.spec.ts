@@ -1521,6 +1521,76 @@ describe('DotService WorkBook sessions', () => {
     await h.service.dispose()
   })
 
+  it('propagates github-poll and inbox-github origin into manageTask during an inbox turn and clears on say/idle', async () => {
+    const h = setup()
+    await h.service.ensureDot()
+    await h.service.submitInbox({
+      source: 'github',
+      sourceId: 'primary-github',
+      deliveryId: 'gh-poll:ev-1',
+      type: 'issues.opened',
+      subject: 'acme/widgets#10',
+      title: 'Bug report',
+      actor: 'octocat',
+      summary: 'broken',
+      receivedAt: 1000,
+      originSource: 'github-poll',
+    })
+    await h.service.flushNotices()
+    await h.service.manageTask({
+      action: 'dispatch',
+      dir: '/proj',
+      title: 'Poll task',
+      message: 'investigate',
+      access: 'read',
+      origin: { strength: 'inferred', source: 'speculative', sender: 'spoof' },
+    })
+    expect(h.store.work.listRuns()[0]!.origin).toEqual({
+      strength: 'explicit',
+      source: 'github-poll',
+      sender: 'octocat',
+    })
+
+    // Turning idle clears inbox turn provenance so later dispatches default to user
+    await h.service.onDotIdle(h.store.dotSessionId!)
+    await h.service.manageTask({
+      action: 'dispatch',
+      dir: '/proj',
+      title: 'After idle',
+      message: 'normal user task',
+      access: 'read',
+    })
+    expect(h.store.work.listRuns()[1]!.origin).toEqual({ strength: 'explicit', source: 'user' })
+
+    // Webhook inbox delivery also propagates inbox-github provenance
+    await h.service.submitInbox({
+      source: 'github',
+      sourceId: 'primary-github',
+      deliveryId: 'wh-ev-2',
+      type: 'pull_request.opened',
+      subject: 'acme/widgets#11',
+      title: 'PR',
+      actor: 'alice',
+      summary: 'pr',
+      receivedAt: 2000,
+      originSource: 'inbox-github',
+    })
+    await h.service.flushNotices()
+    await h.service.manageTask({
+      action: 'dispatch',
+      dir: '/proj',
+      title: 'Webhook task',
+      message: 'check pr',
+      access: 'read',
+    })
+    expect(h.store.work.listRuns()[2]!.origin).toEqual({
+      strength: 'explicit',
+      source: 'inbox-github',
+      sender: 'alice',
+    })
+    await h.service.dispose()
+  })
+
   it('creates the run session in the on-disk casing while the record stays canonical', async () => {
     const dir = realpathSync.native(mkdtempSync(join(tmpdir(), 'dot-CaSiNg-')))
     const h = setup()
@@ -5658,8 +5728,7 @@ describe('DotService background quiet wait', () => {
 
       mockJobs.start('job-1', runSessionId, 'pnpm test')
       const turnEndP = h.service.onTurnEnd(runSessionId)
-      await new Promise(r => setTimeout(r, 15))
-      expect(h.service.hasActiveQuietWait(runSessionId)).toBe(true)
+      await vi.waitFor(() => expect(h.service.hasActiveQuietWait(runSessionId)).toBe(true), { timeout: 2000, interval: 5 })
       expect(watchCalls).toBe(1) // Phase-1 observeRun ran before quiet wait
       expect(h.store.work.run(runId)?.cursor?.seq).toBe(10)
       await h.service.flushNotices()
@@ -5703,8 +5772,7 @@ describe('DotService background quiet wait', () => {
       // 1) supplementWorkRun aborts quiet wait cleanly (relays supplement to sid, zero turn-end notify to dot)
       mockJobs.start('j-sup', sid, 'bg')
       const p1 = h.service.onTurnEnd(sid)
-      await new Promise(r => setTimeout(r, 10))
-      expect(h.service.hasActiveQuietWait(sid)).toBe(true)
+      await vi.waitFor(() => expect(h.service.hasActiveQuietWait(sid)).toBe(true), { timeout: 2000, interval: 5 })
       await h.service.supplementWorkRun(runId, 'extra info', dot, { inputRef: run.inputRef, inputRevision: run.inputRevision })
       await p1
       expect(h.service.hasActiveQuietWait(sid)).toBe(false)
@@ -5713,8 +5781,7 @@ describe('DotService background quiet wait', () => {
 
       // 2) onStatus('running') aborts quiet wait cleanly
       const p2 = h.service.onTurnEnd(sid)
-      await new Promise(r => setTimeout(r, 10))
-      expect(h.service.hasActiveQuietWait(sid)).toBe(true)
+      await vi.waitFor(() => expect(h.service.hasActiveQuietWait(sid)).toBe(true), { timeout: 2000, interval: 5 })
       h.service.onStatus(sid, 'running')
       await p2
       expect(h.service.hasActiveQuietWait(sid)).toBe(false)
@@ -5723,8 +5790,7 @@ describe('DotService background quiet wait', () => {
 
       // 3) cancelWorkChange aborts quiet wait cleanly
       const p3 = h.service.onTurnEnd(sid)
-      await new Promise(r => setTimeout(r, 10))
-      expect(h.service.hasActiveQuietWait(sid)).toBe(true)
+      await vi.waitFor(() => expect(h.service.hasActiveQuietWait(sid)).toBe(true), { timeout: 2000, interval: 5 })
       await h.service.cancelWorkChange(change.id)
       await p3
       expect(h.service.hasActiveQuietWait(sid)).toBe(false)
@@ -5773,16 +5839,14 @@ describe('DotService background quiet wait', () => {
     agents2.set(s2, { id: s2, status: 'idle', session: { id: s2, seq: 1 } })
     mockJobs2.start('j-peer', s1, 'bg')
     const waitPeer = service2.onTurnEnd(s1)
-    await new Promise(r => setTimeout(r, 10))
-    expect(service2.hasActiveQuietWait(s1)).toBe(true)
+    await vi.waitFor(() => expect(service2.hasActiveQuietWait(s1)).toBe(true), { timeout: 2000, interval: 5 })
     await service2.peerSend({ senderSessionId: s2, targetSessionId: s1, text: 'hello peer', deliveryId: 'del-peer-1' })
     await waitPeer
     expect(service2.hasActiveQuietWait(s1)).toBe(false)
 
     // noteSessionArchived aborts active quiet wait cleanly
     const waitArchive = service2.onTurnEnd(s1)
-    await new Promise(r => setTimeout(r, 10))
-    expect(service2.hasActiveQuietWait(s1)).toBe(true)
+    await vi.waitFor(() => expect(service2.hasActiveQuietWait(s1)).toBe(true), { timeout: 2000, interval: 5 })
     await service2.noteSessionArchived(s1)
     await waitArchive
     expect(service2.hasActiveQuietWait(s1)).toBe(false)
@@ -5790,8 +5854,7 @@ describe('DotService background quiet wait', () => {
     // dispose aborts active quiet wait before inFlight settles
     mockJobs2.start('j-disp', s2, 'bg')
     const waitDispose = service2.onTurnEnd(s2)
-    await new Promise(r => setTimeout(r, 10))
-    expect(service2.hasActiveQuietWait(s2)).toBe(true)
+    await vi.waitFor(() => expect(service2.hasActiveQuietWait(s2)).toBe(true), { timeout: 2000, interval: 5 })
     await service2.dispose()
     await waitDispose
     expect(service2.hasActiveQuietWait(s2)).toBe(false)
@@ -5823,16 +5886,16 @@ describe('DotService background quiet wait', () => {
 
       mockJobs.start('j-long', sid, 'npm run build', 'compiling...\nstill running')
       const turnEndP = h.service.onTurnEnd(sid)
-      await new Promise(r => setTimeout(r, 10))
-      expect(h.service.hasActiveQuietWait(sid)).toBe(true)
+      await vi.waitFor(() => expect(h.service.hasActiveQuietWait(sid)).toBe(true), { timeout: 2000, interval: 5 })
       expect(h.delays()).toContain(30 * 60_000)
 
       // maxConcurrentRuns=1 blocks a second run while in quiet wait
       await expect(h.service.manageTask({ action: 'dispatch', task_id: change.id, access: 'read', instruction: 'second' })).rejects.toThrow(/already has 1 open runs/)
 
-      // Fire the 30-min timeout timer; settle shortly after kill is called
-      setTimeout(() => mockJobs.settle('j-long', 'killed'), 15)
+      // Fire the 30-min timeout timer; settle once kill is requested
       h.fire()
+      await vi.waitFor(() => expect(mockJobs.killCalls).toHaveLength(1), { timeout: 2000, interval: 5 })
+      mockJobs.settle('j-long', 'killed')
       await turnEndP
 
       expect(mockJobs.waitCalls[0]).toEqual({ id: 'j-long', timeoutMs: 10_000, caller: sid })
@@ -5897,8 +5960,7 @@ describe('DotService background quiet wait', () => {
       runSid = store1.work.run(runId)!.sessionId!
       mockJobs1.start('j-restart', runSid, 'long')
       const waiting = s1.onTurnEnd(runSid)
-      await new Promise(r => setTimeout(r, 10))
-      expect(s1.hasActiveQuietWait(runSid)).toBe(true)
+      await vi.waitFor(() => expect(s1.hasActiveQuietWait(runSid)).toBe(true), { timeout: 2000, interval: 5 })
       await s1.dispose()
       await waiting
     } finally {
@@ -6280,6 +6342,18 @@ describe('dot-worker preset selection and security hook parity', () => {
       })
       expect(questionRoute.decided).toBe('pending')
       expect(h.service.runTaskPermission(writeSid)).toBe('workspace-write')
+
+      // 5. Live result notice projects display.kind === 'result' cleanly
+      h.service.notify({
+        sessionId: h.store.dotSessionId!,
+        kind: 'result',
+        text: 'PR acme/widgets#98 merged',
+        at: 100,
+      })
+      await h.service.flushNotices()
+      const relayedDisplays = h.relayed.map(r => r.notice).filter(Boolean)
+      const resultEntry = relayedDisplays.flatMap(d => d!.entries).find(e => e.kind === 'result')
+      expect(resultEntry).toMatchObject({ kind: 'result', summary: 'PR acme/widgets#98 merged' })
     } finally {
       for (const scope of scopes) await scope.dispose()
       for (const dispose of disposers) dispose()

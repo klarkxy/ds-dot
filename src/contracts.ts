@@ -511,8 +511,124 @@ export interface DotSettings {
   readonly capabilities: DotCapabilities
   /** MCP servers mounted for dot's own agent only, keyed by serverName. */
   readonly mcpServers?: Readonly<Record<string, DotMcpServer>>
+  /** GitHub CLI polling (primary) and mutual-exclusion webhook configuration. */
+  readonly githubPoll?: GithubPollSettings
   /** Missing and false both mean unlocked: existing installs opt in to self-management. */
   readonly locks?: SettingLocks
+}
+
+// ---- GitHub poll source & Fast-Path admission ----------------------------
+
+export const GITHUB_EVENT_TYPES = ['issue', 'pr', 'comment', 'review', 'ci'] as const
+export type GithubEventType = (typeof GITHUB_EVENT_TYPES)[number]
+
+export const GITHUB_SENDER_CLASSES = ['human', 'listed-bot', 'unlisted-bot'] as const
+export type GithubSenderClass = (typeof GITHUB_SENDER_CLASSES)[number]
+
+export const GITHUB_ADMISSION_ACTIONS = ['inbox', 'context-only', 'ignore'] as const
+export type GithubAdmissionAction = (typeof GITHUB_ADMISSION_ACTIONS)[number]
+
+export interface GithubAdmissionRule {
+  /** Normalized `owner/repo` (lowercase) or `'*'` for all repositories. */
+  readonly repo: string
+  readonly eventType: GithubEventType
+  readonly senderClass: GithubSenderClass
+  readonly action: GithubAdmissionAction
+}
+
+export interface GithubPollStreams {
+  readonly issues: boolean
+  readonly pulls: boolean
+  readonly comments: boolean
+  readonly ci: boolean
+}
+
+export interface GithubPollSettings {
+  readonly enabled: boolean
+  /** Normalized `owner/repo` (lowercase) polled via `gh`. Empty by default. */
+  readonly repos: readonly string[]
+  /** Normalized `owner/repo` (lowercase) kept on Webhook instead of Poll (mutually exclusive with `repos`). */
+  readonly webhookRepos: readonly string[]
+  /** Path or command name for `gh` CLI (default `'gh'`). */
+  readonly ghPath: string
+  /** Optional GitHub Enterprise Server hostname (`--hostname`). */
+  readonly hostname?: string
+  /** User-configured poll interval in seconds (`60..3600`, default `120`). */
+  readonly intervalSec: number
+  readonly streams: GithubPollStreams
+  /** Additional automated actors treated as listed bots alongside defaults. */
+  readonly ignoredActors: readonly string[]
+  /** Source id shared with webhook ingress for dedupe and mode handoff (default `'primary-github'`). */
+  readonly sourceId?: string
+  /** Fast-Path 3-state admission matrix overrides. */
+  readonly admission?: readonly GithubAdmissionRule[]
+}
+
+export const GITHUB_POLL_MIN_INTERVAL_SEC = 60
+export const GITHUB_POLL_MAX_INTERVAL_SEC = 3600
+export const GITHUB_POLL_DEFAULT_INTERVAL_SEC = 120
+export const GITHUB_POLL_DEFAULT_SOURCE_ID = 'primary-github'
+
+export const DEFAULT_GITHUB_POLL_SETTINGS: GithubPollSettings = {
+  enabled: false,
+  repos: [],
+  webhookRepos: [],
+  ghPath: 'gh',
+  intervalSec: GITHUB_POLL_DEFAULT_INTERVAL_SEC,
+  streams: { issues: true, pulls: true, comments: true, ci: true },
+  ignoredActors: [],
+  sourceId: GITHUB_POLL_DEFAULT_SOURCE_ID,
+  admission: [],
+}
+
+export type GithubPollHealthState = 'idle' | 'ok' | 'degraded' | 'error'
+
+export interface GithubPollRepoStatus {
+  readonly repo: string
+  readonly mode: 'poll' | 'webhook'
+  readonly consecutiveFailures: number
+  readonly lastPollAt?: number
+  readonly lastSuccessAt?: number
+  readonly lastDeliveredAt?: number
+  readonly lastError?: string
+  readonly degraded410Count?: number
+}
+
+export interface GithubPollStatusView {
+  readonly enabled: boolean
+  readonly polling: boolean
+  readonly ghPath: string
+  readonly hostname?: string
+  readonly userIntervalSec: number
+  readonly effectiveIntervalSec: number
+  readonly xPollIntervalSec?: number
+  readonly rateLimitRemaining?: number
+  readonly rateLimitLimit?: number
+  readonly rateLimitResetAt?: number
+  readonly hourlyRequests?: number
+  readonly budgetLimitPerHour?: number
+  readonly budgetAdjusted: boolean
+  readonly budgetWarning?: string
+  readonly health: GithubPollHealthState
+  readonly alert: boolean
+  readonly consecutiveFailures: number
+  readonly lastError?: string
+  readonly lastPollAt?: number
+  readonly repos: readonly GithubPollRepoStatus[]
+}
+
+export interface GithubPollTestResult {
+  readonly ok: boolean
+  readonly ghFound: boolean
+  readonly resolvedPath?: string
+  readonly version?: string
+  readonly authenticated: boolean
+  readonly login?: string
+  readonly host: string
+  readonly rateLimitRemaining?: number
+  readonly rateLimitLimit?: number
+  readonly repoChecks?: readonly { readonly repo: string; readonly ok: boolean; readonly error?: string }[]
+  readonly error?: string
 }
 
 /** One dot-local MCP server row in settings. */
@@ -854,6 +970,8 @@ export interface InboxEventInput {
   readonly headRef?: string
   /** PR/workflow head repository (owner/repo, lower-cased) for fork-aware link matching. */
   readonly headRepo?: string
+  /** Optional origin provenance when triggered by poll vs webhook. */
+  readonly originSource?: 'github-poll' | 'inbox-github'
 }
 
 /** A stored inbox row: one pending record per source+sourceId+subject, merged deliveries folded in. */
@@ -899,6 +1017,8 @@ export interface TaskLink {
   /** Head repository learned with the branch; distinguishes same-named fork branches. */
   readonly headRepo?: string
   readonly url?: string
+  /** Distinguishes pull requests from issues for PR-only polling; omitted when unknown. */
+  readonly targetKind?: 'pr' | 'issue'
   readonly origin: 'dot' | 'auto'
   readonly state: 'open' | 'closed' | 'merged'
   readonly addedAt: number

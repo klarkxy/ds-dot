@@ -349,7 +349,7 @@ describe('dot-worker preset definition', () => {
       state: new Map(), tasks: new Map(), tickets: new Map(), schedules: new Map(),
       recipes: new Map(), recipe_proposals: new Map(), proposals: new Map(),
       changes: new Map(), inputs: new Map(), runs: new Map(), verifications: new Map(),
-      peers: new Map(), inbox: new Map(), links: new Map(),
+      peers: new Map(), inbox: new Map(), links: new Map(), github_poll: new Map(),
     }
     const domain = {
       table: (name: string) => ({

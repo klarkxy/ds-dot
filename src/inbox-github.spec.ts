@@ -299,4 +299,16 @@ describe('installInboxIngress', () => {
     expect(calls).toBe(INBOX_PERSIST_ATTEMPTS)
     expect(logs.some(row => row.includes('was not stored'))).toBe(true)
   })
+
+  it('degrades silently when webhookRuntime getter throws', () => {
+    const throwingCtx = {
+      inject: (_deps: string[], cb: (c: unknown) => void) => cb({
+        get webhookRuntime(): WebhookRuntimeLike {
+          throw new Error('boom getter')
+        },
+        effect: (fn: () => unknown) => fn(),
+      }),
+    }
+    expect(() => installInboxIngress(throwingCtx as never, { submitInbox: async () => 'stored' }, () => {})).not.toThrow()
+  })
 })

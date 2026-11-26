@@ -13,6 +13,7 @@ import { JsonStorageBackend } from '@deepseek-ai/dsh-storage-json'
 import { openCompatibleDomain } from '@klarkxy/dsh-plugin-kit/domain'
 import { STATE_KEY, dotDomain } from './storage.ts'
 import { DotStore } from './store.ts'
+import { GithubPollCursorStore } from './github-poll/cursor-store.ts'
 
 describe('old data directory', () => {
   it('opens a 0.3.0-shaped home with retired fields and a tickets table', async () => {
@@ -142,6 +143,44 @@ describe('old data directory', () => {
       const store2 = new DotStore(again)
       expect(store2.link('lnk-1')).toMatchObject({ repo: 'org/repo', number: 7 })
       expect(store2.recipeProposal('rpp-1')).toMatchObject({ recipeId: 'rcp-1', status: 'pending', regression: 'acceptance' })
+      await again.close()
+    } finally {
+      await facility.closeAll()
+      await backend.close()
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('opens a v10 directory cleanly under v11 and persists github_poll KV records', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dot-v10-open-'))
+    const backend = new JsonStorageBackend(root)
+    const facility = new DomainFacility({
+      storage: { backend: { get: (name: string) => {
+        if (name !== 'json') throw new Error('unexpected backend')
+        return backend
+      } } }, logger: { error() {}, warn() {} }, emit() {},
+    } as never, { backend: 'json' })
+    const v10Document = {
+      unit: { name: 'klarkxy_dsh_dot', version: 10 },
+      global: null,
+      tables: {
+        state: { [STATE_KEY]: { dotSessionId: 'dot-1' } },
+      },
+    }
+    await writeFile(join(root, 'klarkxy_dsh_dot.json'), JSON.stringify(v10Document), 'utf8')
+    try {
+      const domain = await openCompatibleDomain(spec => facility.open(spec), dotDomain)
+      const store = new DotStore(domain)
+      const pollTable = store.githubPollTable()
+      expect(pollTable).toBeDefined()
+      const cursorStore = new GithubPollCursorStore(pollTable)
+      await cursorStore.recordDelivery('Acme/Widgets', 'poll', 1234)
+      await domain.close()
+
+      const again = await openCompatibleDomain(spec => facility.open(spec), dotDomain)
+      const store2 = new DotStore(again)
+      const cursorStore2 = new GithubPollCursorStore(store2.githubPollTable())
+      expect(cursorStore2.getRepoState('acme/widgets')).toMatchObject({ kind: 'repo', repo: 'acme/widgets', lastDeliveredAt: 1234, lastMode: 'poll' })
       await again.close()
     } finally {
       await facility.closeAll()

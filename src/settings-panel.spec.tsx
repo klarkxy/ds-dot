@@ -1,7 +1,7 @@
 import { act, useState } from 'react'
 import { JSDOM } from 'jsdom'
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
-import { DEFAULT_SETTINGS, type DotSettings } from './contracts.ts'
+import { DEFAULT_GITHUB_POLL_SETTINGS, DEFAULT_SETTINGS, type DotSettings, type GithubPollStatusView, type GithubPollTestResult } from './contracts.ts'
 import { SettingsPanel, settingsCss } from './settings-panel.tsx'
 
 const dom = new JSDOM('<div id="root"></div>', { url: 'https://local.test' })
@@ -1343,6 +1343,359 @@ describe('dispatch settings layout', () => {
     ])
     await act(async () => document.querySelector<HTMLButtonElement>('.dsh-dot-proposal button')!.click())
     expect(decisions).toEqual([{ id: 'p-preset', allow: true }])
+
+    await act(async () => root.unmount())
+  })
+})
+
+describe('GitHub poll-primary settings', () => {
+  const selectChange = (el: HTMLSelectElement, value: string) => {
+    el.value = value
+    const propsKey = Object.keys(el).find(key => key.startsWith('__reactProps'))
+    const props = propsKey ? (el as unknown as Record<string, { onChange?: (event: { target: HTMLSelectElement }) => void }>)[propsKey] : undefined
+    props?.onChange?.({ target: el })
+  }
+
+  it('renders Poll-primary defaults with no default repos enabled and collapsed advanced sections', async () => {
+    const saves: Array<Partial<DotSettings>> = []
+    let current: DotSettings = { ...DEFAULT_SETTINGS }
+    const api = {
+      models: async () => ({ groups: [] }),
+      settings: async () => current,
+      settingProposals: async () => [],
+      decideSetting: async () => 'ok',
+      setSettings: async (patch: Partial<DotSettings>) => {
+        saves.push(patch)
+        current = { ...current, ...patch } as DotSettings
+        return current
+      },
+    }
+    function Harness({ locale = 'en' }: { locale?: 'en' | 'zh' }) {
+      const [settings, setSettings] = useState<DotSettings>(current)
+      return <SettingsPanel locale={locale} section="github" api={api as never} settings={settings} onSaved={setSettings} />
+    }
+    const root = createRoot(document.getElementById('root')!)
+    await act(async () => root.render(<Harness locale="en" />))
+    await act(async () => { await Promise.resolve() })
+
+    expect(document.querySelector('[data-gh-card="poll"]')).not.toBeNull()
+    expect(document.body.textContent).toContain('GitHub Polling (Local gh, No Public URL)')
+    expect(document.querySelectorAll('[data-gh-list="poll"] .dsh-dot-gh-chip')).toHaveLength(0)
+    expect(document.body.textContent).toContain('No repositories added yet')
+
+    const enabledSwitch = document.querySelector<HTMLButtonElement>('button[role="switch"][aria-label="Enable polling"]')!
+    expect(enabledSwitch.getAttribute('aria-checked')).toBe('false')
+    expect(document.querySelector<HTMLInputElement>('input[aria-label="gh CLI path"]')?.value).toBe('gh')
+    expect(document.querySelector<HTMLInputElement>('input[aria-label="Poll interval"]')?.value).toBe('120')
+
+    // All 4 stream checkboxes default to checked.
+    const streamChecks = [...document.querySelectorAll<HTMLInputElement>('.dsh-dot-gh-streams input[type="checkbox"]')]
+    expect(streamChecks).toHaveLength(4)
+    expect(streamChecks.every(box => box.checked)).toBe(true)
+
+    // Advanced Admission & Webhook sections start collapsed.
+    const admissionDetails = document.querySelector<HTMLDetailsElement>('details[data-gh-section="admission"]')!
+    const webhookDetails = document.querySelector<HTMLDetailsElement>('details[data-gh-section="webhook"]')!
+    expect(admissionDetails.open).toBe(false)
+    expect(webhookDetails.open).toBe(false)
+
+    // Verify zh locale copy renders cleanly too.
+    await act(async () => root.render(<Harness locale="zh" />))
+    expect(document.body.textContent).toContain('GitHub 轮询（本机 gh 免公网配置）')
+    expect(document.body.textContent).toContain('高级：Fast-Path 准入矩阵')
+    expect(document.body.textContent).toContain('高级：Webhook 实时推送')
+
+    expect(saves).toHaveLength(0)
+    await act(async () => root.unmount())
+  })
+
+  it('edits poll toggle, normalized repos, streams, interval validation, ghPath, hostname, and ignoredActors', async () => {
+    const saves: Array<Partial<DotSettings>> = []
+    let current: DotSettings = { ...DEFAULT_SETTINGS }
+    const api = {
+      models: async () => ({ groups: [] }),
+      settings: async () => current,
+      settingProposals: async () => [],
+      decideSetting: async () => 'ok',
+      setSettings: async (patch: Partial<DotSettings>) => {
+        saves.push(patch)
+        current = { ...current, ...patch } as DotSettings
+        return current
+      },
+    }
+    function Harness() {
+      const [settings, setSettings] = useState<DotSettings>(current)
+      return <SettingsPanel locale="en" section="github" api={api as never} settings={settings} onSaved={setSettings} />
+    }
+    const root = createRoot(document.getElementById('root')!)
+    await act(async () => root.render(<Harness />))
+    await act(async () => { await Promise.resolve() })
+
+    // Enable polling.
+    const enabledSwitch = document.querySelector<HTMLButtonElement>('button[role="switch"][aria-label="Enable polling"]')!
+    await act(async () => enabledSwitch.click())
+    expect(saves.at(-1)?.githubPoll?.enabled).toBe(true)
+
+    // Add uppercase repo -> normalized lowercase.
+    const repoInput = document.querySelector<HTMLInputElement>('input[aria-label="Polled repositories"]')!
+    const addBtn = repoInput.closest('.dsh-dot-gh-add-row')!.querySelector<HTMLButtonElement>('button')!
+    await act(async () => { type(repoInput, '  Acme/Widgets ') })
+    await act(async () => addBtn.click())
+    expect(saves.at(-1)?.githubPoll?.repos).toEqual(['acme/widgets'])
+
+    // Toggle CI stream off.
+    const ciCheckbox = [...document.querySelectorAll<HTMLLabelElement>('.dsh-dot-gh-streams label')]
+      .find(label => label.textContent?.includes('CI checks'))!
+      .querySelector<HTMLInputElement>('input[type="checkbox"]')!
+    await act(async () => ciCheckbox.click())
+    expect(saves.at(-1)?.githubPoll?.streams.ci).toBe(false)
+
+    // Invalid interval (below 60 or above 3600) reverts; valid 300 saves.
+    const intervalInput = document.querySelector<HTMLInputElement>('input[aria-label="Poll interval"]')!
+    await act(async () => { type(intervalInput, '30') })
+    await act(async () => { blur(intervalInput) })
+    expect(intervalInput.value).toBe('120')
+
+    await act(async () => { type(intervalInput, '300') })
+    await act(async () => { blur(intervalInput) })
+    expect(saves.at(-1)?.githubPoll?.intervalSec).toBe(300)
+
+    // Update ghPath, hostname, and ignoredActors.
+    const ghPathInput = document.querySelector<HTMLInputElement>('input[aria-label="gh CLI path"]')!
+    await act(async () => { type(ghPathInput, 'C:\\Program Files\\GitHub CLI\\gh.exe') })
+    await act(async () => { blur(ghPathInput) })
+    expect(saves.at(-1)?.githubPoll?.ghPath).toBe('C:\\Program Files\\GitHub CLI\\gh.exe')
+
+    const hostInput = document.querySelector<HTMLInputElement>('input[aria-label="GHES hostname (optional)"]')!
+    await act(async () => { type(hostInput, 'GHE.Internal.Corp') })
+    await act(async () => { blur(hostInput) })
+    expect(saves.at(-1)?.githubPoll?.hostname).toBe('ghe.internal.corp')
+
+    const actorsInput = document.querySelector<HTMLInputElement>('input[aria-label="Ignored bot actors"]')!
+    await act(async () => { type(actorsInput, 'My-Bot[bot], Second-Bot[bot], my-bot[bot]') })
+    await act(async () => { blur(actorsInput) })
+    expect(saves.at(-1)?.githubPoll?.ignoredActors).toEqual(['my-bot[bot]', 'second-bot[bot]'])
+
+    // Remove the added repo chip.
+    const removeBtn = document.querySelector<HTMLButtonElement>('button[aria-label="Remove acme/widgets"]')!
+    await act(async () => removeBtn.click())
+    expect(saves.at(-1)?.githubPoll?.repos).toEqual([])
+
+    await act(async () => root.unmount())
+  })
+
+  it('enforces single-repo mutual exclusion between Polling and Webhook in UI without saving invalid state', async () => {
+    const saves: Array<Partial<DotSettings>> = []
+    let current: DotSettings = {
+      ...DEFAULT_SETTINGS,
+      githubPoll: {
+        ...DEFAULT_GITHUB_POLL_SETTINGS,
+        repos: ['klarkxy/dot-test'],
+        webhookRepos: ['klarkxy/ds-dot'],
+      },
+    }
+    const api = {
+      models: async () => ({ groups: [] }),
+      settings: async () => current,
+      settingProposals: async () => [],
+      decideSetting: async () => 'ok',
+      setSettings: async (patch: Partial<DotSettings>) => {
+        saves.push(patch)
+        current = { ...current, ...patch } as DotSettings
+        return current
+      },
+    }
+    function Harness() {
+      const [settings, setSettings] = useState<DotSettings>(current)
+      return <SettingsPanel locale="en" section="github" api={api as never} settings={settings} onSaved={setSettings} />
+    }
+    const root = createRoot(document.getElementById('root')!)
+    await act(async () => root.render(<Harness />))
+    await act(async () => { await Promise.resolve() })
+
+    // Try adding a webhookRepo ('KLARKXY/DS-DOT') into Poll repos -> blocked with warning.
+    const pollInput = document.querySelector<HTMLInputElement>('input[aria-label="Polled repositories"]')!
+    const pollAdd = pollInput.closest('.dsh-dot-gh-add-row')!.querySelector<HTMLButtonElement>('button')!
+    await act(async () => { type(pollInput, 'KLARKXY/DS-DOT') })
+    await act(async () => pollAdd.click())
+    expect(saves).toHaveLength(0)
+    expect(document.body.textContent).toContain('currently configured for Webhook')
+
+    // Open Webhook section and try adding a polled repo ('klarkxy/dot-test') -> blocked with warning.
+    const webhookDetails = document.querySelector<HTMLDetailsElement>('details[data-gh-section="webhook"]')!
+    webhookDetails.open = true
+    const webhookInput = document.querySelector<HTMLInputElement>('input[aria-label="Webhook repositories"]')!
+    const webhookAdd = webhookInput.closest('.dsh-dot-gh-add-row')!.querySelector<HTMLButtonElement>('button')!
+    await act(async () => { type(webhookInput, 'klarkxy/dot-test') })
+    await act(async () => webhookAdd.click())
+    expect(saves).toHaveLength(0)
+    expect(document.body.textContent).toContain('currently configured for Polling')
+
+    // Adding a non-conflicting webhook repo and editing sourceId succeeds.
+    await act(async () => { type(webhookInput, 'org/new-hook') })
+    await act(async () => webhookAdd.click())
+    expect(saves.at(-1)?.githubPoll?.webhookRepos).toEqual(['klarkxy/ds-dot', 'org/new-hook'])
+
+    const sourceIdInput = document.querySelector<HTMLInputElement>('input[aria-label="Webhook source ID"]')!
+    await act(async () => { type(sourceIdInput, 'custom-gh-hook') })
+    await act(async () => { blur(sourceIdInput) })
+    expect(saves.at(-1)?.githubPoll?.sourceId).toBe('custom-gh-hook')
+
+    await act(async () => root.unmount())
+  })
+
+  it('runs Test gh Connection for both success and failure outcomes, and renders health alert & budget warning banners', async () => {
+    const testRequests: Array<{ ghPath?: string; hostname?: string; repos?: readonly string[] }> = []
+    let testReply: GithubPollTestResult = {
+      ok: true,
+      ghFound: true,
+      resolvedPath: '/usr/bin/gh',
+      version: 'gh version 2.102.0',
+      authenticated: true,
+      login: 'klarkxy',
+      host: 'github.com',
+      rateLimitRemaining: 4900,
+      rateLimitLimit: 5000,
+      repoChecks: [{ repo: 'klarkxy/dot-test', ok: true }],
+    }
+    const statusView: GithubPollStatusView = {
+      enabled: true,
+      polling: false,
+      ghPath: 'gh',
+      userIntervalSec: 60,
+      effectiveIntervalSec: 360,
+      xPollIntervalSec: 120,
+      rateLimitRemaining: 100,
+      rateLimitLimit: 5000,
+      hourlyRequests: 40,
+      budgetLimitPerHour: 50,
+      budgetAdjusted: true,
+      budgetWarning: 'Rate-limit budget guard raised poll interval from 120s to 360s.',
+      health: 'error',
+      alert: true,
+      consecutiveFailures: 3,
+      lastError: 'HTTP 503 Service Unavailable',
+      repos: [{ repo: 'klarkxy/dot-test', mode: 'poll', consecutiveFailures: 3, lastError: 'HTTP 503 Service Unavailable' }],
+    }
+    const current: DotSettings = {
+      ...DEFAULT_SETTINGS,
+      githubPoll: { ...DEFAULT_GITHUB_POLL_SETTINGS, enabled: true, repos: ['klarkxy/dot-test'], intervalSec: 60 },
+    }
+    const api = {
+      models: async () => ({ groups: [] }),
+      settings: async () => current,
+      settingProposals: async () => [],
+      decideSetting: async () => 'ok',
+      setSettings: async () => current,
+      githubPollStatus: async () => statusView,
+      githubPollTest: async (req: { ghPath?: string; hostname?: string; repos?: readonly string[] }) => {
+        testRequests.push(req)
+        return testReply
+      },
+    }
+
+    const root = createRoot(document.getElementById('root')!)
+    await act(async () => root.render(<SettingsPanel locale="en" section="github" api={api as never} settings={current} onSaved={() => {}} />))
+    await act(async () => { await Promise.resolve() })
+
+    // Health alert (consecutiveFailures >= 3) & rate-limit budget warning banners render.
+    const alertBanner = document.querySelector('.dsh-dot-gh-banner--error[role="alert"]')
+    expect(alertBanner?.textContent).toContain('3 consecutive times')
+    expect(alertBanner?.textContent).toContain('HTTP 503 Service Unavailable')
+
+    const budgetBanner = document.querySelector('[data-gh-budget="warn"]')
+    expect(budgetBanner?.textContent).toContain('40 req/hr')
+    expect(budgetBanner?.textContent).toContain('50/hr')
+    expect(budgetBanner?.textContent).toContain('360s')
+    expect(document.body.textContent).toContain('X-Poll-Interval: 120s')
+
+    // Click Test gh Connection -> success view.
+    const testBtn = [...document.querySelectorAll('button')].find(btn => btn.textContent === 'Test gh Connection')!
+    await act(async () => testBtn.click())
+    await act(async () => { await Promise.resolve() })
+    expect(testRequests).toEqual([{ ghPath: 'gh', repos: ['klarkxy/dot-test'] }])
+    const resBox = document.querySelector('.dsh-dot-gh-test-result')!
+    expect(resBox.hasAttribute('data-ok')).toBe(true)
+    expect(resBox.textContent).toContain('/usr/bin/gh')
+    expect(resBox.textContent).toContain('klarkxy')
+    expect(resBox.textContent).toContain('4900/5000')
+    expect(resBox.textContent).toContain('klarkxy/dot-test: Accessible')
+
+    // Simulate failed gh probe (missing binary).
+    testReply = {
+      ok: false,
+      ghFound: false,
+      authenticated: false,
+      host: 'github.com',
+      error: 'gh binary not found on PATH',
+    }
+    await act(async () => testBtn.click())
+    await act(async () => { await Promise.resolve() })
+    expect(document.querySelector('.dsh-dot-gh-test-result')?.hasAttribute('data-ok')).toBe(false)
+    expect(document.querySelector('.dsh-dot-gh-test-result')?.textContent).toContain('gh CLI binary not found')
+    expect(document.querySelector('.dsh-dot-gh-test-result')?.textContent).toContain('gh binary not found on PATH')
+
+    await act(async () => root.unmount())
+  })
+
+  it('edits Fast-Path Admission Matrix rules and preserves .dsh-dot-chat CSS scope', async () => {
+    const saves: Array<Partial<DotSettings>> = []
+    let current: DotSettings = { ...DEFAULT_SETTINGS }
+    const api = {
+      models: async () => ({ groups: [] }),
+      settings: async () => current,
+      settingProposals: async () => [],
+      decideSetting: async () => 'ok',
+      setSettings: async (patch: Partial<DotSettings>) => {
+        saves.push(patch)
+        current = { ...current, ...patch } as DotSettings
+        return current
+      },
+    }
+    function Harness() {
+      const [settings, setSettings] = useState<DotSettings>(current)
+      return <SettingsPanel locale="en" section="github" api={api as never} settings={settings} onSaved={setSettings} />
+    }
+    const root = createRoot(document.getElementById('root')!)
+    await act(async () => root.render(<Harness />))
+    await act(async () => { await Promise.resolve() })
+
+    const details = document.querySelector<HTMLDetailsElement>('details[data-gh-section="admission"]')!
+    details.open = true
+    expect(details.textContent).toContain('Defaults: human → inbox')
+
+    // Invalid repo rejected without save.
+    const repoInput = details.querySelector<HTMLInputElement>('input[aria-label="Repo (* or owner/repo)"]')!
+    const addBtn = [...details.querySelectorAll('button')].find(btn => btn.textContent === 'Add rule')!
+    await act(async () => { type(repoInput, 'not a repo') })
+    await act(async () => addBtn.click())
+    expect(saves).toHaveLength(0)
+    expect(details.textContent).toContain('Rule repo must be * or a valid owner/repo')
+
+    // Valid rule added.
+    await act(async () => {
+      type(repoInput, 'Klarkxy/Dot-Test')
+      selectChange(details.querySelector<HTMLSelectElement>('select[aria-label="Event type"]')!, 'ci')
+      selectChange(details.querySelector<HTMLSelectElement>('select[aria-label="Sender class"]')!, 'unlisted-bot')
+      selectChange(details.querySelector<HTMLSelectElement>('select[aria-label="Action"]')!, 'context-only')
+    })
+    await act(async () => addBtn.click())
+    expect(saves.at(-1)?.githubPoll?.admission).toEqual([
+      { repo: 'klarkxy/dot-test', eventType: 'ci', senderClass: 'unlisted-bot', action: 'context-only' },
+    ])
+
+    // Inline action select updates existing rule.
+    const inlineSelect = details.querySelector<HTMLSelectElement>('select[aria-label="klarkxy/dot-test ci unlisted-bot"]')!
+    await act(async () => { selectChange(inlineSelect, 'inbox') })
+    expect(saves.at(-1)?.githubPoll?.admission).toEqual([
+      { repo: 'klarkxy/dot-test', eventType: 'ci', senderClass: 'unlisted-bot', action: 'inbox' },
+    ])
+
+    // Remove rule.
+    const rmBtn = details.querySelector<HTMLButtonElement>('button[aria-label="Remove rule"]')!
+    await act(async () => rmBtn.click())
+    expect(saves.at(-1)?.githubPoll?.admission).toEqual([])
+    expect(settingsCss).toContain('.dsh-dot-chat .dsh-dot-gh-card')
 
     await act(async () => root.unmount())
   })

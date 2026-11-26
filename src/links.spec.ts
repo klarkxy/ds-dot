@@ -4,7 +4,8 @@
  */
 import { describe, expect, it } from 'vitest'
 import type { InboxRecord } from './contracts.ts'
-import { applyLinkEvent, linkMatchesSubject, makeTaskLink, parseLinkRef, scanReportLinks, subjectTarget, taskLinkId } from './links.ts'
+import { applyLinkEvent, bindThread, inferLinkTargetKind, linkMatchesSubject, makeTaskLink, parseLinkRef, polledTargets, scanReportLinks, subjectTarget, taskLinkId, threadClosed } from './links.ts'
+import { parseTaskLink } from './storage.ts'
 
 describe('parseLinkRef', () => {
   it('accepts pull and issue URLs, owner/repo#N, and owner/repo@branch', () => {
@@ -125,5 +126,90 @@ describe('applyLinkEvent', () => {
     expect(taskLinkId('c-1', { repo: 'acme/widgets', number: 12 })).toBe(taskLinkId('c-1', { repo: 'acme/widgets', number: 12 }))
     expect(taskLinkId('c-1', { repo: 'acme/widgets', number: 12 })).not.toBe(taskLinkId('c-2', { repo: 'acme/widgets', number: 12 }))
     expect(taskLinkId('c-1', { repo: 'acme/widgets', number: 12 })).not.toBe(taskLinkId('c-1', { repo: 'acme/widgets', branch: 'x' }))
+  })
+})
+
+describe('polledTargets, bindThread and threadClosed', () => {
+  it('selects active changes and recently active open links, binds threads, and closes PR links', () => {
+    const now = 10_000_000_000
+    const activeLink = makeTaskLink('c-active', { repo: 'acme/widgets', number: 10 }, 'dot', now - 1000)
+    const recentClosedChangeLink = makeTaskLink('c-recent', { repo: 'acme/widgets', number: 11 }, 'auto', now - 1000)
+    const staleLink = makeTaskLink('c-old', { repo: 'acme/widgets', number: 12 }, 'auto', now - 10 * 24 * 3600_000)
+
+    const changes = new Map([
+      ['c-active', { id: 'c-active', control: 'open' as const, updatedAt: now - 1000 }],
+      ['c-recent', { id: 'c-recent', control: 'open' as const, closeout: { verificationId: 'v-1', source: 'user' }, updatedAt: now - 1000 }],
+      ['c-old', { id: 'c-old', control: 'cancelled' as const, updatedAt: now - 10 * 24 * 3600_000 }],
+    ])
+    const targets = polledTargets([activeLink, recentClosedChangeLink, staleLink], changes, [], now)
+    expect(targets.map(t => t.number)).toEqual([10, 11])
+
+    const bound = bindThread([activeLink], 'c-active', { repo: 'acme/widgets', number: 99 }, 'auto', now)!
+    expect(bound.number).toBe(99)
+
+    const closed = threadClosed([activeLink, staleLink], 'Acme/Widgets', 10, 'merged', now)
+    expect(closed).toHaveLength(1)
+    expect(closed[0]!.state).toBe('merged')
+  })
+
+  it('distinguishes PR vs issue targetKind via URL, events, branch metadata, and legacy fallback', () => {
+    const now = 10_000_000_000
+    const issueLink = makeTaskLink('c-issue', { repo: 'acme/widgets', number: 1, url: 'https://github.com/acme/widgets/issues/1' }, 'dot', now)
+    const prLink = makeTaskLink('c-pr', { repo: 'acme/widgets', number: 5, url: 'https://github.com/acme/widgets/pull/5' }, 'dot', now)
+    const shorthandLink = makeTaskLink('c-short', { repo: 'acme/widgets', number: 9 }, 'dot', now)
+    const branchOnlyLink = makeTaskLink('c-branch', { repo: 'acme/widgets', branch: 'feat/ci' }, 'auto', now)
+
+    expect(issueLink.targetKind).toBe('issue')
+    expect(prLink.targetKind).toBe('pr')
+    expect(shorthandLink.targetKind).toBeUndefined()
+    expect(branchOnlyLink.targetKind).toBeUndefined()
+
+    // applyLinkEvent infers issue vs pr from event types, URLs, and headRef
+    const fromIssueComment = applyLinkEvent(shorthandLink, record({
+      type: 'issue_comment.created',
+      subject: 'acme/widgets#9',
+      url: 'https://github.com/acme/widgets/issues/9#issuecomment-1',
+    }), now)!
+    expect(fromIssueComment.targetKind).toBe('issue')
+
+    const fromPrHead = applyLinkEvent(shorthandLink, record({
+      type: 'issue_comment.created',
+      subject: 'acme/widgets#9',
+      headRef: 'feat/9',
+    }), now)!
+    expect(fromPrHead.targetKind).toBe('pr')
+
+    const branchEvent = applyLinkEvent(branchOnlyLink, record({
+      type: 'check_suite.completed',
+      subject: 'acme/widgets:checks:ci@feat/ci',
+      headRepo: 'acme/widgets',
+    }), now)!
+    expect(branchEvent.targetKind).toBeUndefined()
+
+    // Legacy stored link without targetKind still infers cleanly in polledTargets & parseTaskLink
+    const legacyIssue = parseTaskLink({
+      id: 'link-legacy-issue',
+      changeId: 'c-legacy',
+      repo: 'acme/widgets',
+      number: 2,
+      url: 'https://ghes.example.com/acme/widgets/issues/2',
+      origin: 'dot',
+      state: 'open',
+      addedAt: now,
+    })!
+    expect(legacyIssue).toBeDefined()
+    expect(inferLinkTargetKind(legacyIssue)).toBe('issue')
+
+    const changes = new Map([
+      ['c-issue', { id: 'c-issue', control: 'open' as const, updatedAt: now }],
+      ['c-pr', { id: 'c-pr', control: 'open' as const, updatedAt: now }],
+      ['c-short', { id: 'c-short', control: 'open' as const, updatedAt: now }],
+      ['c-legacy', { id: 'c-legacy', control: 'open' as const, updatedAt: now }],
+    ])
+    const targets = polledTargets([issueLink, prLink, shorthandLink, legacyIssue], changes, [], now)
+    expect(targets.find(t => t.number === 1)?.targetKind).toBe('issue')
+    expect(targets.find(t => t.number === 2)?.targetKind).toBe('issue')
+    expect(targets.find(t => t.number === 5)?.targetKind).toBe('pr')
+    expect(targets.find(t => t.number === 9)?.targetKind).toBeUndefined()
   })
 })

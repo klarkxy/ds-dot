@@ -102,7 +102,7 @@ function roleLine(run: BriefRun): string {
 export const WORKER_DISCIPLINES = [
   'Stop at the impact boundary once the local change is reviewable and test-verified; if you hit a cross-module contract change, architectural trade-off, or requirement gap, pause and ask Dorothy instead of guessing or expanding scope.',
   'Report blockers and failures honestly: never delete or skip tests, weaken type checks, or bypass write-scope limits to work around a question.',
-  'When a human decision is needed, escalate one structured question (question, options, and recommendation) for Dorothy to relay verbatim without rewriting or answering for the human; use dot_peer only for active peer task runs, and bounce out-of-scope follow-ups back to Dorothy to re-triage rather than expanding scope.',
+  'When a human decision is needed, escalate one structured question (question, options, and recommendation) for Dorothy to relay verbatim without rewriting or answering for the human; use dot_peer only for active peer task runs, and bounce out-of-scope follow-ups back to Dorothy (dot_peer action="bounce", target_session_id="dorothy") to re-triage rather than expanding scope.',
 ] as const
 
 /** How a run chooses reversible details and how it reports a real blocker. */

@@ -6,6 +6,10 @@
  */
 import { createHash } from 'node:crypto'
 import type { InboxRecord, TaskLink } from './contracts.ts'
+import { changeIsTerminal, type ChangeRecord, type RunRecord } from './work.ts'
+
+/** Active-PR polling window for recently touched links (7 days). */
+export const POLL_ACTIVE_WINDOW_MS = 7 * 24 * 60 * 60_000
 
 /** Auto-links one run report may add; a report quoting many PRs stays bounded. */
 export const REPORT_LINKS_MAX = 5
@@ -22,6 +26,44 @@ export interface LinkTarget {
   readonly number?: number
   readonly branch?: string
   readonly url?: string
+  readonly targetKind?: 'pr' | 'issue'
+}
+
+const URL_TARGET_KIND_RE = /^https?:\/\/[^/]+(?:\/(?:api\/v3\/repos|repos))?\/[^/]+\/[^/]+\/(pull|pulls|issues)\/\d+(?:[/?#]|$)/i
+
+/** Infer `'pr' | 'issue'` from a GitHub pull/issue URL when unambiguous. */
+export function urlTargetKind(url: string | undefined): 'pr' | 'issue' | undefined {
+  if (!url) return undefined
+  const match = URL_TARGET_KIND_RE.exec(url.trim())
+  if (!match) return undefined
+  return match[1]!.toLowerCase() === 'issues' ? 'issue' : 'pr'
+}
+
+/** Infer `'pr' | 'issue'` from an inbox event's type, branch metadata, or URL. */
+export function inferEventTargetKind(
+  record: Pick<InboxRecord, 'type' | 'url' | 'headRef' | 'headRepo'>,
+): 'pr' | 'issue' | undefined {
+  if (record.type.startsWith('pull_request')) return 'pr'
+  if (record.type.startsWith('issues.')) return 'issue'
+  if (record.headRef !== undefined || record.headRepo !== undefined) return 'pr'
+  return urlTargetKind(record.url)
+}
+
+/** Infer `'pr' | 'issue'` from a stored `TaskLink`'s metadata. */
+export function inferLinkTargetKind(
+  link: Pick<TaskLink, 'number' | 'branch' | 'headRepo' | 'url' | 'targetKind' | 'lastEvent'>,
+): 'pr' | 'issue' | undefined {
+  if (link.targetKind) return link.targetKind
+  const fromUrl = urlTargetKind(link.url)
+  if (fromUrl) return fromUrl
+  if (link.lastEvent) {
+    if (link.lastEvent.type.startsWith('pull_request')) return 'pr'
+    if (link.lastEvent.type.startsWith('issues.')) return 'issue'
+    const fromEventUrl = urlTargetKind(link.lastEvent.url)
+    if (fromEventUrl) return fromEventUrl
+  }
+  if (link.number !== undefined && (link.branch !== undefined || link.headRepo !== undefined)) return 'pr'
+  return undefined
 }
 
 /**
@@ -48,6 +90,7 @@ export function taskLinkId(changeId: string, target: Pick<LinkTarget, 'repo' | '
 }
 
 export function makeTaskLink(changeId: string, target: LinkTarget, origin: 'dot' | 'auto', at: number): TaskLink {
+  const targetKind = target.targetKind ?? urlTargetKind(target.url)
   return {
     id: taskLinkId(changeId, target),
     changeId,
@@ -55,6 +98,7 @@ export function makeTaskLink(changeId: string, target: LinkTarget, origin: 'dot'
     ...(target.number !== undefined ? { number: target.number } : {}),
     ...(target.branch !== undefined ? { branch: target.branch } : {}),
     ...(target.url ? { url: target.url } : {}),
+    ...(targetKind ? { targetKind } : {}),
     origin,
     state: 'open',
     addedAt: at,
@@ -121,12 +165,16 @@ export function linkEventState(type: string): 'open' | 'closed' | 'merged' | und
 export function applyLinkEvent(link: TaskLink, record: InboxRecord, at: number): TaskLink | undefined {
   const state = linkEventState(record.type)
   const learnBranch = record.headRef !== undefined && link.branch === undefined && link.number !== undefined
+  const nextTargetKind = link.number !== undefined
+    ? (link.targetKind ?? inferEventTargetKind(record) ?? inferLinkTargetKind(link))
+    : link.targetKind
   const next: TaskLink = {
     ...link,
     ...(learnBranch ? { branch: record.headRef } : {}),
     // The head ref alone does not say which fork pushed it; keep the repo too
     // so branch matching can tell same-named branches apart.
     ...(learnBranch && record.headRepo !== undefined ? { headRepo: record.headRepo } : {}),
+    ...(nextTargetKind ? { targetKind: nextTargetKind } : {}),
     ...(state !== undefined && state !== link.state ? { state } : {}),
     lastEvent: {
       type: record.type,
@@ -138,4 +186,109 @@ export function applyLinkEvent(link: TaskLink, record: InboxRecord, at: number):
     },
   }
   return next
+}
+
+export interface PolledTarget {
+  readonly repo: string
+  readonly number: number
+  readonly targetKind?: 'pr' | 'issue'
+  readonly branch?: string
+  readonly headRepo?: string
+  readonly changeIds: readonly string[]
+}
+
+/**
+ * PRs/Issues in `links` that belong to an active (non-terminal) Change or had
+ * activity within the last 7 days while still open.
+ */
+export function polledTargets(
+  links: readonly TaskLink[],
+  changes: ReadonlyMap<string, Pick<ChangeRecord, 'id' | 'control' | 'closeout' | 'updatedAt'>>,
+  runs: readonly Pick<RunRecord, 'changeId' | 'phase'>[],
+  now = Date.now(),
+  repoFilter?: string,
+): PolledTarget[] {
+  const normalizedFilter = repoFilter?.trim().toLowerCase()
+  const runsByChange = new Map<string, Pick<RunRecord, 'changeId' | 'phase'>[]>()
+  for (const run of runs) {
+    const list = runsByChange.get(run.changeId)
+    if (list) list.push(run)
+    else runsByChange.set(run.changeId, [run])
+  }
+  const byTarget = new Map<string, { repo: string; number: number; targetKind?: 'pr' | 'issue'; branch?: string; headRepo?: string; changeIds: Set<string> }>()
+  for (const link of links) {
+    if (link.number === undefined) continue
+    if (normalizedFilter && link.repo !== normalizedFilter) continue
+    const change = changes.get(link.changeId)
+    const changeRuns = runsByChange.get(link.changeId) ?? []
+    const activeChange = change !== undefined && !changeIsTerminal(change as ChangeRecord, changeRuns as RunRecord[])
+    const lastAt = Math.max(change?.updatedAt ?? 0, link.lastEvent?.at ?? 0, link.addedAt)
+    const recentlyActive = link.state === 'open' && now - lastAt <= POLL_ACTIVE_WINDOW_MS
+    if (!activeChange && !recentlyActive) continue
+    const key = `${link.repo}#${link.number}`
+    const kind = inferLinkTargetKind(link)
+    let entry = byTarget.get(key)
+    if (!entry) {
+      entry = {
+        repo: link.repo,
+        number: link.number,
+        ...(kind ? { targetKind: kind } : {}),
+        ...(link.branch ? { branch: link.branch } : {}),
+        ...(link.headRepo ? { headRepo: link.headRepo } : {}),
+        changeIds: new Set(),
+      }
+      byTarget.set(key, entry)
+    } else {
+      if (!entry.targetKind && kind) entry.targetKind = kind
+      if (!entry.branch && link.branch) entry.branch = link.branch
+      if (!entry.headRepo && link.headRepo) entry.headRepo = link.headRepo
+    }
+    entry.changeIds.add(link.changeId)
+  }
+  return [...byTarget.values()].map(item => ({
+    repo: item.repo,
+    number: item.number,
+    ...(item.targetKind ? { targetKind: item.targetKind } : {}),
+    ...(item.branch ? { branch: item.branch } : {}),
+    ...(item.headRepo ? { headRepo: item.headRepo } : {}),
+    changeIds: [...item.changeIds],
+  }))
+}
+
+/** Ensure a thread target is bound to a change and optionally fold an event into it. */
+export function bindThread(
+  existing: readonly TaskLink[],
+  changeId: string,
+  target: LinkTarget,
+  origin: 'dot' | 'auto',
+  at: number,
+  event?: InboxRecord,
+): TaskLink | undefined {
+  const id = taskLinkId(changeId, target)
+  const found = existing.find(row => row.id === id)
+  if (!found) {
+    const created = makeTaskLink(changeId, target, origin, at)
+    return event ? (applyLinkEvent(created, event, at) ?? created) : created
+  }
+  return event ? applyLinkEvent(found, event, at) : undefined
+}
+
+/** Transition matching PR links to `merged` or `closed`, returning only changed link records. */
+export function threadClosed(
+  links: readonly TaskLink[],
+  repo: string,
+  number: number,
+  outcome: 'closed' | 'merged',
+  at: number,
+  event?: InboxRecord,
+): TaskLink[] {
+  const normalizedRepo = repo.trim().toLowerCase()
+  const updated: TaskLink[] = []
+  for (const link of links) {
+    if (link.repo !== normalizedRepo || link.number !== number) continue
+    const base = event ? (applyLinkEvent(link, event, at) ?? link) : link
+    if (base.state === outcome && base === link) continue
+    updated.push(base.state === outcome ? base : { ...base, state: outcome })
+  }
+  return updated
 }

@@ -2,7 +2,7 @@
 import type { NoticeEntry, ParsedNotice } from './chat-format.ts'
 export interface Notice {
   readonly sessionId: string
-  readonly kind: 'turn-end' | 'error' | 'approval' | 'question' | 'task-human' | 'idle-check' | 'inbox' | 'recipe-run' | 'recipe-proposal'
+  readonly kind: 'turn-end' | 'error' | 'approval' | 'question' | 'task-human' | 'idle-check' | 'inbox' | 'recipe-run' | 'recipe-proposal' | 'result'
   readonly text: string
   readonly display?: NoticeEntry
   readonly at: number
@@ -139,7 +139,7 @@ export function formatNotices(items: readonly Notice[], ready: readonly string[]
     ['Requests waiting for you:', item => item.kind === 'approval' || item.kind === 'question'],
     ['Errors:', item => item.kind === 'error'],
     ['External events:', item => item.kind === 'inbox'],
-    ['Tasks:', item => !['approval', 'question', 'error'].includes(item.kind) && (!!item.changeId || item.kind === 'task-human' || item.kind === 'idle-check')],
+    ['Tasks:', item => !['approval', 'question', 'error'].includes(item.kind) && (!!item.changeId || item.kind === 'task-human' || item.kind === 'idle-check' || item.kind === 'result')],
     ['Recipes:', item => item.kind === 'recipe-proposal'],
     ['Watched sessions:', item => !item.changeId && item.kind === 'turn-end'],
   ]

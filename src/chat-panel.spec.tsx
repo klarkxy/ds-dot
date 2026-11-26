@@ -773,7 +773,7 @@ describe('ChatPanel activity and notice cards', () => {
     const navButtons = () => [...drawer.querySelectorAll<HTMLButtonElement>('.dsh-dot-drawer-nav button')]
     const navBy = (key: string) => drawer.querySelector<HTMLButtonElement>(`.dsh-dot-drawer-nav button[data-nav="${key}"]`)!
     expect(navButtons().map(node => node.querySelector('.dsh-dot-nav-label')?.textContent)).toEqual([
-      '待确认', '常规', '会话接管', '派发任务', '额外能力', 'MCP 服务', '人设', '上下文', '轨迹',
+      '待确认', '常规', '会话接管', '派发任务', 'GitHub', '额外能力', 'MCP 服务', '人设', '上下文', '轨迹',
     ])
     expect(navBy('proposals').querySelector('.dsh-dot-nav-badge')?.textContent).toBe('1')
     expect(region()).toBe('常规')
@@ -791,6 +791,9 @@ describe('ChatPanel activity and notice cards', () => {
     await act(async () => { navBy('dispatch').click() })
     expect(region()).toBe('派发任务')
     expect(drawer.querySelector('.dsh-dot-settings-status')).toBeNull()
+    await act(async () => { navBy('github').click() })
+    expect(region()).toBe('GitHub 事件')
+    expect(drawer.querySelector('[data-gh-card="poll"]')).not.toBeNull()
     await act(async () => { navBy('capabilities').click() })
     expect(region()).toBe('额外能力')
     await act(async () => { navBy('persona').click() })
@@ -1461,6 +1464,29 @@ describe('backend health banners', () => {
     const root = createRoot(document.getElementById('root')!)
     await act(async () => { root.render(<ChatPanel locale="en" api={api} onOpenSession={() => {}} />) })
     expect(document.body.textContent).toContain('newer than')
+    await act(async () => root.unmount())
+  })
+
+  it('renders result notice entries with a localized Result tag', async () => {
+    const snap: ChatSnapshot = {
+      ...empty,
+      items: [{
+        kind: 'notice',
+        key: 'n-res-1',
+        text: '[dot notice] Updates:\nTasks:\n- result · dot-1: PR acme/widgets#7 merged',
+        at: 100,
+      }],
+    }
+    const root = createRoot(document.getElementById('root')!)
+    await act(async () => { root.render(<ChatPanel locale="en" api={makeApi(snap)} onOpenSession={() => {}} />) })
+    const row = document.querySelector<HTMLElement>('.dsh-dot-notice .dsh-stub-disclosure__row')!
+    await act(async () => { row.click() })
+    const entry = document.querySelector('.dsh-dot-notice-entry[data-kind="result"]')
+    expect(entry).not.toBeNull()
+    const tag = entry?.querySelector('.dsh-stub-tag')
+    expect(tag?.textContent).toBe('Result')
+    expect(tag?.getAttribute('data-tone')).toBe('success')
+    expect(entry?.textContent).toContain('PR acme/widgets#7 merged')
     await act(async () => root.unmount())
   })
 })

@@ -10,7 +10,7 @@ import { openCompatibleDomain } from '@klarkxy/dsh-plugin-kit/domain'
 import { readSnapshot, saveSnapshot, sha256, baselineCaptures } from './artifacts.ts'
 import { STATE_KEY, dotDomain } from './storage.ts'
 import { DotStore } from './store.ts'
-import { DEFAULT_RUN_ORIGIN, WorkBook, canonicalPath, effectiveRunOrigin, judgeVerification, occupantsConflict, onDiskPath, parseInput, parseRun, runOriginSchema, workspaceIdentity, type ExternalOccupant, type RunOrigin, type WorkPersist } from './work.ts'
+import { DEFAULT_RUN_ORIGIN, WorkBook, canonicalPath, effectiveRunOrigin, judgeVerification, occupantsConflict, onDiskPath, parseInput, parseRun, runOriginSchema, runStoppedByUser, workspaceIdentity, type ExternalOccupant, type RunOrigin, type WorkPersist } from './work.ts'
 
 function memoryPersist(fail?: () => boolean): { persist: WorkPersist; rows: Map<string, unknown> } {
   const rows = new Map<string, unknown>()
@@ -949,5 +949,25 @@ describe('run origin provenance', () => {
       await backend.close()
       await rm(root, { recursive: true, force: true })
     }
+  })
+
+  it('identifies user-stopped runs via runStoppedByUser and marks non-terminal changes closureReady', async () => {
+    const { book } = openBook()
+    const change = await book.createChange({
+      title: 'PR work', cwd: '/proj', goal: 'Ship PR',
+      requirements: [{ requirementRef: 'R1', text: 'Ship PR', required: true }], at: 1,
+    })
+    expect((await book.markClosureReady(change.id, { ref: 'acme/widgets#5', outcome: 'merged', at: 2 }))).toEqual({ ok: true, updated: true })
+    expect(book.change(change.id)?.closureReady).toEqual({ ref: 'acme/widgets#5', outcome: 'merged', at: 2 })
+    // Idempotent repeat
+    expect((await book.markClosureReady(change.id, { ref: 'acme/widgets#5', outcome: 'merged', at: 3 }))).toEqual({ ok: true, updated: false })
+
+    expect(runStoppedByUser({ phase: 'active' }, { control: 'open' })).toBe(false)
+    expect(runStoppedByUser({ phase: 'completed', closeReason: 'completed' }, { control: 'open' })).toBe(false)
+    expect(runStoppedByUser({ phase: 'stopped', closeReason: 'closeout' }, { control: 'open' })).toBe(false)
+    expect(runStoppedByUser({ phase: 'stopped', closeReason: 'rework' }, { control: 'open' })).toBe(false)
+    expect(runStoppedByUser({ phase: 'stopped', closeReason: 'stopped' }, { control: 'open' })).toBe(true)
+    expect(runStoppedByUser({ phase: 'settling', closeIntent: 'stopped' }, { control: 'open' })).toBe(true)
+    expect(runStoppedByUser({ phase: 'active' }, { control: 'cancelled' })).toBe(true)
   })
 })

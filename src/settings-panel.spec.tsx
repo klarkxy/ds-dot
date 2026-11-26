@@ -1164,7 +1164,7 @@ describe('dispatch settings layout', () => {
     expect(picker.getAttribute('aria-label')).toBe('Allow selected')
     expect(document.querySelector('.dsh-dot-model-summary')?.textContent).toContain('5 selected')
     expect(document.querySelectorAll('.dsh-dot-model-chip')).toHaveLength(5)
-    expect(document.querySelector('.dsh-dot-model-chip-provider')).toBeNull()
+    expect(document.querySelector('.dsh-dot-model-chip-provider')?.textContent).toBe('Magpie')
     expect(document.querySelector('.dsh-dot-model-chip')?.getAttribute('title')).toBe('Magpie / Agnes 3.0 Flash · KLARKXY')
     expect(document.querySelectorAll('.dsh-dot-model-group')).toHaveLength(3)
     expect(document.querySelector('.dsh-dot-model-group-count')?.textContent).toBe('3/4')

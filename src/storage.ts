@@ -384,6 +384,7 @@ export const githubPollRepoStateSchema = z.object({
   rateLimitResetAt: z.number().optional(),
   deleted410Subjects: z.array(z.string()).optional(),
   retryDeadlines: z.record(z.string(), z.number()).optional(),
+  knownIssueNumbers: z.array(z.number().int().positive()).optional(),
 })
 
 export const githubPollPrReviewCursorSchema = z.object({
@@ -456,6 +457,7 @@ const taskLinkSchema = z.object({
   branch: z.string().optional(),
   headRepo: z.string().optional(),
   url: z.string().optional(),
+  targetKind: z.enum(['pr', 'issue']).optional(),
   origin: z.enum(['dot', 'auto']),
   state: z.enum(['open', 'closed', 'merged']),
   addedAt: z.number(),

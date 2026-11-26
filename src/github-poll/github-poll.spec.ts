@@ -1205,4 +1205,286 @@ describe('PR-5 mandatory 17+ polling, admission, routing & security scenarios', 
       hPoll.cleanup()
     }
   })
+
+  it('skips PR endpoints for linked issues (URL and shorthand fallback), preserves events, and isolates genuine PR 404 failures', async () => {
+    // 1. Linked Issue via explicit /issues/1 URL: NEVER hits pulls/1*, keeps health ok, zero-write 304, delivers comments to active run
+    let nowUrl = 1_700_000_000_000
+    let urlPhase = 1
+    let send304Url = false
+    const urlCalls: string[] = []
+    const hUrl = makeHarness(async (_bin, args) => {
+      if (args[0] === '--version') return { stdout: 'gh version 2.102.0\n', stderr: '' }
+      if (args[0] === 'auth') return { stdout: authSuccessStdout(), stderr: '' }
+      if (args[1]) urlCalls.push(args[1])
+      if (args[1] === 'rate_limit') return { stdout: JSON.stringify({ resources: { core: { remaining: 5000, limit: 5000 } } }), stderr: '' }
+      if (args[1] === 'repos/acme/widgets') return { stdout: JSON.stringify({ default_branch: 'main', html_url: 'https://github.com/acme/widgets' }), stderr: '' }
+      if (args[1] === 'repos/acme/widgets/commits/main') return { stdout: JSON.stringify({ sha: 'main-sha' }), stderr: '' }
+      if (args[1]?.startsWith('repos/acme/widgets/commits/main-sha/check-runs')) return { stdout: JSON.stringify({ total_count: 0, check_runs: [] }), stderr: '' }
+      if (args[1]?.startsWith('repos/acme/widgets/commits/main-sha/statuses')) return { stdout: JSON.stringify([]), stderr: '' }
+      if (args[1]?.startsWith('repos/acme/widgets/issues/comments?')) {
+        if (send304Url) throw Object.assign(new Error('gh: HTTP 304'), { code: 1, stderr: 'gh: HTTP 304\n' })
+        if (urlPhase === 1) return { stdout: httpInclude({ Etag: 'W/"ic-1"' }, []), stderr: '' }
+        return {
+          stdout: httpInclude({ Etag: 'W/"ic-2"' }, [
+            { id: 1001, body: 'Human reply on issue #1', user: { login: 'bob', type: 'User' }, html_url: 'https://github.com/acme/widgets/issues/1#issuecomment-1001', created_at: new Date(nowUrl).toISOString(), updated_at: new Date(nowUrl).toISOString() },
+          ]),
+          stderr: '',
+        }
+      }
+      if (args[1]?.startsWith('repos/acme/widgets/pulls/1')) {
+        throw Object.assign(new Error('gh: Not Found (HTTP 404)'), { code: 1, stderr: 'gh: Not Found (HTTP 404)' })
+      }
+      if (send304Url) throw Object.assign(new Error('gh: HTTP 304'), { code: 1, stderr: 'gh: HTTP 304\n' })
+      return { stdout: httpInclude({ Etag: 'W/"empty"' }, []), stderr: '' }
+    }, () => nowUrl)
+
+    try {
+      await hUrl.service.ensureDot()
+      const ch = await hUrl.store.work.createChange({
+        title: 'Issue 1 work', cwd: hUrl.home, goal: 'Fix issue 1',
+        requirements: [{ requirementRef: 'R1', text: 'Fix issue 1', required: true }], at: nowUrl,
+      })
+      const run = await hUrl.store.work.reserveRun({ changeId: ch.id, kind: 'work', cwd: hUrl.home, writeScope: { kind: 'paths', paths: [] }, at: nowUrl })
+      if (!run.ok) throw new Error('reserve failed')
+      await hUrl.store.work.confirmSession(run.run.id, { sessionId: run.run.requestedSessionId, cwd: hUrl.home })
+      const claim = await hUrl.store.work.claimPrompt(run.run.id, 'p1', nowUrl)
+      if (!claim.ok) throw new Error('claim failed')
+      await hUrl.store.work.settleDelivery(run.run.id, claim.deliveryId, 'accepted', undefined, nowUrl)
+      await hUrl.host.createSession({ sessionId: run.run.requestedSessionId })
+      await hUrl.store.track({ sessionId: run.run.requestedSessionId, origin: 'started', title: 'R1', goal: 'G', cwd: hUrl.home, at: nowUrl })
+      await hUrl.store.putLink(makeTaskLink(ch.id, { repo: 'acme/widgets', number: 1, url: 'https://github.com/acme/widgets/issues/1' }, 'dot', nowUrl))
+
+      await hUrl.store.setSettings(patchSettings(DEFAULT_SETTINGS, {
+        reflection: false,
+        idleCheckMinutes: 0,
+        githubPoll: { enabled: true, repos: ['acme/widgets'], webhookRepos: [], ghPath: 'gh', intervalSec: 120, streams: { issues: true, pulls: true, comments: true, ci: true }, ignoredActors: [] },
+      }))
+
+      await expect(hUrl.service.pollGithubNow()).resolves.toEqual({ ok: true, events: 0 })
+      urlPhase = 2
+      nowUrl += 10_000
+      const p2 = await hUrl.service.pollGithubNow()
+      expect(p2).toEqual({ ok: true, events: 1 })
+      expect(hUrl.service.githubPollStatus().health).toBe('ok')
+      expect(hUrl.service.githubPollStatus().consecutiveFailures).toBe(0)
+      expect(hUrl.inbox.list().map(r => r.subject)).toEqual(['acme/widgets#1'])
+      expect(hUrl.relayed.some(r => r.target === run.run.requestedSessionId && r.text.includes('Human reply on issue #1'))).toBe(true)
+      expect(urlCalls.some(c => c.includes('pulls/1'))).toBe(false)
+
+      // Repeat 304 poll does zero writes and never hits pulls/1
+      send304Url = true
+      hUrl.puts.length = 0
+      urlCalls.length = 0
+      nowUrl += 10_000
+      await expect(hUrl.service.pollGithubNow()).resolves.toEqual({ ok: true, events: 0 })
+      expect(hUrl.puts).toEqual([])
+      expect(urlCalls.some(c => c.includes('pulls/1'))).toBe(false)
+    } finally {
+      await hUrl.service.dispose()
+      hUrl.cleanup()
+    }
+
+    // 2. Shorthand owner/repo#1 (no URL yet) + linked PR #5: probes issues/1 on 404, caches issue classification,
+    //    delivers issue comment & PR review/CI normally, and skips pulls/1* + issues/1 with zero writes on subsequent 304s.
+    let nowShort = 1_700_000_000_000
+    let shortPhase = 1
+    let send304Short = false
+    const shortCalls: string[] = []
+    const hShort = makeHarness(async (_bin, args) => {
+      if (args[0] === '--version') return { stdout: 'gh version 2.102.0\n', stderr: '' }
+      if (args[0] === 'auth') return { stdout: authSuccessStdout(), stderr: '' }
+      if (args[1]) shortCalls.push(args[1])
+      if (args[1] === 'rate_limit') return { stdout: JSON.stringify({ resources: { core: { remaining: 5000, limit: 5000 } } }), stderr: '' }
+      if (args[1] === 'repos/acme/widgets') return { stdout: JSON.stringify({ default_branch: 'main', html_url: 'https://github.com/acme/widgets' }), stderr: '' }
+      if (args[1] === 'repos/acme/widgets/commits/main') return { stdout: JSON.stringify({ sha: 'main-sha' }), stderr: '' }
+      if (args[1]?.startsWith('repos/acme/widgets/commits/main-sha/check-runs')) return { stdout: JSON.stringify({ total_count: 0, check_runs: [] }), stderr: '' }
+      if (args[1]?.startsWith('repos/acme/widgets/commits/main-sha/statuses')) return { stdout: JSON.stringify([]), stderr: '' }
+      if (args[1] === 'repos/acme/widgets/pulls/1/reviews?per_page=100' || args[1] === 'repos/acme/widgets/pulls/1') {
+        throw Object.assign(new Error('gh: Not Found (HTTP 404)'), { code: 1, stderr: 'gh: Not Found (HTTP 404)' })
+      }
+      if (args[1] === 'repos/acme/widgets/issues/1') {
+        return {
+          stdout: JSON.stringify({ id: 1, number: 1, title: 'Shorthand issue', state: 'open', html_url: 'https://github.com/acme/widgets/issues/1', user: { login: 'alice' } }),
+          stderr: '',
+        }
+      }
+      if (args[1] === 'repos/acme/widgets/pulls/5') {
+        return {
+          stdout: JSON.stringify({ number: 5, state: 'open', html_url: 'https://github.com/acme/widgets/pull/5', user: { login: 'alice' }, head: { sha: 'pr5-sha', ref: 'feat/5' } }),
+          stderr: '',
+        }
+      }
+      if (args[1]?.startsWith('repos/acme/widgets/commits/pr5-sha/check-runs')) {
+        return {
+          stdout: JSON.stringify({
+            total_count: 1,
+            check_runs: shortPhase >= 3 ? [{ id: 1, name: 'pr-ci', status: 'completed', conclusion: 'failure' }] : [],
+          }),
+          stderr: '',
+        }
+      }
+      if (args[1]?.startsWith('repos/acme/widgets/commits/pr5-sha/statuses')) return { stdout: JSON.stringify([]), stderr: '' }
+      if (args[1] === 'repos/acme/widgets/pulls/5/reviews?per_page=100') {
+        if (send304Short) throw Object.assign(new Error('gh: HTTP 304'), { code: 1, stderr: 'gh: HTTP 304\n' })
+        return {
+          stdout: httpInclude({ Etag: 'W/"rev-5"' }, shortPhase >= 2
+            ? [{ id: 801, state: 'APPROVED', body: 'ship it', user: { login: 'carol', type: 'User' }, html_url: 'https://github.com/acme/widgets/pull/5#pullrequestreview-801', submitted_at: new Date(nowShort).toISOString() }]
+            : []),
+          stderr: '',
+        }
+      }
+      if (args[1]?.startsWith('repos/acme/widgets/issues/comments?')) {
+        if (send304Short) throw Object.assign(new Error('gh: HTTP 304'), { code: 1, stderr: 'gh: HTTP 304\n' })
+        return {
+          stdout: httpInclude({ Etag: `W/"ic-${shortPhase}"` }, shortPhase >= 2
+            ? [
+                { id: 2001, body: 'bot note', user: { login: 'dependabot[bot]', type: 'Bot' }, html_url: 'https://github.com/acme/widgets/issues/1#issuecomment-2001', created_at: new Date(nowShort).toISOString(), updated_at: new Date(nowShort).toISOString() },
+                { id: 2002, body: 'human note on #1', user: { login: 'alice', type: 'User' }, html_url: 'https://github.com/acme/widgets/issues/1#issuecomment-2002', created_at: new Date(nowShort).toISOString(), updated_at: new Date(nowShort).toISOString() },
+              ]
+            : []),
+          stderr: '',
+        }
+      }
+      if (send304Short) throw Object.assign(new Error('gh: HTTP 304'), { code: 1, stderr: 'gh: HTTP 304\n' })
+      return { stdout: httpInclude({ Etag: 'W/"empty"' }, []), stderr: '' }
+    }, () => nowShort)
+
+    try {
+      await hShort.service.ensureDot()
+      const chIssue = await hShort.store.work.createChange({
+        title: 'Shorthand Issue 1', cwd: hShort.home, goal: 'Issue 1',
+        requirements: [{ requirementRef: 'R1', text: 'Issue 1', required: true }], at: nowShort,
+      })
+      const chPr = await hShort.store.work.createChange({
+        title: 'PR 5', cwd: hShort.home, goal: 'PR 5',
+        requirements: [{ requirementRef: 'R1', text: 'PR 5', required: true }], at: nowShort,
+      })
+      await hShort.store.putLink(makeTaskLink(chIssue.id, { repo: 'acme/widgets', number: 1 }, 'dot', nowShort))
+      await hShort.store.putLink(makeTaskLink(chPr.id, { repo: 'acme/widgets', number: 5, url: 'https://github.com/acme/widgets/pull/5' }, 'dot', nowShort))
+
+      await hShort.store.setSettings(patchSettings(DEFAULT_SETTINGS, {
+        reflection: false,
+        idleCheckMinutes: 0,
+        githubPoll: { enabled: true, repos: ['acme/widgets'], webhookRepos: [], ghPath: 'gh', intervalSec: 120, streams: { issues: true, pulls: true, comments: true, ci: true }, ignoredActors: [] },
+      }))
+
+      // Poll 1 (cold-start): pulls/1/reviews 404 -> probes issues/1 once -> caches known issue -> pollLinkedPrCi skips pulls/1!
+      await expect(hShort.service.pollGithubNow()).resolves.toEqual({ ok: true, events: 0 })
+      expect(hShort.service.githubPollStatus().health).toBe('ok')
+      expect(hShort.service.githubPollStatus().consecutiveFailures).toBe(0)
+      expect(hShort.service.githubPollCursorStore.isKnownIssue('acme/widgets', 1)).toBe(true)
+      expect(hShort.store.links.find(l => l.number === 1)?.targetKind).toBe('issue')
+      expect(shortCalls.filter(c => c === 'repos/acme/widgets/pulls/1')).toHaveLength(0)
+      expect(shortCalls.filter(c => c === 'repos/acme/widgets/issues/1')).toHaveLength(1)
+
+      // Poll 2: issue #1 comment AND PR #5 review admitted with zero pulls/1* calls
+      shortCalls.length = 0
+      shortPhase = 2
+      nowShort += 10_000
+      const p2 = await hShort.service.pollGithubNow()
+      expect(p2).toEqual({ ok: true, events: 2 })
+      expect(shortCalls.some(c => c.includes('pulls/1') || c === 'repos/acme/widgets/issues/1')).toBe(false)
+      expect(hShort.inbox.list().some(r => r.subject === 'acme/widgets#1' && r.summary.includes('human note on #1'))).toBe(true)
+      expect(hShort.inbox.list().some(r => r.subject === 'acme/widgets#5' && r.type === 'pull_request_review.approved')).toBe(true)
+
+      // Poll 3: PR #5 CI failure still detected normally!
+      shortCalls.length = 0
+      shortPhase = 3
+      nowShort += 10_000
+      const p3 = await hShort.service.pollGithubNow()
+      expect(p3).toEqual({ ok: true, events: 1 })
+      expect(hShort.inbox.list().some(r => r.type === 'check_suite.completed' && r.subject === 'acme/widgets:checks:ci@feat/5')).toBe(true)
+
+      // Poll 4: 304 unchanged -> ZERO writes & zero pulls/1* calls
+      send304Short = true
+      shortCalls.length = 0
+      hShort.puts.length = 0
+      nowShort += 10_000
+      await expect(hShort.service.pollGithubNow()).resolves.toEqual({ ok: true, events: 0 })
+      expect(hShort.puts).toEqual([])
+      expect(shortCalls.some(c => c.includes('pulls/1') || c === 'repos/acme/widgets/issues/1')).toBe(false)
+    } finally {
+      await hShort.service.dispose()
+      hShort.cleanup()
+    }
+
+    // 3. Genuine inaccessible PR (404 on both pulls/99 and issues/99): isolates per-target error, preserves earlier
+    //    comment & sibling PR #5 events, triggers >=3 consecutive failure error alert, and skips after 24h retry window.
+    let nowErr = 1_700_000_000_000
+    let errPhase = 1
+    const hErr = makeHarness(async (_bin, args) => {
+      if (args[0] === '--version') return { stdout: 'gh version 2.102.0\n', stderr: '' }
+      if (args[0] === 'auth') return { stdout: authSuccessStdout(), stderr: '' }
+      if (args[1] === 'rate_limit') return { stdout: JSON.stringify({ resources: { core: { remaining: 5000, limit: 5000 } } }), stderr: '' }
+      if (args[1] === 'repos/acme/widgets/pulls/99/reviews?per_page=100' || args[1] === 'repos/acme/widgets/issues/99') {
+        throw Object.assign(new Error('gh: Not Found (HTTP 404)'), { code: 1, stderr: 'gh: Not Found (HTTP 404)' })
+      }
+      if (args[1] === 'repos/acme/widgets/pulls/5/reviews?per_page=100') {
+        return {
+          stdout: httpInclude({}, errPhase === 2
+            ? [{ id: 951, state: 'APPROVED', body: 'ok', user: { login: 'carol', type: 'User' }, html_url: 'https://github.com/acme/widgets/pull/5#pullrequestreview-951', submitted_at: new Date(nowErr).toISOString() }]
+            : []),
+          stderr: '',
+        }
+      }
+      if (args[1]?.startsWith('repos/acme/widgets/issues/comments?')) {
+        return {
+          stdout: httpInclude({}, errPhase === 2
+            ? [{ id: 3001, body: 'comment preserved despite #99 404', user: { login: 'alice', type: 'User' }, html_url: 'https://github.com/acme/widgets/issues/6#issuecomment-3001', created_at: new Date(nowErr).toISOString(), updated_at: new Date(nowErr).toISOString() }]
+            : []),
+          stderr: '',
+        }
+      }
+      return { stdout: httpInclude({}, []), stderr: '' }
+    }, () => nowErr)
+
+    try {
+      const ch99 = await hErr.store.work.createChange({
+        title: 'Missing PR 99', cwd: hErr.home, goal: 'Missing PR 99',
+        requirements: [{ requirementRef: 'R1', text: 'PR 99', required: true }], at: nowErr,
+      })
+      const ch5 = await hErr.store.work.createChange({
+        title: 'Healthy PR 5', cwd: hErr.home, goal: 'Healthy PR 5',
+        requirements: [{ requirementRef: 'R1', text: 'PR 5', required: true }], at: nowErr,
+      })
+      await hErr.store.putLink(makeTaskLink(ch99.id, { repo: 'acme/widgets', number: 99, url: 'https://github.com/acme/widgets/pull/99' }, 'dot', nowErr))
+      await hErr.store.putLink(makeTaskLink(ch5.id, { repo: 'acme/widgets', number: 5, url: 'https://github.com/acme/widgets/pull/5' }, 'dot', nowErr))
+
+      await hErr.store.setSettings(patchSettings(DEFAULT_SETTINGS, {
+        reflection: false,
+        idleCheckMinutes: 0,
+        githubPoll: { enabled: true, repos: ['acme/widgets'], webhookRepos: [], ghPath: 'gh', intervalSec: 120, streams: { issues: false, pulls: false, comments: true, ci: false }, ignoredActors: [] },
+      }))
+
+      // Failure 1 (cold-start): #99 404 -> degraded, 1 failure
+      await expect(hErr.service.pollGithubNow()).resolves.toEqual({ ok: false, events: 0 })
+      expect(hErr.service.githubPollStatus().health).toBe('degraded')
+      expect(hErr.service.githubPollStatus().consecutiveFailures).toBe(1)
+
+      // Failure 2: comment on #6 AND sibling PR #5 review are BOTH admitted (not discarded!), while ok=false tracks #99
+      errPhase = 2
+      nowErr += 10_000
+      const f2 = await hErr.service.pollGithubNow()
+      expect(f2).toEqual({ ok: false, events: 2 })
+      expect(hErr.inbox.list().map(r => r.subject).sort()).toEqual(['acme/widgets#5', 'acme/widgets#6'])
+      expect(hErr.service.githubPollStatus().consecutiveFailures).toBe(2)
+      expect(hErr.service.githubPollStatus().alert).toBe(false)
+
+      // Failure 3: reaches error alert threshold
+      errPhase = 3
+      nowErr += 10_000
+      await expect(hErr.service.pollGithubNow()).resolves.toEqual({ ok: false, events: 0 })
+      expect(hErr.service.githubPollStatus().alert).toBe(true)
+      expect(hErr.service.githubPollStatus().health).toBe('error')
+
+      // After 24h retry window, #99 is skipped and poller recovers cleanly
+      nowErr += 24 * 60 * 60_000 + 1000
+      await expect(hErr.service.pollGithubNow()).resolves.toEqual({ ok: true, events: 0 })
+      expect(hErr.service.githubPollStatus().health).toBe('ok')
+      expect(hErr.service.githubPollStatus().consecutiveFailures).toBe(0)
+    } finally {
+      await hErr.service.dispose()
+      hErr.cleanup()
+    }
+  })
 })

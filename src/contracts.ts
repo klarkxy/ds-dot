@@ -1017,6 +1017,8 @@ export interface TaskLink {
   /** Head repository learned with the branch; distinguishes same-named fork branches. */
   readonly headRepo?: string
   readonly url?: string
+  /** Distinguishes pull requests from issues for PR-only polling; omitted when unknown. */
+  readonly targetKind?: 'pr' | 'issue'
   readonly origin: 'dot' | 'auto'
   readonly state: 'open' | 'closed' | 'merged'
   readonly addedAt: number

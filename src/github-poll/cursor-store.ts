@@ -10,6 +10,7 @@ export const RETRY_WINDOW_MS = 24 * 60 * 60_000
 const MAX_ECHO_ENTRIES = 500
 const MAX_DELIVERED_ENTRIES = 500
 const MAX_410_SUBJECTS = 200
+const MAX_KNOWN_ISSUES = 500
 
 export type StreamName = 'issues' | 'comments' | 'review-comments'
 export type StreamCursor = Extract<GithubPollEntry, { kind: 'stream' }>
@@ -261,6 +262,20 @@ export class GithubPollCursorStore {
     if (current.includes(subject)) return
     await this.updateRepoState(repo, {
       deleted410Subjects: [...current.slice(-(MAX_410_SUBJECTS - 1)), subject],
+    })
+  }
+
+  isKnownIssue(repo: string, number: number): boolean {
+    return this.getRepoState(repo)?.knownIssueNumbers?.includes(number) ?? false
+  }
+
+  async markKnownIssue(repo: string, number: number): Promise<void> {
+    if (!Number.isInteger(number) || number <= 0) return
+    const prev = this.getRepoState(repo)
+    const current = prev?.knownIssueNumbers ?? []
+    if (current.includes(number)) return
+    await this.updateRepoState(repo, {
+      knownIssueNumbers: [...current.slice(-(MAX_KNOWN_ISSUES - 1)), number],
     })
   }
 

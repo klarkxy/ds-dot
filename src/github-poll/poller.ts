@@ -38,6 +38,12 @@ const CommitInfoSchema = z.object({
   sha: z.string().min(1),
 }).loose()
 
+const IssueProbeSchema = z.object({
+  number: z.number().int().positive(),
+  html_url: z.string().optional(),
+  pull_request: z.unknown().nullable().optional(),
+}).loose()
+
 export function cursorAt(startedIso: string): string {
   const ms = Date.parse(startedIso)
   return new Date((Number.isFinite(ms) ? ms : Date.now()) - CURSOR_OVERLAP_MS).toISOString()
@@ -353,20 +359,33 @@ export class GithubPoller {
       for (const repo of pollRepos) {
         if (this.disposed || ac.signal.aborted) break
         try {
-          const count = await this.pollRepo(cli, settings, repo, roundStartMs, ac.signal)
-          totalEvents += count
-          const prev = this.deps.cursorStore.getRepoState(repo)
-          this.transientRepoStatus.set(repo, { lastPollAt: roundStartMs })
-          // Zero-write invariant: only write repo state when clearing a previous failure/error.
-          if ((prev?.consecutiveFailures ?? 0) > 0 || prev?.lastError !== undefined) {
+          const repoRes = await this.pollRepo(cli, settings, repo, roundStartMs, ac.signal)
+          totalEvents += repoRes.events
+          if (repoRes.error !== undefined) {
+            hadFailure = true
+            const msg = redactGithubTokens(repoRes.error instanceof Error ? repoRes.error.message : String(repoRes.error))
+            const prev = this.deps.cursorStore.getRepoState(repo)
+            const nextFailures = (prev?.consecutiveFailures ?? 0) + 1
             await this.deps.cursorStore.updateRepoState(repo, {
-              consecutiveFailures: 0,
-              lastError: undefined,
-              lastSuccessAt: roundStartMs,
+              consecutiveFailures: nextFailures,
+              lastError: msg,
             })
+            this.lastError = msg
+            this.deps.trace?.('github-poll.failed', msg, { repo, consecutiveFailures: nextFailures })
+          } else {
+            const prev = this.deps.cursorStore.getRepoState(repo)
+            this.transientRepoStatus.set(repo, { lastPollAt: roundStartMs })
+            // Zero-write invariant: only write repo state when clearing a previous failure/error.
+            if ((prev?.consecutiveFailures ?? 0) > 0 || prev?.lastError !== undefined) {
+              await this.deps.cursorStore.updateRepoState(repo, {
+                consecutiveFailures: 0,
+                lastError: undefined,
+                lastSuccessAt: roundStartMs,
+              })
+            }
           }
         } catch (error) {
-          if (error instanceof Error && error.name === 'AbortError') break
+          if (isAbortError(error, ac.signal)) break
           hadFailure = true
           const msg = redactGithubTokens(error instanceof Error ? error.message : String(error))
           const prev = this.deps.cursorStore.getRepoState(repo)
@@ -380,12 +399,12 @@ export class GithubPoller {
         }
       }
 
+      if (totalEvents > 0) {
+        this.deps.onCycleEvents?.()
+      }
       if (!hadFailure) {
         this.consecutiveFailures = 0
         this.lastError = undefined
-        if (totalEvents > 0) {
-          this.deps.onCycleEvents?.()
-        }
       } else {
         this.consecutiveFailures += 1
       }
@@ -439,7 +458,48 @@ export class GithubPoller {
     return 'throw'
   }
 
-  private async pollRepo(cli: GhCli, settings: GithubPollSettings, repo: string, nowMs: number, signal: AbortSignal): Promise<number> {
+  private async markTargetAsIssue(repo: string, number: number, htmlUrl?: string): Promise<void> {
+    await this.deps.cursorStore.markKnownIssue(repo, number)
+    for (const link of this.deps.links()) {
+      if (link.repo !== repo || link.number !== number || link.targetKind === 'issue') continue
+      await this.deps.putLink({
+        ...link,
+        targetKind: 'issue',
+        ...(!link.url && htmlUrl ? { url: htmlUrl } : {}),
+      })
+    }
+  }
+
+  private async handlePullTargetError(
+    cli: GhCli,
+    repo: string,
+    target: { readonly number: number; readonly targetKind?: 'pr' | 'issue' },
+    error: unknown,
+    nowMs: number,
+    signal: AbortSignal,
+  ): Promise<{ readonly action: 'skip' | 'throw'; readonly error: unknown }> {
+    if (isAbortError(error, signal)) throw error
+    const subject = `${repo}#${target.number}`
+    if (target.targetKind !== 'pr' && error instanceof CliError && error.code === 404) {
+      try {
+        const issue = await cli.repoApi(IssueProbeSchema, repo, `issues/${target.number}`, [], signal)
+        if (!issue.pull_request) {
+          await this.markTargetAsIssue(repo, target.number, issue.html_url)
+          return { action: 'skip', error: undefined }
+        }
+      } catch (probeError) {
+        if (isAbortError(probeError, signal)) throw probeError
+        if (this.is410(probeError)) {
+          await this.deps.cursorStore.mark410Gone(repo, subject)
+          return { action: 'skip', error: undefined }
+        }
+      }
+    }
+    const action = await this.handleTargetError(repo, subject, error, nowMs)
+    return { action, error }
+  }
+
+  private async pollRepo(cli: GhCli, settings: GithubPollSettings, repo: string, nowMs: number, signal: AbortSignal): Promise<{ readonly events: number; readonly error?: unknown }> {
     const sourceId = settings.sourceId || 'primary-github'
     const nowIso = new Date(nowMs).toISOString()
     const repoState = this.deps.cursorStore.getRepoState(repo)
@@ -449,9 +509,11 @@ export class GithubPoller {
     // 1. issues & pulls stream
     if (settings.streams.issues || settings.streams.pulls) {
       try {
-        events += await this.pollIssuesAndPullsStream(cli, settings, repo, sourceId, nowMs, nowIso, repoState?.lastDeliveredAt, signal)
+        const res = await this.pollIssuesAndPullsStream(cli, settings, repo, sourceId, nowMs, nowIso, repoState?.lastDeliveredAt, signal)
+        events += res.events
+        if (res.error !== undefined) streamErrors.push(res.error)
       } catch (error) {
-        if (error instanceof Error && error.name === 'AbortError') throw error
+        if (isAbortError(error, signal)) throw error
         streamErrors.push(error)
       }
     } else {
@@ -463,19 +525,21 @@ export class GithubPoller {
       try {
         events += await this.pollCommentsStream(cli, settings, repo, sourceId, 'comments', 'issues/comments', nowMs, nowIso, repoState?.lastDeliveredAt, signal)
       } catch (error) {
-        if (error instanceof Error && error.name === 'AbortError') throw error
+        if (isAbortError(error, signal)) throw error
         streamErrors.push(error)
       }
       try {
         events += await this.pollCommentsStream(cli, settings, repo, sourceId, 'review-comments', 'pulls/comments', nowMs, nowIso, repoState?.lastDeliveredAt, signal)
       } catch (error) {
-        if (error instanceof Error && error.name === 'AbortError') throw error
+        if (isAbortError(error, signal)) throw error
         streamErrors.push(error)
       }
       try {
-        events += await this.pollLinkedPrReviews(cli, settings, repo, sourceId, nowMs, signal)
+        const revRes = await this.pollLinkedPrReviews(cli, settings, repo, sourceId, nowMs, signal)
+        events += revRes.events
+        if (revRes.error !== undefined) streamErrors.push(revRes.error)
       } catch (error) {
-        if (error instanceof Error && error.name === 'AbortError') throw error
+        if (isAbortError(error, signal)) throw error
         streamErrors.push(error)
       }
     } else {
@@ -489,23 +553,22 @@ export class GithubPoller {
       try {
         events += await this.pollBranchCi(cli, repo, sourceId, nowMs, signal)
       } catch (error) {
-        if (error instanceof Error && error.name === 'AbortError') throw error
+        if (isAbortError(error, signal)) throw error
         streamErrors.push(error)
       }
       try {
-        events += await this.pollLinkedPrCi(cli, repo, sourceId, nowMs, signal)
+        const ciRes = await this.pollLinkedPrCi(cli, repo, sourceId, nowMs, signal)
+        events += ciRes.events
+        if (ciRes.error !== undefined) streamErrors.push(ciRes.error)
       } catch (error) {
-        if (error instanceof Error && error.name === 'AbortError') throw error
+        if (isAbortError(error, signal)) throw error
         streamErrors.push(error)
       }
     } else {
       await this.deps.cursorStore.clearCiBaseline(repo)
     }
 
-    if (streamErrors.length > 0) {
-      throw streamErrors[0]
-    }
-    return events
+    return streamErrors.length > 0 ? { events, error: streamErrors[0] } : { events }
   }
 
   private initialSinceForStream(nowMs: number, handoffAt?: number): { readonly since: string; readonly coldStart: boolean } {
@@ -524,7 +587,7 @@ export class GithubPoller {
     _nowIso: string,
     handoffAt: number | undefined,
     signal: AbortSignal,
-  ): Promise<number> {
+  ): Promise<{ readonly events: number; readonly error?: unknown }> {
     const floorIso = floorSecondIso(nowMs)
     const stored = this.deps.cursorStore.getStreamCursor(repo, 'issues')
     const init = stored ? { since: clampHorizonSince(stored.since, nowMs), coldStart: false } : this.initialSinceForStream(nowMs, handoffAt)
@@ -559,7 +622,7 @@ export class GithubPoller {
         ...(seenKeys.length > 0 ? { seenKeys } : {}),
         updatedAt: nowMs,
       })
-      return 0
+      return { events: 0 }
     }
 
     // If a kind was just enabled after the other, initialize its started timestamp at floorIso so it cold-starts cleanly.
@@ -590,11 +653,12 @@ export class GithubPoller {
           updatedAt: nowMs,
         })
       }
-      return 0
+      return { events: 0 }
     }
 
     let newestUpdated = since
     let emitted = 0
+    const targetErrors: unknown[] = []
     const horizonMs = nowMs - POLL_HORIZON_MS
     const seenSet = new Set(stored?.seenKeys ?? [])
     const coldSeededSet = new Set(stored?.seenKeys ?? [])
@@ -623,9 +687,11 @@ export class GithubPoller {
         try {
           pr = await cli.repoApi(PullSchema, repo, `pulls/${item.number}`, [], signal)
         } catch (error) {
+          if (isAbortError(error, signal)) throw error
           const action = await this.handleTargetError(repo, subject, error, nowMs)
           if (action === 'skip') continue
-          throw error
+          targetErrors.push(error)
+          continue
         }
         const closedAtMs = timestampMs(pr.closed_at ?? pr.merged_at ?? item.closed_at ?? updatedIso, prUpdatedMs)
         const action: 'opened' | 'reopened' | 'closed' | undefined = pr.state === 'closed'
@@ -680,7 +746,7 @@ export class GithubPoller {
     }
 
     const advanced = res.items.length > 0 ? clampHorizonSince(cursorAt(newestUpdated), nowMs) : since
-    const nextSince = Date.parse(advanced) > Date.parse(since) ? advanced : since
+    const nextSince = targetErrors.length === 0 && Date.parse(advanced) > Date.parse(since) ? advanced : since
     const nextEtag = res.headers.etag && nextSince === since ? res.headers.etag : undefined
     const nextSeen = [...seenSet].slice(-200)
     const changed = !stored
@@ -699,7 +765,7 @@ export class GithubPoller {
       ...(nextSeen.length > 0 ? { seenKeys: nextSeen } : {}),
       updatedAt: changed ? nowMs : (stored?.updatedAt ?? nowMs),
     })
-    return emitted
+    return targetErrors.length > 0 ? { events: emitted, error: targetErrors[0] } : { events: emitted }
   }
 
   private async pollCommentsStream(
@@ -841,15 +907,17 @@ export class GithubPoller {
     sourceId: string,
     nowMs: number,
     signal: AbortSignal,
-  ): Promise<number> {
+  ): Promise<{ readonly events: number; readonly error?: unknown }> {
     const targets = polledTargets(this.deps.links(), this.deps.changes(), this.deps.runs(), nowMs, repo)
     const commentsCursor = this.deps.cursorStore.getStreamCursor(repo, 'comments')
     const repoState = this.deps.cursorStore.getRepoState(repo)
     const handoffAt = repoState?.lastDeliveredAt
     const floorIso = floorSecondIso(nowMs)
     let emitted = 0
+    const targetErrors: unknown[] = []
     for (const target of targets) {
       if (signal.aborted) throw new DOMException('Aborted', 'AbortError')
+      if (target.targetKind === 'issue' || this.deps.cursorStore.isKnownIssue(repo, target.number)) continue
       const subject = `${repo}#${target.number}`
       if (this.deps.cursorStore.is410Gone(repo, subject)) continue
       const stored = this.deps.cursorStore.getPrReviewCursor(repo, target.number)
@@ -858,9 +926,10 @@ export class GithubPoller {
       try {
         res = await cli.repoPagesWithHeaders(CommentSchema, repo, `pulls/${target.number}/reviews?per_page=100`, extraArgs, undefined, signal)
       } catch (error) {
-        const action = await this.handleTargetError(repo, subject, error, nowMs)
-        if (action === 'skip') continue
-        throw error
+        const handled = await this.handlePullTargetError(cli, repo, target, error, nowMs, signal)
+        if (handled.action === 'skip') continue
+        targetErrors.push(handled.error)
+        continue
       }
       await this.recordHeaders(repo, res.headers)
       if (res.notModified) continue
@@ -941,7 +1010,7 @@ export class GithubPoller {
         updatedAt: changed ? nowMs : (stored?.updatedAt ?? nowMs),
       })
     }
-    return emitted
+    return targetErrors.length > 0 ? { events: emitted, error: targetErrors[0] } : { events: emitted }
   }
 
   private async pollBranchCi(cli: GhCli, repo: string, sourceId: string, nowMs: number, signal: AbortSignal): Promise<number> {
@@ -1006,22 +1075,34 @@ export class GithubPoller {
     return outcome.inboxResult === 'stored' || outcome.inboxResult === 'merged' ? 1 : 0
   }
 
-  private async pollLinkedPrCi(cli: GhCli, repo: string, sourceId: string, nowMs: number, signal: AbortSignal): Promise<number> {
+  private async pollLinkedPrCi(cli: GhCli, repo: string, sourceId: string, nowMs: number, signal: AbortSignal): Promise<{ readonly events: number; readonly error?: unknown }> {
     const targets = polledTargets(this.deps.links(), this.deps.changes(), this.deps.runs(), nowMs, repo)
     let emitted = 0
+    const targetErrors: unknown[] = []
     for (const target of targets) {
       if (signal.aborted) throw new DOMException('Aborted', 'AbortError')
+      if (target.targetKind === 'issue' || this.deps.cursorStore.isKnownIssue(repo, target.number)) continue
       const subject = `${repo}#${target.number}`
       if (this.deps.cursorStore.is410Gone(repo, subject)) continue
       let pr: GhPull
       try {
         pr = await cli.repoApi(PullSchema, repo, `pulls/${target.number}`, [], signal)
       } catch (error) {
+        const handled = await this.handlePullTargetError(cli, repo, target, error, nowMs, signal)
+        if (handled.action === 'skip') continue
+        targetErrors.push(handled.error)
+        continue
+      }
+      let snapshot: Awaited<ReturnType<typeof pullChecks>>
+      try {
+        snapshot = await pullChecks(cli, repo, pr.head.sha, undefined, signal)
+      } catch (error) {
+        if (isAbortError(error, signal)) throw error
         const action = await this.handleTargetError(repo, subject, error, nowMs)
         if (action === 'skip') continue
-        throw error
+        targetErrors.push(error)
+        continue
       }
-      const snapshot = await pullChecks(cli, repo, pr.head.sha, undefined, signal)
       const counts = ciCounts(snapshot)
       const nowFailures = ciFailures(snapshot)
       const previous = this.deps.cursorStore.getPrCiBaseline(repo, target.number)
@@ -1081,6 +1162,6 @@ export class GithubPoller {
         emitted += 1
       }
     }
-    return emitted
+    return targetErrors.length > 0 ? { events: emitted, error: targetErrors[0] } : { events: emitted }
   }
 }

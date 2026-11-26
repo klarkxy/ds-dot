@@ -943,6 +943,8 @@ describe('ChatPanel activity and notice cards', () => {
     const block = chatCss.slice(queryIndex, chatCss.indexOf('\n}\n', queryIndex) + 3)
     expect(block).toContain('.dsh-dot-chat .dsh-dot-settings { padding: 14px 14px 28px; }')
     expect(block).toContain('white-space: normal;')
+    expect(block).toContain('.dsh-dot-nav-label')
+    expect(chatCss).toContain('box-shadow: inset 2px 0 0 var(--dsw-alias-state-business-primary)')
   })
 })
 

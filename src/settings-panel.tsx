@@ -599,6 +599,34 @@ export function SettingsPanel({ locale, api, settings, section = 'all', proposal
     const list = checked ? [...rule.list, ...keys.filter(key => !rule.list.includes(key))] : rule.list.filter(key => !drop.has(key))
     save({ taskModels: { mode: rule.mode, list } })
   }
+  /**
+   * Details expansion: automatic answer (searched or has selections) unless the
+   * user folded or unfolded the group by hand; that manual answer is forgotten
+   * when the automatic answer changes, so the list never sticks open or closed.
+   */
+  const manualOpen = useRef<Record<string, boolean | undefined>>({})
+  const manualAuto = useRef<Record<string, boolean | undefined>>({})
+  const [, bumpDetails] = useState(0)
+  const expandDetails = (id: string, auto: boolean): boolean => {
+    if (needle !== '') return auto
+    const picked = manualOpen.current[id]
+    if (picked === undefined) return auto
+    if (manualAuto.current[id] !== auto) {
+      delete manualOpen.current[id]
+      delete manualAuto.current[id]
+      return auto
+    }
+    return picked
+  }
+  const onDetailsClick = (id: string, auto: boolean) => (event: React.MouseEvent<HTMLElement>) => {
+    const target = event.target as { closest?: (selector: string) => unknown } | null
+    if (target && typeof target.closest === 'function' && target.closest('button, a, input, textarea, [role="tab"]')) return
+    const details = event.currentTarget.parentElement
+    if (!details || details.tagName !== 'DETAILS') return
+    manualOpen.current[id] = !(details as HTMLDetailsElement).open
+    manualAuto.current[id] = auto
+    bumpDetails(rev => rev + 1)
+  }
   const emptyAllowList = rule.mode === 'allow' && rule.list.length === 0
   const modelHelp = models.failed ? t(locale, 'sModelFailed')
     : models.choices ? undefined
@@ -712,105 +740,115 @@ export function SettingsPanel({ locale, api, settings, section = 'all', proposal
         </div>
       ) : null}
       {show('dispatch') ? (
-        <div className="dsh-dot-pane-section">
+        <div className="dsh-dot-pane-section dsh-dot-dispatch">
           {allSections ? <h3 className="dsh-dot-pane-section-title">{t(locale, 'sTasks')}</h3> : null}
-          <div className="dsh-ui-form">
-            <Field
-              label={t(locale, 'sTaskPermission')}
-              tip={t(locale, `sTaskPermissionDesc_${settings.taskPermission}` as TextKey)}
-              help={livePermissions.includes(settings.taskPermission) ? undefined : t(locale, 'sTaskPermissionUnavailable').replace('{name}', t(locale, `sTaskPermission_${settings.taskPermission}` as TextKey))}
-              helpTone={livePermissions.includes(settings.taskPermission) ? undefined : 'warn'}
-              {...lock('taskPermission')}
-            >
-              <SegmentedChoice locale={locale} label={t(locale, 'sTaskPermission')} value={settings.taskPermission} options={permissionModes} labelKeyOf={opt => `sTaskPermission_${opt}`} onChange={next => save({ taskPermission: next })} />
-            </Field>
-            <Field label={t(locale, 'sTaskModels')} help={taskModelsHelp} helpTone={taskModelsHelp ? 'warn' : undefined} wide {...lock('taskModels')}>
-              <SegmentedChoice locale={locale} label={t(locale, 'sTaskModels')} value={rule.mode} options={['all', 'allow', 'deny']} labelKeyOf={opt => `sTaskModels_${opt}`} onChange={next => save({ taskModels: { mode: next, list: rule.list } })} />
-              {rule.mode === 'all' ? null : (
-                <div className="dsh-dot-model-picker" role="group" aria-label={t(locale, `sTaskModels_${rule.mode}`)}>
-                  <div className="dsh-dot-model-toolbar">
-                    <Input
-                      className="dsh-dot-model-search"
-                      icon={<IconSearchOutlineRegular size={13} />}
-                      type="search"
-                      aria-label={t(locale, 'sTaskModelsFilter')}
-                      placeholder={t(locale, 'sTaskModelsFilter')}
-                      value={modelFilter}
-                      onChange={event => setModelFilter(event.target.value)}
-                    />
-                    <span className="dsh-ui-meta">{t(locale, 'sTaskModelsSelected').replace('{n}', String(rule.list.length))}</span>
-                    {rule.list.length > 0 ? (
-                      <Button variant="ghost" size="sm" onClick={() => save({ taskModels: { mode: rule.mode, list: [] } })}>{t(locale, 'sTaskModelsClear')}</Button>
-                    ) : null}
-                  </div>
-                  {rule.list.length > 0 ? (
-                    <div className="dsh-dot-model-chips" data-tone={rule.mode} aria-label={t(locale, 'sTaskModelsSelected').replace('{n}', String(rule.list.length))}>
-                      {rule.list.map(key => {
-                        const choice = catalogChoices.find(item => taskModelKey(item) === key)
-                        const stale = choice === undefined
-                        return (
-                          <span key={key} className="dsh-dot-model-chip" data-stale={stale ? '' : undefined} title={stale ? `${key} ${t(locale, 'sTaskModelsGone')}` : choice.label}>
-                            <span className="dsh-dot-model-chip-name">{choice ? modelMenuShortName(choice) : key}</span>
-                            {choice ? <span className="dsh-dot-model-chip-provider">{choice.providerLabel ?? choice.provider}</span> : null}
-                            <button type="button" className="dsh-dot-model-chip-remove" aria-label={t(locale, 'sTaskModelsRemove').replace('{name}', choice ? modelMenuShortName(choice) : key)} onClick={() => toggleTaskModel(key, false)}>×</button>
-                          </span>
-                        )
-                      })}
+          <div className="dsh-ui-form dsh-dot-dispatch-stack">
+            <div className="dsh-dot-dispatch-group" data-group="permission">
+              <Field
+                label={t(locale, 'sTaskPermission')}
+                tip={t(locale, `sTaskPermissionDesc_${settings.taskPermission}` as TextKey)}
+                help={livePermissions.includes(settings.taskPermission) ? undefined : t(locale, 'sTaskPermissionUnavailable').replace('{name}', t(locale, `sTaskPermission_${settings.taskPermission}` as TextKey))}
+                helpTone={livePermissions.includes(settings.taskPermission) ? undefined : 'warn'}
+                {...lock('taskPermission')}
+              >
+                <SegmentedChoice locale={locale} label={t(locale, 'sTaskPermission')} value={settings.taskPermission} options={permissionModes} labelKeyOf={opt => `sTaskPermission_${opt}`} onChange={next => save({ taskPermission: next })} />
+              </Field>
+            </div>
+            <div className="dsh-dot-dispatch-group" data-group="models">
+              <Field label={t(locale, 'sTaskModels')} help={taskModelsHelp} helpTone={taskModelsHelp ? 'warn' : undefined} {...lock('taskModels')}>
+                <SegmentedChoice locale={locale} label={t(locale, 'sTaskModels')} value={rule.mode} options={['all', 'allow', 'deny']} labelKeyOf={opt => `sTaskModels_${opt}`} onChange={next => save({ taskModels: { mode: next, list: rule.list } })} />
+                {rule.mode === 'all' ? null : (
+                  <div className="dsh-dot-model-picker" role="group" aria-label={t(locale, `sTaskModels_${rule.mode}`)}>
+                    <div className="dsh-dot-model-toolbar">
+                      <Input
+                        className="dsh-dot-model-search"
+                        icon={<IconSearchOutlineRegular size={13} />}
+                        type="search"
+                        aria-label={t(locale, 'sTaskModelsFilter')}
+                        placeholder={t(locale, 'sTaskModelsFilter')}
+                        value={modelFilter}
+                        onChange={event => setModelFilter(event.target.value)}
+                      />
+                      <div className="dsh-dot-model-summary">
+                        <span className="dsh-ui-meta">{t(locale, 'sTaskModelsSelected').replace('{n}', String(rule.list.length))}</span>
+                        {rule.list.length > 0 ? (
+                          <Button variant="ghost" size="sm" onClick={() => save({ taskModels: { mode: rule.mode, list: [] } })}>{t(locale, 'sTaskModelsClear')}</Button>
+                        ) : null}
+                      </div>
                     </div>
-                  ) : null}
-                  <div className="dsh-dot-model-list">
-                    {filteredGroups.length === 0 && staleKeys.length === 0 ? (
-                      <div className="dsh-dot-model-empty">{catalogChoices.length === 0 && !models.failed ? t(locale, 'sModelLoading') : t(locale, 'sTaskModelsNoMatch')}</div>
-                    ) : null}
-                    {filteredGroups.map(group => {
-                      const keys = group.items.map(taskModelKey)
-                      const selected = keys.filter(key => rule.list.includes(key))
-                      return (
-                        <details className="dsh-dot-model-group" key={group.provider} open={modelFilter.trim() !== '' || selected.length > 0}>
-                          <summary className="dsh-dot-model-group-title">
-                            <span className="dsh-dot-model-group-label">{group.name}<span className="dsh-dot-model-group-count">{selected.length}/{keys.length}</span></span>
-                            <button type="button" className="dsh-dot-model-group-toggle" onClick={event => { event.preventDefault(); event.stopPropagation(); toggleTaskGroup(keys, selected.length !== keys.length) }}>{t(locale, selected.length === keys.length ? 'sTaskModelsGroupNone' : 'sTaskModelsGroupAll')}</button>
-                          </summary>
-                          {group.items.map(choice => {
-                            const key = taskModelKey(choice)
-                            return (
-                              <Checkbox
-                                key={key}
-                                className="dsh-dot-model-item"
-                                checked={rule.list.includes(key)}
-                                label={modelMenuShortName(choice)}
-                                title={choice.label}
-                                onChange={checked => toggleTaskModel(key, checked)}
-                              />
-                            )
-                          })}
-                        </details>
-                      )
-                    })}
-                    {staleKeys.length > 0 ? (
-                      <div className="dsh-dot-model-group">
-                        <div className="dsh-dot-model-group-title">{t(locale, 'sTaskModelsStaleGroup')}</div>
-                        {staleKeys.map(key => (
-                          <Checkbox
-                            key={key}
-                            className="dsh-dot-model-item"
-                            checked={rule.list.includes(key)}
-                            label={`${key} ${t(locale, 'sTaskModelsGone')}`}
-                            onChange={checked => toggleTaskModel(key, checked)}
-                          />
-                        ))}
+                    {rule.list.length > 0 ? (
+                      <div className="dsh-dot-model-chips" data-tone={rule.mode} aria-label={t(locale, 'sTaskModelsSelected').replace('{n}', String(rule.list.length))}>
+                        {rule.list.map(key => {
+                          const choice = catalogChoices.find(item => taskModelKey(item) === key)
+                          const stale = choice === undefined
+                          return (
+                            <span key={key} className="dsh-dot-model-chip" data-stale={stale ? '' : undefined} title={stale ? `${key} ${t(locale, 'sTaskModelsGone')}` : choice.label}>
+                              <span className="dsh-dot-model-chip-name">{choice ? modelMenuShortName(choice) : key}</span>
+                              {choice ? <span className="dsh-dot-model-chip-provider">{choice.providerLabel ?? choice.provider}</span> : null}
+                              <button type="button" className="dsh-dot-model-chip-remove" aria-label={t(locale, 'sTaskModelsRemove').replace('{name}', choice ? choice.label : key)} onClick={() => toggleTaskModel(key, false)}>×</button>
+                            </span>
+                          )
+                        })}
                       </div>
                     ) : null}
+                    <div className="dsh-dot-model-list">
+                      {filteredGroups.length === 0 && staleKeys.length === 0 ? (
+                        <div className="dsh-dot-model-empty">{catalogChoices.length === 0 && !models.failed ? t(locale, 'sModelLoading') : t(locale, 'sTaskModelsNoMatch')}</div>
+                      ) : null}
+                      {filteredGroups.map(group => {
+                        const keys = group.items.map(taskModelKey)
+                        const selected = keys.filter(key => rule.list.includes(key))
+                        const auto = needle !== '' || selected.length > 0
+                        return (
+                          <details className="dsh-dot-model-group" key={group.provider} open={expandDetails(group.provider, auto)}>
+                            <summary className="dsh-dot-model-group-title" onClick={onDetailsClick(group.provider, auto)}>
+                              <span className="dsh-dot-model-group-label"><span className="dsh-dot-model-group-name" title={group.name}>{group.name}</span><span className="dsh-dot-model-group-count">{selected.length}/{keys.length}</span></span>
+                              <button type="button" className="dsh-dot-model-group-toggle" onClick={event => { event.preventDefault(); event.stopPropagation(); toggleTaskGroup(keys, selected.length !== keys.length) }} onKeyDown={event => event.stopPropagation()} onKeyUp={event => event.stopPropagation()}>{t(locale, selected.length === keys.length ? 'sTaskModelsGroupNone' : 'sTaskModelsGroupAll')}</button>
+                            </summary>
+                            {group.items.map(choice => {
+                              const key = taskModelKey(choice)
+                              const on = rule.list.includes(key)
+                              return (
+                                <Checkbox
+                                  key={key}
+                                  className={on ? 'dsh-dot-model-item dsh-dot-model-item--on' : 'dsh-dot-model-item'}
+                                  checked={on}
+                                  label={modelMenuShortName(choice)}
+                                  title={choice.label}
+                                  onChange={checked => toggleTaskModel(key, checked)}
+                                />
+                              )
+                            })}
+                          </details>
+                        )
+                      })}
+                      {staleKeys.length > 0 ? (
+                        <div className="dsh-dot-model-group">
+                          <div className="dsh-dot-model-group-title">{t(locale, 'sTaskModelsStaleGroup')}</div>
+                          {staleKeys.map(key => (
+                            <Checkbox
+                              key={key}
+                              className="dsh-dot-model-item dsh-dot-model-item--on"
+                              checked={rule.list.includes(key)}
+                              label={`${key} ${t(locale, 'sTaskModelsGone')}`}
+                              onChange={checked => toggleTaskModel(key, checked)}
+                            />
+                          ))}
+                        </div>
+                      ) : null}
+                    </div>
                   </div>
-                </div>
-              )}
-            </Field>
-            <InlineField
-              label={t(locale, 'sIdleCheck')}
-              tip={t(locale, 'sIdleCheckDesc')}
-              {...lock('idleCheckMinutes')}
-              control={<IdleCheckInput locale={locale} value={settings.idleCheckMinutes} onCommit={minutes => save({ idleCheckMinutes: minutes })} />}
-            />
+                )}
+              </Field>
+            </div>
+            <div className="dsh-dot-dispatch-group" data-group="routine">
+              <InlineField
+                label={t(locale, 'sIdleCheck')}
+                tip={t(locale, 'sIdleCheckDesc')}
+                {...lock('idleCheckMinutes')}
+                control={<IdleCheckInput locale={locale} value={settings.idleCheckMinutes} onCommit={minutes => save({ idleCheckMinutes: minutes })} />}
+              />
+            </div>
           </div>
         </div>
       ) : null}
@@ -925,35 +963,97 @@ export const settingsCss = `
   margin: 0; max-height: 160px; overflow: auto; padding: 8px 10px; white-space: pre-wrap; overflow-wrap: anywhere;
   background: var(--dsw-alias-bg-layer-2); border-radius: var(--dsw-radius-sm); font: 12px/18px var(--ds-font-family-code); color: var(--dsw-alias-label-primary);
 }
-.dsh-dot-chat .dsh-dot-model-picker {
-  display: flex; flex-direction: column; gap: 8px; margin-top: 4px; padding: 10px;
-  border-radius: var(--dsw-radius-md); background: var(--dsw-alias-bg-layer-1); box-shadow: var(--dsw-elevation-stroke);
+.dsh-dot-chat .dsh-dot-dispatch { min-width: 0; }
+.dsh-dot-chat .dsh-dot-dispatch-stack { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+.dsh-dot-chat .dsh-dot-dispatch-group { min-width: 0; }
+.dsh-dot-chat .dsh-dot-dispatch-group[data-group='permission'],
+.dsh-dot-chat .dsh-dot-dispatch-group[data-group='models'] {
+  padding: 12px 12px 14px; border-radius: var(--dsw-radius-md);
+  background: var(--dsw-alias-bg-layer-2); box-shadow: var(--dsw-elevation-stroke);
 }
-.dsh-dot-chat .dsh-dot-model-toolbar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.dsh-dot-chat .dsh-dot-model-toolbar > button { flex-shrink: 0; white-space: nowrap; }
-.dsh-dot-chat .dsh-dot-model-search { flex: 1 1 160px; min-width: 0; height: 28px; }
-.dsh-dot-chat .dsh-dot-model-list { display: flex; flex-direction: column; gap: 8px; max-height: 320px; overflow-y: auto; padding: 2px; }
-.dsh-dot-chat .dsh-dot-model-chips { display: flex; flex-wrap: wrap; gap: 4px; max-height: 96px; overflow-y: auto; }
-.dsh-dot-chat .dsh-dot-model-chip { display: inline-flex; align-items: center; gap: 4px; min-width: 0; max-width: 100%; padding: 1px 4px 1px 7px; border-radius: var(--dsw-radius-sm); background: var(--dsw-alias-bg-layer-2); font-size: 11px; line-height: 16px; color: var(--dsw-alias-label-primary); }
+.dsh-dot-chat .dsh-dot-dispatch-group[data-group='routine'] {
+  padding: 10px 2px 10px; border-top: 0.5px solid var(--dsw-alias-border-l2);
+}
+.dsh-dot-chat .dsh-dot-dispatch-group .dsh-ui-field { min-width: 0; padding-top: 0; padding-bottom: 0; }
+.dsh-dot-chat .dsh-dot-dispatch-group[data-group='routine'] .dsh-dot-inline-row { flex-wrap: wrap; }
+.dsh-dot-chat .dsh-dot-dispatch [role='tablist'] {
+  display: grid; width: 100%; max-width: 100%; min-width: 0; box-sizing: border-box;
+}
+.dsh-dot-chat .dsh-dot-dispatch [role='tablist'] [role='tab'] {
+  min-width: 0; padding-left: 8px; padding-right: 8px;
+}
+.dsh-dot-chat .dsh-dot-model-picker {
+  display: flex; flex-direction: column; gap: 10px; min-width: 0; margin-top: 10px;
+}
+.dsh-dot-chat .dsh-dot-model-toolbar { display: flex; flex-direction: column; align-items: stretch; gap: 8px; min-width: 0; }
+.dsh-dot-chat .dsh-dot-model-summary { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-width: 0; min-height: 24px; }
+.dsh-dot-chat .dsh-dot-model-summary > button { flex-shrink: 0; white-space: nowrap; }
+.dsh-dot-chat .dsh-dot-model-summary .dsh-ui-meta { font-size: 12px; line-height: 18px; font-variant-numeric: tabular-nums; color: var(--dsw-alias-label-secondary); }
+.dsh-dot-chat .dsh-dot-model-search { display: flex; width: 100%; min-width: 0; height: 32px; box-sizing: border-box; }
+/* The settings scroller is the only vertical scroll. Capping the list or the tokens adds a nested scrollbar. */
+.dsh-dot-chat .dsh-dot-model-list { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.dsh-dot-chat .dsh-dot-model-chips { display: flex; flex-wrap: wrap; gap: 6px; min-width: 0; }
+.dsh-dot-chat .dsh-dot-model-chip {
+  display: inline-flex; align-items: center; gap: 4px; min-width: 0; max-width: 100%; min-height: 24px;
+  padding: 2px 2px 2px 8px; border-radius: var(--dsw-radius-sm); background: var(--dsw-alias-bg-base);
+  box-shadow: var(--dsw-elevation-stroke); font-size: 12px; line-height: 18px; color: var(--dsw-alias-label-primary);
+}
 .dsh-dot-chat .dsh-dot-model-chip[data-stale] { color: var(--dsw-alias-label-tertiary); }
 .dsh-dot-chat .dsh-dot-model-chip[data-stale] .dsh-dot-model-chip-name { text-decoration: line-through; }
 .dsh-dot-chat .dsh-dot-model-chips[data-tone='deny'] .dsh-dot-model-chip { color: var(--dsw-alias-state-warn-primary); }
-.dsh-dot-chat .dsh-dot-model-chip-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dsh-dot-chat .dsh-dot-model-chip-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .dsh-dot-chat .dsh-dot-model-chip-provider { flex-shrink: 0; font-size: 10px; color: var(--dsw-alias-label-tertiary); }
-.dsh-dot-chat .dsh-dot-model-chip-remove { border: 0; background: none; padding: 0 2px; color: inherit; cursor: pointer; font-size: 13px; line-height: 1; }
-.dsh-dot-chat .dsh-dot-model-group > summary { display: flex; align-items: center; gap: 6px; list-style: none; cursor: pointer; }
+.dsh-dot-chat .dsh-dot-model-chip-remove {
+  display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0;
+  width: 18px; height: 18px; padding: 0; border: 0; border-radius: var(--dsw-radius-sm);
+  background: transparent; color: var(--dsw-alias-label-tertiary); cursor: pointer; font-size: 13px; line-height: 1;
+}
+.dsh-dot-chat .dsh-dot-model-chip-remove:hover { background: var(--dsw-alias-interactive-bg-hover); color: var(--dsw-alias-label-primary); }
+.dsh-dot-chat .dsh-dot-model-chip-remove:focus-visible { background: var(--dsw-alias-interactive-bg-hover); color: var(--dsw-alias-label-primary); outline: 1.5px solid var(--dsw-alias-state-business-primary); outline-offset: 1px; }
+.dsh-dot-chat .dsh-dot-model-group {
+  display: flex; flex-direction: column; gap: 1px; min-width: 0; padding: 4px;
+  border-radius: var(--dsw-radius-sm); background: var(--dsw-alias-bg-base);
+}
+.dsh-dot-chat .dsh-dot-model-group > summary {
+  display: flex; align-items: center; gap: 8px; min-width: 0; min-height: 28px; padding: 2px 4px 2px 2px;
+  list-style: none; cursor: pointer; border-radius: var(--dsw-radius-sm);
+}
 .dsh-dot-chat .dsh-dot-model-group > summary::-webkit-details-marker { display: none; }
-.dsh-dot-chat .dsh-dot-model-group > summary::before { content: '›'; display: inline-block; transition: transform 0.12s; color: var(--dsw-alias-label-tertiary); }
+.dsh-dot-chat .dsh-dot-model-group > summary:hover:not(:has(.dsh-dot-model-group-toggle:hover)) { background: var(--dsw-alias-interactive-bg-hover); }
+.dsh-dot-chat .dsh-dot-model-group > summary:focus-visible { outline: 1.5px solid var(--dsw-alias-state-business-primary); outline-offset: 1px; }
+.dsh-dot-chat .dsh-dot-model-group > summary::before {
+  content: '›'; display: inline-block; flex-shrink: 0; width: 12px; text-align: center;
+  transition: transform var(--ds-transition-duration, 0.2s) var(--ds-ease-in-out, ease); color: var(--dsw-alias-label-tertiary);
+}
 .dsh-dot-chat .dsh-dot-model-group[open] > summary::before { transform: rotate(90deg); }
-.dsh-dot-chat .dsh-dot-model-group-label { flex: 1 1 auto; min-width: 0; }
-.dsh-dot-chat .dsh-dot-model-group-count { margin-left: 6px; font-weight: 400; color: var(--dsw-alias-label-tertiary); }
-.dsh-dot-chat .dsh-dot-model-group-toggle { flex-shrink: 0; border: 0; background: none; padding: 0 6px; color: var(--dsw-alias-label-tertiary); font-size: 11px; line-height: 16px; cursor: pointer; }
-.dsh-dot-chat .dsh-dot-model-group-toggle:hover { color: var(--dsw-alias-label-primary); }
+.dsh-dot-chat .dsh-dot-model-group-label { display: inline-flex; align-items: center; gap: 6px; flex: 1 1 auto; min-width: 0; }
+.dsh-dot-chat .dsh-dot-model-group-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; color: var(--dsw-alias-label-primary); }
+.dsh-dot-chat .dsh-dot-model-group-count {
+  flex-shrink: 0; padding: 0 6px; border-radius: var(--dsw-radius-sm); background: var(--dsw-alias-bg-layer-2);
+  font-weight: 500; font-variant-numeric: tabular-nums; color: var(--dsw-alias-label-secondary);
+}
+.dsh-dot-chat .dsh-dot-model-group-toggle {
+  flex-shrink: 0; margin-left: auto; padding: 2px 8px; border: 0; border-radius: var(--dsw-radius-sm);
+  background: transparent; color: var(--dsw-alias-label-secondary); font: inherit; font-size: 12px; line-height: 18px; cursor: pointer;
+}
+.dsh-dot-chat .dsh-dot-model-group-toggle:hover { background: var(--dsw-alias-interactive-bg-hover); color: var(--dsw-alias-label-primary); }
+.dsh-dot-chat .dsh-dot-model-group-toggle:focus-visible { background: var(--dsw-alias-interactive-bg-hover); color: var(--dsw-alias-label-primary); outline: 1.5px solid var(--dsw-alias-state-business-primary); outline-offset: 1px; }
 .dsh-dot-chat .dsh-dot-model-empty { padding: 12px 8px; text-align: center; font-size: 12px; color: var(--dsw-alias-label-tertiary); }
-.dsh-dot-chat .dsh-dot-model-group { display: flex; flex-direction: column; gap: 2px; }
-.dsh-dot-chat .dsh-dot-model-group-title { padding: 4px 6px 2px; font-size: 11px; line-height: 16px; font-weight: 600; color: var(--dsw-alias-label-tertiary); }
-.dsh-dot-chat .dsh-dot-model-item { display: flex; align-items: center; gap: 8px; padding: 4px 6px; border-radius: var(--dsw-radius-sm); font-size: 13px; line-height: 20px; cursor: pointer; }
+.dsh-dot-chat .dsh-dot-model-picker .dsh-dot-model-empty {
+  padding: 18px 12px; border-radius: var(--dsw-radius-sm); background: var(--dsw-alias-bg-base); line-height: 18px;
+}
+.dsh-dot-chat .dsh-dot-model-group-title { padding: 4px 6px 2px; font-size: 12px; line-height: 18px; font-weight: 600; color: var(--dsw-alias-label-secondary); }
+.dsh-dot-chat .dsh-dot-model-item {
+  display: flex; align-items: center; gap: 8px; width: 100%; min-width: 0; box-sizing: border-box;
+  min-height: 30px; padding: 4px 8px; border-radius: var(--dsw-radius-sm); font-size: 13px; line-height: 20px; cursor: pointer;
+}
+.dsh-dot-chat .dsh-dot-model-item > span { min-width: 0; overflow-wrap: anywhere; }
 .dsh-dot-chat .dsh-dot-model-item:hover { background: var(--dsw-alias-interactive-bg-hover); }
+.dsh-dot-chat .dsh-dot-model-item--on { background: color-mix(in srgb, var(--dsw-alias-state-business-primary) 14%, transparent); }
+.dsh-dot-chat .dsh-dot-model-item--on:hover { background: color-mix(in srgb, var(--dsw-alias-state-business-primary) 22%, var(--dsw-alias-interactive-bg-hover)); }
+@media (prefers-reduced-motion: reduce) {
+  .dsh-dot-chat .dsh-dot-model-group > summary::before { transition: none; }
+}
 .dsh-dot-chat .dsh-dot-idle-check { display: inline-flex; align-items: center; gap: 6px; flex-shrink: 0; }
 .dsh-dot-chat .dsh-dot-update { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 4px; flex-wrap: wrap; }
 .dsh-dot-chat .dsh-dot-update-meta { flex: 1 1 160px; min-width: 0; }

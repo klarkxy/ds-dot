@@ -145,7 +145,11 @@ export const chatCss = settingsCss + `
   transition: background-color var(--ds-transition-duration, 0.2s) var(--ds-ease-in-out, ease-in-out), color var(--ds-transition-duration, 0.2s) var(--ds-ease-in-out, ease-in-out);
 }
 .dsh-dot-chat .dsh-dot-nav-item:hover { background: var(--dsw-alias-interactive-bg-hover); color: var(--dsw-alias-label-primary); }
-.dsh-dot-chat .dsh-dot-nav-item[aria-pressed='true'] { background: var(--dsw-alias-interactive-bg-active); color: var(--dsw-alias-label-primary); font-weight: 500; }
+.dsh-dot-chat .dsh-dot-nav-item[aria-pressed='true'] {
+  background: var(--dsw-alias-interactive-bg-active); color: var(--dsw-alias-label-primary); font-weight: 500;
+  box-shadow: inset 2px 0 0 var(--dsw-alias-state-business-primary);
+}
+.dsh-dot-chat .dsh-dot-nav-item[aria-pressed='true'] .dsh-dot-nav-icon { color: var(--dsw-alias-state-business-primary); }
 .dsh-dot-chat .dsh-dot-nav-item:focus-visible { outline: 2px solid var(--dsw-alias-brand-primary); outline-offset: -2px; }
 .dsh-dot-chat .dsh-dot-nav-icon { display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; width: 16px; height: 16px; color: inherit; }
 .dsh-dot-chat .dsh-dot-filters button {

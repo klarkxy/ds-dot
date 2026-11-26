@@ -7,7 +7,7 @@
 import { defineDomain, domainTable } from '@deepseek-ai/dsh-storage-domain'
 import { z } from 'zod'
 import type { ViewNode } from '@klarkxy/dsh-deep-view/contracts'
-import { SETTING_FIELDS, type AgreementEntry, type CognitionEntry, type CognitionVersion, type DotContextUsage, type DotUsageOffset, type InboxRecord, type RecipeProposal, type RecipeRecord, type TaskLink, type ReflectionRun, type ScheduleRecord, type SettingProposal, type TaskRecord } from './contracts.ts'
+import { SETTING_FIELDS, WATCHDOG_MODES, WATCHDOG_SIGNALS, type AgreementEntry, type CognitionEntry, type CognitionVersion, type DotContextUsage, type DotUsageOffset, type InboxRecord, type RecipeProposal, type RecipeRecord, type TaskLink, type ReflectionRun, type ScheduleRecord, type SettingProposal, type TaskRecord } from './contracts.ts'
 import { maxEntrySuffix, migrateAgreementEntries, migrateCognitionEntries } from './memory.ts'
 import { migrateTaskPermissionBaseline, TASK_PERMISSIONS } from './settings.ts'
 import type { UpdateStatus } from './auto-update.ts'
@@ -425,6 +425,60 @@ export function parseGithubPollEntry(value: unknown): GithubPollEntry | undefine
   return parsed.success ? parsed.data : undefined
 }
 
+const watchdogVerdictSchema = z.object({
+  verdict: z.enum(['progressing', 'spinning', 'off-scope']),
+  confidence: z.enum(['low', 'medium', 'high']),
+  summary: z.string(),
+  evidence: z.array(z.string()),
+}).strict()
+
+const watchdogHitEntrySchema = z.object({
+  kind: z.literal('hit'),
+  id: z.string().min(1),
+  at: z.number(),
+  runId: z.string().min(1),
+  changeId: z.string().min(1),
+  inputRef: z.string().min(1),
+  inputRevision: z.number().int(),
+  sessionId: z.string().min(1),
+  signal: z.enum(WATCHDOG_SIGNALS),
+  runPhase: z.string(),
+  mode: z.enum(WATCHDOG_MODES),
+  evidence: z.array(z.string()),
+  hardLimitReached: z.boolean().optional(),
+  judge: watchdogVerdictSchema.optional(),
+  stopped: z.boolean().optional(),
+  annotation: z.enum(['accurate', 'false-positive']).optional(),
+  annotatedAt: z.number().optional(),
+}).strict()
+
+const watchdogModelFallbackNoticeSchema = z.object({
+  configuredModel: z.string(),
+  reason: z.enum(['not-in-catalog', 'invalid-format', 'runtime-error']),
+  detail: z.string().optional(),
+  at: z.number(),
+}).strict()
+
+const watchdogMetaEntrySchema = z.object({
+  kind: z.literal('meta'),
+  watchdogStops: z.number().int().nonnegative(),
+  stopsByRun: z.record(z.string(), z.number().int().nonnegative()).optional(),
+  stopsByInput: z.record(z.string(), z.number().int().nonnegative()).optional(),
+  modelFallbackNotice: watchdogModelFallbackNoticeSchema.optional(),
+}).strict()
+
+const watchdogStoredEntrySchema = z.discriminatedUnion('kind', [
+  watchdogHitEntrySchema,
+  watchdogMetaEntrySchema,
+])
+
+export type WatchdogStoredEntry = z.infer<typeof watchdogStoredEntrySchema>
+
+export function parseWatchdogStoredEntry(value: unknown): WatchdogStoredEntry | undefined {
+  const parsed = watchdogStoredEntrySchema.safeParse(value)
+  return parsed.success ? parsed.data : undefined
+}
+
 const recipeBodyFields = {
   goal: z.string(),
   requirements: z.array(requirementSchema),
@@ -520,10 +574,10 @@ export function parseRecipeProposal(value: unknown): RecipeProposal | undefined 
 
 export const dotDomain = defineDomain({
   name: 'klarkxy_dsh_dot',
-  // v9 adds task links; v10 adds recipe proposals; v11 adds github_poll KV store.
+  // v9 adds task links; v10 adds recipe proposals; v11 adds github_poll KV store; v12 adds watchdog KV store.
   // Older rows still open: read schemas strip keys they no longer declare and dropped tables are never read.
-  version: 11,
-  compatibleVersions: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+  version: 12,
+  compatibleVersions: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
   tables: {
     // Stored rows may still carry the pre-entry knowledge shape; parseState migrates them.
     state: domainTable<string, StoredState>(stateSchema as z.ZodType<StoredState>),
@@ -540,6 +594,7 @@ export const dotDomain = defineDomain({
     links: domainTable<string, TaskLink>(taskLinkSchema),
     recipe_proposals: domainTable<string, RecipeProposal>(recipeProposalSchema),
     github_poll: domainTable<string, GithubPollEntry>(githubPollEntrySchema),
+    watchdog: domainTable<string, WatchdogStoredEntry>(watchdogStoredEntrySchema),
   },
 })
 

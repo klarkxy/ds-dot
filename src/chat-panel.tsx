@@ -1117,6 +1117,7 @@ function NoticeCard({ entry, locale, tasks, onOpenSession }: { entry: NoticeEntr
       <div className="dsh-dot-card-head">
         <Tag tone={NOTICE_TAG_TONE[entry.kind]}>{noticeTagLabel(locale, entry.kind)}</Tag>
         {entry.kind === 'approval' && entry.subject ? <code className="dsh-dot-code-pill">{entry.subject}</code> : null}
+        {entry.kind === 'task-human' && entry.subject ? <span className="dsh-dot-card-subject">{entry.subject}</span> : null}
         {entry.requestId ? <span className="dsh-dot-req-id">{entry.requestId}</span> : null}
         {perm ? <Tag tone="outline">{perm}</Tag> : null}
         {entry.viaSubagent ? <Tag tone="quiet">{t(locale, 'subagentTag')}</Tag> : null}

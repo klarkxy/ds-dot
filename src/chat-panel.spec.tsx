@@ -1489,4 +1489,91 @@ describe('backend health banners', () => {
     expect(entry?.textContent).toContain('PR acme/widgets#7 merged')
     await act(async () => root.unmount())
   })
+
+  it('renders task-human Watchdog stop subject and Context tab Watchdog Diagnostics annotation flow', async () => {
+    let watchdogState = {
+      mode: 'auto' as const,
+      configuredModel: 'deepseek/chat',
+      watchdogStops: 1,
+      calibration: {
+        windowDays: 14 as const,
+        total14d: 1,
+        reviewed14d: 0,
+        accurate14d: 0,
+        falsePositive14d: 0,
+        falsePositiveRate: null as number | null,
+      },
+      hits: [{
+        id: 'wd-hit-1',
+        at: Date.UTC(2026, 10, 26, 15, 30),
+        runId: 'run-9',
+        changeId: 'chg-9',
+        inputRef: 'issue#9',
+        inputRevision: 1,
+        sessionId: 'sess-9',
+        signal: 'no-progress' as const,
+        runPhase: 'active',
+        mode: 'auto' as const,
+        evidence: ['netActiveMs=920000ms with 0 writes'],
+        stopped: true,
+      }],
+    }
+    const snap: ChatSnapshot = {
+      ...empty,
+      items: [{
+        kind: 'notice',
+        key: 'n-wd-1',
+        text: '[dot notice] Updates:\nTasks:\n- task-human · sess-9: Watchdog stopped run-9',
+        notice: {
+          isReminder: false,
+          entries: [{
+            kind: 'task-human',
+            sessionId: 'sess-9',
+            subject: 'Watchdog circuit breaker: run-9',
+            summary: 'Stopped after repeated spinning.',
+          }],
+        },
+        at: 100,
+      }],
+    }
+    const api = makeApi(snap)
+    api.context = async () => ({ live: false, compactions: 0, watchdog: watchdogState })
+    api.annotateWatchdog = async (id, annotation) => {
+      watchdogState = {
+        ...watchdogState,
+        calibration: {
+          windowDays: 14,
+          total14d: 1,
+          reviewed14d: 1,
+          accurate14d: annotation === 'accurate' ? 1 : 0,
+          falsePositive14d: annotation === 'false-positive' ? 1 : 0,
+          falsePositiveRate: annotation === 'false-positive' ? 1 : 0,
+        },
+        hits: watchdogState.hits.map(hit => hit.id === id ? { ...hit, annotation, annotatedAt: 200 } : hit),
+      }
+      return watchdogState
+    }
+
+    const root = createRoot(document.getElementById('root')!)
+    await act(async () => { root.render(<ChatPanel locale="en" api={api} onOpenSession={() => {}} />) })
+    const row = document.querySelector<HTMLElement>('.dsh-dot-notice .dsh-stub-disclosure__row')!
+    await act(async () => { row.click() })
+    const entry = document.querySelector('.dsh-dot-notice-entry[data-kind="task-human"]')
+    expect(entry?.querySelector('.dsh-dot-card-subject')?.textContent).toBe('Watchdog circuit breaker: run-9')
+    expect(entry?.textContent).toContain('Stopped after repeated spinning.')
+
+    // Open drawer and navigate to Context tab.
+    await act(async () => { document.querySelector<HTMLButtonElement>('button[aria-label="Settings"]')!.click() })
+    await act(async () => { document.querySelector<HTMLButtonElement>('.dsh-dot-drawer-nav button[data-nav="context"]')!.click() })
+    await act(async () => { await Promise.resolve() })
+    expect(document.querySelector('section.dsh-dot-wd')).not.toBeNull()
+    expect(document.querySelector('[data-stat="fp-rate"] dd')?.textContent).toBe('No reviews yet')
+
+    const accurateBtn = document.querySelector<HTMLButtonElement>('[data-hit-id="wd-hit-1"] button[data-annotation="accurate"]')!
+    await act(async () => { accurateBtn.click() })
+    await act(async () => { await Promise.resolve() })
+    expect(document.querySelector('[data-stat="reviewed"] dd')?.textContent).toBe('1')
+    expect(document.querySelector('[data-stat="fp-rate"] dd')?.textContent).toBe('0.0%')
+    await act(async () => root.unmount())
+  })
 })

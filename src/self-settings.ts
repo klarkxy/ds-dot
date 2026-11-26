@@ -39,6 +39,7 @@ export function settingsSnapshotBlock(settings: DotSettings): string {
     `defaultTaskPreset: ${settings.defaultTaskPreset ?? DEFAULT_SETTINGS.defaultTaskPreset}`,
     `reflection: ${settings.reflection}`,
     `idleCheckMinutes: ${settings.idleCheckMinutes}`,
+    `watchdogMode: ${settings.watchdogMode}`,
   ].join('\n')
 }
 

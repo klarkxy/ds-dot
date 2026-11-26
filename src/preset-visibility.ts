@@ -20,7 +20,7 @@ import { AsyncLocalStorage } from 'node:async_hooks'
 import { symbols } from '@deepseek-ai/cordis'
 import { scopeOf } from '@deepseek-ai/dsh-scope'
 import { HOST_SCHEDULE_MUTATORS } from './capabilities.ts'
-import { PRESET_ID } from './contracts.ts'
+import { PRESET_ID, WATCHDOG_PRESET_ID } from './contracts.ts'
 import { REFLECTION_PRESET_ID } from './reflection.ts'
 
 export interface ListedPreset {
@@ -100,7 +100,7 @@ function sameAgentContext(candidate: unknown, target: unknown, targetScope: unkn
 }
 
 export function isInternalPreset(id: string): boolean {
-  return id === PRESET_ID || id === REFLECTION_PRESET_ID
+  return id === PRESET_ID || id === REFLECTION_PRESET_ID || id === WATCHDOG_PRESET_ID
 }
 
 export function visiblePresets<T extends { readonly id: string }>(rows: readonly T[]): T[] {

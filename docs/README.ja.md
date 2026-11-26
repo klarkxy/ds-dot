@@ -6,7 +6,7 @@
 
 **ドロシー（`dot`）** は **DeepSeek Harness（DSH）** のサイドバーに住む常駐パートナーです。ふだんの言葉で頼めば複数の作業を並行して整え、確認しやすい前後の差分で返してくれます。小さな確認は静かに通し、大事な操作の前だけ必ず止まって相談します。
 
-> **詳しい読み物と実機クリップ：** **[ドロシーの手帳](https://klarkxy.github.io/ds-dot/)** でイラスト付きの日記、[14 本の実機スクリーン録画](https://klarkxy.github.io/ds-dot/#clips)、[最初の一言サンプル](https://klarkxy.github.io/ds-dot/#about) をまとめて見られます。
+> **詳しい読み物と実機クリップ：** **[ドロシーの手帳](https://klarkxy.github.io/ds-dot/)** でイラスト付きの日記、[15 本の実機スクリーン録画](https://klarkxy.github.io/ds-dot/#clips)、[最初の一言サンプル](https://klarkxy.github.io/ds-dot/#about) をまとめて見られます。
 
 ## インストール
 
@@ -29,11 +29,11 @@ dsh plugin --profile web add ds-dot
 - **並列進行と見やすい差分：** ぶつからない作業は同時に進めたり別ブランチで隔離して作業します（手元の HEAD だけでなく PR やリモート参照からもブランチを切れ、別系統のブランチは手元へ誤ってマージせず保持か破棄を選べます）。渡す前に自分で確かめ、削除ファイルも含めた差分から行を指定して差し戻せます（3 回詰まると停止して相談）。
 - **明確な確認ライン：** 安全な参照確認やローカルテストは静かに実行し、削除・外部送信・機密ファイルアクセスや迷う場面では確認カードで停止します。パネルを閉じていてもバッジや通知でお知らせします。ファイル編集・コマンド実行・プラグイン管理のツールは派遣タスク専用で、ドロシー自身は使いません。リンクした開発用本体は別ワークツリーで直し、マージ後にだけ組み直します（以前の `lib/` は `~/.dsh/dot/self-upgrade` に控え、マーケットから入れた本体には手を付けません）。
 - **レシピと定時実行：** いつもの週次手順をレシピとして保存し、自然言語のリマインダーから直接起動可能。調整後に調子が落ちたら旧版への復元案も出します。
-- **項目ロックと GitHub 監視：** 変えたくない設定には個別にロックをかけられ、公開 URL なしでも手元の `gh` で Issue・PR・コメント・CI をポーリングできます（既定では全リポジトリ無効）。他プラグインの追加ツールは既定オフで、必要に応じて `@klarkxy/dsh-dev-index`、`@klarkxy/dsh-model-picker`、即時通知用の `@deepseek-ai/dsh-webhook` も併用できます。
+- **項目ロック・見張り巡回と GitHub 監視：** 変えたくない設定には個別にロックをかけられ、公開 URL なしでも手元の `gh` で Issue・PR・コメント・CI をポーリングできます（既定では全リポジトリ無効）。空回りや停止を検知する **Run Watchdog**（既定はモデル呼び出しなしの `observe`、コンテキスト診断で 14 日間の誤検知チェック可）も備え、他プラグインの追加ツールは既定オフで必要に応じて `@klarkxy/dsh-dev-index`、`@klarkxy/dsh-model-picker`、即時通知用の `@deepseek-ai/dsh-webhook` も併用できます。
 - **Dorothy 専用 MCP サーバー：** 「MCP サーバー」ページで DeepWiki・GitHub・Context7 などのリモートサービスや独自サーバーを接続。Dorothy だけにマウントされ、接続後も「追加機能」での明示的な許可がないとツールは呼び出せません。
 
 ## リンク
 
 - [ドロシーの手帳（GitHub Pages）](https://klarkxy.github.io/ds-dot/) — 日記、[実機録画](https://klarkxy.github.io/ds-dot/#clips)、[導入ガイド](https://klarkxy.github.io/ds-dot/#about)
-- [技術リファレンス](reference.md) — 承認モード、自動遮断ルール、プロファイル設定、ローカル `gh` 監視と Webhook 設定、アップグレード案内
+- [技術リファレンス](reference.md) — 承認モード、自動遮断ルール、プロファイル設定、Run Watchdog と診断校正、ローカル `gh` 監視と Webhook 設定、アップグレード案内
 - [コントリビュート](https://github.com/klarkxy/ds-dot/blob/main/CONTRIBUTING.md) · [リリース手順](https://github.com/klarkxy/ds-dot/blob/main/docs/releasing.md) · [Apache-2.0 ライセンス](../LICENSE)

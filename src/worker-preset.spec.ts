@@ -349,7 +349,7 @@ describe('dot-worker preset definition', () => {
       state: new Map(), tasks: new Map(), tickets: new Map(), schedules: new Map(),
       recipes: new Map(), recipe_proposals: new Map(), proposals: new Map(),
       changes: new Map(), inputs: new Map(), runs: new Map(), verifications: new Map(),
-      peers: new Map(), inbox: new Map(), links: new Map(), github_poll: new Map(),
+      peers: new Map(), inbox: new Map(), links: new Map(), github_poll: new Map(), watchdog: new Map(),
     }
     const domain = {
       table: (name: string) => ({
@@ -475,7 +475,7 @@ describe('dot-worker preset definition', () => {
           })
           await expect(fiber.await().then(() => 'ok')).resolves.toBe('ok')
           await expect(fiber.dispose().then(() => 'ok')).resolves.toBe('ok')
-          expect(warnSpy).toHaveBeenCalledTimes(3)
+          expect(warnSpy).toHaveBeenCalledTimes(4)
         } finally {
           rmSync(homeDir, { recursive: true, force: true })
         }
@@ -512,7 +512,7 @@ describe('dot-worker preset definition', () => {
           await expect(fiber.await().then(() => 'ok')).resolves.toBe('ok')
           await new Promise(resolve => setTimeout(resolve, 25))
           await expect(fiber.dispose().then(() => 'ok')).resolves.toBe('ok')
-          if (loggerMode === 'warn-throws') expect(asyncWarnSpy).toHaveBeenCalledTimes(3)
+          if (loggerMode === 'warn-throws') expect(asyncWarnSpy).toHaveBeenCalledTimes(4)
           else expect(loggerGetterSpy).toHaveBeenCalled()
         } finally {
           rmSync(homeDir, { recursive: true, force: true })

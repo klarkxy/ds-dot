@@ -36,6 +36,11 @@ export const DOT_TRACE = {
   githubPollDirectDelivered: 'github-poll.direct-delivered',
   githubPollBounced: 'github-poll.bounced',
   githubPollClosure: 'github-poll.closure',
+  watchdogHit: 'watchdog.hit',
+  watchdogJudge: 'watchdog.judge',
+  watchdogStop: 'watchdog.stop',
+  watchdogAnnotate: 'watchdog.annotate',
+  watchdogFallback: 'watchdog.fallback',
 } as const
 
 export type DotTraceEventName = (typeof DOT_TRACE)[keyof typeof DOT_TRACE]

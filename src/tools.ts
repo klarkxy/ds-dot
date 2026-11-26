@@ -541,7 +541,7 @@ export function apply(ctx: Context): void {
   const self = () => dot().selfSettings
   tool(defineToolInput({
     name: TOOL.settings,
-    description: `Read full settings or submit a setting-change proposal for human approval. Live core switches (scope, approvals, questions, taskPermission, defaultTaskPreset, reflection, idleCheckMinutes) are already shown in [settings snapshot]; call action=read only when you need full values, lock states, or pending proposals. action=propose queues one unlocked setting change for approval in Settings (nothing changes until approved). Supported fields: model, approvals, questions, scope, taskModels, taskPermission, defaultTaskPreset, reflection, idleCheckMinutes (0–1440; 0 disables), persona, address, agreements (agreements bulk text). Pass value as a JSON-encoded string matching action=read (e.g. "\\"human\\"", "true", "{\\"provider\\":\\"p\\",\\"model\\":\\"m\\"}", or "null" to reset a clearable default). Locks and homeDir are human-only; use ${TOOL.agreement} and ${TOOL.cognition} for normal knowledge updates.`,
+    description: `Read full settings or submit a setting-change proposal for human approval. Live core switches (scope, approvals, questions, taskPermission, defaultTaskPreset, reflection, idleCheckMinutes, watchdogMode) are already shown in [settings snapshot]; call action=read only when you need full values, lock states, or pending proposals. action=propose queues one unlocked setting change for approval in Settings (nothing changes until approved). Supported fields: model, approvals, questions, scope, taskModels, taskPermission, defaultTaskPreset, reflection, idleCheckMinutes (0–1440; 0 disables), watchdogMode (off | observe | auto), watchdogModel ("provider/model" or null for host default), persona, address, agreements (agreements bulk text). Pass value as a JSON-encoded string matching action=read (e.g. "\\"human\\"", "true", "{\\"provider\\":\\"p\\",\\"model\\":\\"m\\"}", or "null" to reset a clearable default). Locks and homeDir are human-only; use ${TOOL.agreement} and ${TOOL.cognition} for normal knowledge updates.`,
     parameters: {
       action: { type: 'string', enum: ['read', 'propose'], required: true, description: 'Operation: read or propose.' },
       field: { type: 'string', description: 'propose: target setting field name.' },
@@ -616,6 +616,28 @@ export function apply(ctx: Context): void {
     },
     title: 'Capabilities',
   }), false)
+
+  // ── dot_watchdog (strictly read-only diagnostics query) ──────────────────
+  tool(defineToolInput({
+    name: TOOL.watchdog,
+    description: 'Read-only query over Watchdog diagnostics: current watchdogMode/watchdogModel, watchdogStops counter, 14-day false-positive calibration stats, model fallback notices, and recent signal hits with evidence and judge verdicts. Use this to explain why a run was flagged or stopped; Watchdog never auto-modifies prompts or settings (propose setting changes via dot_settings).',
+    parameters: {
+      run_id: { type: 'string', description: 'Optional run id filter.' },
+      task_id: { type: 'string', description: 'Optional change/task id filter.' },
+      signal: { type: 'string', description: 'Optional signal type filter (repeat-tool-call, repeat-tool-error, no-progress, compaction-loop, budget-retry-stall, silent-stall, infra-failure).' },
+      limit: { type: 'integer', description: 'Maximum hits to return (default 15, max 50).' },
+    },
+    execute: async (args) => {
+      const limit = num(args, 'limit')
+      return dot().queryWatchdog({
+        ...(str(args, 'run_id') ? { runId: str(args, 'run_id')! } : {}),
+        ...(str(args, 'task_id') ? { changeId: str(args, 'task_id')! } : {}),
+        ...(str(args, 'signal') ? { signal: str(args, 'signal')! } : {}),
+        ...(limit !== undefined ? { limit } : {}),
+      })
+    },
+    title: 'Watchdog diagnostics',
+  }), true)
 }
 
 /** Shared defaults: text output, serial execution, a generic call card. */

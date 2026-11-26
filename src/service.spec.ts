@@ -6361,4 +6361,64 @@ describe('dot-worker preset selection and security hook parity', () => {
       await h.service.dispose()
     }
   })
+
+  it('integrates Watchdog observe default, auto hard-stop keeping failedRounds isolated, annotation, and factoryReset cleanup', async () => {
+    const h = setup({ scope: 'all', watchdogMode: 'observe' })
+    const change = await h.service.createWorkChange({ title: 'WD', cwd: '/repo', goal: 'fix bug', at: 1 })
+    const res = await h.service.manageTask({ action: 'dispatch', task_id: change.id, access: 'read', instruction: 'go' })
+    const runId = /started (run-\d+)/.exec(res)![1]!
+    const sid = h.store.work.run(runId)!.sessionId!
+
+    // Default observe mode: 4 repeat tool calls -> records hit & contextView.watchdog, 0 internal judge calls
+    for (let i = 1; i <= 4; i++) {
+      h.service.onSessionEvent(sid, {
+        type: 'tool/call',
+        seq: i,
+        time: 1000 + i,
+        data: { callId: `c-${i}`, name: 'read_file', arguments: '{"path":"a.ts"}' },
+      })
+    }
+    await h.service.watchdog.flushJudge()
+    const ctxView = await h.service.contextView()
+    expect(ctxView.watchdog?.mode).toBe('observe')
+    expect(ctxView.watchdog?.hits).toHaveLength(1)
+    expect(ctxView.watchdog?.hits[0]?.signal).toBe('repeat-tool-call')
+    expect(h.calls.some(c => c.includes('internal'))).toBe(false)
+
+    // Annotation updates 14d calibration metrics
+    const hitId = ctxView.watchdog!.hits[0]!.id
+    await h.service.annotateWatchdogHit(hitId, 'accurate')
+    expect(h.service.watchdogDiagnostics().calibration).toMatchObject({
+      total14d: 1,
+      reviewed14d: 1,
+      accurate14d: 1,
+      falsePositive14d: 0,
+      falsePositiveRate: 0,
+    })
+
+    // Switch to auto mode -> single-turn >=8 errors triggers watchdog stop without incrementing failedRounds
+    await h.store.setSettings({ ...h.store.settings, watchdogMode: 'auto' })
+    h.service.settingsChanged()
+    h.service.onSessionEvent(sid, { type: 'turn/start', seq: 10, time: 2000, data: { turn: 2 } })
+    for (let i = 1; i <= 8; i++) {
+      h.service.onSessionEvent(sid, {
+        type: 'tool/result',
+        seq: 10 + i,
+        time: 2000 + i,
+        data: { turn: 2, message: { toolCallId: `e-${i}`, isError: true, content: 'ENOENT' } },
+      })
+    }
+    await h.service.watchdog.flushJudge()
+    expect(h.store.work.run(runId)?.phase).toBe('stopped')
+    expect(h.store.work.run(runId)?.closeReason).toBe('watchdog')
+    expect(h.store.work.failedRounds(change.id)).toBe(0)
+    expect(h.service.watchdogDiagnostics().watchdogStops).toBe(1)
+
+    // Factory reset wipes Watchdog hits and counters
+    const preview = h.service.previewFactoryReset()
+    await h.service.confirmFactoryReset(preview.token)
+    expect(h.service.watchdogDiagnostics().watchdogStops).toBe(0)
+    expect(h.service.watchdogDiagnostics().hits).toEqual([])
+    await h.service.dispose()
+  })
 })

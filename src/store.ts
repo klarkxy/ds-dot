@@ -15,7 +15,7 @@ import { ownedSessionIds, sessionIsOwned } from './peer.ts'
 import { WorkBook, isUnknownState, type ChangeRecord, type WorkPersist } from './work.ts'
 import { projectWorkIdle, projectWorkLedger } from './work-actions.ts'
 
-type TableName = 'state' | 'tasks' | 'schedules' | 'proposals' | 'changes' | 'inputs' | 'runs' | 'verifications' | 'peers' | 'inbox' | 'recipes' | 'links' | 'recipe_proposals' | 'github_poll'
+type TableName = 'state' | 'tasks' | 'schedules' | 'proposals' | 'changes' | 'inputs' | 'runs' | 'verifications' | 'peers' | 'inbox' | 'recipes' | 'links' | 'recipe_proposals' | 'github_poll' | 'watchdog'
 
 export interface DotTable {
   entries(): IterableIterator<[unknown, unknown]>
@@ -484,6 +484,11 @@ export class DotStore {
           const keys = [...pollTable.entries()].map(([key]) => String(key))
           for (const key of keys) await this.durable(() => pollTable.delete(key))
         }
+        const wdTable = this.watchdogTable()
+        if (wdTable) {
+          const keys = [...wdTable.entries()].map(([key]) => String(key))
+          for (const key of keys) await this.durable(() => wdTable.delete(key))
+        }
       }
       this.tasks.clear()
       this.reminders.clear()
@@ -781,6 +786,20 @@ export class DotStore {
     if (!this.domain) return undefined
     try {
       const table = this.domain.table('github_poll')
+      if (!table || typeof table.entries !== 'function' || typeof table.get !== 'function' || typeof table.put !== 'function') return undefined
+      const iter = table.entries()
+      if (!iter) return undefined
+      return table
+    } catch {
+      return undefined
+    }
+  }
+
+  /** Safe accessor for the v12 `watchdog` KV table; returns undefined on legacy minimal mock domains. */
+  watchdogTable(): DotTable | undefined {
+    if (!this.domain) return undefined
+    try {
+      const table = this.domain.table('watchdog')
       if (!table || typeof table.entries !== 'function' || typeof table.get !== 'function' || typeof table.put !== 'function') return undefined
       const iter = table.entries()
       if (!iter) return undefined

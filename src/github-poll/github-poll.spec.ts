@@ -40,7 +40,7 @@ import {
 } from './index.ts'
 
 function memoryDomain(): { domain: DotDomainHandle; tables: Record<string, Map<string, unknown>>; puts: string[] } {
-  const names = ['state', 'tasks', 'schedules', 'proposals', 'recipes', 'links', 'recipe_proposals', 'changes', 'inputs', 'runs', 'verifications', 'peers', 'inbox', 'github_poll']
+  const names = ['state', 'tasks', 'schedules', 'proposals', 'recipes', 'links', 'recipe_proposals', 'changes', 'inputs', 'runs', 'verifications', 'peers', 'inbox', 'github_poll', 'watchdog']
   const tables: Record<string, Map<string, unknown>> = {}
   for (const name of names) tables[name] = new Map()
   const puts: string[] = []

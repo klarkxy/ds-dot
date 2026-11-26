@@ -40,4 +40,22 @@ describe('dot trace', () => {
     logger.info.mockImplementation(() => { throw new Error('disk full') })
     expect(traceSessionSent(logger, { sessionId: 's1', queued: false })).toBe(false)
   })
+
+  it('emits watchdog trace events with DROPPED_KEY and TEXT_MAX hygiene', () => {
+    const logger = sink()
+    emitDotTrace(logger, {
+      event: 'watchdog.hit',
+      level: 'warn',
+      message: 'Watchdog signal repeat-tool-call fired.',
+      changeId: 'chg-1',
+      sessionId: 'sess-1',
+      data: { signal: 'repeat-tool-call', detail: 'dropped', token: 'secret', count: 4 },
+    })
+    expect(logger.warn).toHaveBeenCalledWith('watchdog.hit', 'Watchdog signal repeat-tool-call fired.', undefined, {
+      changeId: 'chg-1',
+      sessionId: 'sess-1',
+      signal: 'repeat-tool-call',
+      count: 4,
+    })
+  })
 })

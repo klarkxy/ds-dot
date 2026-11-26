@@ -160,4 +160,24 @@ describe('Dorothy self settings', () => {
     await h.store.setSettings({ ...h.store.settings, locks: { defaultTaskPreset: true } })
     await expect(h.self.propose({ field: 'defaultTaskPreset', value: 'standard', reason: 'revert' })).rejects.toThrow(/locked by the human/)
   })
+
+  it('reads, proposes, approves, clears, and enforces locks on watchdogMode and watchdogModel', async () => {
+    const h = setup()
+    expect(await h.self.read()).toContain('watchdogMode: observe')
+
+    await h.self.propose({ field: 'watchdogMode', value: 'auto', reason: 'enable automated judge' })
+    const modeProposal = h.store.settingProposals[0]!
+    expect(modeProposal).toMatchObject({ field: 'watchdogMode', before: 'observe', after: 'auto' })
+    expect(await h.self.decide(modeProposal.id, true)).toContain('watchdogMode is now auto')
+    expect(h.store.settings.watchdogMode).toBe('auto')
+
+    await h.self.propose({ field: 'watchdogModel', value: 'openai/gpt-4o', reason: 'dedicated cheap judge' })
+    const modelProposal = h.store.settingProposals[0]!
+    expect(modelProposal).toMatchObject({ field: 'watchdogModel', before: null, after: 'openai/gpt-4o' })
+    expect(await h.self.decide(modelProposal.id, true)).toContain('watchdogModel is now openai/gpt-4o')
+    expect(h.store.settings.watchdogModel).toBe('openai/gpt-4o')
+
+    await h.store.setSettings({ ...h.store.settings, locks: { watchdogMode: true } })
+    await expect(h.self.propose({ field: 'watchdogMode', value: 'off', reason: 'disable' })).rejects.toThrow(/locked by the human/)
+  })
 })

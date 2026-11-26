@@ -306,4 +306,28 @@ describe('githubPoll setting', () => {
 
     expect(patchSettings(saved, { githubPoll: null }).githubPoll).toBeUndefined()
   })
+
+  it('defaults watchdogMode to observe and validates watchdogMode and watchdogModel', () => {
+    expect(DEFAULT_SETTINGS.watchdogMode).toBe('observe')
+    expect(DEFAULT_SETTINGS.watchdogModel).toBeUndefined()
+    expect(parseSettings({}).watchdogMode).toBe('observe')
+    expect(parseSettings({ watchdogMode: 'auto' }).watchdogMode).toBe('auto')
+    expect(parseSettings({ watchdogMode: 'bogus' }).watchdogMode).toBe('observe')
+    expect(parseSettings({ watchdogModel: 'openai/gpt-4o' }).watchdogModel).toBe('openai/gpt-4o')
+    expect(parseSettings({ watchdogModel: { provider: 'anthropic', model: 'claude-3-7-sonnet' } }).watchdogModel).toBe('anthropic/claude-3-7-sonnet')
+    expect(parseSettings({ watchdogModel: '' }).watchdogModel).toBeUndefined()
+    expect(parseSettings({ watchdogModel: 'no-slash' }).watchdogModel).toBeUndefined()
+
+    const updated = patchSettings(DEFAULT_SETTINGS, { watchdogMode: 'auto', watchdogModel: 'openai/gpt-4o' })
+    expect(updated.watchdogMode).toBe('auto')
+    expect(updated.watchdogModel).toBe('openai/gpt-4o')
+    expect(patchSettings(updated, { watchdogModel: null }).watchdogModel).toBeUndefined()
+    expect(patchSettings(updated, { watchdogModel: '' }).watchdogModel).toBeUndefined()
+    expect(patchSettings(DEFAULT_SETTINGS, { watchdogModel: { provider: 'p', model: 'm' } }).watchdogModel).toBe('p/m')
+    expect(() => patchSettings(DEFAULT_SETTINGS, { watchdogMode: 'strict' })).toThrow(/watchdogMode/)
+    expect(() => patchSettings(DEFAULT_SETTINGS, { watchdogModel: 'missing-slash' })).toThrow(/watchdogModel/)
+
+    const locked = patchSettings(DEFAULT_SETTINGS, { locks: { watchdogMode: true, watchdogModel: true } })
+    expect(locked.locks).toEqual({ watchdogMode: true, watchdogModel: true })
+  })
 })

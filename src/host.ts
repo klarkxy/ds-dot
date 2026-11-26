@@ -28,7 +28,7 @@ import type { RawEvent } from './chat.ts'
 import type { ParsedNotice } from './chat-format.ts'
 import { contextView, EMPTY_SCAN, foldScan, type ContextScan, type PreTurnContext, type ProjectionValues } from './context.ts'
 import { assembledSurface, type AssembledPromptInput } from './context-surface.ts'
-import type { DotContextUsage, DotContextView, ModelChoice, TrajectoryView } from './contracts.ts'
+import { WATCHDOG_PRESET_ID, type DotContextUsage, type DotContextView, type ModelChoice, type TrajectoryView } from './contracts.ts'
 import type { CatalogModel, TaskModelCatalog } from './task-models.ts'
 import type { CatalogPreset, TaskPresetCatalog } from './task-presets.ts'
 import { REFLECTION_PRESET_ID, REFLECTION_ALLOW } from './reflection.ts'
@@ -120,7 +120,7 @@ export interface DotHost {
    * pass (the reflection run). It keeps the host's default permissions: such a
    * pass needs no file system access at all.
    */
-  createInternal(cwd: string, preset: string): Promise<string>
+  createInternal(cwd: string, preset: string, options?: { readonly allow?: readonly string[]; readonly model?: ModelChoice | null }): Promise<string>
   /** Deliver one prompt to an internal session and wake it. */
   promptInternal(sessionId: string, text: string): Promise<void>
   /** Wait for the internal turn, cancelling and rejecting on timeout or failure. */
@@ -351,6 +351,16 @@ export function bindHost(get: Get, log?: (message: string) => void, modelOf?: ()
       },
     } as AgentOptions
   }
+  const explicitAgentOptions = (model: ModelChoice | null): AgentOptions => {
+    const defaults = need<DefaultModel>('agentDefaultModel')
+    return {
+      get provider() { return model?.provider ?? defaults.currentSelection().provider },
+      get model() { return model?.model ?? defaults.currentSelection().model },
+      get reasoningEffort() {
+        return model ? model.reasoningEffort : defaults.currentSelection().reasoningEffort
+      },
+    } as AgentOptions
+  }
   // Same composition the controller uses for its own sessions: model selection, then the preset.
   const setupFor = async (preset: string, allow: readonly string[]) => {
     const presets = need<PresetRegistry>('agentPresets')
@@ -485,8 +495,8 @@ export function bindHost(get: Get, log?: (message: string) => void, modelOf?: ()
       const presets: CatalogPreset[] = []
       for (const entry of await registry.list()) {
         if (typeof entry.id !== 'string' || !entry.id) continue
-        // The reflection preset is internal; dot must not pick it as a task preset.
-        if (entry.id === REFLECTION_PRESET_ID) continue
+        // The reflection and watchdog presets are internal; dot must not pick them as task presets.
+        if (entry.id === REFLECTION_PRESET_ID || entry.id === WATCHDOG_PRESET_ID) continue
         presets.push({
           id: entry.id,
           ...typeof entry.name === 'string' && entry.name ? { name: entry.name } : {},
@@ -739,13 +749,17 @@ export function bindHost(get: Get, log?: (message: string) => void, modelOf?: ()
       permit(handle.agent.session, FULL_ACCESS)
       return sessionId
     },
-    async createInternal(cwd, preset) {
+    async createInternal(cwd, preset, options) {
       await mkdir(cwd, { recursive: true })
-      const { id, setup } = await setupFor(preset, REFLECTION_ALLOW)
+      const allow = options?.allow ?? (preset === WATCHDOG_PRESET_ID ? [] : REFLECTION_ALLOW)
+      const { id, setup } = await setupFor(preset, allow)
       const sessionId = `session-${randomUUID()}` as SessionId
-      // A reflection pass needs no file system or shell access, so it keeps the
-      // host's default permissions instead of dot's full access.
-      const handle = await agents().create({ sessionId, agentOptions: agentOptions(), meta: { cwd, origin: 'subagent', agentPreset: id }, setup })
+      // Internal passes need no file system or shell access, so they keep the
+      // host's default permissions instead of dot's full access. When `options.model`
+      // is provided (`null` = host default, `ModelChoice` = explicit override),
+      // never inherit Dorothy's `store.settings.model`.
+      const resolvedOptions = options?.model !== undefined ? explicitAgentOptions(options.model) : agentOptions()
+      const handle = await agents().create({ sessionId, agentOptions: resolvedOptions, meta: { cwd, origin: 'subagent', agentPreset: id }, setup })
       handles.set(sessionId, handle)
       return sessionId
     },

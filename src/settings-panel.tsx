@@ -580,6 +580,7 @@ function GithubSettingsSection({ locale, api, settings, onSave }: {
 
   const [pollRepoDraft, setPollRepoDraft] = useState('')
   const [pollRepoError, setPollRepoError] = useState('')
+  const [advancedOpen, setAdvancedOpen] = useState(false)
   const [webhookRepoDraft, setWebhookRepoDraft] = useState('')
   const [webhookRepoError, setWebhookRepoError] = useState('')
 
@@ -644,6 +645,7 @@ function GithubSettingsSection({ locale, api, settings, onSave }: {
     }
     if (gh.webhookRepos.includes(norm)) {
       setPollRepoError(t(locale, 'sGhErrMutualExclusionPoll').replace('{repo}', norm))
+      setAdvancedOpen(true)
       return
     }
     if (gh.repos.includes(norm)) {
@@ -723,6 +725,7 @@ function GithubSettingsSection({ locale, api, settings, onSave }: {
   }
 
   const rules = gh.admission ?? []
+  const advancedCount = rules.length + gh.webhookRepos.length
   const addAdmissionRule = () => {
     const raw = admRepo.trim()
     const norm = raw === '*' ? '*' : normalizeRepoInput(raw)
@@ -869,9 +872,10 @@ function GithubSettingsSection({ locale, api, settings, onSave }: {
         ) : null}
       </div>
 
-      <details className="dsh-dot-gh-details dsh-dot-gh-advanced" data-gh-section="advanced">
+      <details className="dsh-dot-gh-details dsh-dot-gh-advanced" data-gh-section="advanced" open={advancedOpen} onToggle={event => setAdvancedOpen(event.currentTarget.open)}>
         <summary className="dsh-dot-gh-details-summary">
           <span>{t(locale, 'sGhAdvanced')}</span>
+          {advancedCount > 0 ? <span className="dsh-dot-model-group-count">{advancedCount}</span> : null}
         </summary>
         <div className="dsh-dot-gh-details-body">
           <div className="dsh-ui-form">
@@ -1412,7 +1416,7 @@ export function SettingsPanel({ locale, api, settings, section = 'all', proposal
                   onChange={next => save({ watchdogMode: next })}
                 />
               </Field>
-              {(settings.watchdogMode ?? 'observe') === 'auto' ? (
+              {(settings.watchdogMode ?? 'observe') === 'auto' || Boolean(settings.watchdogModel) ? (
                 <Field label={t(locale, 'sWatchdogModel')} tip={t(locale, 'sWatchdogModelDesc')} help={modelHelp} helpTone={models.failed ? 'warn' : undefined}>
                   <ModelPickerInput
                     locale={locale}
@@ -1654,7 +1658,7 @@ export const settingsCss = `
 .dsh-dot-chat .dsh-dot-mcp-remove:hover:not(:disabled) { color: var(--dsw-alias-state-error-primary, var(--dsw-alias-label-primary)); background: var(--dsw-alias-interactive-bg-hover); }
 /* GitHub poll-primary settings card, status banners, connection check, and collapsed advanced panels. */
 .dsh-dot-chat .dsh-dot-gh { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
-.dsh-dot-chat .dsh-dot-gh-card { display: flex; flex-direction: column; gap: 10px; padding: 12px 14px; border-radius: var(--dsw-radius-md); background: var(--dsw-alias-bg-layer-1); box-shadow: var(--dsw-elevation-stroke); min-width: 0; }
+.dsh-dot-chat .dsh-dot-pane-section.dsh-dot-gh, .dsh-dot-chat .dsh-dot-pane-section.dsh-dot-factory { padding-top: 14px; padding-bottom: 14px; }
 .dsh-dot-chat .dsh-dot-gh-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
 .dsh-dot-chat .dsh-dot-gh-title { margin: 0; font-size: 14px; line-height: 20px; font-weight: 600; color: var(--dsw-alias-label-primary); }
 .dsh-dot-chat .dsh-dot-gh-desc { margin: 0; font-size: 12px; line-height: 18px; color: var(--dsw-alias-label-secondary); }

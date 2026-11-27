@@ -292,6 +292,17 @@ describe('i18n locale resolution and pack completeness', () => {
     }
   })
 
+  it('keeps context watchdog labels aligned with settings labels in every locale', () => {
+    for (const loc of SUPPORTED_LOCALES) {
+      const ui = localePack(loc).ui
+      for (const mode of ['off', 'observe', 'auto'] as const) {
+        expect(ui[`ctxWatchdogMode_${mode}`], `${loc} ctxWatchdogMode_${mode}`).toBe(ui[`sWatchdogMode_${mode}`])
+      }
+      expect(ui.ctxWatchdogModelLabel, `${loc} ctxWatchdogModelLabel`).toBe(ui.sWatchdogModel)
+      expect(ui.ctxWatchdogTitle, `${loc} ctxWatchdogTitle`).toBe(ui.sWatchdogMode)
+    }
+  })
+
   it('has identical keys, non-empty strings, and matching {placeholder} tokens across all 8 TypeScript packs', () => {
     const ref = localePack('en')
     const refSections = {

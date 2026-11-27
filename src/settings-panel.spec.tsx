@@ -1384,6 +1384,46 @@ describe('GitHub poll-primary settings', () => {
     await act(async () => root.unmount())
   })
 
+  it('shows a configured-count badge on Advanced only when admission rules or webhook repos exist', async () => {
+    const api = {
+      models: async () => ({ groups: [] }),
+      settings: async () => DEFAULT_SETTINGS,
+      settingProposals: async () => [],
+      decideSetting: async () => 'ok',
+      setSettings: async () => DEFAULT_SETTINGS,
+    }
+    const admissionRule = { repo: 'acme/widgets', eventType: 'ci', senderClass: 'human', action: 'inbox' } as const
+    const withBoth: DotSettings = {
+      ...DEFAULT_SETTINGS,
+      githubPoll: { ...DEFAULT_GITHUB_POLL_SETTINGS, webhookRepos: ['acme/hooks'], admission: [admissionRule] },
+    }
+    const withRuleOnly: DotSettings = {
+      ...DEFAULT_SETTINGS,
+      githubPoll: { ...DEFAULT_GITHUB_POLL_SETTINGS, admission: [admissionRule] },
+    }
+    const withWebhookOnly: DotSettings = {
+      ...DEFAULT_SETTINGS,
+      githubPoll: { ...DEFAULT_GITHUB_POLL_SETTINGS, webhookRepos: ['acme/hooks'] },
+    }
+    const root = createRoot(document.getElementById('root')!)
+    const render = async (settings: DotSettings) => {
+      await act(async () => root.render(<SettingsPanel locale="en" section="github" api={api as never} settings={settings} onSaved={() => {}} />))
+      await act(async () => { await Promise.resolve() })
+    }
+    const badge = () => document.querySelector('details[data-gh-section="advanced"] .dsh-dot-gh-details-summary .dsh-dot-model-group-count')
+
+    await render(withBoth)
+    expect(badge()?.textContent).toBe('2')
+    await render(withRuleOnly)
+    expect(badge()?.textContent).toBe('1')
+    await render(withWebhookOnly)
+    expect(badge()?.textContent).toBe('1')
+    await render({ ...DEFAULT_SETTINGS })
+    expect(badge()).toBeNull()
+
+    await act(async () => root.unmount())
+  })
+
   it('edits poll toggle, normalized repos, streams, interval validation, ghPath, hostname, and ignoredActors', async () => {
     const saves: Array<Partial<DotSettings>> = []
     let current: DotSettings = { ...DEFAULT_SETTINGS }
@@ -1495,10 +1535,10 @@ describe('GitHub poll-primary settings', () => {
     await act(async () => pollAdd.click())
     expect(saves).toHaveLength(0)
     expect(document.body.textContent).toContain('currently configured for Webhook')
+    const advancedDetails = document.querySelector<HTMLDetailsElement>('details[data-gh-section="advanced"]')!
+    expect(advancedDetails.open).toBe(true)
 
-    // Open Webhook section and try adding a polled repo ('klarkxy/dot-test') -> blocked with warning.
-    const webhookDetails = document.querySelector<HTMLDetailsElement>('details[data-gh-section="advanced"]')!
-    webhookDetails.open = true
+    // The conflict opened the Advanced section; try adding a polled repo ('klarkxy/dot-test') as a Webhook repo -> blocked with warning.
     const webhookInput = document.querySelector<HTMLInputElement>('input[aria-label="Webhook repositories"]')!
     const webhookAdd = webhookInput.closest('.dsh-dot-gh-add-row')!.querySelector<HTMLButtonElement>('button')!
     await act(async () => { type(webhookInput, 'klarkxy/dot-test') })
@@ -1671,6 +1711,7 @@ describe('GitHub poll-primary settings', () => {
     await act(async () => rmBtn.click())
     expect(saves.at(-1)?.githubPoll?.admission).toEqual([])
     expect(settingsCss).toContain('.dsh-dot-chat .dsh-dot-gh')
+    expect(settingsCss).not.toContain('.dsh-dot-gh-card')
 
     await act(async () => root.unmount())
   })
@@ -1750,7 +1791,7 @@ describe('Run Watchdog settings', () => {
     await act(async () => modeTab('Auto-stop').click())
     expect(saves.at(-1)).toEqual({ watchdogMode: 'auto' })
 
-    // Model dropdown is populated from the catalog only while auto-stop is active.
+    // Model dropdown is populated from the catalog while auto-stop is active.
     const modelSelect = () => document.querySelector<HTMLSelectElement>('select[aria-label="Review model"]')!
     expect([...modelSelect().options].map(o => o.textContent)).toEqual([
       'Follow default model',
@@ -1790,6 +1831,34 @@ describe('Run Watchdog settings', () => {
       '跟随默认模型',
       'DeepSeek / DeepSeek Reasoner',
     ])
+
+    await act(async () => root.unmount())
+  })
+
+  it('keeps a saved watchdogModel visible in observe mode and hides it when unset', async () => {
+    const api = {
+      models: async () => catalog,
+      settings: async () => DEFAULT_SETTINGS,
+      settingProposals: async () => [],
+      decideSetting: async () => 'ok',
+      setSettings: async () => DEFAULT_SETTINGS,
+    }
+    const root = createRoot(document.getElementById('root')!)
+    const render = async (settings: DotSettings) => {
+      await act(async () => root.render(<SettingsPanel locale="en" section="advanced" api={api as never} settings={settings} onSaved={() => {}} />))
+      await act(async () => { await Promise.resolve() })
+    }
+    const modelSelect = () => document.querySelector<HTMLSelectElement>('select[aria-label="Review model"]')
+
+    await render({ ...DEFAULT_SETTINGS, watchdogMode: 'observe', watchdogModel: 'deepseek/reasoner' })
+    expect(modelSelect()).not.toBeNull()
+    expect(modelSelect()?.value).toBe(JSON.stringify(['deepseek', 'reasoner']))
+
+    await render({ ...DEFAULT_SETTINGS, watchdogMode: 'observe' })
+    expect(modelSelect()).toBeNull()
+
+    await render({ ...DEFAULT_SETTINGS, watchdogMode: 'observe', watchdogModel: null } as DotSettings)
+    expect(modelSelect()).toBeNull()
 
     await act(async () => root.unmount())
   })

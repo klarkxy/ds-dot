@@ -273,6 +273,7 @@ export class DotService {
 
   get store(): DotStore { return this.options.store }
   get host(): DotHost { return this.options.host }
+  get homeDir(): string { return this.options.homeDir }
   get rules(): RuleConfig { return this.store.settings }
   get dotSessionId(): string | undefined { return this.store.dotSessionId }
   get locale(): CopyLocale { return this.currentLocale ?? this.store.uiLocale ?? 'zh' }
@@ -456,8 +457,11 @@ export class DotService {
 
   private resolveFileReceipts(ids: readonly string[]): readonly ChatFileRef[] {
     this.pruneFileReceipts()
+    const seen = new Set<string>()
     const refs: ChatFileRef[] = []
     for (const id of ids) {
+      if (seen.has(id)) throw new DotError('dot/invalid', 'Duplicate attachment receipt id; nothing was sent.')
+      seen.add(id)
       const row = this.fileReceipts.get(id)
       if (!row) throw new DotError('dot/invalid', 'That attachment upload is no longer available. Attach the file again and resend; nothing was sent.')
       refs.push(row.ref)
@@ -470,9 +474,9 @@ export class DotService {
     const body = text.trim()
     const pictures = checkChatImages(images)
     const fileIds = checkChatFileIds(files)
-    const documents = this.resolveFileReceipts(fileIds)
-    if (!body && pictures.length === 0 && documents.length === 0) throw new DotError('dot/invalid', 'message must be non-empty')
+    if (!body && pictures.length === 0 && fileIds.length === 0) throw new DotError('dot/invalid', 'message must be non-empty')
     await this.serial(async () => {
+      const documents = this.resolveFileReceipts(fileIds)
       const dot = await this.ready()
       // The human already wakes dot, so carried updates join the same message
       // instead of becoming a separate model turn of their own.
@@ -1106,6 +1110,7 @@ export class DotService {
         throw new DotError('dot/reset-incomplete', `Factory reset is incomplete: sessions were archived and artifact files were removed, but clearing Dorothy's records failed (${messageOf(failure)}). Request a new preview to retry the remaining cleanup.`)
       }
       this.pending.reset()
+      this.fileReceipts.clear()
       this.diffPriors.clear()
       this.batcher.take()
       this.releaseChildSeals()

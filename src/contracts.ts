@@ -8,6 +8,23 @@
 export const PLUGIN_NAME = 'dsh-dot'
 export const SERVICE_NAME = 'dot'
 export const PRESET_ID = 'dot'
+export const WORKER_PRESET_ID = 'dot-worker'
+export const WATCHDOG_PRESET_ID = 'dot-watchdog'
+export const TASK_PRESET_OPTIONS = ['standard', WORKER_PRESET_ID] as const
+export type DefaultTaskPreset = (typeof TASK_PRESET_OPTIONS)[number]
+export const WATCHDOG_MODES = ['off', 'observe', 'auto'] as const
+export type WatchdogMode = (typeof WATCHDOG_MODES)[number]
+export const WATCHDOG_SIGNALS = [
+  'repeat-tool-call',
+  'repeat-tool-error',
+  'no-progress',
+  'compaction-loop',
+  'budget-retry-stall',
+  'silent-stall',
+  'infra-failure',
+] as const
+export type WatchdogSignalType = (typeof WATCHDOG_SIGNALS)[number]
+export type WatchdogAnnotation = 'accurate' | 'false-positive'
 export const RPC_CHANNEL = '/dsh-dot'
 
 /** What self.status reports about this install and its newest kept pre-upgrade backup. */
@@ -37,13 +54,14 @@ export const TOOL = {
   settings: 'dot_settings',
   capabilities: 'dot_capabilities',
   recipe: 'dot_recipe',
+  watchdog: 'dot_watchdog',
 } as const
 
 /**
  * Settings Dorothy may propose changing; locks themselves are human-only.
  * `agreements` is the human's rules text, edited as one bulk value.
  */
-export const SETTING_FIELDS = ['model', 'approvals', 'questions', 'scope', 'taskModels', 'taskPermission', 'reflection', 'idleCheckMinutes', 'persona', 'address', 'agreements', 'capabilities'] as const
+export const SETTING_FIELDS = ['model', 'approvals', 'questions', 'scope', 'taskModels', 'taskPermission', 'defaultTaskPreset', 'reflection', 'idleCheckMinutes', 'watchdogMode', 'watchdogModel', 'persona', 'address', 'agreements', 'capabilities'] as const
 export type SettingField = typeof SETTING_FIELDS[number]
 export type SettingLocks = Readonly<Partial<Record<SettingField, boolean>>>
 
@@ -182,6 +200,15 @@ export type TaskStatus = 'running' | 'idle' | 'blocked' | 'error' | 'archived'
 export type RunKind = 'work' | 'rework' | 'review'
 export type RunAccess = 'read' | 'write'
 export type ChangePriority = 1 | 2 | 3
+
+export type RetryKind = 'budget' | 'transient'
+
+export interface WorkRunRetryStatus {
+  readonly kind: RetryKind
+  readonly attempts: number
+  readonly since: string
+  readonly accumulatedMs: number
+}
 
 export interface TaskRecord {
   readonly sessionId: string
@@ -482,11 +509,17 @@ export interface DotSettings {
   readonly taskModels: TaskModelRule
   /** The permission preset a new task session starts with. */
   readonly taskPermission: TaskPermission
+  /** Default preset a new task session starts on when dot_task omits preset. */
+  readonly defaultTaskPreset: DefaultTaskPreset
   /** Whether dot may run her own background reflection pass. */
   readonly reflection: boolean
   /** Whether dot checks daily for a newer published version of itself and hot-updates. */
   readonly autoUpdate: boolean
   readonly idleCheckMinutes: number
+  /** Run Watchdog operating mode: off | observe (signals only, default) | auto (signals + read-only judge). */
+  readonly watchdogMode: WatchdogMode
+  /** Optional model override (`provider/model`) for the read-only dot-watchdog judge; absent follows host default. */
+  readonly watchdogModel?: string
   /** Prompt-cache TTL overrides by `provider/model` key, in minutes; 0 turns keepalive off for that model. */
   readonly cacheTtl?: Readonly<Record<string, number>>
   /** The human's own persona text for dot; absent uses the default persona. */
@@ -497,8 +530,124 @@ export interface DotSettings {
   readonly capabilities: DotCapabilities
   /** MCP servers mounted for dot's own agent only, keyed by serverName. */
   readonly mcpServers?: Readonly<Record<string, DotMcpServer>>
+  /** GitHub CLI polling (primary) and mutual-exclusion webhook configuration. */
+  readonly githubPoll?: GithubPollSettings
   /** Missing and false both mean unlocked: existing installs opt in to self-management. */
   readonly locks?: SettingLocks
+}
+
+// ---- GitHub poll source & Fast-Path admission ----------------------------
+
+export const GITHUB_EVENT_TYPES = ['issue', 'pr', 'comment', 'review', 'ci'] as const
+export type GithubEventType = (typeof GITHUB_EVENT_TYPES)[number]
+
+export const GITHUB_SENDER_CLASSES = ['human', 'listed-bot', 'unlisted-bot'] as const
+export type GithubSenderClass = (typeof GITHUB_SENDER_CLASSES)[number]
+
+export const GITHUB_ADMISSION_ACTIONS = ['inbox', 'context-only', 'ignore'] as const
+export type GithubAdmissionAction = (typeof GITHUB_ADMISSION_ACTIONS)[number]
+
+export interface GithubAdmissionRule {
+  /** Normalized `owner/repo` (lowercase) or `'*'` for all repositories. */
+  readonly repo: string
+  readonly eventType: GithubEventType
+  readonly senderClass: GithubSenderClass
+  readonly action: GithubAdmissionAction
+}
+
+export interface GithubPollStreams {
+  readonly issues: boolean
+  readonly pulls: boolean
+  readonly comments: boolean
+  readonly ci: boolean
+}
+
+export interface GithubPollSettings {
+  readonly enabled: boolean
+  /** Normalized `owner/repo` (lowercase) polled via `gh`. Empty by default. */
+  readonly repos: readonly string[]
+  /** Normalized `owner/repo` (lowercase) kept on Webhook instead of Poll (mutually exclusive with `repos`). */
+  readonly webhookRepos: readonly string[]
+  /** Path or command name for `gh` CLI (default `'gh'`). */
+  readonly ghPath: string
+  /** Optional GitHub Enterprise Server hostname (`--hostname`). */
+  readonly hostname?: string
+  /** User-configured poll interval in seconds (`60..3600`, default `120`). */
+  readonly intervalSec: number
+  readonly streams: GithubPollStreams
+  /** Additional automated actors treated as listed bots alongside defaults. */
+  readonly ignoredActors: readonly string[]
+  /** Source id shared with webhook ingress for dedupe and mode handoff (default `'primary-github'`). */
+  readonly sourceId?: string
+  /** Fast-Path 3-state admission matrix overrides. */
+  readonly admission?: readonly GithubAdmissionRule[]
+}
+
+export const GITHUB_POLL_MIN_INTERVAL_SEC = 60
+export const GITHUB_POLL_MAX_INTERVAL_SEC = 3600
+export const GITHUB_POLL_DEFAULT_INTERVAL_SEC = 120
+export const GITHUB_POLL_DEFAULT_SOURCE_ID = 'primary-github'
+
+export const DEFAULT_GITHUB_POLL_SETTINGS: GithubPollSettings = {
+  enabled: false,
+  repos: [],
+  webhookRepos: [],
+  ghPath: 'gh',
+  intervalSec: GITHUB_POLL_DEFAULT_INTERVAL_SEC,
+  streams: { issues: true, pulls: true, comments: true, ci: true },
+  ignoredActors: [],
+  sourceId: GITHUB_POLL_DEFAULT_SOURCE_ID,
+  admission: [],
+}
+
+export type GithubPollHealthState = 'idle' | 'ok' | 'degraded' | 'error'
+
+export interface GithubPollRepoStatus {
+  readonly repo: string
+  readonly mode: 'poll' | 'webhook'
+  readonly consecutiveFailures: number
+  readonly lastPollAt?: number
+  readonly lastSuccessAt?: number
+  readonly lastDeliveredAt?: number
+  readonly lastError?: string
+  readonly degraded410Count?: number
+}
+
+export interface GithubPollStatusView {
+  readonly enabled: boolean
+  readonly polling: boolean
+  readonly ghPath: string
+  readonly hostname?: string
+  readonly userIntervalSec: number
+  readonly effectiveIntervalSec: number
+  readonly xPollIntervalSec?: number
+  readonly rateLimitRemaining?: number
+  readonly rateLimitLimit?: number
+  readonly rateLimitResetAt?: number
+  readonly hourlyRequests?: number
+  readonly budgetLimitPerHour?: number
+  readonly budgetAdjusted: boolean
+  readonly budgetWarning?: string
+  readonly health: GithubPollHealthState
+  readonly alert: boolean
+  readonly consecutiveFailures: number
+  readonly lastError?: string
+  readonly lastPollAt?: number
+  readonly repos: readonly GithubPollRepoStatus[]
+}
+
+export interface GithubPollTestResult {
+  readonly ok: boolean
+  readonly ghFound: boolean
+  readonly resolvedPath?: string
+  readonly version?: string
+  readonly authenticated: boolean
+  readonly login?: string
+  readonly host: string
+  readonly rateLimitRemaining?: number
+  readonly rateLimitLimit?: number
+  readonly repoChecks?: readonly { readonly repo: string; readonly ok: boolean; readonly error?: string }[]
+  readonly error?: string
 }
 
 /** One dot-local MCP server row in settings. */
@@ -629,9 +778,11 @@ export const DEFAULT_SETTINGS: DotSettings = {
   scope: 'tracked',
   taskModels: { mode: 'all', list: [] },
   taskPermission: 'workspace-write',
+  defaultTaskPreset: 'standard',
   reflection: true,
   autoUpdate: true,
   idleCheckMinutes: 10,
+  watchdogMode: 'observe',
   capabilities: { grants: {} },
 }
 
@@ -769,6 +920,60 @@ export interface DotContextView {
   readonly usage?: DotContextUsage
   readonly compactions: number
   readonly lastCompactionAt?: number
+  /** Optional Watchdog diagnostics & 14-day calibration summary, rendered even when Dorothy's session is not live. */
+  readonly watchdog?: WatchdogDiagnosticsView
+}
+
+export interface WatchdogVerdict {
+  readonly verdict: 'progressing' | 'spinning' | 'off-scope'
+  readonly confidence: 'low' | 'medium' | 'high'
+  readonly summary: string
+  readonly evidence: readonly string[]
+}
+
+export interface WatchdogHitRecord {
+  readonly id: string
+  readonly at: number
+  readonly runId: string
+  readonly changeId: string
+  readonly inputRef: string
+  readonly inputRevision: number
+  readonly sessionId: string
+  readonly signal: WatchdogSignalType
+  readonly runPhase: string
+  readonly mode: WatchdogMode
+  readonly evidence: readonly string[]
+  readonly hardLimitReached?: boolean
+  readonly judge?: WatchdogVerdict
+  readonly stopped?: boolean
+  readonly annotation?: WatchdogAnnotation
+  readonly annotatedAt?: number
+}
+
+export interface WatchdogModelFallbackNotice {
+  readonly configuredModel: string
+  readonly reason: 'not-in-catalog' | 'invalid-format' | 'runtime-error'
+  readonly detail?: string
+  readonly at: number
+}
+
+export interface WatchdogCalibrationStats {
+  readonly windowDays: 14
+  readonly total14d: number
+  readonly reviewed14d: number
+  readonly accurate14d: number
+  readonly falsePositive14d: number
+  /** Null when reviewed14d === 0 so UI distinguishes "no reviews yet" from 0%. */
+  readonly falsePositiveRate: number | null
+}
+
+export interface WatchdogDiagnosticsView {
+  readonly mode: WatchdogMode
+  readonly configuredModel?: string
+  readonly watchdogStops: number
+  readonly modelFallbackNotice?: WatchdogModelFallbackNotice
+  readonly calibration: WatchdogCalibrationStats
+  readonly hits: readonly WatchdogHitRecord[]
 }
 
 // ---- dot's trajectory, drawn by the plugin -----------------------------
@@ -839,6 +1044,8 @@ export interface InboxEventInput {
   readonly headRef?: string
   /** PR/workflow head repository (owner/repo, lower-cased) for fork-aware link matching. */
   readonly headRepo?: string
+  /** Optional origin provenance when triggered by poll vs webhook. */
+  readonly originSource?: 'github-poll' | 'inbox-github'
 }
 
 /** A stored inbox row: one pending record per source+sourceId+subject, merged deliveries folded in. */
@@ -884,6 +1091,8 @@ export interface TaskLink {
   /** Head repository learned with the branch; distinguishes same-named fork branches. */
   readonly headRepo?: string
   readonly url?: string
+  /** Distinguishes pull requests from issues for PR-only polling; omitted when unknown. */
+  readonly targetKind?: 'pr' | 'issue'
   readonly origin: 'dot' | 'auto'
   readonly state: 'open' | 'closed' | 'merged'
   readonly addedAt: number

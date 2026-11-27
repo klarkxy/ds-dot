@@ -10,7 +10,7 @@ import { openCompatibleDomain } from '@klarkxy/dsh-plugin-kit/domain'
 import { readSnapshot, saveSnapshot, sha256, baselineCaptures } from './artifacts.ts'
 import { STATE_KEY, dotDomain } from './storage.ts'
 import { DotStore } from './store.ts'
-import { DEFAULT_RUN_ORIGIN, WorkBook, canonicalPath, effectiveRunOrigin, judgeVerification, occupantsConflict, onDiskPath, parseInput, parseRun, runOriginSchema, workspaceIdentity, type ExternalOccupant, type RunOrigin, type WorkPersist } from './work.ts'
+import { DEFAULT_RUN_ORIGIN, WorkBook, canonicalPath, effectiveRunOrigin, judgeVerification, occupantsConflict, onDiskPath, parseInput, parseRun, runOriginSchema, runStoppedByUser, workspaceIdentity, type ExternalOccupant, type RunOrigin, type WorkPersist } from './work.ts'
 
 function memoryPersist(fail?: () => boolean): { persist: WorkPersist; rows: Map<string, unknown> } {
   const rows = new Map<string, unknown>()
@@ -949,5 +949,54 @@ describe('run origin provenance', () => {
       await backend.close()
       await rm(root, { recursive: true, force: true })
     }
+  })
+
+  it('identifies user-stopped runs via runStoppedByUser and marks non-terminal changes closureReady', async () => {
+    const { book } = openBook()
+    const change = await book.createChange({
+      title: 'PR work', cwd: '/proj', goal: 'Ship PR',
+      requirements: [{ requirementRef: 'R1', text: 'Ship PR', required: true }], at: 1,
+    })
+    expect((await book.markClosureReady(change.id, { ref: 'acme/widgets#5', outcome: 'merged', at: 2 }))).toEqual({ ok: true, updated: true })
+    expect(book.change(change.id)?.closureReady).toEqual({ ref: 'acme/widgets#5', outcome: 'merged', at: 2 })
+    // Idempotent repeat
+    expect((await book.markClosureReady(change.id, { ref: 'acme/widgets#5', outcome: 'merged', at: 3 }))).toEqual({ ok: true, updated: false })
+
+    expect(runStoppedByUser({ phase: 'active' }, { control: 'open' })).toBe(false)
+    expect(runStoppedByUser({ phase: 'completed', closeReason: 'completed' }, { control: 'open' })).toBe(false)
+    expect(runStoppedByUser({ phase: 'stopped', closeReason: 'closeout' }, { control: 'open' })).toBe(false)
+    expect(runStoppedByUser({ phase: 'stopped', closeReason: 'rework' }, { control: 'open' })).toBe(false)
+    expect(runStoppedByUser({ phase: 'stopped', closeReason: 'stopped' }, { control: 'open' })).toBe(true)
+    expect(runStoppedByUser({ phase: 'settling', closeIntent: 'stopped' }, { control: 'open' })).toBe(true)
+    expect(runStoppedByUser({ phase: 'stopped', closeReason: 'watchdog' }, { control: 'open' })).toBe(false)
+    expect(runStoppedByUser({ phase: 'settling', closeIntent: 'stopped', closeReason: 'watchdog' }, { control: 'open' })).toBe(false)
+    expect(runStoppedByUser({ phase: 'active' }, { control: 'cancelled' })).toBe(true)
+  })
+
+  it('settles watchdog-stopped runs with closeReason watchdog without incrementing failedRounds', async () => {
+    const { book } = openBook()
+    const change = await book.createChange({
+      title: 'Watchdog stop test', cwd: '/proj', goal: 'Test',
+      requirements: [{ requirementRef: 'R1', text: 'Test', required: true }], at: 1,
+    })
+    const reserved = await book.reserveRun({
+      changeId: change.id, kind: 'work', cwd: '/proj',
+      writeScope: { kind: 'paths', paths: [] }, at: 2,
+    })
+    if (!reserved.ok) throw new Error(reserved.message)
+    await book.confirmSession(reserved.run.id, { sessionId: reserved.run.requestedSessionId, cwd: '/proj' }, 3)
+    const sent = await book.claimPrompt(reserved.run.id, 'go', 4)
+    if (!sent.ok) throw new Error(sent.message)
+    await book.settleDelivery(reserved.run.id, sent.deliveryId, 'accepted', undefined, 5)
+
+    const prep = await book.prepareFinish(reserved.run.id, 'stopped', 10, 'watchdog')
+    expect(prep.ok).toBe(true)
+    expect(runStoppedByUser(book.run(reserved.run.id)!)).toBe(false)
+
+    const done = await book.finishSettled(reserved.run.id, 10, 'stopped', { queueCleared: true, agentIdle: true, jobsSettled: true }, 11)
+    expect(done).toEqual({ ok: true, phase: 'stopped' })
+    expect(book.run(reserved.run.id)?.closeReason).toBe('watchdog')
+    expect(book.failedRounds(change.id)).toBe(0)
+    expect(runStoppedByUser(book.run(reserved.run.id)!)).toBe(false)
   })
 })

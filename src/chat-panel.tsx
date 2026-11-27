@@ -8,7 +8,7 @@
 import {
   Button, DisclosureRow, IconCheckOutlineRegular, IconChecklistOutlineRegular, IconChevronDownOutlineRegular,
   IconCloseOutlineRegular, IconCordisPluginOutlineRegular, IconEditOutlineRegular, IconGaugeOutlineRegular, IconGlobeOutlineRegular,
-  IconInspectOutlineRegular, IconShieldOutlineRegular, IconSlidersTwoOutlineRegular, IconUserOutlineRegular,
+  IconInspectOutlineRegular, IconRefreshOutlineRegular, IconShieldOutlineRegular, IconSlidersTwoOutlineRegular, IconUserOutlineRegular,
   IconWarningOutlineRegular, MarkdownText, Modal, modalSelector, StateDot, Tag, TextShimmer, Tooltip, UserMessageBubble,
   type MarkdownLabels, type StateDotState, type TagTone,
 } from '@deepseek-ai/dsh-client-ui-primitives'
@@ -125,7 +125,7 @@ interface DrawerProps {
 }
 
 const SETTINGS_SECTIONS: ReadonlySet<DrawerTab> = new Set<SettingsSection>([
-  'proposals', 'general', 'takeover', 'dispatch', 'capabilities', 'mcp',
+  'proposals', 'general', 'takeover', 'dispatch', 'github', 'capabilities', 'mcp',
 ])
 
 function isSettingsSection(tab: DrawerTab): tab is SettingsSection {
@@ -257,6 +257,7 @@ function WorkDrawer({ locale, api, tab, wide, settings, trajectoryRev, running, 
     { value: 'general', label: t(locale, 'tabGeneral'), title: t(locale, 'tabGeneral'), icon: <IconSlidersTwoOutlineRegular size={15} /> },
     { value: 'takeover', label: t(locale, 'tabTakeover'), title: t(locale, 'sRequests'), icon: <IconShieldOutlineRegular size={15} /> },
     { value: 'dispatch', label: t(locale, 'tabDispatch'), title: t(locale, 'sTasks'), icon: <IconChecklistOutlineRegular size={15} /> },
+    { value: 'github', label: t(locale, 'tabGithub'), title: t(locale, 'sGithubTitle'), icon: <IconRefreshOutlineRegular size={15} /> },
     { value: 'capabilities', label: t(locale, 'tabCapabilities'), title: t(locale, 'sCapabilities'), icon: <IconCordisPluginOutlineRegular size={15} /> },
     { value: 'mcp', label: t(locale, 'tabMcp'), title: t(locale, 'sMcp'), icon: <IconGlobeOutlineRegular size={15} /> },
     { value: 'persona', label: t(locale, 'tabPersona'), title: t(locale, 'personaTitle'), icon: <IconUserOutlineRegular size={15} />, dirty: personaDirty },
@@ -1071,6 +1072,7 @@ const NOTICE_TAG_TONE: Record<Exclude<NoticeEntry['kind'], 'reminder'>, TagTone>
   inbox: 'info',
   'recipe-run': 'success',
   'recipe-proposal': 'info',
+  result: 'success',
 }
 
 function noticeTagLabel(locale: CopyLocale, kind: Exclude<NoticeEntry['kind'], 'reminder'>): string {
@@ -1084,6 +1086,7 @@ function noticeTagLabel(locale: CopyLocale, kind: Exclude<NoticeEntry['kind'], '
     case 'inbox': return t(locale, 'inboxEvent')
     case 'recipe-run': return t(locale, 'recipeRunTag')
     case 'recipe-proposal': return t(locale, 'recipeProposalTag')
+    case 'result': return t(locale, 'resultNotice')
   }
 }
 
@@ -1124,6 +1127,7 @@ function NoticeCard({ entry, locale, tasks, onOpenSession }: { entry: NoticeEntr
       <div className="dsh-dot-card-head">
         <Tag tone={NOTICE_TAG_TONE[entry.kind]}>{noticeTagLabel(locale, entry.kind)}</Tag>
         {entry.kind === 'approval' && entry.subject ? <code className="dsh-dot-code-pill">{entry.subject}</code> : null}
+        {entry.kind === 'task-human' && entry.subject ? <span className="dsh-dot-card-subject">{entry.subject}</span> : null}
         {entry.requestId ? <span className="dsh-dot-req-id">{entry.requestId}</span> : null}
         {perm ? <Tag tone="outline">{perm}</Tag> : null}
         {entry.viaSubagent ? <Tag tone="quiet">{t(locale, 'subagentTag')}</Tag> : null}

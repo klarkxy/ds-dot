@@ -28,6 +28,19 @@ export const DOT_TRACE = {
   updateChecked: 'update.checked',
   updateApplied: 'update.applied',
   updateFailed: 'update.failed',
+  githubPollStarted: 'github-poll.started',
+  githubPollCompleted: 'github-poll.completed',
+  githubPollFailed: 'github-poll.failed',
+  githubPollRateLimited: 'github-poll.rate-limited',
+  githubPollAdmitted: 'github-poll.admitted',
+  githubPollDirectDelivered: 'github-poll.direct-delivered',
+  githubPollBounced: 'github-poll.bounced',
+  githubPollClosure: 'github-poll.closure',
+  watchdogHit: 'watchdog.hit',
+  watchdogJudge: 'watchdog.judge',
+  watchdogStop: 'watchdog.stop',
+  watchdogAnnotate: 'watchdog.annotate',
+  watchdogFallback: 'watchdog.fallback',
 } as const
 
 export type DotTraceEventName = (typeof DOT_TRACE)[keyof typeof DOT_TRACE]

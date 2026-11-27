@@ -79,11 +79,14 @@ export interface PeerSendInput {
   readonly targetSessionId: string
   readonly deliveryId: string
   readonly text: string
+  readonly action?: 'send' | 'bounce'
 }
 
 export interface PeerDeliveryDeps {
   now(): number
   owns(sessionId: string): boolean
+  isDorothy?(sessionId: string): boolean
+  bounce?(input: { readonly senderSessionId: string; readonly deliveryId: string; readonly text: string }): Promise<string>
   get(id: string): PeerDelivery | undefined
   put(row: PeerDelivery): Promise<void>
   /** Inserts already in the target log. Undefined means the log could not be read. */
@@ -141,9 +144,47 @@ export async function deliverPeer(input: PeerSendInput, deps: PeerDeliveryDeps):
     return `Error [${code}]: ${message}`
   }
   if (!DELIVERY_ID_RE.test(deliveryId)) return refuse('delivery_id must be 1–64 letters, digits, or . _ : -', 'dot/peer-refused')
-  if (!sender || !target) return refuse('sender and target are required; nothing was sent.', 'dot/peer-refused')
-  if (sender === target) return refuse('a session cannot peer-message itself; nothing was sent.', 'dot/peer-refused')
+  if (!sender) return refuse('sender and target are required; nothing was sent.', 'dot/peer-refused')
+  const isBounce = input.action === 'bounce' || target.toLowerCase() === 'dorothy' || (deps.isDorothy?.(target) ?? false)
+  if (!isBounce && !target) return refuse('sender and target are required; nothing was sent.', 'dot/peer-refused')
+  if (!isBounce && sender === target) return refuse('a session cannot peer-message itself; nothing was sent.', 'dot/peer-refused')
   if (text.trim() === '' || text.length > TEXT_MAX) return refuse('text must be non-empty and at most 8000 characters; nothing was sent.', 'dot/peer-refused')
+  if (isBounce) {
+    if (!deps.owns(sender)) return refuse('peer messages stay inside sessions dot opened; nothing was sent.', 'dot/peer-refused')
+    if (!deps.bounce) return refuse('bouncing follow-ups to Dorothy is unavailable; nothing was sent.', 'dot/peer-unavailable')
+    const bounceTarget = 'dorothy'
+    const existing = deps.get(deliveryId)
+    if (existing && (existing.senderSessionId !== sender || existing.targetSessionId !== bounceTarget || existing.text !== text)) {
+      return refuse(`delivery ${deliveryId} is already bound to a different message; nothing was sent.`, 'dot/peer-refused')
+    }
+    const row = (status: PeerDelivery['status']): PeerDelivery => ({
+      id: deliveryId, senderSessionId: sender, targetSessionId: bounceTarget, text, status, updatedAt: deps.now(),
+    })
+    if (existing) {
+      if (existing.status === 'accepted') {
+        deps.trace?.('peer.duplicate', `Delivery ${deliveryId} already bounced to Dorothy.`, { senderSessionId: sender, targetSessionId: bounceTarget, deliveryId, status: 'accepted' })
+        return `delivery ${deliveryId} already bounced to Dorothy; not sent again.`
+      }
+      if (existing.status !== 'unknown') {
+        await deps.put(row('unknown'))
+      }
+      deps.trace?.('peer.unknown', `Bounce ${deliveryId} to Dorothy was not proved.`, { senderSessionId: sender, targetSessionId: bounceTarget, deliveryId, status: 'unknown' })
+      return `delivery ${deliveryId} is unknown and was not resent.`
+    }
+    try { await deps.put(row('intent')) } catch {
+      return refuse('the delivery could not be recorded; nothing was sent.', 'dot/peer-failed')
+    }
+    try {
+      const outcome = await deps.bounce({ senderSessionId: sender, deliveryId, text })
+      await deps.put(row('accepted'))
+      deps.trace?.('peer.sent', `Bounced delivery ${deliveryId} to Dorothy.`, { senderSessionId: sender, targetSessionId: bounceTarget, deliveryId, status: 'accepted' })
+      return `delivery ${deliveryId} accepted: bounced to Dorothy (${outcome}).`
+    } catch {
+      await deps.put(row('unknown'))
+      deps.trace?.('peer.unknown', `Bounce ${deliveryId} to Dorothy was not proved.`, { senderSessionId: sender, targetSessionId: bounceTarget, deliveryId, status: 'unknown' })
+      return `delivery ${deliveryId} is unknown and was not resent.`
+    }
+  }
   if (!deps.owns(sender) || !deps.owns(target)) return refuse('peer messages stay inside sessions dot opened; nothing was sent.', 'dot/peer-refused')
   const existing = deps.get(deliveryId)
   if (existing && (existing.senderSessionId !== sender || existing.targetSessionId !== target || existing.text !== text)) {
@@ -370,16 +411,23 @@ export function sealChildSession(agent: unknown, send: (input: PeerSendInput) =>
     }))
     disposers.push(ctx.tools.register(defineTool({
       name: PEER_TOOL,
-      description: 'Send one idempotent message from this session to another active session opened by dot (caller identity is automatic; do not pass a sender). target_session_id must belong to a different active run that still holds its input and scope; finished, settling, stopped, or superseded runs are refused. delivery_id uniquely identifies this exact message: repeating the same id reconciles status without double-sending, whereas an unknown result means delivery was unconfirmed and must not be retried with a new id.',
+      description: 'Send one idempotent message from this session to another active session opened by dot (caller identity is automatic; do not pass a sender), or bounce an out-of-scope follow-up back to Dorothy (action="bounce", target_session_id="dorothy"). For peer sends, target_session_id must belong to a different active run that still holds its input and scope; finished, settling, stopped, or superseded runs are refused. delivery_id uniquely identifies this exact message: repeating the same id reconciles status without double-sending, whereas an unknown result means delivery was unconfirmed and must not be retried with a new id.',
       parameters: {
-        target_session_id: { type: 'string', required: true, description: 'Active peer session id opened by dot.' },
+        action: { type: 'string', enum: ['send', 'bounce'], description: 'send (default): message an active peer run; bounce: return an out-of-scope follow-up to Dorothy for re-triage.' },
+        target_session_id: { type: 'string', required: true, description: 'Active peer session id opened by dot, or "dorothy" when bouncing.' },
         delivery_id: { type: 'string', required: true, description: 'Idempotency key (1–64 letters, digits, or . _ : -).' },
         text: { type: 'string', required: true, description: 'Message body (1–8000 characters).' },
       },
       output: TEXT_OUTPUT,
       isConcurrencySafe: () => false,
       async execute(args) {
-        return send({ senderSessionId: live.session.id, targetSessionId: args.target_session_id, deliveryId: args.delivery_id, text: args.text })
+        return send({
+          senderSessionId: live.session.id,
+          targetSessionId: args.target_session_id,
+          deliveryId: args.delivery_id,
+          text: args.text,
+          action: args.action === 'bounce' ? 'bounce' : 'send',
+        })
       },
     })))
   } catch (error) {

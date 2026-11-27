@@ -6,7 +6,7 @@
 
 **桃乐丝（`dot`）** 是 **DeepSeek Harness（DSH）** 侧栏里的常驻搭档。用日常说话的方式交给她多件事，她会自己核对完改动再摆出前后对比；小确认直接放行，涉及大事一定会停下来等你点头。
 
-> **看详细图文与实机录屏：** 欢迎前往 **[桃乐丝的记事本](https://klarkxy.github.io/ds-dot/)** 浏览个人日记、查看 [14 段完整实机录屏](https://klarkxy.github.io/ds-dot/#clips)，以及复制 [上手常用句子](https://klarkxy.github.io/ds-dot/#about)。
+> **看详细图文与实机录屏：** 欢迎前往 **[桃乐丝的记事本](https://klarkxy.github.io/ds-dot/)** 浏览个人日记、查看 [16 段完整实机录屏](https://klarkxy.github.io/ds-dot/#clips)，以及复制 [上手常用句子](https://klarkxy.github.io/ds-dot/#about)。
 
 ## 安装
 
@@ -30,11 +30,11 @@ dsh plugin --profile web add ds-dot
 - **输入卡片与文件交接：** 输入框是一张圆角卡片，“+”菜单和圆形发送/停止键保持简洁；可附加任意类型文件（不只图片），中文等非 ASCII 文件名不丢字。桃乐丝可用只读文件工具读取附件和任意绝对路径，凭据路径仍拒绝；Word/PDF 通过可选 Office 技能读取。
 - **边界清楚，有事先问：** 看文件、跑本地测试直接过；碰到删文件、外发推送、敏感凭据或拿不准的情况一定弹卡确认，哪怕面板收着也会在侧栏或桌面提醒你。改文件、跑命令、装插件这类工具只归派出去的任务，桃乐丝自己不用。改她自己时，链接进来的开发目录会先在临时工作树里改、你合并后再重建（旧 `lib/` 备份在 `~/.dsh/dot/self-upgrade`）；插件市场装的那份她不会去动。
 - **配方与定时：** 常跑的周报和巡检存成配方后可直接由定时提醒启动；改版后效果变差时还会主动建议恢复旧版。
-- **习惯上锁与按需搭档：** 可以锁住不想被提议改动的人设或设置项，插件额外工具默认全关；按需搭配 `@klarkxy/dsh-dev-index`、`@klarkxy/dsh-model-picker` 与 `@deepseek-ai/dsh-webhook`。
+- **习惯上锁、巡检与 GitHub 轮询：** 可以锁住不想被提议改动的人设或设置项；无需公网回调即可通过本机 `gh` 轮询议题、PR、评论与 CI（默认不启用任何仓库）；内置 **Run Watchdog** 巡检防空转（默认 `observe` 仅记信号、零模型调用，可在上下文诊断页复核误报并校准 14 天误报率）；插件额外工具默认全关，也可按需搭配 `@klarkxy/dsh-dev-index`、`@klarkxy/dsh-model-picker` 或实时推送 `@deepseek-ai/dsh-webhook`。
 - **桃乐丝专属 MCP 服务：** 在「MCP 服务」页接入 DeepWiki、GitHub、Context7 等远程服务或自建服务——只挂载给桃乐丝一个人用，接入后工具仍要在「额外能力」里显式授权才会生效。
 
 ## 更多资料
 
 - [桃乐丝的记事本（GitHub Pages）](https://klarkxy.github.io/ds-dot/) — 图文日记、[实机录屏](https://klarkxy.github.io/ds-dot/#clips) 与 [上手提示词](https://klarkxy.github.io/ds-dot/#about)
-- [进阶参考文档](reference.md) — 审批模式、高危拦截清单、Profile 配置、GitHub Webhook `cordis.yml` 及升级说明
+- [进阶参考文档](reference.md) — 审批模式、高危拦截清单、Profile 配置、Run Watchdog 与误报校准、本机 `gh` 轮询与 Webhook 说明及升级提示
 - [参与贡献](https://github.com/klarkxy/ds-dot/blob/main/CONTRIBUTING.md) · [发布流程](https://github.com/klarkxy/ds-dot/blob/main/docs/releasing.md) · [Apache-2.0 协议](../LICENSE)

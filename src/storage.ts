@@ -7,7 +7,7 @@
 import { defineDomain, domainTable } from '@deepseek-ai/dsh-storage-domain'
 import { z } from 'zod'
 import type { ViewNode } from '@klarkxy/dsh-deep-view/contracts'
-import { SETTING_FIELDS, type AgreementEntry, type CognitionEntry, type CognitionVersion, type DotContextUsage, type DotUsageOffset, type InboxRecord, type RecipeProposal, type RecipeRecord, type TaskLink, type ReflectionRun, type ScheduleRecord, type SettingProposal, type TaskRecord } from './contracts.ts'
+import { SETTING_FIELDS, WATCHDOG_MODES, WATCHDOG_SIGNALS, type AgreementEntry, type CognitionEntry, type CognitionVersion, type DotContextUsage, type DotUsageOffset, type InboxRecord, type RecipeProposal, type RecipeRecord, type TaskLink, type ReflectionRun, type ScheduleRecord, type SettingProposal, type TaskRecord } from './contracts.ts'
 import { maxEntrySuffix, migrateAgreementEntries, migrateCognitionEntries } from './memory.ts'
 import { migrateTaskPermissionBaseline, TASK_PERMISSIONS } from './settings.ts'
 import type { UpdateStatus } from './auto-update.ts'
@@ -315,6 +315,7 @@ const inboxRecordSchema = z.object({
   receivedAt: z.number(),
   headRef: z.string().optional(),
   headRepo: z.string().optional(),
+  originSource: z.enum(['github-poll', 'inbox-github']).optional(),
   updatedAt: z.number(),
   deliveredAt: z.number().optional(),
 })
@@ -322,6 +323,160 @@ const inboxRecordSchema = z.object({
 export function parseInboxRecord(value: unknown): InboxRecord | undefined {
   const parsed = inboxRecordSchema.safeParse(value)
   return parsed.success ? parsed.data as InboxRecord : undefined
+}
+
+export const githubPollStreamCursorSchema = z.object({
+  kind: z.literal('stream'),
+  repo: z.string().min(1),
+  stream: z.enum(['issues', 'comments', 'review-comments']),
+  etag: z.string().optional(),
+  lastModified: z.string().optional(),
+  since: z.string().min(1),
+  startedIssues: z.string().optional(),
+  startedPulls: z.string().optional(),
+  startedComments: z.string().optional(),
+  seenKeys: z.array(z.string()).optional(),
+  updatedAt: z.number(),
+})
+
+export const githubPollCiBaselineSchema = z.object({
+  kind: z.literal('ci'),
+  repo: z.string().min(1),
+  branch: z.string().min(1),
+  failures: z.array(z.string()),
+  revision: z.number().int().nonnegative(),
+  updatedAt: z.number(),
+})
+
+export const githubPollPrCiBaselineSchema = z.object({
+  kind: z.literal('pr-ci'),
+  repo: z.string().min(1),
+  number: z.number().int().positive(),
+  headSha: z.string().min(1),
+  failures: z.array(z.string()),
+  revision: z.number().int().nonnegative(),
+  updatedAt: z.number(),
+})
+
+export const githubPollEchoLedgerSchema = z.object({
+  kind: z.literal('echo'),
+  repo: z.string().min(1),
+  entries: z.array(z.object({
+    id: z.string().min(1),
+    kind: z.enum(['issue_comment', 'review_comment', 'review']),
+    sentAt: z.number(),
+  })),
+  updatedAt: z.number(),
+})
+
+export const githubPollRepoStateSchema = z.object({
+  kind: z.literal('repo'),
+  repo: z.string().min(1),
+  consecutiveFailures: z.number().int().nonnegative(),
+  lastPollAt: z.number().optional(),
+  lastSuccessAt: z.number().optional(),
+  lastDeliveredAt: z.number().optional(),
+  lastMode: z.enum(['poll', 'webhook']).optional(),
+  lastError: z.string().optional(),
+  xPollIntervalSec: z.number().int().positive().optional(),
+  rateLimitRemaining: z.number().int().nonnegative().optional(),
+  rateLimitLimit: z.number().int().positive().optional(),
+  rateLimitResetAt: z.number().optional(),
+  deleted410Subjects: z.array(z.string()).optional(),
+  retryDeadlines: z.record(z.string(), z.number()).optional(),
+  knownIssueNumbers: z.array(z.number().int().positive()).optional(),
+})
+
+export const githubPollPrReviewCursorSchema = z.object({
+  kind: z.literal('pr-review'),
+  repo: z.string().min(1),
+  number: z.number().int().positive(),
+  etag: z.string().optional(),
+  lastModified: z.string().optional(),
+  startedComments: z.string().min(1),
+  seenIds: z.array(z.string()).optional(),
+  updatedAt: z.number(),
+})
+
+export const githubPollDeliveredSchema = z.object({
+  kind: z.literal('delivered'),
+  repo: z.string().min(1),
+  entries: z.array(z.object({
+    id: z.string().min(1),
+    deliveredAt: z.number(),
+  })),
+  updatedAt: z.number(),
+})
+
+export const githubPollEntrySchema = z.discriminatedUnion('kind', [
+  githubPollStreamCursorSchema,
+  githubPollCiBaselineSchema,
+  githubPollPrCiBaselineSchema,
+  githubPollPrReviewCursorSchema,
+  githubPollEchoLedgerSchema,
+  githubPollDeliveredSchema,
+  githubPollRepoStateSchema,
+])
+
+export type GithubPollEntry = z.infer<typeof githubPollEntrySchema>
+
+export function parseGithubPollEntry(value: unknown): GithubPollEntry | undefined {
+  const parsed = githubPollEntrySchema.safeParse(value)
+  return parsed.success ? parsed.data : undefined
+}
+
+const watchdogVerdictSchema = z.object({
+  verdict: z.enum(['progressing', 'spinning', 'off-scope']),
+  confidence: z.enum(['low', 'medium', 'high']),
+  summary: z.string(),
+  evidence: z.array(z.string()),
+}).strict()
+
+const watchdogHitEntrySchema = z.object({
+  kind: z.literal('hit'),
+  id: z.string().min(1),
+  at: z.number(),
+  runId: z.string().min(1),
+  changeId: z.string().min(1),
+  inputRef: z.string().min(1),
+  inputRevision: z.number().int(),
+  sessionId: z.string().min(1),
+  signal: z.enum(WATCHDOG_SIGNALS),
+  runPhase: z.string(),
+  mode: z.enum(WATCHDOG_MODES),
+  evidence: z.array(z.string()),
+  hardLimitReached: z.boolean().optional(),
+  judge: watchdogVerdictSchema.optional(),
+  stopped: z.boolean().optional(),
+  annotation: z.enum(['accurate', 'false-positive']).optional(),
+  annotatedAt: z.number().optional(),
+}).strict()
+
+const watchdogModelFallbackNoticeSchema = z.object({
+  configuredModel: z.string(),
+  reason: z.enum(['not-in-catalog', 'invalid-format', 'runtime-error']),
+  detail: z.string().optional(),
+  at: z.number(),
+}).strict()
+
+const watchdogMetaEntrySchema = z.object({
+  kind: z.literal('meta'),
+  watchdogStops: z.number().int().nonnegative(),
+  stopsByRun: z.record(z.string(), z.number().int().nonnegative()).optional(),
+  stopsByInput: z.record(z.string(), z.number().int().nonnegative()).optional(),
+  modelFallbackNotice: watchdogModelFallbackNoticeSchema.optional(),
+}).strict()
+
+const watchdogStoredEntrySchema = z.discriminatedUnion('kind', [
+  watchdogHitEntrySchema,
+  watchdogMetaEntrySchema,
+])
+
+export type WatchdogStoredEntry = z.infer<typeof watchdogStoredEntrySchema>
+
+export function parseWatchdogStoredEntry(value: unknown): WatchdogStoredEntry | undefined {
+  const parsed = watchdogStoredEntrySchema.safeParse(value)
+  return parsed.success ? parsed.data : undefined
 }
 
 const recipeBodyFields = {
@@ -356,6 +511,7 @@ const taskLinkSchema = z.object({
   branch: z.string().optional(),
   headRepo: z.string().optional(),
   url: z.string().optional(),
+  targetKind: z.enum(['pr', 'issue']).optional(),
   origin: z.enum(['dot', 'auto']),
   state: z.enum(['open', 'closed', 'merged']),
   addedAt: z.number(),
@@ -418,10 +574,10 @@ export function parseRecipeProposal(value: unknown): RecipeProposal | undefined 
 
 export const dotDomain = defineDomain({
   name: 'klarkxy_dsh_dot',
-  // v9 adds task links; v10 adds recipe proposals. Older rows still open: read
-  // schemas strip keys they no longer declare and dropped tables are never read.
-  version: 10,
-  compatibleVersions: [1, 2, 3, 4, 5, 6, 7, 8, 9],
+  // v9 adds task links; v10 adds recipe proposals; v11 adds github_poll KV store; v12 adds watchdog KV store.
+  // Older rows still open: read schemas strip keys they no longer declare and dropped tables are never read.
+  version: 12,
+  compatibleVersions: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
   tables: {
     // Stored rows may still carry the pre-entry knowledge shape; parseState migrates them.
     state: domainTable<string, StoredState>(stateSchema as z.ZodType<StoredState>),
@@ -437,6 +593,8 @@ export const dotDomain = defineDomain({
     recipes: domainTable<string, RecipeRecord>(recipeSchema),
     links: domainTable<string, TaskLink>(taskLinkSchema),
     recipe_proposals: domainTable<string, RecipeProposal>(recipeProposalSchema),
+    github_poll: domainTable<string, GithubPollEntry>(githubPollEntrySchema),
+    watchdog: domainTable<string, WatchdogStoredEntry>(watchdogStoredEntrySchema),
   },
 })
 

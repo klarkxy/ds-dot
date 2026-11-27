@@ -5,9 +5,9 @@ import { BOARD_ROOT } from './board.tsx'
 import { FINISHED_SHOWN } from './board-groups.ts'
 import { totalUsage } from './context.ts'
 import { formatAge } from './ledger.ts'
-import { formatDuration, formatTokens, t, type CopyLocale, type TextKey } from './ui-copy.ts'
+import { fillText, formatDuration, formatTokens, t, type CopyLocale, type TextKey } from './ui-copy.ts'
 import {
-  acceptPayload, forceReleasePayload, groupWork, integrateActions, lookRequest, rejectPayload, resumePayload, scopeText, shortId, workFactKey, workFactTone, workFailure,
+  acceptPayload, backgroundJobCount, forceReleasePayload, groupWork, highlightedRetry, integrateActions, lookRequest, rejectPayload, resumePayload, scopeText, shortId, workFactKey, workFactTone, workFailure,
   type PendingGlance, type WorkAcceptPayload, type WorkBoardItem, type WorkChangeView, type WorkIntegratePayload, type WorkLinkView, type WorkReadRequest, type WorkRejectPayload, type WorkRunView, type WorkStatus,
 } from './work-board.ts'
 
@@ -548,6 +548,7 @@ function LiveElapsed({ startedAt }: { readonly startedAt: number }) {
 function RunFacts({ locale, run, onOpenSession }: { readonly locale: CopyLocale; readonly run: WorkRunView; readonly onOpenSession?: (sessionId: string) => void }) {
   const paths = scopeText(run.writeScope)
   const exclusive = run.writeScope?.kind === 'workspace-exclusive'
+  const runBgJobs = backgroundJobCount([run])
   return (
     <div className="dsh-dot-work-run">
       <span className="dsh-dot-work-run-line">
@@ -564,6 +565,12 @@ function RunFacts({ locale, run, onOpenSession }: { readonly locale: CopyLocale;
           <>
             {' · '}
             <span>{t(locale, 'workStatusRunning')} <LiveElapsed startedAt={run.startedAt} /></span>
+          </>
+        ) : null}
+        {runBgJobs > 0 ? (
+          <>
+            {' · '}
+            <span>{fillText(t(locale, 'workBackgroundJobs'), { count: String(runBgJobs) })}</span>
           </>
         ) : null}
         {run.sessionId && onOpenSession ? (
@@ -647,6 +654,8 @@ function WorkRow({ locale, item, pending, onAccept, onReject, onAnswer, onResume
   }
   const actions = lookOpen || accept || reject || resume || forceRelease || integrates.length > 0 || Boolean(latestSessionId && onOpenSession)
   const delivery = item.runs.flatMap(run => run.deliveries ?? []).at(-1)
+  const retry = highlightedRetry(item.runs)
+  const bgJobs = backgroundJobCount(item.runs)
   useEffect(() => {
     if (rejectMode === 'reject' && !reject) { setRejectMode(undefined); setRejectNote('') }
     if (rejectMode === 'look' && !lookOpen) { setRejectMode(undefined); setRejectNote('') }
@@ -689,6 +698,8 @@ function WorkRow({ locale, item, pending, onAccept, onReject, onAnswer, onResume
           <span className="dsh-dot-work-meta">
             <Tag tone={STATUS_TONE[item.status]}>{t(locale, STATUS_KEY[item.status])}</Tag>
             {item.priority === 3 ? <Tag tone="warning">{t(locale, 'priorityHigh')}</Tag> : null}
+            {retry ? <Tag tone={retry.kind === 'budget' ? 'danger' : 'warning'} className="dsh-dot-work-retry">{fillText(t(locale, 'workRetryBadge'), { count: String(retry.attempts) })}</Tag> : null}
+            {bgJobs > 0 ? <Tag tone="quiet" className="dsh-dot-work-jobs">{fillText(t(locale, 'workBackgroundJobs'), { count: String(bgJobs) })}</Tag> : null}
             {item.isolation ? <Tag tone="neutral">worktree · {item.isolation.branch}{item.isolation.state !== 'active' ? ` · ${t(locale, ISOLATION_STATE_KEY[item.isolation.state])}` : ''}</Tag> : null}
             {item.tokens !== undefined && item.tokens > 0 ? (
               <Tag tone="neutral">{formatTokens(item.tokens)} {t(locale, 'workTokens')}{item.wallMs !== undefined ? ` · ${formatDuration(item.wallMs)}` : ''}</Tag>

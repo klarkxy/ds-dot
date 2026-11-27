@@ -119,11 +119,11 @@ describe('dot tools', () => {
   it('keeps the private reflection preset to history reads and one restricted submission', () => {
     expect(loadReflection().map(tool => tool.name).sort()).toEqual([TOOL.searchHistory, TOOL.readHistory, REFLECTION_SUBMIT_TOOL, REFLECTION_PROPOSE_TOOL].sort())
   })
-  it('compiles every dot tool definition through defineTool and keeps 19 dot_* plus show_view', () => {
+  it('compiles every dot tool definition through defineTool and keeps 20 dot_* plus show_view', () => {
     const names = load().map(tool => tool.name)
     expect([...names].sort()).toEqual([...Object.values(TOOL), 'show_view'].sort())
-    expect(names).toHaveLength(20)
-    expect(new Set(names).size).toBe(20)
+    expect(names).toHaveLength(21)
+    expect(new Set(names).size).toBe(21)
   })
 
   it('denies credential-like paths, symlinks, bare credential dirs, and malformed arguments on inherited read-only file tools', async () => {
@@ -178,7 +178,7 @@ describe('dot tools', () => {
     // dot_workspace is NOT read-only: create mutates state.
     // dot_agreement / dot_cognition are NOT read-only: they mutate knowledge.
     // show_view is read-only so the no-approval dot policy runs it directly.
-    expect(readOnly).toEqual([TOOL.listModels, TOOL.overview, TOOL.read, TOOL.readHistory, TOOL.searchHistory, 'show_view'].sort())
+    expect(readOnly).toEqual([TOOL.listModels, TOOL.overview, TOOL.read, TOOL.readHistory, TOOL.searchHistory, TOOL.watchdog, 'show_view'].sort())
   })
 
   it('registers the merged tools, not the old split ones', () => {
@@ -507,8 +507,23 @@ describe('settingsSnapshotBlock', () => {
   it('shows the fresh workspace-write default and reflection switch', () => {
     const snapshot = settingsSnapshotBlock(DEFAULT_SETTINGS)
     expect(snapshot).toContain('taskPermission: workspace-write')
+    expect(snapshot).toContain('defaultTaskPreset: standard')
     expect(snapshot).toContain('reflection: true')
     expect(settingsSnapshotBlock({ ...DEFAULT_SETTINGS, taskPermission: 'default', reflection: false })).toContain('taskPermission: default')
+    expect(settingsSnapshotBlock({ ...DEFAULT_SETTINGS, defaultTaskPreset: 'dot-worker' })).toContain('defaultTaskPreset: dot-worker')
     expect(settingsSnapshotBlock({ ...DEFAULT_SETTINGS, reflection: false })).toContain('reflection: false')
+  })
+
+  it('documents defaultTaskPreset, watchdogMode, watchdogModel and dot-worker in dot_settings and dot_task tool schemas', () => {
+    const tools = load()
+    const settingsTool = tools.find(row => row.name === TOOL.settings) as { description: string }
+    const taskTool = tools.find(row => row.name === TOOL.task) as { parameters: { properties: { preset: { description: string } } } }
+    const watchdogTool = tools.find(row => row.name === TOOL.watchdog) as { description: string; hostEffect?: string }
+    expect(settingsTool.description).toContain('defaultTaskPreset')
+    expect(settingsTool.description).toContain('watchdogMode')
+    expect(settingsTool.description).toContain('watchdogModel')
+    expect(taskTool.parameters.properties.preset.description).toContain('dot-worker')
+    expect(watchdogTool.hostEffect).toBe('read-only')
+    expect(watchdogTool.description).toContain('Read-only')
   })
 })

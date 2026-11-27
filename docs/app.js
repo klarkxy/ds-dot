@@ -34,6 +34,40 @@
       },
     },
     {
+      id: 'run-watchdog',
+      pr: 99,
+      date: '2026.11.26',
+      post: 'run-watchdog',
+      file: 'dot-pr6-watchdog.gif',
+      title: {
+        zh: 'Run Watchdog 模式切换与诊断页误报复核',
+        en: 'Switching Run Watchdog modes and reviewing hits in Diagnostics',
+        ja: 'Run Watchdog のモード切替と診断画面での誤検知チェック',
+      },
+      desc: {
+        zh: '在设置里切好 Watchdog 模式或模型后，去上下文诊断页就能翻看近期命中记录并顺手标出判断正确或误报。',
+        en: 'Pick a Watchdog mode or model in Settings, then check recent hits in Context Diagnostics and mark each one accurate or false positive.',
+        ja: '設定で Watchdog のモードやモデルを選んでから、コンテキスト診断で検出履歴を見て正確・誤検知をマークできます。',
+      },
+    },
+    {
+      id: 'github-poll',
+      pr: 98,
+      date: '2026.11.26',
+      post: 'github-watch',
+      file: 'dot-pr5-github-poll.gif',
+      title: {
+        zh: '用本机 gh 轮询 GitHub，免配公网回调',
+        en: 'Polling GitHub with local gh—no public URL',
+        ja: '手元の gh で GitHub 監視、公開 URL 不要',
+      },
+      desc: {
+        zh: '在 GitHub 设置卡里添上仓库、测过本机 gh 连接与配额，还能展开调整事件准入策略和可选的 Webhook 推送。',
+        en: 'Add repos on the GitHub card, test your local gh connection and quota, and expand advanced admission rules or optional webhook push.',
+        ja: 'GitHub 設定カードでリポジトリ追加と gh 接続テストを行い、詳細欄で取り込みルールや任意の Webhook も調整できます。',
+      },
+    },
+    {
       id: 'drawer-settings',
       pr: 90,
       date: '2026.11.25',
@@ -207,7 +241,7 @@
       id: 'inbox',
       pr: 56,
       date: '2026.11.22',
-      post: 'notes-and-quiet',
+      post: 'github-watch',
       file: 'dot-52-event-links.gif',
       title: {
         zh: 'PR 新动态自动回到原任务',
@@ -342,6 +376,88 @@
       },
       showInvite: true,
       showPrompts: true,
+    },
+    {
+      slug: 'run-watchdog',
+      date: '2026.11.26',
+      category: 'rules',
+      image: 'images/chibi-guard.jpg',
+      aspect: 'square',
+      imageAlt: {
+        zh: '站在阳光铁艺门前的Q版桃乐丝鼓起脸颊并拿着黄铜小摇铃',
+        en: 'Chibi Dorothy guarding a garden gate with a raised hand and brass bell',
+        ja: '庭の門扉の前で頬をふくらませて呼び鈴を手にするちびドロシー',
+      },
+      caption: {
+        zh: '平时安静盯梢不乱喊，真卡死转圈了再轻摇小铃提醒。',
+        en: 'Watching quietly in the background—only ringing the bell when a run truly spins.',
+        ja: 'ふだんは静かに見守りつつ、本当に空回りしたときだけ鈴を鳴らします。',
+      },
+      title: {
+        zh: '加了只读巡检哨兵，还在诊断页攒了误报标尺',
+        en: 'A quiet Run Watchdog—and a review board for false alarms',
+        ja: '静かな見張り番 Watchdog と、診断ページの誤検知チェック',
+      },
+      excerpt: {
+        zh: '派出去的任务万一原地打转或悄悄卡住，现在有双层 Watchdog 在旁边帮忙看着。默认只在后台静静记下七类异常信号，不额外叫模型；你也可以在诊断页顺手标一标哪次算误报。',
+        en: 'If a dispatched run starts repeating itself or silently stalls, a two-layer Watchdog now keeps an eye on it. By default it only logs seven clear signals without calling any extra model, and lets you mark hits right in Context Diagnostics.',
+        ja: '任せたタスクが空回りしたり黙って止まったりしたときのために、見張り番の Watchdog を用意しました。初期状態では余計なモデルを呼ばず七つのサインだけを静かに記録し、診断ページで誤検知かどうかも手元で印を付けられます。',
+      },
+      paragraphs: {
+        zh: [
+          '其实最怕的还是任务跑着跑着陷进死胡同——同一条命令反复撞墙、连着压缩好几次上下文却没改半行代码，或者干脆一动不动。新加的 Run Watchdog 每五分钟也会顺手巡一眼，并且会把正在等后台命令、等你审批或限额退避的时间先扣掉，免得正常等结果时乱响警报。默认开在观察模式，只靠固定规则把线索记到上下文诊断页，一次模型都不调；要是切到自动模式并指定了专门的只读判官，连续撞到硬上限或再次确认原地空转时才会把任务停下，停下来的次数也单独记账，不会算成任务连败。',
+          '巡检和判官都严格只读，绝不会背着你乱改提示词或设置；你想问“刚才那个任务怎么被标了”，直接用日常的话问我，我也能翻诊断记录解释清楚。另外在上下文诊断页里，每条命中后面都摆了判断正确和误报两个按钮，先把近十四天的误报率压到一成以内，再决定要不要启动下一步在只读隔离沙箱里静默尝试复现 Issue 的想法——那份设计稿我也先收进计划目录里留底啦，doro~',
+        ],
+        en: [
+          'The trickiest kind of stall is a run quietly looping—calling the same failing tool over and over, compacting context twice with zero progress, or sitting silent while looking busy. Watchdog checks live events alongside a five-minute patrol, subtracting legitimate background waits, pending approvals, and retry pauses first so normal waiting never triggers noise. It defaults to Observe mode, logging those seven signals straight to Context Diagnostics with zero model calls; switch to Auto and a strictly read-only judge (using your chosen model or host default) steps in when signals fire, keeping its own separate stop counter and pausing for you if the same run gets stopped twice.',
+          'Neither the patrol nor the judge can edit prompts or settings behind your back—any adjustment still comes to you as a regular proposal, and you can simply ask me in chat why a run was flagged. Every recorded hit in Context Diagnostics also has Accurate and False positive buttons so we can measure the 14-day false-positive rate first before ever turning on the read-only speculative Issue reproduction idea we tucked away in the plan folder, doro~',
+        ],
+        ja: [
+          '同じ失敗コマンドを何度も叩いたり、文脈の圧縮を繰り返すだけで一行も進まなかったり、動いているようで実は固まっていたりする場面は気づきにくいものです。新しい Run Watchdog はイベント監視に加えて 5 分おきの巡回も行い、裏のコマンド待ちや承認待ち、制限待機は差し引いてから判定するので、普通の待機中に誤って騒ぐ心配がありません。既定の観察モードではモデルを一切呼ばず七つのサインを静かに残し、自動モードに切り替えたときだけ読み取り専用の判定役が見に来ます（止めた回数も通常の失敗カウントとは別枠で数えます）。',
+          '見張り役も判定役も設定やプロンプトを勝手に書き換えることはなく、調整したいときはいつもどおり提案カードを出しますし、「さっきのタスクが止まった理由は？」と聞かれれば診断記録を読んでそのままお答えします。コンテキスト診断では履歴ごとに「正確」「誤検知」のボタンを付けたので、まずは 14 日間の誤検知率を 1 割未満に落ち着かせてから、計画フォルダにしまった静かな Issue 再現案を動かすか考えましょう、doro~',
+        ],
+      },
+    },
+    {
+      slug: 'github-watch',
+      date: '2026.11.26',
+      category: 'work',
+      image: 'images/chibi-dispatch.jpg',
+      aspect: 'square',
+      imageAlt: {
+        zh: '阳光书桌前的Q版桃乐丝写便条，身旁两只小粉鲸衔着纸飞机',
+        en: 'Chibi Dorothy at a sunny wooden desk with two tiny pink whales carrying paper airplanes',
+        ja: '机でメモを取りながらピンクの小クジラたちと紙飛行機を送り出すちびドロシー',
+      },
+      caption: {
+        zh: '不用拉公网隧道，本机有 gh 就能顺手替你看着仓库动态。',
+        en: 'No public tunnel needed—local gh is enough to watch your repos.',
+        ja: '公開トンネルなしでも、手元の gh だけでリポジトリを見守れます。',
+      },
+      title: {
+        zh: '不用公网地址，也能用本机 gh 帮着盯 GitHub',
+        en: 'Watching GitHub with your local gh—no public URL needed',
+        ja: '公開アドレスなしで、手元の gh から GitHub を見守る',
+      },
+      excerpt: {
+        zh: '以前想让我在仓库有新评论或 CI 挂掉时递话，得先搭公网回调地址；现在只要电脑里装了并登录过 gh，在设置里填上仓库名打开开关，我就能定期替你看着议题、PR、评论和检查结果。默认一个仓库都不盯，你点名加哪个才盯哪个。',
+        en: 'Getting PR comments or failed checks routed back to me used to mean wiring up a public webhook URL. Now, if the gh CLI is signed in on your machine, just add a repo in Settings and flip polling on—nothing gets watched until you ask.',
+        ja: 'PR のコメントや CI の失敗を受け取るには、これまで公開用の Webhook アドレスを用意する必要がありました。これからは手元で gh にログインしていれば、設定でリポジトリを追加してスイッチを入れるだけで、課題・PR・コメント・チェック結果を定期に見に行けます。',
+      },
+      paragraphs: {
+        zh: [
+          '打开设置里的 GitHub 一栏，点一下测试连接确认本机 gh 登录和配额都正常，再添上想盯的仓库就行。默认只从打开那一刻往后看，不会把陈年旧账一股脑翻出来；平时常见的机器人动态只顺手递给正在跑相关 PR 的任务，不刷屏收件箱，而你自己在 GitHub 上留的评论会照常留着，我或任务刚发出去的话也会自动避开，免得自己跟自己打回声。要是剩余配额快不够了，间隔会自己往后放宽一点，连续几次没连上也会在设置页提醒你。',
+          '来新评论时，跟这个 PR 绑在一起的活跃任务都会直接收到摘要（太长的正文自动收进文件留个读取路径），要是哪条消息不归某个任务管，它会退回给我再重新派人。被你手动停掉的任务绝对不会再被打扰，等到 PR 真的合并或关闭了，我再把对应任务带到最后一步验收，发一条结果通知给你。以后要是换到有公网环境的机器想改用实时推送，同一仓库只开一边就行，切过去时进度也会顺着接上，doro~',
+        ],
+        en: [
+          'Open the GitHub tab in Settings, hit Test gh Connection to check your sign-in and quota, and add the repositories you want watched. Polling only looks forward from the moment you enable it so old history never floods in; routine bot noise quietly stays out of your inbox, while your own human comments still come through—and replies sent from here are skipped so we never echo ourselves. If API quota gets tight the interval eases back on its own, and repeated failures raise a clear notice.',
+          'Fresh comments go straight as short context to every active task linked to that PR (with longer text tucked into a readable file), and anything outside a task’s lane gets handed back to me to re-route. Tasks you stopped yourself stay completely quiet, and once a PR merges or closes I move the matching work into a final check and send one tidy result note. If you ever switch a repo to real-time webhooks later, only one mode runs per repo and the handoff picks up right where it left off, doro~',
+        ],
+        ja: [
+          '設定の GitHub タブを開いて接続テストを押し、ログイン状態と残り枠を確かめたら、見守りたいリポジトリを足すだけです。有効にした時点から先だけを見に行くので過去の通知がどっと押し寄せることはありませんし、定番ボットの動きは必要なタスクへだけそっと届けます。ご自身のアカウントで書いたコメントはちゃんと拾い、こちらから送ったばかりの返信は聞き流して堂々巡りを防ぎます。残り枠が少なくなれば間隔を自動で緩め、何度か続けて失敗したときは設定画面でお知らせします。',
+          '新しいコメントが来ると、その PR に結び付いている進行中のタスクみんなへ短い要約が直接届き（長文はファイルに控えて場所を添えます）、担当外の話題はわたしの元へ戻して振り直します。あなたが手動で止めたタスクにはもう一切話しかけませんし、PR がマージまたはクローズされたら最終チェックへ進めて結果を一度だけお伝えします。あとから公開環境でリアルタイム通知へ切り替えるときも、同じリポジトリでは片方だけ動いて引き継ぎも途切れません、doro~',
+        ],
+      },
     },
     {
       slug: 'notes-and-quiet',
@@ -620,15 +736,15 @@
   const COMPANION_FRIENDS = [
     {
       name: {
-        zh: 'GitHub 消息联动',
-        en: 'GitHub Webhook',
-        ja: 'GitHub 連携',
+        zh: 'GitHub 实时推送（可选）',
+        en: 'GitHub Webhook (optional)',
+        ja: 'GitHub Webhook 連携（任意）',
       },
       plugin: '@deepseek-ai/dsh-webhook',
       desc: {
-        zh: '把 PR 新评论和检查结果直接归回当初那条任务底下，省得来回翻。',
-        en: 'Routes fresh PR comments and check failures straight back to the task that opened the PR.',
-        ja: 'PR のコメントやチェック結果を元のタスクの下へ自動でまとめてくれます。',
+        zh: '平时直接用内置的本机 gh 轮询就能盯仓库；如果已经有公网回调地址，再装它收实时推送。',
+        en: 'Built-in local gh polling works with zero public URL; add this only if you want real-time webhook push.',
+        ja: 'ふだんは内蔵のローカル gh 監視だけで使え、公開エンドポイントがあるときだけ即時通知用に足せます。',
       },
     },
     {

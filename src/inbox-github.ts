@@ -58,17 +58,37 @@ async function persistInboxEvent(
   throw last instanceof Error ? last : new Error(String(last))
 }
 
+export interface InboxIngressOptions {
+  /** Return false to ignore webhook deliveries (e.g., when a repo is configured for polling or before handoff watermark). */
+  readonly shouldAccept?: (repo: string, receivedAt: number, event: InboxEventInput) => boolean
+  readonly onDelivered?: (repo: string, event: InboxEventInput) => Promise<void> | void
+}
+
+function repoFromSubject(subject: string): string {
+  return (subject.split(/[#@:]/)[0] ?? '').trim().toLowerCase()
+}
+
 /**
  * Register the single github rule once the host provides the webhook runtime.
  * `ctx.inject` runs the callback only when the service exists and replays it
  * when the service is replaced; the inner effect's disposer unregisters on
  * unload. No runtime — nothing happens.
  */
-export function installInboxIngress(ctx: Context, service: InboxSubmitter, log?: (message: string) => void): void {
+export function installInboxIngress(
+  ctx: Context,
+  service: InboxSubmitter,
+  log?: (message: string) => void,
+  options?: InboxIngressOptions,
+): void {
   if (typeof ctx.inject !== 'function') return
   void ctx.inject(['webhookRuntime'], inboxCtx => {
     inboxCtx.effect(() => {
-      const runtime = (inboxCtx as InboxHost).webhookRuntime
+      let runtime: WebhookRuntimeLike | undefined
+      try {
+        runtime = (inboxCtx as InboxHost).webhookRuntime
+      } catch {
+        return () => {}
+      }
       if (typeof runtime?.register !== 'function') return () => {}
       return runtime.register({
         id: INBOX_RULE_ID,
@@ -82,7 +102,14 @@ export function installInboxIngress(ctx: Context, service: InboxSubmitter, log?:
             return null
           }
           if (event === undefined) return null
+          const repo = repoFromSubject(event.subject)
+          if (options?.shouldAccept && repo && !options.shouldAccept(repo, event.receivedAt, event)) {
+            return null
+          }
           await persistInboxEvent(service, event, delivery?.deliveryId, log)
+          if (repo) {
+            await options?.onDelivered?.(repo, event)
+          }
           return null
         },
       })
@@ -168,6 +195,7 @@ export function normalizeGithub(delivery: VerifiedWebhookDelivery): InboxEventIn
     // lines, but do not clip: subject is the coalesce key and two long names
     // that share a prefix must stay distinct.
     subject: flatten(view.subject),
+    originSource: 'inbox-github',
   }
 }
 

@@ -17,7 +17,7 @@ import { createAttentionWatcher, DESKTOP_NOTIFY_KEY, type AttentionWatcher } fro
 import { contextCss } from './context-panel.tsx'
 import { personaCss } from './persona-panel.tsx'
 import { trajectoryCss } from './trajectory-panel.tsx'
-import { PLUGIN_NAME, RPC_CHANNEL, type AttentionView, type BoardView, type RecipeBoardRow, type CapabilityCatalogView, type ChatSnapshot, type DotContextView, type DotMcpListView, type DotSettings, type FactoryResetPreview, type FactoryResetResult, type KeepaliveInfo, type KnowledgeView, type ReflectionRun, type SelfStatusView, type SettingProposal, type TrajectoryView, type TaskPermission } from './contracts.ts'
+import { PLUGIN_NAME, RPC_CHANNEL, type AttentionView, type BoardView, type RecipeBoardRow, type CapabilityCatalogView, type ChatSnapshot, type DotContextView, type DotMcpListView, type DotSettings, type FactoryResetPreview, type FactoryResetResult, type GithubPollStatusView, type GithubPollTestResult, type KeepaliveInfo, type KnowledgeView, type ReflectionRun, type SelfStatusView, type SettingProposal, type TrajectoryView, type TaskPermission, type WatchdogAnnotation, type WatchdogDiagnosticsView } from './contracts.ts'
 import type { UpdateStatus } from './auto-update.ts'
 import { copyLocale, t, type CopyLocale } from './ui-copy.ts'
 import type { ChatFileReceipt } from './chat-files.ts'
@@ -102,6 +102,8 @@ export function apply(ctx: Context): void {
     mcpCredentialSet: (server: string, value: string) => call<{ configured: boolean; masked?: string }>('mcp.credential.set', { server, value }),
     mcpCredentialUnset: (server: string) => call<{ configured: boolean }>('mcp.credential.unset', { server }),
     taskPermissionOptions: signal => call<{ options: TaskPermission[] }>('settings.taskpermissions', {}, signal),
+    githubPollStatus: signal => call<GithubPollStatusView>('github.poll.status', {}, signal),
+    githubPollTest: request => call<GithubPollTestResult>('github.poll.test', request),
     newSegment: () => call<string>('segment.new'),
     updateStatus: signal => call<UpdateStatus | null>('update.status', {}, signal),
     updateCheck: () => call<UpdateStatus>('update.check'),
@@ -114,6 +116,8 @@ export function apply(ctx: Context): void {
     restoreCognition: at => call<KnowledgeView>('cognition.restore', { at }),
     context: signal => call<DotContextView>('context', {}, signal),
     clearUsage: () => call<DotContextView>('context.clear'),
+    watchdogDiagnostics: signal => call<WatchdogDiagnosticsView>('watchdog.diagnostics', {}, signal),
+    annotateWatchdog: (id, annotation) => call<WatchdogDiagnosticsView>('watchdog.annotate', { id, annotation }),
     trajectory: signal => call<TrajectoryView>('trajectory', {}, signal),
     reflectionRuns: signal => call<readonly ReflectionRun[]>('reflection.runs', {}, signal),
     reflectionTrajectory: (sessionId, signal) => call<TrajectoryView>('reflection.trajectory', { sessionId }, signal),

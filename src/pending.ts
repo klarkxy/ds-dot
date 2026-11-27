@@ -42,9 +42,17 @@ interface Entry {
   cleanup?: () => void
 }
 
+export interface WaitInterval {
+  readonly start: number
+  readonly end: number
+}
+
+const CLOSED_INTERVAL_LIMIT = 200
+
 export class PendingHub {
   private readonly entries = new Map<string, Entry>()
   private readonly settled = new Map<string, Settlement>()
+  private readonly closedIntervals = new Map<string, WaitInterval[]>()
   private readonly listeners = new Set<() => void>()
 
   constructor(
@@ -101,6 +109,27 @@ export class PendingHub {
 
   forSession(sessionId: string): PendingView[] { return this.list().filter(view => view.sessionId === sessionId) }
 
+  /** Wait intervals (closed + open up to `now`) for one session, used by Watchdog netActiveMs. */
+  waitIntervals(sessionId: string, now = this.now()): WaitInterval[] {
+    const out: WaitInterval[] = [...(this.closedIntervals.get(sessionId) ?? [])]
+    for (const entry of this.entries.values()) {
+      if (entry.view.sessionId !== sessionId) continue
+      const start = entry.view.createdAt
+      const end = Math.max(start, now)
+      out.push({ start, end })
+    }
+    return out
+  }
+
+  /** Total deduplicated (interval-union) pending approval/question wait duration for a session since `since`. */
+  pendingWaitMs(sessionId: string, now = this.now(), since = 0): number {
+    return mergeIntervalDuration(this.waitIntervals(sessionId, now), since, now)
+  }
+
+  clearSession(sessionId: string): void {
+    this.closedIntervals.delete(sessionId)
+  }
+
   onChange(listener: () => void): () => void {
     this.listeners.add(listener)
     return () => { this.listeners.delete(listener) }
@@ -115,6 +144,7 @@ export class PendingHub {
   reset(): void {
     for (const id of [...this.entries.keys()]) this.settle(id, undefined)
     this.settled.clear()
+    this.closedIntervals.clear()
   }
 
   private settle(id: string, answer: PendingAnswer | undefined): boolean {
@@ -122,6 +152,11 @@ export class PendingHub {
     if (entry === undefined) return false
     this.entries.delete(id)
     entry.cleanup?.()
+    const endedAt = Math.max(entry.view.createdAt, this.now())
+    const list = this.closedIntervals.get(entry.view.sessionId) ?? []
+    list.push({ start: entry.view.createdAt, end: endedAt })
+    if (list.length > CLOSED_INTERVAL_LIMIT) list.splice(0, list.length - CLOSED_INTERVAL_LIMIT)
+    this.closedIntervals.set(entry.view.sessionId, list)
     entry.resolve(answer)
     this.remember(entry.view, answer === undefined ? 'withdrawn' : 'answered')
     this.changed()
@@ -149,4 +184,32 @@ export function coversQuestions(view: PendingView, answer: Extract<PendingAnswer
   const ids = (view.questions ?? []).map(item => item.id)
   const given = answer.answers.map(item => item.id)
   return ids.length === given.length && new Set(given).size === given.length && ids.every(id => given.includes(id))
+}
+
+function mergeIntervalDuration(intervals: readonly WaitInterval[], since: number, now: number): number {
+  if (!Number.isFinite(now) || now <= since) return 0
+  const clipped: Array<{ start: number; end: number }> = []
+  for (const item of intervals) {
+    if (!Number.isFinite(item.start) || !Number.isFinite(item.end)) continue
+    const start = Math.max(since, item.start)
+    const end = Math.min(now, item.end)
+    if (end > start) clipped.push({ start, end })
+  }
+  if (clipped.length === 0) return 0
+  clipped.sort((a, b) => a.start - b.start || a.end - b.end)
+  let total = 0
+  let curStart = clipped[0]!.start
+  let curEnd = clipped[0]!.end
+  for (let i = 1; i < clipped.length; i++) {
+    const next = clipped[i]!
+    if (next.start <= curEnd) {
+      if (next.end > curEnd) curEnd = next.end
+    } else {
+      total += curEnd - curStart
+      curStart = next.start
+      curEnd = next.end
+    }
+  }
+  total += curEnd - curStart
+  return total
 }

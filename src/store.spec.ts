@@ -21,6 +21,8 @@ function fakeDomain(seed: Record<string, Record<string, unknown>> = {}) {
     peers: new Map(Object.entries(seed.peers ?? {})),
     inbox: new Map(Object.entries(seed.inbox ?? {})),
     links: new Map(Object.entries(seed.links ?? {})),
+    github_poll: new Map(Object.entries(seed.github_poll ?? {})),
+    watchdog: new Map(Object.entries(seed.watchdog ?? {})),
   }
   const puts: string[] = []
   const domain: DotDomainHandle = {
@@ -684,5 +686,25 @@ describe('task recipe storage', () => {
     const change = store.work.change('c-1')
     expect(change).toMatchObject({ id: 'c-1', title: 'Old' })
     expect(change?.recipe).toBeUndefined()
+  })
+
+  it('exposes try/catch-guarded watchdogTable and clears it on factoryReset', async () => {
+    const { domain, tables } = fakeDomain()
+    const store = new DotStore(domain)
+    const table = store.watchdogTable()
+    expect(table).toBeDefined()
+    await table!.put('meta', { kind: 'meta', watchdogStops: 2 })
+    expect(tables.watchdog!.size).toBe(1)
+    await store.factoryReset(10)
+    expect(tables.watchdog!.size).toBe(0)
+
+    const minimal = new DotStore({
+      table: name => {
+        if (name === 'watchdog' || name === 'github_poll') throw new Error('missing table')
+        return { entries: () => new Map().entries(), get: () => undefined, put: async () => {}, delete: async () => false }
+      },
+      close: async () => {},
+    })
+    expect(minimal.watchdogTable()).toBeUndefined()
   })
 })

@@ -42,6 +42,18 @@ export const USAGE_PRUNE_GRACE_MS = 24 * 60 * 60_000
 /** Terminal run — usage and wall time can be recorded against it. */
 export function runIsTerminal(run: Pick<RunRecord, 'phase'>): boolean { return TERMINAL.has(run.phase) }
 
+/** Whether a run or its parent change was explicitly stopped/cancelled by the user. */
+export function runStoppedByUser(
+  run: Pick<RunRecord, 'phase' | 'closeIntent' | 'closeReason'>,
+  change?: Pick<ChangeRecord, 'control'>,
+): boolean {
+  if (change?.control === 'cancelled') return true
+  if (run.closeReason === 'watchdog') return false
+  if (run.closeIntent === 'stopped') return true
+  if (run.phase === 'stopped' && run.closeReason !== 'closeout' && run.closeReason !== 'rework') return true
+  return false
+}
+
 /**
  * Tokens and wall time summed over a change's finished runs. Only runs that
  * recorded the fields contribute, so the totals track the terminal set and a
@@ -115,6 +127,8 @@ export interface ChangeRecord {
   readonly recipe?: { readonly id: string; readonly revision: number }
   /** A change whose runs wrote into a dot-managed git worktree instead of the checkout. */
   readonly isolation?: TaskIsolation
+  /** Recorded when a linked PR merges/closes so Dorothy knows to run closure acceptance checks. */
+  readonly closureReady?: { readonly ref: string; readonly outcome: 'merged' | 'closed'; readonly at: number }
   readonly createdAt: number
   readonly updatedAt: number
 }
@@ -303,6 +317,11 @@ export const changeSchema = z.object({
     base: z.object({ ref: z.string().min(1), remote: z.string().min(1).optional() }).optional(),
     state: z.enum(['active', 'committed', 'merged', 'discarded']),
     commitSha: z.string().min(1).optional(), mergedInto: z.string().min(1).optional(), at: z.number(),
+  }).optional(),
+  closureReady: z.object({
+    ref: z.string().min(1),
+    outcome: z.enum(['merged', 'closed']),
+    at: z.number(),
   }).optional(),
   createdAt: z.number(), updatedAt: z.number(),
 })
@@ -2059,7 +2078,14 @@ export class WorkBook {
           ? { ...item, status: 'rejected' as const, evidence: 'superseded-by-verified-stop', updatedAt: at }
           : item)
         : run.deliveries
-      const next: RunRecord = { ...run, deliveries, phase, closureEvidence: evidence, closeReason: phase, updatedAt: at }
+      const next: RunRecord = {
+        ...run,
+        deliveries,
+        phase,
+        closureEvidence: evidence,
+        closeReason: phase === 'stopped' && run.closeReason ? run.closeReason : phase,
+        updatedAt: at,
+      }
       await this.commit('runs', next.id, next)
       this.runs.set(next.id, next)
       this.currentRevision += 1
@@ -2149,6 +2175,27 @@ export class WorkBook {
       this.changes.set(next.id, next)
       this.currentRevision += 1
       return { ok: true }
+    })
+  }
+
+  /** Flag a non-terminal change for closure acceptance check when a linked PR closes or merges (never bypasses verification). */
+  markClosureReady(changeId: string, detail: { readonly ref: string; readonly outcome: 'merged' | 'closed'; readonly at: number }): Promise<{ readonly ok: true; readonly updated: boolean } | WorkRefusal> {
+    return this.exclusive(async () => {
+      const refused = this.recoveryRefusal()
+      if (refused) return refused
+      const current = this.changes.get(changeId)
+      if (!current) return { ok: false, code: 'missing', message: `unknown change ${changeId}` }
+      if (current.control === 'cancelled' || current.closeout !== undefined) {
+        return { ok: true, updated: false }
+      }
+      if (current.closureReady?.ref === detail.ref && current.closureReady.outcome === detail.outcome) {
+        return { ok: true, updated: false }
+      }
+      const next: ChangeRecord = { ...current, closureReady: detail, updatedAt: detail.at }
+      await this.commit('changes', next.id, next)
+      this.changes.set(next.id, next)
+      this.currentRevision += 1
+      return { ok: true, updated: true }
     })
   }
 
@@ -2255,7 +2302,7 @@ export class WorkBook {
    * Close one run without cancelling its change. The stop itself happens outside
    * the lock; this only persists the settling gate.
    */
-  prepareFinish(runId: string, phase: 'completed' | 'failed', at = Date.now()): Promise<{ readonly ok: true; readonly updatedAt: number; readonly sessionId?: string; readonly requestedSessionId: string } | WorkRefusal> {
+  prepareFinish(runId: string, phase: 'completed' | 'failed' | 'stopped', at = Date.now(), closeReason?: string): Promise<{ readonly ok: true; readonly updatedAt: number; readonly sessionId?: string; readonly requestedSessionId: string } | WorkRefusal> {
     return this.exclusive(async () => {
       const refused = this.recoveryRefusal()
       if (refused) return refused
@@ -2264,13 +2311,13 @@ export class WorkBook {
       if (TERMINAL.has(run.phase)) return { ok: false, code: 'closed-run', message: `${runId} is ${run.phase}` }
       if (run.phase === 'settling') {
         if (run.closeIntent) return { ok: true, updatedAt: run.updatedAt, ...(run.sessionId ? { sessionId: run.sessionId } : {}), requestedSessionId: run.requestedSessionId }
-        const next: RunRecord = { ...run, closeIntent: phase, updatedAt: at }
+        const next: RunRecord = { ...run, closeIntent: phase, ...(closeReason ? { closeReason } : {}), updatedAt: at }
         await this.commit('runs', next.id, next)
         this.runs.set(next.id, next)
         this.currentRevision += 1
         return { ok: true, updatedAt: next.updatedAt, ...(next.sessionId ? { sessionId: next.sessionId } : {}), requestedSessionId: next.requestedSessionId }
       }
-      const next: RunRecord = { ...run, phase: 'settling', closeIntent: phase, updatedAt: at }
+      const next: RunRecord = { ...run, phase: 'settling', closeIntent: phase, ...(closeReason ? { closeReason } : {}), updatedAt: at }
       await this.commit('runs', next.id, next)
       this.runs.set(next.id, next)
       this.currentRevision += 1

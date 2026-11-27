@@ -48,6 +48,8 @@ import { dotDomain, parseInboxRecord, parsePeerDelivery, parseTask } from './sto
 import { DotStore, type DotDomainHandle } from './store.ts'
 import { DOT_INHERITED_ALLOW } from './tools.ts'
 import { copyLocale, fillText, t } from './ui-copy.ts'
+import { WATCHDOG_INSTRUCTIONS, WATCHDOG_PRESET_ID } from './watchdog.ts'
+import { registerWorkerPreset } from './worker-preset.ts'
 
 export const name = PLUGIN_NAME
 export const inject = ['storageDomain', 'sessions', 'sessionController', 'workspaceRegistry', 'sessionQuery', 'agentPresets', 'agents', 'agentDefaultModel', 'webServer', 'connection'] as const
@@ -84,8 +86,9 @@ interface SessionLike {
   readonly header?: { readonly parentSession?: string; readonly cwd?: string; readonly origin?: string }
   readonly seq?: number
   eventAt?(seq: number): RawEvent | undefined
+  snapshotEvents?(): readonly RawEvent[]
 }
-interface AgentLike { readonly id?: string; readonly session?: SessionLike }
+interface AgentLike { readonly id?: string; readonly status?: string; readonly session?: SessionLike }
 
 /** Tell Dorothy, in the chat, why a review was rejected. The decision is already committed, so the
  *  note is best effort: it must never fail the RPC or hold its acknowledgment while the chat queues. */
@@ -107,7 +110,7 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
   if (retiring) await retiring.catch(() => undefined)
   const logger = installPluginLogger(ctx, PLUGIN_NAME, { forwardHostWarnError: false })
   const log = (message: string) => {
-    ctx.logger?.info?.(message)
+    try { ctx.logger?.info?.(message) } catch { /* host logger is optional */ }
     logger.info('dot.runtime', message)
   }
   const domain = await openCompatibleDomain(
@@ -117,17 +120,41 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
   )
   const store = new DotStore(domain, [...domain.table('tasks').entries()].map(([, value]) => parseTask(value)).filter((task): task is TaskRecord => task !== undefined))
   let sealOwned: ((agent: unknown) => void) | undefined
+  const safeAgentPresets = (): Context['agentPresets'] | undefined => {
+    try { return ctx.agentPresets }
+    catch { return undefined }
+  }
+  const invokePresetDispose = (dispose: (() => Promise<void>) | undefined) => {
+    if (typeof dispose !== 'function') return
+    try {
+      void Promise.resolve(dispose()).catch(() => {})
+    } catch { /* preset disposal is best-effort */ }
+  }
+  const safeWarn = (template: string, error: unknown) => {
+    try { ctx.logger?.warn?.(template, messageOf(error)) } catch { /* host logger is optional */ }
+  }
   /** Tool definitions published on dot's preset scope (the ds-dot/mcp mounts). */
   const presetScopeDefs = async (): Promise<readonly { readonly name: string; readonly description?: string }[]> => {
-    const presets = ctx.agentPresets as unknown as {
-      acquireScope?(id: string): Promise<{ key: unknown } & { [Symbol.asyncDispose](): Promise<void> }>
+    try {
+      const presets = safeAgentPresets() as {
+        acquireScope?(id: string): Promise<{ key: unknown } & { [Symbol.asyncDispose](): Promise<void> }>
+      } | undefined
+      const toolsService = ctx.get('tools' as never) as
+        | (CapabilityTools & { definitions?(key?: unknown): readonly { readonly name: string; readonly description?: string }[] })
+        | undefined
+      const acquireScope = presets?.acquireScope
+      if (typeof acquireScope !== 'function') return []
+      const handle = await acquireScope.call(presets, PRESET_ID)
+      if (handle === undefined) return []
+      try {
+        const definitions = toolsService?.definitions
+        return typeof definitions === 'function' ? definitions.call(toolsService, handle.key) : []
+      } finally {
+        await handle[Symbol.asyncDispose]?.()
+      }
+    } catch {
+      return []
     }
-    const toolsService = ctx.get('tools' as never) as
-      | (CapabilityTools & { definitions?(key?: unknown): readonly { readonly name: string; readonly description?: string }[] })
-      | undefined
-    const handle = await presets.acquireScope?.(PRESET_ID)
-    if (handle === undefined || toolsService?.definitions === undefined) return []
-    try { return toolsService.definitions(handle.key) } finally { await handle[Symbol.asyncDispose]() }
   }
   /** Global MCP server names: manager rows plus names guessed from root `mcp__x__y` tools. */
   const globalMcpNames = (): ReadonlySet<string> => {
@@ -170,6 +197,7 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
   const host = bindHost(name => ctx.get(name as never), log, () => store.settings.model, agent => { sealOwned?.(agent) }, capabilities)
   const service = new DotService({
     host,
+    get: name => ctx.get(name as never),
     store,
     capabilities,
     peers: new PeerLedger(domain.table('peers'), parsePeerDelivery),
@@ -231,6 +259,8 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
   follow()
   const unfollow = store.onChange(follow)
   const unpending = service.pending.onChange(() => feed.boardChanged())
+  const unretry = service.onRetryChange(() => feed.boardChanged())
+  const unjobs = service.onBackgroundJobsChange(() => feed.boardChanged())
   const ensureDot = async () => {
     const sessionId = await service.ensureDot()
     follow()
@@ -243,10 +273,16 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
   // A tool set change can mean a bundle came or went; refetch row mapping on the next catalog read.
   ctx.effect(() => (ctx as unknown as { on(name: string, listener: () => void): () => void }).on('tools/change', () => capabilities.invalidateBundles()), 'dot.capabilities-bundles')
   // Optional webhook ingress: only while the host provides webhookRuntime.
-  installInboxIngress(ctx, service, log)
+  installInboxIngress(ctx, service, log, {
+    shouldAccept: (repo, receivedAt) => service.shouldAcceptWebhookDelivery(repo, receivedAt),
+  })
+  service.startGithubPoll()
+  service.startWatchdog()
   ctx.effect(() => () => {
     unfollow()
     unpending()
+    unretry()
+    unjobs()
     const done = (async () => {
       service.releaseChildSeals()
       await service.dispose().catch(err => { logger.fault('service.dispose-failed', 'DotService disposal failed.', err) })
@@ -260,90 +296,181 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
   }, 'dot.lifecycle')
 
   ctx.effect(() => {
-    const release = installPresetVisibility(ctx.agentPresets, ctx)
+    const presets = safeAgentPresets()
+    let release: (() => void) = () => {}
+    try {
+      release = installPresetVisibility(presets, ctx)
+    } catch {
+      return () => {}
+    }
     // Warm the public-default cache so `@deepseek-ai/dsh-tool-schedule` can
     // rewrite `composedPreset` before the first roster read.
-    const warm = typeof (ctx.agentPresets as { remoteExportList?: () => Promise<unknown> }).remoteExportList === 'function'
-      ? ctx.agentPresets.remoteExportList()
-      : ctx.agentPresets.list()
-    void warm.catch(() => {})
-    return release
+    if (presets) {
+      try {
+        const remoteExportList = (presets as { remoteExportList?: () => Promise<unknown> }).remoteExportList
+        const list = presets.list
+        const warm = typeof remoteExportList === 'function'
+          ? remoteExportList.call(presets)
+          : typeof list === 'function'
+            ? list.call(presets)
+            : undefined
+        void Promise.resolve(warm).catch(() => {})
+      } catch { /* cache warmup is best-effort */ }
+    }
+    return () => {
+      try { release() } catch { /* visibility disposal is best-effort */ }
+    }
   }, 'dot.preset-visibility')
-  ctx.effect(() => installInternalPresetCreateGuard(ctx.get('sessionController' as never), () => publicTaskPreset(ctx.agentPresets)), 'dot.public-session-create')
+  ctx.effect(() => {
+    let release: (() => void) = () => {}
+    try {
+      release = installInternalPresetCreateGuard(ctx.get('sessionController' as never), () => publicTaskPreset(safeAgentPresets()))
+    } catch {
+      return () => {}
+    }
+    return () => {
+      try { release() } catch { /* create-guard disposal is best-effort */ }
+    }
+  }, 'dot.public-session-create')
 
   // The dot preset: conversation, dot's tools, and in-place compaction for the
   // one turn that outgrows the window before a segment change. Choices go through
   // deep-view's show_view cards, which every session gets when it is installed.
   ctx.effect(() => {
+    const presets = safeAgentPresets()
     let release: (() => Promise<void>) | undefined
     let disposed = false
-    void ctx.agentPresets.register({
-      id: PRESET_ID,
-      name: 'Dorothy',
-      description: 'Dorothy (dot): coordinates workspaces and task sessions, settles routine requests, and reports back; carries read-only file and Office tools, but no write or shell tools.',
-      order: 90,
-      plugins: [
-        { id: 'persona', name: '@deepseek-ai/dsh-persona', config: { prefix: DOT_INSTRUCTIONS } },
-        { id: 'time-context', name: '@deepseek-ai/dsh-time-context' },
-        {
-          id: 'compaction', name: 'cordis:group', group: true, isolate: { compaction: true },
-          config: [
-            // Spelled out so the context page draws the compaction line from the same numbers.
-            { id: 'compaction-basic', name: '@deepseek-ai/dsh-compaction-basic', config: { ...COMPACTION_POLICY } },
-            { id: 'command-compact', name: '@deepseek-ai/dsh-command-compact' },
-          ],
-        },
-        { id: 'tool-fs', name: '@deepseek-ai/dsh-tool-fs', config: { write: false, edit: false, applyPatch: false } },
-        { id: 'tool-fs-search', name: '@deepseek-ai/dsh-tool-fs-search', config: { sampleOverCapGlobResults: false } },
-        { id: 'tool-office', name: '@deepseek-ai/dsh-tool-office' },
-        { id: 'dot-tools', name: 'ds-dot/tools' },
-        // Dot-local MCP servers, mounted on the preset scope from settings.
-        { id: 'dot-mcp', name: 'ds-dot/mcp' },
-        // Global-nature host built-ins, grantable through Extra capabilities;
-        // the agent-scope restrict masks them until granted.
-        { id: 'tool-skill', name: '@deepseek-ai/dsh-tool-skill' },
-        { id: 'tool-schedule', name: '@deepseek-ai/dsh-tool-schedule' },
-        { id: 'tool-plugin-manager', name: '@deepseek-ai/dsh-plugin-manager/tools', disabled: { __jsExpr: "!ctx.get('profileContext')" } },
-      ] as never,
-    }).then((dispose: () => Promise<void>) => {
-      if (disposed) { void dispose(); return }
-      release = dispose
-      logger.debug('preset.registered', 'Registered Dorothy preset.', { presetId: PRESET_ID })
-      // Reminders wake dot's session, which only opens once its preset exists.
-      service.startReminders()
-    }, (error: unknown) => {
+    const onFailed = (error: unknown) => {
       logger.error('preset.register-failed', 'Failed to register Dorothy preset.', error, { presetId: PRESET_ID })
-      ctx.logger?.warn?.('dsh-dot: preset registration failed: %s', messageOf(error))
-    })
-    return () => { disposed = true; void release?.() }
+      safeWarn('dsh-dot: preset registration failed: %s', error)
+    }
+    try {
+      const register = presets?.register
+      if (typeof register !== 'function') return () => {}
+      void Promise.resolve(register.call(presets, {
+        id: PRESET_ID,
+        name: 'Dorothy',
+        description: 'Dorothy (dot): coordinates workspaces and task sessions, settles routine requests, and reports back; carries read-only file and Office tools, but no write or shell tools.',
+        order: 90,
+        plugins: [
+          { id: 'persona', name: '@deepseek-ai/dsh-persona', config: { prefix: DOT_INSTRUCTIONS } },
+          { id: 'time-context', name: '@deepseek-ai/dsh-time-context' },
+          {
+            id: 'compaction', name: 'cordis:group', group: true, isolate: { compaction: true },
+            config: [
+              // Spelled out so the context page draws the compaction line from the same numbers.
+              { id: 'compaction-basic', name: '@deepseek-ai/dsh-compaction-basic', config: { ...COMPACTION_POLICY } },
+              { id: 'command-compact', name: '@deepseek-ai/dsh-command-compact' },
+            ],
+          },
+          { id: 'tool-fs', name: '@deepseek-ai/dsh-tool-fs', config: { write: false, edit: false, applyPatch: false } },
+          { id: 'tool-fs-search', name: '@deepseek-ai/dsh-tool-fs-search', config: { sampleOverCapGlobResults: false } },
+          { id: 'tool-office', name: '@deepseek-ai/dsh-tool-office' },
+          { id: 'dot-tools', name: 'ds-dot/tools' },
+          // Dot-local MCP servers, mounted on the preset scope from settings.
+          { id: 'dot-mcp', name: 'ds-dot/mcp' },
+          // Global-nature host built-ins, grantable through Extra capabilities;
+          // the agent-scope restrict masks them until granted.
+          { id: 'tool-skill', name: '@deepseek-ai/dsh-tool-skill' },
+          { id: 'tool-schedule', name: '@deepseek-ai/dsh-tool-schedule' },
+          { id: 'tool-plugin-manager', name: '@deepseek-ai/dsh-plugin-manager/tools', disabled: { __jsExpr: "!ctx.get('profileContext')" } },
+        ] as never,
+      })).then((dispose: () => Promise<void>) => {
+        if (disposed) { invokePresetDispose(dispose); return }
+        release = dispose
+        logger.debug('preset.registered', 'Registered Dorothy preset.', { presetId: PRESET_ID })
+        // Reminders wake dot's session, which only opens once its preset exists.
+        service.startReminders()
+      }, onFailed)
+    } catch (error: unknown) {
+      onFailed(error)
+    }
+    return () => {
+      disposed = true
+      const current = release
+      release = undefined
+      invokePresetDispose(current)
+    }
   }, 'dot.preset')
 
   // The internal reflection preset: a hidden subagent session mounts only the
   // read-only history tools and the cognition submission tool (never the
   // agreements tool). It is filtered out of the task preset roster in host.ts.
   ctx.effect(() => {
+    const presets = safeAgentPresets()
     let release: (() => Promise<void>) | undefined
     let disposed = false
-    void ctx.agentPresets.register({
-      id: REFLECTION_PRESET_ID,
-      name: 'Dot reflection',
-      description: 'Internal background reflection pass that updates Dorothy’s cognition; never used for tasks.',
-      order: 91,
-      plugins: [
-        { id: 'persona', name: '@deepseek-ai/dsh-persona', config: { prefix: REFLECTION_INSTRUCTIONS } },
-        { id: 'time-context', name: '@deepseek-ai/dsh-time-context' },
-        { id: 'dot-reflection-tools', name: 'ds-dot/reflection' },
-      ] as never,
-    }).then((dispose: () => Promise<void>) => {
-      if (disposed) { void dispose(); return }
-      release = dispose
-      logger.debug('preset.registered', 'Registered Dot reflection preset.', { presetId: REFLECTION_PRESET_ID })
-    }, (error: unknown) => {
+    const onFailed = (error: unknown) => {
       logger.error('preset.register-failed', 'Failed to register Dot reflection preset.', error, { presetId: REFLECTION_PRESET_ID })
-      ctx.logger?.warn?.('dsh-dot: reflection preset registration failed: %s', messageOf(error))
-    })
-    return () => { disposed = true; void release?.() }
+      safeWarn('dsh-dot: reflection preset registration failed: %s', error)
+    }
+    try {
+      const register = presets?.register
+      if (typeof register !== 'function') return () => {}
+      void Promise.resolve(register.call(presets, {
+        id: REFLECTION_PRESET_ID,
+        name: 'Dot reflection',
+        description: 'Internal background reflection pass that updates Dorothy’s cognition; never used for tasks.',
+        order: 91,
+        plugins: [
+          { id: 'persona', name: '@deepseek-ai/dsh-persona', config: { prefix: REFLECTION_INSTRUCTIONS } },
+          { id: 'time-context', name: '@deepseek-ai/dsh-time-context' },
+          { id: 'dot-reflection-tools', name: 'ds-dot/reflection' },
+        ] as never,
+      })).then((dispose: () => Promise<void>) => {
+        if (disposed) { invokePresetDispose(dispose); return }
+        release = dispose
+        logger.debug('preset.registered', 'Registered Dot reflection preset.', { presetId: REFLECTION_PRESET_ID })
+      }, onFailed)
+    } catch (error: unknown) {
+      onFailed(error)
+    }
+    return () => {
+      disposed = true
+      const current = release
+      release = undefined
+      invokePresetDispose(current)
+    }
   }, 'dot.reflection-preset')
+
+  ctx.effect(() => registerWorkerPreset(ctx, logger), 'dot.worker-preset')
+
+  // The internal read-only watchdog judge preset: zero file/shell/task tools.
+  ctx.effect(() => {
+    const presets = safeAgentPresets()
+    let release: (() => Promise<void>) | undefined
+    let disposed = false
+    const onFailed = (error: unknown) => {
+      logger.error('preset.register-failed', 'Failed to register Dot watchdog preset.', error, { presetId: WATCHDOG_PRESET_ID })
+      safeWarn('dsh-dot: watchdog preset registration failed: %s', error)
+    }
+    try {
+      const register = presets?.register
+      if (typeof register !== 'function') return () => {}
+      void Promise.resolve(register.call(presets, {
+        id: WATCHDOG_PRESET_ID,
+        name: 'Dot watchdog',
+        description: 'Internal strictly read-only run-health judge used when watchdogMode is auto; never used for tasks.',
+        order: 92,
+        plugins: [
+          { id: 'persona', name: '@deepseek-ai/dsh-persona', config: { prefix: WATCHDOG_INSTRUCTIONS } },
+          { id: 'time-context', name: '@deepseek-ai/dsh-time-context' },
+        ] as never,
+      })).then((dispose: () => Promise<void>) => {
+        if (disposed) { invokePresetDispose(dispose); return }
+        release = dispose
+        logger.debug('preset.registered', 'Registered Dot watchdog preset.', { presetId: WATCHDOG_PRESET_ID })
+      }, onFailed)
+    } catch (error: unknown) {
+      onFailed(error)
+    }
+    return () => {
+      disposed = true
+      const current = release
+      release = undefined
+      invokePresetDispose(current)
+    }
+  }, 'dot.watchdog-preset')
 
   // Correlate the host audit id (not callId) with its in-memory dot request.
   const approvalWithdrawals = new Map<string, { sessionId: string; withdraw: () => void }>()
@@ -351,15 +478,39 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
 
   // Ledger and chat feed. Handlers never throw back into the agent loop.
   const guard = (work: () => unknown) => { try { void Promise.resolve(work()).catch(() => {}) } catch { /* observer only */ } }
+  const agentsSafe = (): { get?(id: string): AgentLike | undefined; list?(): readonly AgentLike[] } | undefined => {
+    try { return ctx.get('agents' as never) as { get?(id: string): AgentLike | undefined; list?(): readonly AgentLike[] } | undefined }
+    catch { return undefined }
+  }
+  const readSessionSnapshot = (session: SessionLike | undefined): readonly RawEvent[] => {
+    if (!session) return []
+    try {
+      if (typeof session.snapshotEvents === 'function') return session.snapshotEvents()
+      if (typeof session.seq === 'number' && typeof session.eventAt === 'function') {
+        const events: RawEvent[] = []
+        for (let seq = 0; seq < session.seq; seq++) {
+          const event = session.eventAt(seq)
+          if (event) events.push(event)
+        }
+        return events
+      }
+    } catch { /* best-effort snapshot */ }
+    return []
+  }
   ctx.effect(() => ctx.on('tools/change', () => service.refreshChildSeals()), 'dot.child-tools')
   ctx.effect(() => ctx.on('agent/disposed', ({ agent }: { agent: AgentLike }) => {
-    const id = agent.session?.id
-    if (id) service.releaseChildSeal(id)
+    const id = agent?.session?.id ?? agent?.id
+    if (id) {
+      service.releaseChildSeal(id)
+      service.noteAgentDisposed(id)
+    }
   }), 'dot.seal-release')
   ctx.effect(() => ctx.on('agent/status', ({ agent, status }: { agent: AgentLike; status: string }) => guard(() => {
     const own = agent.session?.id
     if (own) feed.onStatus(own)
-    if (own) service.sealIfOwned(agent)
+    if (own) {
+      try { service.sealIfOwned(agent) } catch { /* best-effort seal; must not block status transitions */ }
+    }
     if (own && service.isDot(own) && (status === 'running' || status === 'idle')) service.onStatus(own, status)
     // dot's own session is left out of the ledger; its finished turn is where a segment change is checked.
     // The check waits for the turn boundary to commit, like the reply read below.
@@ -370,6 +521,13 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
   // Archive is not an agent status. The host keeps the session readable and
   // Dorothy's last idle status would otherwise stay on the board forever.
   const onHost = (name: string, listener: (...args: never[]) => void) => (ctx as unknown as { on(event: string, fn: (...args: never[]) => void): () => void }).on(name, listener)
+  ctx.effect(() => onHost('agent/created', (({ agent }: { agent?: AgentLike }) => guard(() => {
+    const session = agent?.session
+    const id = typeof session?.id === 'string' ? session.id : typeof agent?.id === 'string' ? agent.id : undefined
+    if (!id) return
+    const status = agent?.status === 'idle' ? 'idle' : 'running'
+    service.onAgentCreated(id, status, readSessionSnapshot(session))
+  })) as never), 'dot.agent-created')
   ctx.effect(() => onHost('workspace/session-archived', ((request: { sessionId?: string }) => {
     const id = request?.sessionId
     if (typeof id === 'string' && id) guard(() => service.noteSessionArchived(id))
@@ -391,6 +549,12 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
   })), 'dot.error')
   ctx.effect(() => (ctx as unknown as { on(name: string, listener: (...args: never[]) => void): () => void }).on('session/event', ((session: { id?: string }, event: RawEvent) => {
     if (session?.id && feed.isDot(session.id)) guard(() => feed.onEvent(session.id!, event))
+    if (session?.id) {
+      const liveSession = agentsSafe()?.get?.(session.id)?.session
+      if (!liveSession || liveSession === session) {
+        guard(() => service.onSessionEvent(session.id!, event))
+      }
+    }
     if (event.type === 'approval/decided') {
       const id = (event.data as { id?: unknown } | undefined)?.id
       const linked = typeof id === 'string' ? approvalWithdrawals.get(id) : undefined
@@ -404,6 +568,7 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
     const id = payload?.agent?.session?.id
     if (id && payload.frame && feed.isDot(id)) guard(() => feed.onStream(id, payload.frame!))
   }) as never), 'dot.chat-stream')
+  service.backfillManagedRetryHealth()
 
   /** Top-level session a request belongs to: a subagent's popups show in its root session. */
   const agents = () => ctx.get('agents' as never) as unknown as { get(id: string): AgentLike | undefined } | undefined
@@ -528,7 +693,7 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
   }
   // The kit's 64 KiB default answers 413 before `say` or `attach` runs. The
   // shared cap below fits advertised images and one maximum-size file upload.
-  const PASSIVE_ENDPOINTS = new Set(['wait', 'board', 'attention', 'work.list', 'work.read', 'card.pending', 'card.detail', 'recipes', 'self.status'])
+  const PASSIVE_ENDPOINTS = new Set(['wait', 'board', 'attention', 'work.list', 'work.read', 'card.pending', 'card.detail', 'recipes', 'self.status', 'github.poll.status', 'watchdog.diagnostics'])
   ctx.effect(() => registerHostRpc(ctx as unknown as HostRpcContext, RPC_CHANNEL, async (endpoint, payload, signal) => {
     try {
       const reqLocale = field(payload, 'uiLocale')
@@ -584,6 +749,25 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
         }
         case 'stop': { await service.stop(); return { ok: true, value: true } }
         case 'settings': return { ok: true, value: store.settings }
+        case 'github.poll.status': return { ok: true, value: service.githubPollStatus() }
+        case 'github.poll.test': {
+          const ghPath = typeof field(payload, 'ghPath') === 'string' ? str(payload, 'ghPath') : undefined
+          const hostname = typeof field(payload, 'hostname') === 'string' ? str(payload, 'hostname') : undefined
+          const rawRepos = field(payload, 'repos')
+          const repos = Array.isArray(rawRepos) ? rawRepos.filter((r): r is string => typeof r === 'string') : undefined
+          try {
+            return {
+              ok: true,
+              value: await service.testGithubPollConnection({
+                ...(ghPath !== undefined ? { ghPath } : {}),
+                ...(hostname !== undefined ? { hostname } : {}),
+                ...(repos !== undefined ? { repos } : {}),
+              }),
+            }
+          } catch (error) {
+            return { ok: false, error: { code: error instanceof DotError ? error.code : 'dot/failed', message: messageOf(error) } }
+          }
+        }
         case 'settings.proposals': return { ok: true, value: store.settingProposals }
         case 'settings.taskpermissions': {
           const live = host.taskPermissionOptions?.() ?? { safeAuto: false, auto: false }
@@ -650,6 +834,19 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
         case 'context.clear': {
           await ensureDot()
           return { ok: true, value: await service.clearUsage() }
+        }
+        case 'watchdog.diagnostics': {
+          return { ok: true, value: service.watchdogDiagnostics() }
+        }
+        case 'watchdog.annotate': {
+          const id = str(payload, 'id').trim()
+          const annotation = field(payload, 'annotation')
+          if (!id || (annotation !== 'accurate' && annotation !== 'false-positive')) {
+            return { ok: false, error: { code: 'dot/invalid', message: 'watchdog.annotate requires id and annotation (accurate | false-positive)' } }
+          }
+          const updated = await service.annotateWatchdogHit(id, annotation)
+          if (!updated) return { ok: false, error: { code: 'dot/not-found', message: `unknown watchdog hit ${id}` } }
+          return { ok: true, value: service.watchdogDiagnostics() }
         }
         case 'recipes': return { ok: true, value: service.recipeBoard() }
         case 'recipe.run': {

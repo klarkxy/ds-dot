@@ -23,6 +23,13 @@ import { TASK_BRANCH_PREFIX, TASK_WORKTREES_DIR, listTaskWorktrees, runGit } fro
 import { killProcessTree, libHashOf, runSelfBuild } from './self-root.ts'
 import { canonicalPath, onDiskPath } from './work.ts'
 import { upsertRecipeOutcome } from './recipes.ts'
+import { Context } from '@deepseek-ai/cordis'
+import { createScope } from '@deepseek-ai/dsh-scope'
+import { SystemPrompt } from '@deepseek-ai/dsh-system-prompt'
+import { ToolsService } from '@deepseek-ai/dsh-tools'
+import { ToolExecutionPipeline, executeToolBatch } from '@deepseek-ai/dsh-tools/pipeline'
+import { isTaskOnlySelector, TASK_ONLY_TOOLS } from './capabilities.ts'
+import { patchSettings } from './settings.ts'
 
 /** Manual timer: tests fire scheduled callbacks explicitly. */
 function manualTimer() {
@@ -180,7 +187,7 @@ function fakeHost() {
   }
 }
 
-function setup(settings?: Partial<DotSettings>, trace?: { info: (event: string, message: string, context?: Record<string, unknown>) => boolean; debug: (event: string, message: string, context?: Record<string, unknown>) => boolean; warn: (event: string, message: string, error?: unknown, context?: Record<string, unknown>) => boolean }, homeDir = join(tmpdir(), 'dsh-dot-spec'), extra: { pluginManager?: () => unknown; git?: typeof runGit; capabilities?: unknown; cognitionPromptEntries?: number; selfInstall?: { readonly root: string; readonly mode: 'linked' | 'installed' }; selfBuild?: (root: string, signal?: AbortSignal) => Promise<{ readonly ok: boolean; readonly output: string }> } = {}) {
+function setup(settings?: Partial<DotSettings>, trace?: { info: (event: string, message: string, context?: Record<string, unknown>) => boolean; debug: (event: string, message: string, context?: Record<string, unknown>) => boolean; warn: (event: string, message: string, error?: unknown, context?: Record<string, unknown>) => boolean }, homeDir = join(tmpdir(), 'dsh-dot-spec'), extra: { pluginManager?: () => unknown; git?: typeof runGit; capabilities?: unknown; cognitionPromptEntries?: number; selfInstall?: { readonly root: string; readonly mode: 'linked' | 'installed' }; selfBuild?: (root: string, signal?: AbortSignal) => Promise<{ readonly ok: boolean; readonly output: string }>; get?: (name: string) => unknown; backgroundLimitMs?: number } = {}) {
   const fake = fakeHost()
   const clock = manualTimer()
   const store = new DotStore(undefined)
@@ -191,7 +198,7 @@ function setup(settings?: Partial<DotSettings>, trace?: { info: (event: string, 
   // A fresh install defaults to tracked; see DEFAULT_SETTINGS.
   void store.setSettings({ ...DEFAULT_SETTINGS, reflection: false, idleCheckMinutes: 0, autoUpdate: false, scope: 'all', ...settings })
   let at = 1000
-  const service = new DotService({ host: fake.host, store, homeDir, approvalGraceMs: 0, timer: clock.timer, now: () => at, ...(trace ? { trace } : {}), ...(extra.pluginManager ? { pluginManager: extra.pluginManager } : {}), ...(extra.git ? { git: extra.git } : {}), ...(extra.capabilities !== undefined ? { capabilities: extra.capabilities as never } : {}), ...(extra.cognitionPromptEntries !== undefined ? { cognitionPromptEntries: extra.cognitionPromptEntries } : {}), ...(extra.selfInstall ? { selfInstall: extra.selfInstall } : {}), ...(extra.selfBuild ? { selfBuild: extra.selfBuild } : {}) })
+  const service = new DotService({ host: fake.host, store, homeDir, approvalGraceMs: 0, timer: clock.timer, now: () => at, ...(trace ? { trace } : {}), ...(extra.pluginManager ? { pluginManager: extra.pluginManager } : {}), ...(extra.git ? { git: extra.git } : {}), ...(extra.capabilities !== undefined ? { capabilities: extra.capabilities as never } : {}), ...(extra.cognitionPromptEntries !== undefined ? { cognitionPromptEntries: extra.cognitionPromptEntries } : {}), ...(extra.selfInstall ? { selfInstall: extra.selfInstall } : {}), ...(extra.selfBuild ? { selfBuild: extra.selfBuild } : {}), ...(extra.get ? { get: extra.get } : {}), ...(extra.backgroundLimitMs !== undefined ? { backgroundLimitMs: extra.backgroundLimitMs } : {}) })
   return { ...fake, ...clock, store, service, advance: (ms: number) => { at += ms } }
 }
 
@@ -1523,6 +1530,76 @@ describe('DotService WorkBook sessions', () => {
     })
     const run = h.store.work.listRuns()[0]!
     expect(run.origin).toEqual({ strength: 'explicit', source: 'user' })
+    await h.service.dispose()
+  })
+
+  it('propagates github-poll and inbox-github origin into manageTask during an inbox turn and clears on say/idle', async () => {
+    const h = setup()
+    await h.service.ensureDot()
+    await h.service.submitInbox({
+      source: 'github',
+      sourceId: 'primary-github',
+      deliveryId: 'gh-poll:ev-1',
+      type: 'issues.opened',
+      subject: 'acme/widgets#10',
+      title: 'Bug report',
+      actor: 'octocat',
+      summary: 'broken',
+      receivedAt: 1000,
+      originSource: 'github-poll',
+    })
+    await h.service.flushNotices()
+    await h.service.manageTask({
+      action: 'dispatch',
+      dir: '/proj',
+      title: 'Poll task',
+      message: 'investigate',
+      access: 'read',
+      origin: { strength: 'inferred', source: 'speculative', sender: 'spoof' },
+    })
+    expect(h.store.work.listRuns()[0]!.origin).toEqual({
+      strength: 'explicit',
+      source: 'github-poll',
+      sender: 'octocat',
+    })
+
+    // Turning idle clears inbox turn provenance so later dispatches default to user
+    await h.service.onDotIdle(h.store.dotSessionId!)
+    await h.service.manageTask({
+      action: 'dispatch',
+      dir: '/proj',
+      title: 'After idle',
+      message: 'normal user task',
+      access: 'read',
+    })
+    expect(h.store.work.listRuns()[1]!.origin).toEqual({ strength: 'explicit', source: 'user' })
+
+    // Webhook inbox delivery also propagates inbox-github provenance
+    await h.service.submitInbox({
+      source: 'github',
+      sourceId: 'primary-github',
+      deliveryId: 'wh-ev-2',
+      type: 'pull_request.opened',
+      subject: 'acme/widgets#11',
+      title: 'PR',
+      actor: 'alice',
+      summary: 'pr',
+      receivedAt: 2000,
+      originSource: 'inbox-github',
+    })
+    await h.service.flushNotices()
+    await h.service.manageTask({
+      action: 'dispatch',
+      dir: '/proj',
+      title: 'Webhook task',
+      message: 'check pr',
+      access: 'read',
+    })
+    expect(h.store.work.listRuns()[2]!.origin).toEqual({
+      strength: 'explicit',
+      source: 'inbox-github',
+      sender: 'alice',
+    })
     await h.service.dispose()
   })
 
@@ -5392,5 +5469,968 @@ describe('DotService task permission pinning and Safe Auto read-only guard', () 
       rmSync(dir, { recursive: true, force: true })
       rmSync(home, { recursive: true, force: true })
     }
+  })
+})
+
+describe('DotService RetryHealth, idle suppression, and WorkRunView projection', () => {
+  it('projects retryStatus onto board(), workBoard(), and workList(), and clears on lifecycle events', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'dot-retry-proj-'))
+    const home = mkdtempSync(join(tmpdir(), 'dot-retry-proj-home-'))
+    const h = setup({}, undefined, home)
+    try {
+      const dotId = await h.service.ensureDot()
+      writeFileSync(join(dir, 'a.ts'), 'init')
+      const change = JSON.parse(await h.service.manageTask({ action: 'create', title: 'Retry Work', goal: 'finish', dir })) as { id: string }
+      const dispatched = await h.service.manageTask({ action: 'dispatch', task_id: change.id, access: 'read', instruction: 'inspect' })
+      const runId = /started (run-\d+)/.exec(dispatched)![1]!
+      const runSessionId = h.store.work.run(runId)!.sessionId!
+
+      // Managed stream accepts dot and run session, ignores watched & unmanaged sessions
+      await h.service.watch('watched-1', 'Human Chat')
+      const seen: string[] = []
+      const unsub = h.service.subscribeManagedSessionEvents((sid, ev) => { seen.push(`${sid}:${ev.type}`) })
+      const unsubThrow = h.service.subscribeManagedSessionEvents(() => { throw new Error('subscriber fault') })
+
+      h.service.onSessionEvent('watched-1', { type: 'llm/retry', seq: 1, time: 10_000, data: { retryId: 'w1', turn: 1, step: 1, provider: 'p', retry: 1, failure: { status: 429 } } })
+      h.service.onSessionEvent('unmanaged-1', { type: 'llm/retry', seq: 1, time: 10_000, data: { retryId: 'u1', turn: 1, step: 1, provider: 'p', retry: 1, failure: { status: 429 } } })
+      expect(h.service.retryHealth.get('watched-1')).toBeUndefined()
+      expect(h.service.retryHealth.get('unmanaged-1')).toBeUndefined()
+      expect(seen).toEqual([])
+
+      // Run session receives transient retry -> retry-started -> retry 2
+      h.service.onSessionEvent(runSessionId, { type: 'turn/start', seq: 1, time: 10_000, data: { turn: 1 } })
+      h.service.onSessionEvent(runSessionId, { type: 'step/start', seq: 2, time: 10_000, data: { turn: 1, step: 1 } })
+      h.service.onSessionEvent(runSessionId, { type: 'llm/retry', seq: 3, time: 11_000, data: { retryId: 'c1', turn: 1, step: 1, provider: 'deepseek', retry: 1, failure: { status: 429, code: 'RATE_LIMIT' } } })
+      h.service.onSessionEvent(runSessionId, { type: 'llm/retry-started', seq: 4, time: 13_500, data: { retryId: 'c1', turn: 1, step: 1, retry: 1 } })
+      h.service.onSessionEvent(runSessionId, { type: 'llm/retry', seq: 5, time: 14_000, data: { retryId: 'c1', turn: 1, step: 1, provider: 'deepseek', retry: 2, failure: { status: 503, code: 'SERVER' } } })
+      expect(seen.length).toBe(5)
+
+      const expectedStatus = {
+        kind: 'transient' as const,
+        attempts: 2,
+        since: new Date(11_000).toISOString(),
+        accumulatedMs: 2500,
+      }
+      expect(h.service.workBoard(change.id)?.runs[0]?.retryStatus).toEqual(expectedStatus)
+      expect(h.service.workList().find(row => row.id === change.id)?.runs[0]?.retryStatus).toEqual(expectedStatus)
+      expect(h.service.board().work?.find(row => row.id === change.id)?.runs[0]?.retryStatus).toEqual(expectedStatus)
+
+      // onStatus('idle') clears active retry and preserves accumulatedWaitMs; projections drop retryStatus
+      h.service.onStatus(runSessionId, 'idle')
+      expect(h.service.retryHealth.get(runSessionId)).toBeUndefined()
+      expect(h.service.retryHealth.accumulatedWaitMs(runSessionId)).toBe(2500)
+      expect(h.service.workBoard(change.id)?.runs[0]?.retryStatus).toBeUndefined()
+      expect(h.service.board().work?.find(row => row.id === change.id)?.runs[0]?.retryStatus).toBeUndefined()
+
+      // noteSessionRemoved clears run session retry even when origin !== 'watched'
+      h.service.onSessionEvent(runSessionId, { type: 'step/start', seq: 6, time: 20_000, data: { turn: 1, step: 2 } })
+      h.service.onSessionEvent(runSessionId, { type: 'llm/retry', seq: 7, time: 21_000, data: { retryId: 'c2', turn: 1, step: 2, provider: 'deepseek', retry: 1, failure: { type: 'budget_exceeded' } } })
+      expect(h.service.retryHealth.get(runSessionId)?.kind).toBe('budget')
+      await h.service.noteSessionRemoved(runSessionId)
+      expect(h.service.retryHealth.get(runSessionId)).toBeUndefined()
+
+      // Dorothy's own session events are tracked and cleared on dispose
+      h.service.onSessionEvent(dotId, { type: 'llm/retry', seq: 1, time: 30_000, data: { retryId: 'd1', turn: 1, step: 1, provider: 'deepseek', retry: 1, failure: { status: 429 } } })
+      expect(h.service.retryHealth.get(dotId)?.kind).toBe('transient')
+      unsub()
+      unsubThrow()
+    } finally {
+      await h.service.dispose()
+      expect(h.service.retryHealth.list()).toEqual([])
+      rmSync(dir, { recursive: true, force: true })
+      rmSync(home, { recursive: true, force: true })
+    }
+  })
+
+  it('backfills retryHealth before idleChecker.run() in reconcileNow() and suppresses idle check while Dorothy or run retries', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'dot-retry-idle-'))
+    const home = mkdtempSync(join(tmpdir(), 'dot-retry-idle-home-'))
+    const fake = fakeHost()
+    const clock = manualTimer()
+    const store = new DotStore(undefined)
+    await store.setSettings({ ...DEFAULT_SETTINGS, reflection: false, idleCheckMinutes: 1, autoUpdate: false, scope: 'all' })
+    let at = 1000
+    const liveAgents: Array<{ readonly sessionId: string; readonly status: 'idle' | 'running'; readonly events: readonly RawEvent[] }> = []
+    fake.host.listLiveAgents = () => liveAgents
+    const service = new DotService({ host: fake.host, store, homeDir: home, approvalGraceMs: 0, timer: clock.timer, now: () => at })
+
+    try {
+      const dotId = await service.ensureDot()
+      writeFileSync(join(dir, 'a.ts'), 'init')
+      const change = JSON.parse(await service.manageTask({ action: 'create', title: 'Stuck Retry', goal: 'finish', dir })) as { id: string }
+      const dispatched = await service.manageTask({ action: 'dispatch', task_id: change.id, access: 'read', instruction: 'inspect' })
+      const runId = /started (run-\d+)/.exec(dispatched)![1]!
+      const runSessionId = store.work.run(runId)!.sessionId!
+      // Mark task idle in store while session is actually actively retrying in host agent registry
+      await store.apply({ type: 'status', sessionId: runSessionId, status: 'idle', at: 1500 }, [])
+      await service.finishWorkRun(runId, 'failed')
+      // Create a second rework change with a live retrying session seeded in listLiveAgents
+      const change2 = JSON.parse(await service.manageTask({ action: 'create', title: 'Backfill Retrying', goal: 'finish', dir })) as { id: string }
+      const dispatched2 = await service.manageTask({ action: 'dispatch', task_id: change2.id, access: 'read', instruction: 'inspect' })
+      const runId2 = /started (run-\d+)/.exec(dispatched2)![1]!
+      const runSessionId2 = store.work.run(runId2)!.sessionId!
+      await store.apply({ type: 'status', sessionId: runSessionId2, status: 'idle', at: 1700 }, [])
+
+      liveAgents.push({
+        sessionId: runSessionId2,
+        status: 'running',
+        events: [
+          { type: 'turn/start', seq: 1, time: 2000, data: { turn: 1 } },
+          { type: 'step/start', seq: 2, time: 2000, data: { turn: 1, step: 1 } },
+          { type: 'llm/retry', seq: 3, time: 2500, data: { retryId: 'r-bf', turn: 1, step: 1, provider: 'p', retry: 1, failure: { status: 429 } } },
+        ],
+      })
+      // Also seed an already-idle agent whose stale retry must be cleared on backfill
+      liveAgents.push({
+        sessionId: runSessionId,
+        status: 'idle',
+        events: [
+          { type: 'llm/retry', seq: 1, time: 1800, data: { retryId: 'r-stale', turn: 1, step: 1, provider: 'p', retry: 1, failure: { status: 429 } } },
+        ],
+      })
+
+      // Dorothy is retrying -> reconcileNow() must NOT fire idle-check
+      service.onSessionEvent(dotId, { type: 'llm/retry', seq: 1, time: 3000, data: { retryId: 'd-retry', turn: 1, step: 1, provider: 'p', retry: 1, failure: { status: 429 } } })
+      await service.reconcile()
+      expect(service.retryHealth.get(runSessionId2)?.kind).toBe('transient')
+      expect(service.retryHealth.get(runSessionId)).toBeUndefined()
+      expect(fake.relayed.filter(item => item.notice?.entries?.some(e => e.kind === 'idle-check') || item.text.includes('Routine check'))).toHaveLength(0)
+
+      // Clear Dorothy's retry and run reconcile: change2 (retrying) is excluded, change (rework, idle) fires!
+      service.onStatus(dotId, 'idle')
+      expect(service.retryHealth.get(dotId)).toBeUndefined()
+      await service.reconcile()
+      await service.flushNotices()
+      const delivered = fake.relayed.map(s => s.text).join('\n')
+      expect(delivered).toContain(change.id)
+      expect(delivered).not.toContain(change2.id)
+    } finally {
+      await service.dispose()
+      rmSync(dir, { recursive: true, force: true })
+      rmSync(home, { recursive: true, force: true })
+    }
+  })
+})
+
+function createMockJobsService() {
+  const jobs = new Map<string, { id: string; label: string; owner?: string; status: string; outputText: string; waited: boolean }>()
+  const subscribers = new Set<{ filter: { owner?: string; owners?: string }; listener: (ev: { type: string; job?: { id: string; label?: string; owner?: string; status: string }; awaited?: boolean }) => void }>()
+  const killCalls: Array<{ id: string; caller?: string; reason?: string }> = []
+  const waitCalls: Array<{ id: string; timeoutMs: number; caller?: string }> = []
+  const readCalls: string[] = []
+  const readAtCalls: string[] = []
+  const waitResolvers = new Map<string, Set<() => void>>()
+
+  function emit(ev: { type: string; job?: { id: string; label?: string; owner?: string; status: string }; awaited?: boolean }) {
+    for (const sub of [...subscribers]) {
+      if (sub.filter.owner !== undefined && ev.job?.owner !== undefined && ev.job.owner !== sub.filter.owner) continue
+      sub.listener(ev)
+    }
+  }
+
+  const service = {
+    events: {
+      subscribe(filter: { owner?: string; owners?: string }, listener: (ev: { type: string; job?: { id: string; label?: string; owner?: string; status: string }; awaited?: boolean }) => void) {
+        const entry = { filter, listener }
+        subscribers.add(entry)
+        return () => { subscribers.delete(entry) }
+      },
+    },
+    list(caller?: string) {
+      return [...jobs.values()]
+        .filter(j => j.owner === undefined || j.owner === caller)
+        .map(j => ({ id: j.id, label: j.label, owner: j.owner, status: j.status }))
+    },
+    read(id: string) {
+      readCalls.push(id)
+      return { chunks: [] }
+    },
+    readAt(id: string, from: number, caller?: string) {
+      readAtCalls.push(id)
+      const job = jobs.get(id)
+      if (!job || (job.owner !== undefined && job.owner !== caller)) throw new Error('forbidden')
+      return { chunks: job.outputText ? [{ text: job.outputText.slice(from) }] : [], next: job.outputText.length, lossy: false }
+    },
+    wait(id: string, timeoutMs: number, caller?: string) {
+      waitCalls.push({ id, timeoutMs, caller })
+      const job = jobs.get(id)
+      if (!job || (job.status !== 'running' && job.status !== 'stopping')) return Promise.resolve(job)
+      return new Promise<unknown>(resolve => {
+        const set = waitResolvers.get(id) ?? new Set()
+        const onDone = () => { set.delete(onDone); resolve(job) }
+        set.add(onDone)
+        waitResolvers.set(id, set)
+      })
+    },
+    kill(id: string, caller?: string, reason?: string) {
+      killCalls.push({ id, caller, reason })
+      const job = jobs.get(id)
+      if (!job || (job.owner !== undefined && job.owner !== caller)) return 'already-finished'
+      job.status = 'stopping'
+      return 'requested'
+    },
+  }
+
+  return {
+    service,
+    killCalls,
+    waitCalls,
+    readCalls,
+    readAtCalls,
+    start(id: string, owner: string | undefined, label = id, outputText = '') {
+      const job = { id, label, owner, status: 'running', outputText, waited: false }
+      jobs.set(id, job)
+      emit({ type: 'registered', job: { id, label, owner, status: 'running' } })
+    },
+    settle(id: string, status: 'completed' | 'killed' | 'failed' = 'completed') {
+      const job = jobs.get(id)
+      if (!job) return
+      job.status = status
+      const resolvers = waitResolvers.get(id)
+      const awaited = (resolvers?.size ?? 0) > 0
+      if (resolvers) {
+        for (const fn of [...resolvers]) fn()
+        resolvers.clear()
+      }
+      emit({ type: 'settled', job: { id: job.id, label: job.label, owner: job.owner, status }, awaited })
+    },
+    remove(id: string) {
+      const job = jobs.get(id)
+      if (!job) return
+      jobs.delete(id)
+      emit({ type: 'removed', job: { id: job.id, label: job.label, owner: job.owner, status: job.status } })
+    },
+  }
+}
+
+describe('DotService background quiet wait', () => {
+  it('suppresses Dorothy wakeup while jobs run, runs Phase-2 observeRun after settlement, and notifies once', async () => {
+    const mockJobs = createMockJobsService()
+    const agents = new Map<string, { id: string; status: 'idle' | 'running'; session: { id: string; seq: number } }>()
+    const h = setup({ scope: 'all' }, undefined, undefined, {
+      get: name => {
+        if (name === 'jobs') return mockJobs.service
+        if (name === 'agents') return { get: (id: string) => agents.get(id) }
+        return undefined
+      },
+    })
+    try {
+      await h.service.ensureDot()
+      const change = await h.service.createWorkChange({ title: 'BG', cwd: '/bg', goal: 'finish', at: 1 })
+      const dispatched = await h.service.manageTask({ action: 'dispatch', task_id: change.id, access: 'read', instruction: 'run bg' })
+      const runId = /started (run-\d+)/.exec(dispatched)![1]!
+      const runSessionId = h.store.work.run(runId)!.sessionId!
+      agents.set(runSessionId, { id: runSessionId, status: 'idle', session: { id: runSessionId, seq: 1 } })
+
+      // Watched session without a WorkRun resolves immediately even if jobs exist for it (not intercepted by quiet wait)
+      await h.service.watch('watched-1', 'watch goal')
+      mockJobs.start('watched-j', 'watched-1', 'watch bg')
+      await h.service.onTurnEnd('watched-1')
+      expect(h.service.hasActiveQuietWait('watched-1')).toBe(false)
+      expect(h.store.task('watched-1')?.unseenTurns).toBe(1)
+      mockJobs.settle('watched-j', 'completed')
+
+      // Track watchSession calls for Phase-1 vs Phase-2 observeRun
+      let watchCalls = 0
+      h.host.watchSession = async () => {
+        watchCalls += 1
+        return { seq: watchCalls === 1 ? 10 : 25, queue: 'empty' as const }
+      }
+      h.host.latestReply = async () => 'post-job final answer'
+
+      mockJobs.start('job-1', runSessionId, 'pnpm test')
+      const turnEndP = h.service.onTurnEnd(runSessionId)
+      await vi.waitFor(() => expect(h.service.hasActiveQuietWait(runSessionId)).toBe(true), { timeout: 2000, interval: 5 })
+      expect(watchCalls).toBe(1) // Phase-1 observeRun ran before quiet wait
+      expect(h.store.work.run(runId)?.cursor?.seq).toBe(10)
+      await h.service.flushNotices()
+      expect(h.relayed).toHaveLength(0)
+
+      mockJobs.settle('job-1', 'completed')
+      await turnEndP
+      expect(h.service.hasActiveQuietWait(runSessionId)).toBe(false)
+      expect(watchCalls).toBe(2) // Phase-2 observeRun ran after quiet wait
+      expect(h.store.work.run(runId)?.cursor?.seq).toBe(25)
+      await h.service.flushNotices()
+      expect(h.relayed).toHaveLength(1)
+      expect(h.relayed[0]!.text).toContain('post-job final answer')
+      expect(h.service.quietWaitMs(runSessionId)).toBeGreaterThanOrEqual(0)
+    } finally {
+      await h.service.dispose()
+    }
+  })
+
+  it('aborts active quiet wait without double-notify on supplementWorkRun, peerSend, onStatus running, cancel, archive, and dispose', async () => {
+    const mockJobs = createMockJobsService()
+    const agents = new Map<string, { id: string; status: 'idle' | 'running'; session: { id: string; seq: number } }>()
+    const peers = new Map<string, string>()
+    const h = setup({ scope: 'all' }, undefined, undefined, {
+      get: name => {
+        if (name === 'jobs') return mockJobs.service
+        if (name === 'agents') return { get: (id: string) => agents.get(id) }
+        return undefined
+      },
+    })
+    try {
+      const dot = await h.service.ensureDot()
+      const change = await h.service.createWorkChange({ title: 'Abort', cwd: '/abort', goal: 'abort', maxConcurrentRuns: 4, at: 1 })
+      const dispatched = await h.service.manageTask({ action: 'dispatch', task_id: change.id, access: 'read', instruction: 'run' })
+      const runId = /started (run-\d+)/.exec(dispatched)![1]!
+      const run = h.store.work.run(runId)!
+      const sid = run.sessionId!
+      agents.set(sid, { id: sid, status: 'idle', session: { id: sid, seq: 1 } })
+      h.events.set(sid, [])
+
+      // 1) supplementWorkRun aborts quiet wait cleanly (relays supplement to sid, zero turn-end notify to dot)
+      mockJobs.start('j-sup', sid, 'bg')
+      const p1 = h.service.onTurnEnd(sid)
+      await vi.waitFor(() => expect(h.service.hasActiveQuietWait(sid)).toBe(true), { timeout: 2000, interval: 5 })
+      await h.service.supplementWorkRun(runId, 'extra info', dot, { inputRef: run.inputRef, inputRevision: run.inputRevision })
+      await p1
+      expect(h.service.hasActiveQuietWait(sid)).toBe(false)
+      await h.service.flushNotices()
+      expect(h.relayed.filter(item => item.target === dot)).toHaveLength(0)
+
+      // 2) onStatus('running') aborts quiet wait cleanly
+      const p2 = h.service.onTurnEnd(sid)
+      await vi.waitFor(() => expect(h.service.hasActiveQuietWait(sid)).toBe(true), { timeout: 2000, interval: 5 })
+      h.service.onStatus(sid, 'running')
+      await p2
+      expect(h.service.hasActiveQuietWait(sid)).toBe(false)
+      await h.service.flushNotices()
+      expect(h.relayed.filter(item => item.target === dot)).toHaveLength(0)
+
+      // 3) cancelWorkChange aborts quiet wait cleanly
+      const p3 = h.service.onTurnEnd(sid)
+      await vi.waitFor(() => expect(h.service.hasActiveQuietWait(sid)).toBe(true), { timeout: 2000, interval: 5 })
+      await h.service.cancelWorkChange(change.id)
+      await p3
+      expect(h.service.hasActiveQuietWait(sid)).toBe(false)
+      await h.service.flushNotices()
+      expect(h.relayed.filter(item => item.target === dot)).toHaveLength(0)
+      void peers
+    } finally {
+      await h.service.dispose()
+    }
+
+    // 4) peerSend and dispose abort quiet wait cleanly
+    const mockJobs2 = createMockJobsService()
+    const agents2 = new Map<string, { id: string; status: 'idle' | 'running'; session: { id: string; seq: number } }>()
+    const fake2 = fakeHost()
+    const clock2 = manualTimer()
+    const store2 = new DotStore(undefined)
+    void store2.setSettings({ ...DEFAULT_SETTINGS, reflection: false, idleCheckMinutes: 0, autoUpdate: false, scope: 'all' })
+    const { PeerLedger } = await import('./peer.ts')
+    const { parsePeerDelivery } = await import('./storage.ts')
+    const peerRows = new Map<string, unknown>()
+    const peersLedger = new PeerLedger({
+      get: k => peerRows.get(k),
+      put: async (k, v) => { peerRows.set(k, v) },
+      delete: async k => peerRows.delete(k),
+      entries: () => peerRows.entries(),
+    }, parsePeerDelivery)
+    const service2 = new DotService({
+      host: fake2.host,
+      store: store2,
+      peers: peersLedger,
+      homeDir: join(tmpdir(), 'dsh-dot-peer-abort'),
+      approvalGraceMs: 0,
+      timer: clock2.timer,
+      get: name => (name === 'jobs' ? mockJobs2.service : name === 'agents' ? { get: (id: string) => agents2.get(id) } : undefined),
+    })
+    await service2.ensureDot()
+    const c2a = await service2.createWorkChange({ title: 'PeerA', cwd: '/peer-a', goal: 'peer', at: 1 })
+    const c2b = await service2.createWorkChange({ title: 'PeerB', cwd: '/peer-b', goal: 'peer', at: 1 })
+    const d1 = await service2.manageTask({ action: 'dispatch', task_id: c2a.id, access: 'read', instruction: 'r1' })
+    const d2 = await service2.manageTask({ action: 'dispatch', task_id: c2b.id, access: 'read', instruction: 'r2' })
+    const r1 = /started (run-\d+)/.exec(d1)![1]!
+    const r2 = /started (run-\d+)/.exec(d2)![1]!
+    const s1 = store2.work.run(r1)!.sessionId!
+    const s2 = store2.work.run(r2)!.sessionId!
+    agents2.set(s1, { id: s1, status: 'idle', session: { id: s1, seq: 1 } })
+    agents2.set(s2, { id: s2, status: 'idle', session: { id: s2, seq: 1 } })
+    mockJobs2.start('j-peer', s1, 'bg')
+    const waitPeer = service2.onTurnEnd(s1)
+    await vi.waitFor(() => expect(service2.hasActiveQuietWait(s1)).toBe(true), { timeout: 2000, interval: 5 })
+    await service2.peerSend({ senderSessionId: s2, targetSessionId: s1, text: 'hello peer', deliveryId: 'del-peer-1' })
+    await waitPeer
+    expect(service2.hasActiveQuietWait(s1)).toBe(false)
+
+    // noteSessionArchived aborts active quiet wait cleanly
+    const waitArchive = service2.onTurnEnd(s1)
+    await vi.waitFor(() => expect(service2.hasActiveQuietWait(s1)).toBe(true), { timeout: 2000, interval: 5 })
+    await service2.noteSessionArchived(s1)
+    await waitArchive
+    expect(service2.hasActiveQuietWait(s1)).toBe(false)
+
+    // dispose aborts active quiet wait before inFlight settles
+    mockJobs2.start('j-disp', s2, 'bg')
+    const waitDispose = service2.onTurnEnd(s2)
+    await vi.waitFor(() => expect(service2.hasActiveQuietWait(s2)).toBe(true), { timeout: 2000, interval: 5 })
+    await service2.dispose()
+    await waitDispose
+    expect(service2.hasActiveQuietWait(s2)).toBe(false)
+  })
+
+  it('kills jobs at 30m timeout, enforces maxConcurrentRuns until release, runs Phase-2 observeRun, and suppresses late tool-jobs wakeups', async () => {
+    const mockJobs = createMockJobsService()
+    const agents = new Map<string, { id: string; status: 'idle' | 'running'; session: { id: string; seq: number } }>()
+    const h = setup({ scope: 'all' }, undefined, undefined, {
+      get: name => {
+        if (name === 'jobs') return mockJobs.service
+        if (name === 'agents') return { get: (id: string) => agents.get(id) }
+        return undefined
+      },
+    })
+    try {
+      await h.service.ensureDot()
+      const change = await h.service.createWorkChange({ title: 'Timeout', cwd: '/timeout', goal: 'finish', maxConcurrentRuns: 1, at: 1 })
+      const dispatched = await h.service.manageTask({ action: 'dispatch', task_id: change.id, access: 'read', instruction: 'run long' })
+      const runId = /started (run-\d+)/.exec(dispatched)![1]!
+      const sid = h.store.work.run(runId)!.sessionId!
+      agents.set(sid, { id: sid, status: 'idle', session: { id: sid, seq: 1 } })
+
+      let watchCalls = 0
+      h.host.watchSession = async () => {
+        watchCalls += 1
+        return { seq: watchCalls === 1 ? 3 : 9, queue: 'empty' as const }
+      }
+
+      mockJobs.start('j-long', sid, 'npm run build', 'compiling...\nstill running')
+      const turnEndP = h.service.onTurnEnd(sid)
+      await vi.waitFor(() => expect(h.service.hasActiveQuietWait(sid)).toBe(true), { timeout: 2000, interval: 5 })
+      expect(h.delays()).toContain(30 * 60_000)
+
+      // maxConcurrentRuns=1 blocks a second run while in quiet wait
+      await expect(h.service.manageTask({ action: 'dispatch', task_id: change.id, access: 'read', instruction: 'second' })).rejects.toThrow(/already has 1 open runs/)
+
+      // Fire the 30-min timeout timer; settle once kill is requested
+      h.fire()
+      await vi.waitFor(() => expect(mockJobs.killCalls).toHaveLength(1), { timeout: 2000, interval: 5 })
+      mockJobs.settle('j-long', 'killed')
+      await turnEndP
+
+      expect(mockJobs.waitCalls[0]).toEqual({ id: 'j-long', timeoutMs: 10_000, caller: sid })
+      expect(mockJobs.killCalls[0]).toEqual({ id: 'j-long', caller: sid, reason: 'background-timeout' })
+      expect(mockJobs.readCalls).toEqual([])
+      expect(mockJobs.readAtCalls).toEqual(['j-long'])
+      expect(watchCalls).toBe(2) // Phase-2 observeRun ran after killJobs
+      await h.service.flushNotices()
+      expect(h.relayed).toHaveLength(1)
+      expect(h.relayed[0]!.text).toContain('background timeout')
+      expect(h.relayed[0]!.text).toContain('j-long (npm run build)')
+
+      // Abandoned-wait fallback: a late wakeup turn from dsh-tool-jobs is suppressed cleanly
+      h.relayed.length = 0
+      await h.service.onTurnEnd(sid)
+      await h.service.flushNotices()
+      expect(h.relayed).toHaveLength(0)
+
+      // Finishing (handoff/close) releases the maxConcurrentRuns slot
+      await h.service.finishWorkRun(runId, 'failed')
+      const dispatched2 = await h.service.manageTask({ action: 'dispatch', task_id: change.id, access: 'read', instruction: 'retry after release' })
+      expect(dispatched2).toContain('started run-')
+    } finally {
+      await h.service.dispose()
+    }
+  })
+
+  it('reconciles cleanly across host restart when background jobs finished during downtime', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'dot-bg-restart-'))
+    const home = mkdtempSync(join(tmpdir(), 'dot-bg-restart-home-'))
+    const backend = new JsonStorageBackend(dir)
+    const facility = new DomainFacility({
+      storage: { backend: { get: (name: string) => {
+        if (name !== 'json') throw new Error('unexpected backend')
+        return backend
+      } } },
+      logger: { error() {}, warn() {} },
+      emit() {},
+    } as never, { backend: 'json' })
+    const domain = await openCompatibleDomain(spec => facility.open(spec), dotDomain)
+    const mockJobs1 = createMockJobsService()
+    const fake1 = fakeHost()
+    const clock1 = manualTimer()
+    const store1 = new DotStore(domain)
+    await store1.setSettings({ ...DEFAULT_SETTINGS, reflection: false, idleCheckMinutes: 0, autoUpdate: false, scope: 'all' })
+    const s1 = new DotService({
+      host: fake1.host,
+      store: store1,
+      homeDir: home,
+      approvalGraceMs: 0,
+      timer: clock1.timer,
+      get: name => (name === 'jobs' ? mockJobs1.service : undefined),
+    })
+
+    let runId = ''
+    let runSid = ''
+    try {
+      await s1.ensureDot()
+      const change = await s1.createWorkChange({ title: 'Restart', cwd: dir, goal: 'survive', at: 1 })
+      const dispatched = await s1.manageTask({ action: 'dispatch', task_id: change.id, access: 'read', instruction: 'run' })
+      runId = /started (run-\d+)/.exec(dispatched)![1]!
+      runSid = store1.work.run(runId)!.sessionId!
+      mockJobs1.start('j-restart', runSid, 'long')
+      const waiting = s1.onTurnEnd(runSid)
+      await vi.waitFor(() => expect(s1.hasActiveQuietWait(runSid)).toBe(true), { timeout: 2000, interval: 5 })
+      await s1.dispose()
+      await waiting
+    } finally {
+      await store1.flush()
+    }
+
+    // Restart with fresh DotService & empty jobs registry (job finished across restart)
+    const mockJobs2 = createMockJobsService()
+    const fake2 = fakeHost()
+    fake2.host.findSession = async id => (id === runSid ? { cwd: dir, preset: 'standard' } : undefined)
+    fake2.host.watchSession = async () => ({ seq: 42, queue: 'empty' as const })
+    const clock2 = manualTimer()
+    const store2 = new DotStore(domain)
+    const s2 = new DotService({
+      host: fake2.host,
+      store: store2,
+      homeDir: home,
+      approvalGraceMs: 0,
+      timer: clock2.timer,
+      get: name => (name === 'jobs' ? mockJobs2.service : undefined),
+    })
+    try {
+      expect(s2.hasActiveQuietWait(runSid)).toBe(false)
+      await s2.reconcile()
+      expect(store2.work.run(runId)?.cursor?.seq).toBe(42)
+      const finished = await s2.finishWorkRun(runId, 'completed')
+      expect(finished).toMatchObject({ ok: true, phase: 'completed' })
+    } finally {
+      await s2.dispose()
+      await store2.flush()
+      await domain.close()
+      await facility.closeAll()
+      await backend.close()
+      rmSync(dir, { recursive: true, force: true })
+      rmSync(home, { recursive: true, force: true })
+    }
+  })
+
+  it('degrades silently without jobs/subagents, projects backgroundJobCount, fires onBackgroundJobsChange, and excludes busy runs from idle-check', async () => {
+    // 1) Missing jobs/subagents: notifies immediately and omits backgroundJobCount
+    const hNoJobs = setup({ scope: 'all' })
+    try {
+      await hNoJobs.service.ensureDot()
+      const change = await hNoJobs.service.createWorkChange({ title: 'NoJobs', cwd: '/nojobs', goal: 'g', at: 1 })
+      const d = await hNoJobs.service.manageTask({ action: 'dispatch', task_id: change.id, access: 'read', instruction: 'go' })
+      const rId = /started (run-\d+)/.exec(d)![1]!
+      const sid = hNoJobs.store.work.run(rId)!.sessionId!
+      await hNoJobs.service.onTurnEnd(sid)
+      await hNoJobs.service.flushNotices()
+      expect(hNoJobs.relayed).toHaveLength(1)
+      expect(hNoJobs.service.workBoard(change.id)?.runs[0]?.backgroundJobCount).toBeUndefined()
+    } finally {
+      await hNoJobs.service.dispose()
+    }
+
+    // 2) With jobs: live projection, onBackgroundJobsChange, and idle-check exclusion
+    const mockJobs = createMockJobsService()
+    const h = setup({ scope: 'all', idleCheckMinutes: 1 }, undefined, undefined, {
+      get: name => (name === 'jobs' ? mockJobs.service : undefined),
+    })
+    try {
+      const dot = await h.service.ensureDot()
+      const boardChanges = vi.fn()
+      const unsub = h.service.onBackgroundJobsChange(boardChanges)
+      const change = await h.service.createWorkChange({ title: 'LiveCount', cwd: '/lc', goal: 'g', at: 1 })
+      const d = await h.service.manageTask({ action: 'dispatch', task_id: change.id, access: 'read', instruction: 'go' })
+      const rId = /started (run-\d+)/.exec(d)![1]!
+      const sid = h.store.work.run(rId)!.sessionId!
+      // Mark task idle in store while job is still running
+      await h.store.apply({ type: 'status', sessionId: sid, status: 'idle', at: 1500 }, [])
+      mockJobs.start('j-live', sid, 'watch')
+      expect(boardChanges).toHaveBeenCalledTimes(1)
+      expect(h.service.workBoard(change.id)?.runs[0]?.backgroundJobCount).toBe(1)
+      expect(h.service.workList().find(row => row.id === change.id)?.runs[0]?.backgroundJobCount).toBe(1)
+      expect(h.service.board().work?.find(row => row.id === change.id)?.runs[0]?.backgroundJobCount).toBe(1)
+
+      // Idle check must exclude change while background job is running
+      h.service.onStatus(dot, 'idle')
+      h.fire()
+      await h.service.flushNotices()
+      expect(h.relayed.filter(item => item.text.includes('Routine check'))).toHaveLength(0)
+
+      // Unowned job events must not fire onBackgroundJobsChange
+      mockJobs.start('j-unowned', undefined, 'global')
+      expect(boardChanges).toHaveBeenCalledTimes(1)
+
+      // Settle job: count drops -> field omitted, listener notified
+      mockJobs.settle('j-live', 'completed')
+      expect(boardChanges).toHaveBeenCalledTimes(2)
+      expect(h.service.workBoard(change.id)?.runs[0]?.backgroundJobCount).toBeUndefined()
+      unsub()
+    } finally {
+      await h.service.dispose()
+    }
+  })
+
+  it('handles throwing jobs.events getter cleanly in DotService constructor, onTurnEnd, and onBackgroundJobsChange', async () => {
+    const throwingEventsJobs = new Proxy({
+      list: (caller?: string) => (caller ? [{ id: 'j-1', owner: caller, status: 'running' }] : []),
+    }, {
+      get(target, prop, receiver) {
+        if (prop === 'events') throw new Error('events getter exploded!')
+        return Reflect.get(target, prop, receiver)
+      },
+    })
+    const h = setup({ scope: 'all' }, undefined, undefined, {
+      get: name => (name === 'jobs' ? throwingEventsJobs : undefined),
+    })
+    try {
+      await h.service.ensureDot()
+      const unsub = h.service.onBackgroundJobsChange(() => {})
+      const change = await h.service.createWorkChange({ title: 'TrapEvents', cwd: '/trap', goal: 'g', at: 1 })
+      const d = await h.service.manageTask({ action: 'dispatch', task_id: change.id, access: 'read', instruction: 'go' })
+      const rId = /started (run-\d+)/.exec(d)![1]!
+      const sid = h.store.work.run(rId)!.sessionId!
+      await expect(h.service.onTurnEnd(sid)).resolves.toBeUndefined()
+      await h.service.flushNotices()
+      expect(h.relayed).toHaveLength(1)
+      unsub()
+    } finally {
+      await h.service.dispose()
+    }
+  })
+
+  it('does not notify Dorothy from onTurnEndNow while agent status is running', async () => {
+    const mockJobs = createMockJobsService()
+    const agents = new Map<string, { id: string; status: 'idle' | 'running'; session: { id: string; seq: number } }>()
+    const h = setup({ scope: 'all' }, undefined, undefined, {
+      get: name => {
+        if (name === 'jobs') return mockJobs.service
+        if (name === 'agents') return { get: (id: string) => agents.get(id) }
+        return undefined
+      },
+    })
+    try {
+      await h.service.ensureDot()
+      const change = await h.service.createWorkChange({ title: 'RunningRace', cwd: '/race', goal: 'g', at: 1 })
+      const d = await h.service.manageTask({ action: 'dispatch', task_id: change.id, access: 'read', instruction: 'go' })
+      const rId = /started (run-\d+)/.exec(d)![1]!
+      const sid = h.store.work.run(rId)!.sessionId!
+
+      // Case 1: live job + agent already running at Phase-1 completion
+      agents.set(sid, { id: sid, status: 'running', session: { id: sid, seq: 1 } })
+      mockJobs.start('j-live', sid, 'build')
+      await h.service.onTurnEnd(sid)
+      await h.service.flushNotices()
+      expect(h.service.hasActiveQuietWait(sid)).toBe(false)
+      expect(h.relayed).toHaveLength(0)
+
+      // Case 2: job settled & woke worker before Phase-1 completion (liveJobs === 0, status === 'running')
+      mockJobs.settle('j-live', 'completed')
+      await h.service.onTurnEnd(sid)
+      await h.service.flushNotices()
+      expect(h.relayed).toHaveLength(0)
+
+      // Case 3: once worker actually finishes running and goes idle, onTurnEnd notifies Dorothy
+      agents.set(sid, { id: sid, status: 'idle', session: { id: sid, seq: 2 } })
+      await h.service.onTurnEnd(sid)
+      await h.service.flushNotices()
+      expect(h.relayed).toHaveLength(1)
+    } finally {
+      await h.service.dispose()
+    }
+  })
+
+  it('ignores onBackgroundJobsChange job events for terminal (completed, failed, stopped) runs', async () => {
+    const mockJobs = createMockJobsService()
+    const h = setup({ scope: 'all' }, undefined, undefined, {
+      get: name => (name === 'jobs' ? mockJobs.service : undefined),
+    })
+    try {
+      await h.service.ensureDot()
+      const boardChanges = vi.fn()
+      const unsub = h.service.onBackgroundJobsChange(boardChanges)
+
+      const c1 = await h.service.createWorkChange({ title: 'CompletedRun', cwd: '/t1', goal: 'g', at: 1 })
+      const d1 = await h.service.manageTask({ action: 'dispatch', task_id: c1.id, access: 'read', instruction: 'r1' })
+      const r1 = /started (run-\d+)/.exec(d1)![1]!
+      const s1 = h.store.work.run(r1)!.sessionId!
+      await h.service.finishWorkRun(r1, 'completed')
+
+      const c2 = await h.service.createWorkChange({ title: 'FailedRun', cwd: '/t2', goal: 'g', at: 1 })
+      const d2 = await h.service.manageTask({ action: 'dispatch', task_id: c2.id, access: 'read', instruction: 'r2' })
+      const r2 = /started (run-\d+)/.exec(d2)![1]!
+      const s2 = h.store.work.run(r2)!.sessionId!
+      await h.service.finishWorkRun(r2, 'failed')
+
+      const c3 = await h.service.createWorkChange({ title: 'StoppedRun', cwd: '/t3', goal: 'g', at: 1 })
+      const d3 = await h.service.manageTask({ action: 'dispatch', task_id: c3.id, access: 'read', instruction: 'r3' })
+      const r3 = /started (run-\d+)/.exec(d3)![1]!
+      const s3 = h.store.work.run(r3)!.sessionId!
+      await h.service.cancelWorkChange(c3.id)
+
+      boardChanges.mockClear()
+      mockJobs.start('j-done', s1, 'late')
+      mockJobs.settle('j-done', 'completed')
+      mockJobs.start('j-fail', s2, 'late')
+      mockJobs.remove('j-fail')
+      mockJobs.start('j-stop', s3, 'late')
+      expect(boardChanges).toHaveBeenCalledTimes(0)
+
+      // Active run still triggers onBackgroundJobsChange
+      const c4 = await h.service.createWorkChange({ title: 'ActiveRun', cwd: '/t4', goal: 'g', at: 1 })
+      const d4 = await h.service.manageTask({ action: 'dispatch', task_id: c4.id, access: 'read', instruction: 'r4' })
+      const r4 = /started (run-\d+)/.exec(d4)![1]!
+      const s4 = h.store.work.run(r4)!.sessionId!
+      mockJobs.start('j-open', s4, 'live')
+      expect(boardChanges).toHaveBeenCalledTimes(1)
+      unsub()
+    } finally {
+      await h.service.dispose()
+    }
+  })
+})
+
+describe('dot-worker preset selection and security hook parity', () => {
+  it('routes dispatches via defaultTaskPreset (overridden by dot_task preset and falling back when missing/broken)', async () => {
+    const h = setup({ defaultTaskPreset: 'dot-worker' })
+    let presets = [{ id: 'standard' }, { id: 'dot-worker' }, { id: 'ptc' }, { id: 'dot' }] as Array<{ id: string; broken?: string }>
+    h.host.listPresets = async () => ({ fallback: 'standard', presets })
+    try {
+      await h.service.ensureDot()
+
+      // 1. Omitting preset picks configured defaultTaskPreset ('dot-worker')
+      const c1 = await h.service.createWorkChange({ title: 'WorkerDefault', cwd: '/w1', goal: 'g', at: 1 })
+      const d1 = await h.service.manageTask({ action: 'dispatch', task_id: c1.id, access: 'read', instruction: 'run with default' })
+      const r1 = /started (run-\d+)/.exec(d1)![1]!
+      const run1 = h.store.work.run(r1)!
+      expect(run1.expectedPreset).toBe('dot-worker')
+      expect(h.calls.some(call => call.startsWith(`create ${run1.sessionId} `) && call.endsWith(' preset=dot-worker'))).toBe(true)
+      await expect(h.host.findSession(run1.sessionId!)).resolves.toMatchObject({ preset: 'dot-worker' })
+
+      // 2. Explicit dot_task preset ('standard' or 'ptc') overrides defaultTaskPreset
+      const c2 = await h.service.createWorkChange({ title: 'ExplicitStandard', cwd: '/w2', goal: 'g', at: 1 })
+      const d2 = await h.service.manageTask({ action: 'dispatch', task_id: c2.id, access: 'read', preset: 'standard', instruction: 'override to standard' })
+      const r2 = /started (run-\d+)/.exec(d2)![1]!
+      const run2 = h.store.work.run(r2)!
+      expect(run2.expectedPreset).toBeUndefined()
+      expect(h.calls.some(call => call.startsWith(`create ${run2.sessionId} `) && !call.includes('preset='))).toBe(true)
+
+      const c3 = await h.service.createWorkChange({ title: 'ExplicitPtc', cwd: '/w3', goal: 'g', at: 1 })
+      const d3 = await h.service.manageTask({ action: 'dispatch', task_id: c3.id, access: 'read', preset: 'ptc', instruction: 'override to ptc' })
+      const r3 = /started (run-\d+)/.exec(d3)![1]!
+      expect(h.store.work.run(r3)!.expectedPreset).toBe('ptc')
+
+      // 3. Broken or absent dot-worker falls back to host 'standard' without throwing
+      presets = [{ id: 'standard' }, { id: 'dot-worker', broken: 'mount error' }]
+      const c4 = await h.service.createWorkChange({ title: 'BrokenWorkerFallback', cwd: '/w4', goal: 'g', at: 1 })
+      const d4 = await h.service.manageTask({ action: 'dispatch', task_id: c4.id, access: 'read', instruction: 'fallback check' })
+      const r4 = /started (run-\d+)/.exec(d4)![1]!
+      expect(h.store.work.run(r4)!.expectedPreset).toBeUndefined()
+    } finally {
+      await h.service.dispose()
+    }
+  })
+
+  it('enforces guardRunWriteTool, sealChildSession, TASK_ONLY_TOOLS isolation, and approval/question relay on dot-worker runs identically to standard', async () => {
+    const h = setup({ defaultTaskPreset: 'dot-worker', approvals: 'dot', questions: 'dot' })
+    h.host.listPresets = async () => ({
+      fallback: 'standard',
+      presets: [{ id: 'standard' }, { id: 'dot-worker' }],
+    })
+
+    const ctx = new Context()
+    new SystemPrompt(ctx, {})
+    new ToolsService(ctx)
+    const pipeline = new ToolExecutionPipeline(ctx)
+    ctx.tools.setExecutor({
+      describe: tools => ({
+        schemas: tools.map(t => ({
+          name: t.name,
+          description: t.description,
+          parameters: { type: 'object', properties: {} },
+        })),
+      }),
+      execute: input => executeToolBatch(input, pipeline, () => 4),
+    })
+
+    const disposers: Array<() => void> = []
+    disposers.push(ctx.tools.register({
+      name: 'subagent',
+      description: 'spawn subagent',
+      parameters: { type: 'object', properties: {} },
+      output: { schema: { type: 'string' }, render: (_a, v) => [{ type: 'text', text: String(v) }] },
+      execute: () => 'subagent-ok',
+    } as never))
+    disposers.push(ctx.tools.register({
+      name: 'write',
+      description: 'write file',
+      parameters: { type: 'object', properties: { path: { type: 'string' }, content: { type: 'string' } } },
+      output: { schema: { type: 'string' }, render: (_a, v) => [{ type: 'text', text: String(v) }] },
+      execute: () => 'write-ok',
+    } as never))
+
+    const liveAgents = new Map<string, { id: string; ctx: Context; session: { id: string } }>()
+    const scopes: Array<ReturnType<typeof createScope>> = []
+    const origCreate = h.host.createSession.bind(h.host)
+    h.host.createSession = async place => {
+      const id = await origCreate(place)
+      const agent: { id: string; ctx?: Context; session: { id: string } } = { id, session: { id } }
+      const scope = createScope(ctx, agent)
+      agent.ctx = scope.ctx
+      scopes.push(scope)
+      liveAgents.set(id, agent as { id: string; ctx: Context; session: { id: string } })
+      h.service.sealAgent(agent)
+      return id
+    }
+
+    try {
+      await h.service.ensureDot()
+
+      // 1. Read-only dot-worker run: denies child tools, registers dot_peer, blocks write tool
+      const readChange = await h.service.createWorkChange({ title: 'ReadWorker', cwd: '/repo', goal: 'inspect', at: 1 })
+      const readRes = await h.service.manageTask({ action: 'dispatch', task_id: readChange.id, access: 'read', instruction: 'inspect safely' })
+      const readRunId = /started (run-\d+)/.exec(readRes)![1]!
+      const readSid = h.store.work.run(readRunId)!.sessionId!
+      const readAgent = liveAgents.get(readSid)!
+      expect(h.store.work.run(readRunId)!.expectedPreset).toBe('dot-worker')
+      expect(ctx.tools.get('dot_peer', readAgent as never)).toBeDefined()
+      expect(ctx.tools.get('subagent', readAgent as never)).toBeUndefined()
+
+      const readExec = await ctx.tools.execute({
+        agent: readAgent as never,
+        signal: new AbortController().signal,
+        calls: [
+          { id: 'c-sub', name: 'subagent', arguments: '{}' },
+          { id: 'c-write', name: 'write', arguments: JSON.stringify({ path: 'src/a.ts', content: 'x' }) },
+        ] as never,
+      })
+      expect(readExec.results[0]?.result).toMatchObject({ isError: true })
+      expect(readExec.results[1]?.result).toMatchObject({ isError: true })
+
+      // 2. Scoped write dot-worker run: allows declared file, blocks undeclared file
+      const writeChange = await h.service.createWorkChange({ title: 'WriteWorker', cwd: '/repo', goal: 'edit one file', at: 1 })
+      const writeRes = await h.service.manageTask({
+        action: 'dispatch',
+        task_id: writeChange.id,
+        access: 'write',
+        paths: JSON.stringify([{ path: 'src/ok.ts', type: 'file' }]),
+        instruction: 'edit src/ok.ts',
+      })
+      const writeRunId = /started (run-\d+)/.exec(writeRes)![1]!
+      const writeSid = h.store.work.run(writeRunId)!.sessionId!
+      const writeAgent = liveAgents.get(writeSid)!
+      expect(h.store.work.run(writeRunId)!.expectedPreset).toBe('dot-worker')
+
+      const writeExec = await ctx.tools.execute({
+        agent: writeAgent as never,
+        signal: new AbortController().signal,
+        calls: [
+          { id: 'c-bad-path', name: 'write', arguments: JSON.stringify({ path: 'src/other.ts', content: 'nope' }) },
+          { id: 'c-good-path', name: 'write', arguments: JSON.stringify({ path: 'src/ok.ts', content: 'ok' }) },
+        ] as never,
+      })
+      expect(writeExec.results[0]?.result).toMatchObject({ isError: true })
+      expect(writeExec.results[1]?.result).toMatchObject({ isError: false, value: 'write-ok' })
+
+      // 3. TASK_ONLY_TOOLS isolation remains blocked on Dorothy's own settings
+      for (const toolName of ['bash', 'pwsh', 'write', 'edit', 'apply_patch']) {
+        expect(TASK_ONLY_TOOLS.has(toolName)).toBe(true)
+        expect(isTaskOnlySelector(`tool:${toolName}`)).toBe(true)
+        expect(() => patchSettings(h.store.settings, { capabilities: { grants: { [`tool:${toolName}`]: 'auto' } } })).toThrow(/task runs/)
+      }
+
+      // 4. Approval & user-question relay works identically on dot-worker sessions
+      const approvalRoute = h.service.relayRequest({
+        kind: 'approval',
+        sessionId: writeSid,
+        subject: 'pwsh',
+        toolName: 'pwsh',
+        arguments: '{"command":"pnpm test"}',
+      })
+      expect(approvalRoute.decided).toBe('pending')
+      const questionRoute = h.service.relayRequest({
+        kind: 'question',
+        sessionId: writeSid,
+        subject: 'Choose branch',
+        questions: [{ id: 'q1', question: 'Which branch?' }],
+      })
+      expect(questionRoute.decided).toBe('pending')
+      expect(h.service.runTaskPermission(writeSid)).toBe('workspace-write')
+
+      // 5. Live result notice projects display.kind === 'result' cleanly
+      h.service.notify({
+        sessionId: h.store.dotSessionId!,
+        kind: 'result',
+        text: 'PR acme/widgets#98 merged',
+        at: 100,
+      })
+      await h.service.flushNotices()
+      const relayedDisplays = h.relayed.map(r => r.notice).filter(Boolean)
+      const resultEntry = relayedDisplays.flatMap(d => d!.entries).find(e => e.kind === 'result')
+      expect(resultEntry).toMatchObject({ kind: 'result', summary: 'PR acme/widgets#98 merged' })
+    } finally {
+      for (const scope of scopes) await scope.dispose()
+      for (const dispose of disposers) dispose()
+      await ctx.fiber.dispose()
+      await h.service.dispose()
+    }
+  })
+
+  it('integrates Watchdog observe default, auto hard-stop keeping failedRounds isolated, annotation, and factoryReset cleanup', async () => {
+    const h = setup({ scope: 'all', watchdogMode: 'observe' })
+    const change = await h.service.createWorkChange({ title: 'WD', cwd: '/repo', goal: 'fix bug', at: 1 })
+    const res = await h.service.manageTask({ action: 'dispatch', task_id: change.id, access: 'read', instruction: 'go' })
+    const runId = /started (run-\d+)/.exec(res)![1]!
+    const sid = h.store.work.run(runId)!.sessionId!
+
+    // Default observe mode: 4 repeat tool calls -> records hit & contextView.watchdog, 0 internal judge calls
+    for (let i = 1; i <= 4; i++) {
+      h.service.onSessionEvent(sid, {
+        type: 'tool/call',
+        seq: i,
+        time: 1000 + i,
+        data: { callId: `c-${i}`, name: 'read_file', arguments: '{"path":"a.ts"}' },
+      })
+    }
+    await h.service.watchdog.flushJudge()
+    const ctxView = await h.service.contextView()
+    expect(ctxView.watchdog?.mode).toBe('observe')
+    expect(ctxView.watchdog?.hits).toHaveLength(1)
+    expect(ctxView.watchdog?.hits[0]?.signal).toBe('repeat-tool-call')
+    expect(h.calls.some(c => c.includes('internal'))).toBe(false)
+
+    // Annotation updates 14d calibration metrics
+    const hitId = ctxView.watchdog!.hits[0]!.id
+    await h.service.annotateWatchdogHit(hitId, 'accurate')
+    expect(h.service.watchdogDiagnostics().calibration).toMatchObject({
+      total14d: 1,
+      reviewed14d: 1,
+      accurate14d: 1,
+      falsePositive14d: 0,
+      falsePositiveRate: 0,
+    })
+
+    // Switch to auto mode -> single-turn >=8 errors triggers watchdog stop without incrementing failedRounds
+    await h.store.setSettings({ ...h.store.settings, watchdogMode: 'auto' })
+    h.service.settingsChanged()
+    h.service.onSessionEvent(sid, { type: 'turn/start', seq: 10, time: 2000, data: { turn: 2 } })
+    for (let i = 1; i <= 8; i++) {
+      h.service.onSessionEvent(sid, {
+        type: 'tool/result',
+        seq: 10 + i,
+        time: 2000 + i,
+        data: { turn: 2, message: { toolCallId: `e-${i}`, isError: true, content: 'ENOENT' } },
+      })
+    }
+    await h.service.watchdog.flushJudge()
+    expect(h.store.work.run(runId)?.phase).toBe('stopped')
+    expect(h.store.work.run(runId)?.closeReason).toBe('watchdog')
+    expect(h.store.work.failedRounds(change.id)).toBe(0)
+    expect(h.service.watchdogDiagnostics().watchdogStops).toBe(1)
+
+    // Factory reset wipes Watchdog hits and counters
+    const preview = h.service.previewFactoryReset()
+    await h.service.confirmFactoryReset(preview.token)
+    expect(h.service.watchdogDiagnostics().watchdogStops).toBe(0)
+    expect(h.service.watchdogDiagnostics().hits).toEqual([])
+    await h.service.dispose()
   })
 })

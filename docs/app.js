@@ -17,6 +17,23 @@
 
   const RECORDINGS = [
     {
+      id: 'settings-redesign',
+      pr: 100,
+      date: '2026.11.27',
+      post: 'notes-and-quiet',
+      file: 'dot-settings-redesign.gif',
+      title: {
+        zh: '重新分好类的设置抽屉',
+        en: 'The regrouped settings drawer',
+        ja: '整理し直した設定の引き出し',
+      },
+      desc: {
+        zh: '从常规一路点到高级：不常碰的开关收在高级里，锁定设置也在那一张清单上。',
+        en: 'A walk from General to Advanced: rarely touched switches live under Advanced, next to the one locked-settings checklist.',
+        ja: '一般から詳細まで順に開きます。滅多に触らない項目とロックの一覧は詳細にまとめました。',
+      },
+    },
+    {
       id: 'run-watchdog',
       pr: 99,
       date: '2026.11.26',

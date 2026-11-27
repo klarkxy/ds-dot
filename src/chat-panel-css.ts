@@ -491,8 +491,8 @@ export const chatCss = settingsCss + `
 .dsh-dot-chat .dsh-dot-stop-btn:hover { filter: brightness(1.06); }
 .dsh-dot-chat .dsh-dot-stop-btn:active { transform: scale(0.97); }
 .dsh-dot-chat .dsh-dot-send-btn {
-  display: inline-flex; align-items: center; justify-content: center; gap: 5px;
-  height: 30px; padding: 0 13px 0 11px; border: 0; border-radius: 15px;
+  display: inline-flex; align-items: center; justify-content: center; gap: 0;
+  width: 32px; height: 32px; padding: 0; border: 0; border-radius: 50%;
   background: var(--dsw-alias-brand-primary, #4d6bfe);
   color: var(--dsw-alias-label-primary-foreground, #ffffff);
   font: inherit; font-size: 12px; line-height: 16px; font-weight: 500; white-space: nowrap; cursor: pointer;
@@ -692,7 +692,6 @@ export const chatCss = settingsCss + `
   background: transparent; color: var(--dsw-alias-label-error); cursor: pointer; flex-shrink: 0;
 }
 .dsh-dot-chat .dsh-dot-file-retry:hover { background: var(--dsw-alias-interactive-bg-hover); }
-.dsh-dot-chat .dsh-dot-send-btn { width: 32px; height: 32px; padding: 0; border-radius: 50%; gap: 0; }
 .dsh-dot-chat .dsh-dot-files { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 5px; max-width: min(76%, 620px); }
 .dsh-dot-chat .dsh-dot-file-chip {
   display: inline-flex; align-items: center; max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;

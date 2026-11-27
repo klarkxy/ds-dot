@@ -16,7 +16,7 @@ const jaUi: UiText = {
   thinking: 'ドロシーが考えています…',
   greeting: 'ドロシーです。',
   greetingHint: 'ご用件をお知らせください。',
-  placeholder: "桃乐丝への要件を入力し、/ でクイックコマンド",
+  placeholder: "ドロシーへの要件を入力し、/ でクイックコマンド",
   placeholderRunning: "背景や要件を追加・調整し、/ でクイックコマンド",
   send: '送信',
   stop: '停止',

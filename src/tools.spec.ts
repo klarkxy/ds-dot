@@ -1,4 +1,5 @@
-import { readFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
@@ -125,13 +126,48 @@ describe('dot tools', () => {
     expect(new Set(names).size).toBe(20)
   })
 
-  it('denies credential-like paths on the inherited read-only file tools', async () => {
+  it('denies credential-like paths, symlinks, bare credential dirs, and malformed arguments on inherited read-only file tools', async () => {
     const gate = load().listeners['tools/pre-execute']?.[0]
     expect(gate).toBeTypeOf('function')
     const next = async () => ({ kind: 'next' })
     await expect(gate!({ name: 'read', arguments: { file_path: '/home/u/.ssh/id_rsa' } }, next)).resolves.toMatchObject({ kind: 'deny', reason: expect.stringMatching(/credential/) })
     await expect(gate!({ name: 'glob', arguments: { pattern: '**/.env' } }, next)).resolves.toMatchObject({ kind: 'deny' })
+    await expect(gate!({ name: 'grep', arguments: { path: '/home/u/.ssh', pattern: 'BEGIN' } }, next)).resolves.toMatchObject({ kind: 'deny' })
+    await expect(gate!({ name: 'grep', arguments: { path: '/tmp/work', glob: '*.pem', pattern: 'BEGIN' } }, next)).resolves.toMatchObject({ kind: 'deny' })
+    await expect(gate!({ name: 'office_render', arguments: { input: '/tmp/deck.pptx', output_dir: '/Users/alice/.aws' } }, next)).resolves.toMatchObject({ kind: 'deny' })
     await expect(gate!({ name: 'office_convert', arguments: JSON.stringify({ input: '/tmp/.aws/credentials' }) }, next)).resolves.toMatchObject({ kind: 'deny' })
+    // Fail-closed when arguments are malformed, missing, array-shaped, or smuggle non-string path fields.
+    await expect(gate!({ name: 'read', arguments: '{malformed json' }, next)).resolves.toMatchObject({ kind: 'deny' })
+    await expect(gate!({ name: 'read', arguments: undefined }, next)).resolves.toMatchObject({ kind: 'deny' })
+    await expect(gate!({ name: 'read', arguments: ['not-an-object'] }, next)).resolves.toMatchObject({ kind: 'deny' })
+    await expect(gate!({ name: 'read', arguments: { file_path: { nested: '/home/u/.ssh/id_rsa' } } }, next)).resolves.toMatchObject({ kind: 'deny' })
+
+    // Workspace symlinks/junctions escaping to .ssh or .env are resolved and denied.
+    const sandbox = mkdtempSync(join(tmpdir(), 'dsh-dot-guard-'))
+    try {
+      const ws = join(sandbox, 'workspace')
+      const sshDir = join(sandbox, '.ssh')
+      mkdirSync(ws)
+      mkdirSync(sshDir)
+      writeFileSync(join(sshDir, 'id_rsa'), 'PRIVATE')
+      writeFileSync(join(ws, '.env.example'), 'KEY=')
+      symlinkSync(sshDir, join(ws, 'ssh-link'), 'junction')
+      await expect(gate!({ name: 'read', arguments: { file_path: join(ws, 'ssh-link', 'id_rsa') } }, next)).resolves.toMatchObject({ kind: 'deny' })
+      await expect(gate!({ name: 'grep', arguments: { path: join(ws, 'ssh-link'), pattern: 'PRIVATE' } }, next)).resolves.toMatchObject({ kind: 'deny' })
+      let fileLinksSupported = false
+      try {
+        symlinkSync(join(sshDir, 'id_rsa'), join(ws, 'leak.txt'))
+        symlinkSync('/nonexistent/home/.ssh/id_rsa', join(ws, 'dangling-leak.txt'))
+        fileLinksSupported = true
+      } catch { /* Windows without symlink privilege */ }
+      if (fileLinksSupported) {
+        await expect(gate!({ name: 'read', arguments: { file_path: join(ws, 'leak.txt') } }, next)).resolves.toMatchObject({ kind: 'deny' })
+        await expect(gate!({ name: 'read', arguments: { file_path: join(ws, 'dangling-leak.txt') } }, next)).resolves.toMatchObject({ kind: 'deny' })
+      }
+      await expect(gate!({ name: 'read', arguments: { file_path: join(ws, '.env.example') } }, next)).resolves.toEqual({ kind: 'next' })
+    } finally {
+      rmSync(sandbox, { recursive: true, force: true })
+    }
     await expect(gate!({ name: 'read', arguments: { file_path: '/tmp/notes.md' } }, next)).resolves.toEqual({ kind: 'next' })
   })
 

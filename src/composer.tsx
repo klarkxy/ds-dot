@@ -7,7 +7,7 @@ import { IconCheckOutlineRegular, IconCloseOutlineRegular, IconWarningOutlineReg
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ChangeEvent, type ClipboardEvent, type DragEvent, type KeyboardEvent, type MutableRefObject } from 'react'
 import type { ChatItem } from './contracts.ts'
 import { CHAT_IMAGE_LIMIT, imageName, inspectImageBytes, type ChatImage } from './chat-images.ts'
-import { CHAT_FILE_BYTES, CHAT_FILE_LIMIT, ChatFileRejected, fileName, humanBytes, type ChatFileReceipt } from './chat-files.ts'
+import { CHAT_FILE_BYTES, CHAT_FILE_LIMIT, fileName, humanBytes, type ChatFileReceipt } from './chat-files.ts'
 import { fillText, t, type CopyLocale } from './ui-copy.ts'
 
 function bytesToBase64(bytes: Uint8Array): string {
@@ -30,7 +30,7 @@ interface ComposerFile {
   readonly key: string
   readonly name: string
   readonly bytes: number
-  readonly data: string
+  readonly file: File
   readonly status: 'uploading' | 'ready' | 'error'
   readonly receipt?: ChatFileReceipt
   readonly error?: string
@@ -119,6 +119,7 @@ export function Composer({
   const composerRef = useRef<HTMLDivElement>(null)
   const plusRef = useRef<HTMLDivElement>(null)
   const fileSeq = useRef(0)
+  const filesRef = useRef<ComposerFile[]>([])
   const slashList = useRef<HTMLDivElement>(null)
   const area = useRef<HTMLTextAreaElement>(null)
   const picker = useRef<HTMLInputElement>(null)
@@ -186,21 +187,30 @@ export function Composer({
     return out.slice(-30)
   }, [items])
 
-  const uploadOne = useCallback(async (row: ComposerFile) => {
+  const updateFiles = useCallback((updater: ComposerFile[] | ((list: ComposerFile[]) => ComposerFile[])) => {
+    const next = typeof updater === 'function' ? updater(filesRef.current) : updater
+    filesRef.current = next
+    setFiles(next)
+  }, [])
+
+  const uploadOne = useCallback(async (row: ComposerFile, encodedData?: string) => {
     try {
-      const receipt = await onAttach(row.name, row.data)
-      setFiles(list => list.map(item => item.key === row.key && item.status === 'uploading' ? { ...item, status: 'ready' as const, receipt, name: receipt.name, bytes: receipt.bytes } : item))
+      const data = encodedData ?? bytesToBase64(new Uint8Array(await row.file.arrayBuffer()))
+      const receipt = await onAttach(row.name, data)
+      if (!filesRef.current.some(item => item.key === row.key && item.status === 'uploading')) return
+      updateFiles(list => list.map(item => item.key === row.key && item.status === 'uploading' ? { ...item, status: 'ready' as const, receipt, name: receipt.name, bytes: receipt.bytes } : item))
     } catch (failure) {
+      if (!filesRef.current.some(item => item.key === row.key && item.status === 'uploading')) return
       const message = failure instanceof Error ? failure.message : String(failure)
-      setFiles(list => list.map(item => item.key === row.key && item.status === 'uploading' ? { ...item, status: 'error' as const, error: message } : item))
+      updateFiles(list => list.map(item => item.key === row.key && item.status === 'uploading' ? { ...item, status: 'error' as const, error: message } : item))
       setLocalError(fillText(t(locale, 'fileUploadFailed'), { message }))
     }
-  }, [onAttach, locale])
+  }, [onAttach, locale, updateFiles])
 
   const addFiles = useCallback(async (picked: readonly File[]) => {
     setLocalError(undefined)
     let imageCount = images.length
-    let fileCount = files.length
+    let fileCount = filesRef.current.length
     for (const file of picked) {
       const bytes = new Uint8Array(await file.arrayBuffer())
       const inspected = inspectImageBytes(bytes, file.type)
@@ -227,13 +237,13 @@ export function Composer({
         key: `${Date.now()}:${fileSeq.current}`,
         name: clean,
         bytes: bytes.length,
-        data: bytesToBase64(bytes),
+        file,
         status: 'uploading',
       }
-      setFiles(list => [...list, row])
-      void uploadOne(row)
+      updateFiles(list => [...list, row])
+      void uploadOne(row, bytesToBase64(bytes))
     }
-  }, [images.length, files.length, uploadOne, locale])
+  }, [images.length, uploadOne, updateFiles, locale])
 
 
   const submit = useCallback(() => {
@@ -248,12 +258,12 @@ export function Composer({
         setText('')
         writeDraft(sessionId, '')
         setImages([])
-        setFiles([])
+        updateFiles([])
         setHistoryCursor(-1)
         setExpanded(false)
       }, () => {})
       .finally(() => { setBusy(false); area.current?.focus() })
-  }, [text, images, files, busy, disabled, sessionId, onSend])
+  }, [text, images, files, busy, disabled, sessionId, onSend, updateFiles])
 
   const startNewSegment = useCallback(() => {
     if (disabled || running || segmentBusy) return
@@ -508,20 +518,20 @@ export function Composer({
 
   const retryFile = useCallback((row: ComposerFile) => {
     const reset: ComposerFile = { ...row, status: 'uploading', error: undefined }
-    setFiles(list => list.map(item => item.key === row.key ? reset : item))
+    updateFiles(list => list.map(item => item.key === row.key ? reset : item))
     setLocalError(undefined)
     void uploadOne(reset)
-  }, [uploadOne])
+  }, [uploadOne, updateFiles])
 
   const clearAll = useCallback(() => {
     updateText('')
     setImages([])
-    setFiles([])
+    updateFiles([])
     setLocalError(undefined)
     setExpanded(false)
     onDismissError()
     area.current?.focus()
-  }, [updateText, onDismissError])
+  }, [updateText, updateFiles, onDismissError])
 
   const shownError = localError ?? error
   const uploadsPending = files.some(file => file.status !== 'ready')
@@ -647,7 +657,7 @@ export function Composer({
                     className="dsh-dot-attachment-remove"
                     aria-label={t(locale, 'removeFile')}
                     title={t(locale, 'removeFile')}
-                    onClick={() => setFiles(list => list.filter(item => item.key !== file.key))}
+                    onClick={() => updateFiles(list => list.filter(item => item.key !== file.key))}
                   >
                     ×
                   </button>

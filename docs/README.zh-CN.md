@@ -6,7 +6,7 @@
 
 **桃乐丝（`dot`）** 是 **DeepSeek Harness（DSH）** 侧栏里的常驻搭档。用日常说话的方式交给她多件事，她会自己核对完改动再摆出前后对比；小确认直接放行，涉及大事一定会停下来等你点头。
 
-> **看详细图文与实机录屏：** 欢迎前往 **[桃乐丝的记事本](https://klarkxy.github.io/ds-dot/)** 浏览个人日记、查看 [13 段完整实机录屏](https://klarkxy.github.io/ds-dot/#clips)，以及复制 [上手常用句子](https://klarkxy.github.io/ds-dot/#about)。
+> **看详细图文与实机录屏：** 欢迎前往 **[桃乐丝的记事本](https://klarkxy.github.io/ds-dot/)** 浏览个人日记、查看 [14 段完整实机录屏](https://klarkxy.github.io/ds-dot/#clips)，以及复制 [上手常用句子](https://klarkxy.github.io/ds-dot/#about)。
 
 ## 安装
 

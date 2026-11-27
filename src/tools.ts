@@ -8,6 +8,9 @@
  * because bridge channels (e.g. Gemini function calling) silently drop tools
  * that contain non-compliant schemas.
  */
+import { existsSync, lstatSync, readlinkSync, realpathSync } from 'node:fs'
+import { homedir } from 'node:os'
+import { dirname, isAbsolute, join, resolve } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import { credentialLikePath } from './approval-risk.ts'
 import { defineTool } from '@deepseek-ai/dsh-tools'
@@ -91,7 +94,9 @@ const bool = (args: unknown, key: string): boolean =>
 export const TASK_ACTIONS = ['create', 'revise', 'dispatch', 'check', 'read', 'list', 'supplement', 'finish', 'step', 'closeout', 'pause', 'resume', 'cancel', 'decide', 'reject', 'link', 'unlink'] as const
 
 const CREDENTIAL_GUARD_TOOLS: ReadonlySet<string> = new Set(['read', 'read_image', 'glob', 'grep', 'office_render', 'office_convert'])
+const CREDENTIAL_GUARD_KEYS = ['file_path', 'path', 'pattern', 'glob', 'input', 'output_dir', 'output'] as const
 const CREDENTIAL_GUARD_REASON = 'That path looks like a credential file and will not be read.'
+const GLOB_META = /[*?[\]{}]/
 
 function guardArgs(args: unknown): Record<string, unknown> | undefined {
   if (typeof args === 'string') {
@@ -103,13 +108,97 @@ function guardArgs(args: unknown): Record<string, unknown> | undefined {
   return args !== null && typeof args === 'object' && !Array.isArray(args) ? args as Record<string, unknown> : undefined
 }
 
-function credentialToolGuard(exec: { readonly name: string; readonly arguments?: unknown }): string | undefined {
+function expandHome(raw: string): string {
+  if (raw === '~') return homedir()
+  if (raw.startsWith('~/') || raw.startsWith('~\\')) return join(homedir(), raw.slice(2))
+  return raw
+}
+
+function splitGlobPrefix(target: string): { readonly prefix: string; readonly suffix: string } {
+  const parts = target.split(/([/\\])/)
+  let prefix = ''
+  for (let index = 0; index < parts.length; index += 1) {
+    const part = parts[index]!
+    if (GLOB_META.test(part)) {
+      return { prefix: prefix.replace(/[/\\]+$/, ''), suffix: parts.slice(index).join('') }
+    }
+    prefix += part
+  }
+  return { prefix: target, suffix: '' }
+}
+
+function resolveExistingAndLinks(candidate: string): readonly string[] {
+  const out = new Set<string>([candidate])
+  const walk = (inputPath: string, depth: number): void => {
+    if (depth > 16) return
+    const tail: string[] = []
+    let cur = inputPath
+    while (true) {
+      try {
+        const stat = lstatSync(cur)
+        if (stat.isSymbolicLink()) {
+          const rawLink = expandHome(readlinkSync(cur))
+          const target = isAbsolute(rawLink) ? rawLink : resolve(dirname(cur), rawLink)
+          const next = tail.length > 0 ? join(target, ...tail) : target
+          if (!out.has(next)) {
+            out.add(next)
+            walk(next, depth + 1)
+          }
+        }
+      } catch { /* missing segment or unreadable link */ }
+      if (existsSync(cur)) {
+        try {
+          const real = (realpathSync.native ?? realpathSync)(cur)
+          out.add(tail.length > 0 ? join(real, ...tail) : real)
+        } catch { /* ignore transient fs errors */ }
+        break
+      }
+      const parent = dirname(cur)
+      if (parent === cur) break
+      const base = cur.slice(parent.length).replace(/^[/\\]+/, '')
+      if (base) tail.unshift(base)
+      cur = parent
+    }
+  }
+  walk(candidate, 0)
+  return [...out]
+}
+
+function resolvedCredentialPath(raw: string, baseDir?: string): boolean {
+  const trimmed = raw.trim()
+  if (!trimmed) return false
+  if (credentialLikePath(trimmed)) return true
+  const expanded = expandHome(trimmed)
+  if (credentialLikePath(expanded)) return true
+  const { prefix, suffix } = splitGlobPrefix(expanded)
+  if (!prefix) return false
+  const roots = isAbsolute(prefix)
+    ? [resolve(prefix)]
+    : [...(baseDir ? [resolve(baseDir, prefix)] : []), resolve(prefix)]
+  const joinSuffix = (resolvedPrefix: string) =>
+    suffix ? `${resolvedPrefix}${suffix.startsWith('/') || suffix.startsWith('\\') ? '' : '/'}${suffix}` : resolvedPrefix
+  for (const root of roots) {
+    for (const candidate of resolveExistingAndLinks(root)) {
+      if (credentialLikePath(candidate) || (suffix !== '' && credentialLikePath(joinSuffix(candidate)))) {
+        return true
+      }
+    }
+  }
+  return false
+}
+
+export function credentialToolGuard(exec: { readonly name: string; readonly arguments?: unknown }, baseDir?: string): string | undefined {
   if (!CREDENTIAL_GUARD_TOOLS.has(exec.name)) return undefined
   const args = guardArgs(exec.arguments)
-  if (!args) return undefined
-  for (const key of ['file_path', 'path', 'pattern', 'input']) {
+  if (!args) return CREDENTIAL_GUARD_REASON
+  for (const key of CREDENTIAL_GUARD_KEYS) {
     const value = args[key]
-    if (typeof value === 'string' && credentialLikePath(value)) return CREDENTIAL_GUARD_REASON
+    if (value === undefined || value === null) continue
+    if (typeof value !== 'string') return CREDENTIAL_GUARD_REASON
+    const bad = exec.name === 'grep' && key === 'pattern'
+      ? credentialLikePath(value)
+      : resolvedCredentialPath(value, baseDir)
+    if (bad) return CREDENTIAL_GUARD_REASON
   }
   return undefined
 }
@@ -120,7 +209,7 @@ export function apply(ctx: Context): void {
   const dot = () => host[SERVICE_NAME]
   // Names outside the locked set go to the capability layer: granted extras pass
   // while still granted and applied to the live segment; everything else denies.
-  gateToolExecution(ctx, DOT_INHERITED_ALLOW, exec => dot().capabilityGate(exec), credentialToolGuard)
+  gateToolExecution(ctx, DOT_INHERITED_ALLOW, exec => dot().capabilityGate(exec), exec => credentialToolGuard(exec, (dot() as { readonly homeDir?: string } | undefined)?.homeDir))
   devIndexLoad = installDotDevIndex(ctx)
   // Both sections read what the segment froze when it started, so every request of a segment
   // shares one prompt prefix; a settings edit reaches dot with her next segment. A session

@@ -76,8 +76,12 @@ export function checkChatFileIds(value: unknown): readonly string[] {
   if (value === undefined || value === null) return []
   if (!Array.isArray(value)) throw new ChatFileRejected('invalid')
   if (value.length > CHAT_FILE_LIMIT) throw new ChatFileRejected('too-many')
+  const seen = new Set<string>()
   return value.map(entry => {
-    if (typeof entry !== 'string' || entry.length === 0 || entry.length > 64) throw new ChatFileRejected('invalid')
+    if (typeof entry !== 'string' || entry.length === 0 || entry.length > 64 || seen.has(entry)) {
+      throw new ChatFileRejected('invalid')
+    }
+    seen.add(entry)
     return entry
   })
 }

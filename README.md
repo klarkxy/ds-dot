@@ -6,7 +6,7 @@
 
 **Dorothy (`dot`)** is your sidebar partner inside **DeepSeek Harness (DSH)**. Hand off tasks in plain words, review clean before/after diffs, let routine checks pass quietly while pausing on big decisions, and keep scheduled recipes organized.
 
-> **Read more & watch real recordings:** Visit **[Dorothy’s Notebook](https://klarkxy.github.io/ds-dot/)** for illustrated guides, all [13 live DSH screen recordings](https://klarkxy.github.io/ds-dot/#clips), and [day-one starter prompts](https://klarkxy.github.io/ds-dot/#about).
+> **Read more & watch real recordings:** Visit **[Dorothy’s Notebook](https://klarkxy.github.io/ds-dot/)** for illustrated guides, all [14 live DSH screen recordings](https://klarkxy.github.io/ds-dot/#clips), and [day-one starter prompts](https://klarkxy.github.io/ds-dot/#about).
 
 ## Install
 

@@ -35,12 +35,12 @@ export type GateVerdict = 'next' | { readonly kind: string; readonly reason?: st
  * locked set go to `decideExtra` when present — the dynamic verdict for the
  * extra-capability layer — and deny when it returns undefined or throws.
  */
-export function gateToolExecution(ctx: Context, allowedNames: readonly string[], decideExtra?: (exec: GateExec) => Promise<GateVerdict>, guard?: (exec: GateExec) => string | undefined): void {
+export function gateToolExecution(ctx: Context, allowedNames: readonly string[], decideExtra?: (exec: GateExec) => Promise<GateVerdict>, guard?: (exec: GateExec) => string | undefined | Promise<string | undefined>): void {
   const host = ctx as unknown as ToolScope
   const allowed = new Set(allowedNames)
   ctx.effect(() => host.on('tools/pre-execute', async (exec, next) => {
     if (allowed.has(exec.name)) {
-      const denied = guard?.(exec)
+      const denied = await guard?.(exec)
       if (denied !== undefined) return { kind: 'deny', reason: denied }
       return next()
     }

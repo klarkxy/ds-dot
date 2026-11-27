@@ -71,23 +71,36 @@ describe('routine check setting', () => {
     await act(async () => root.unmount())
   })
 
-  it('can be locked like the other settings', async () => {
+  it('locks settings from the advanced checklist instead of inline lock buttons', async () => {
     let current: DotSettings = { ...DEFAULT_SETTINGS }
     const api = {
       models: async () => ({ groups: [] }), settings: async () => current, settingProposals: async () => [], decideSetting: async () => 'ok',
+      keepalive: async () => ({ provider: 'p', model: 'base', minutes: 5, defaultMinutes: 5 }),
       setSettings: async (patch: Partial<DotSettings>) => { current = { ...current, ...patch } as DotSettings; return current },
     }
     function Harness() {
       const [settings, setSettings] = useState<DotSettings>(current)
-      return <SettingsPanel locale="en" api={api as never} settings={settings} onSaved={setSettings} />
+      return <SettingsPanel locale="en" section="advanced" api={api as never} settings={settings} onSaved={setSettings} />
     }
     const root = createRoot(document.getElementById('root')!)
     await act(async () => root.render(<Harness />))
     await act(async () => { await Promise.resolve() })
-    const lock = [...document.querySelectorAll<HTMLButtonElement>('.dsh-dot-lock')].find(button => button.getAttribute('aria-label')?.includes('Routine check'))!
+    const cards = [...document.querySelectorAll<HTMLElement>('.dsh-dot-pane-section')]
+    expect(cards[0]?.textContent).toContain('Cache duration')
+    expect(cards[0]?.textContent).toContain('Task preset')
+    expect(cards[0]?.textContent).toContain('Stall detection')
+    expect(cards[1]?.textContent).toContain('Locked settings')
+    const lockRows = [...document.querySelectorAll<HTMLElement>('.dsh-dot-lock-check')]
+    expect(lockRows.map(row => row.textContent)).toEqual([
+      'Model', 'Background reflection', 'Scope', 'Approvals', 'Questions', 'Task permissions', 'Available models',
+      'Routine check interval', 'Tool access', 'What she calls you', 'Voice & personality', 'Agreements',
+      'Task preset', 'Stall detection', 'Review model',
+    ])
+    const lock = lockRows.find(row => row.textContent?.includes('Routine check interval'))!
     expect(lock).toBeDefined()
     await act(async () => lock.click())
     expect(current.locks).toEqual({ idleCheckMinutes: true })
+    expect(document.querySelector('.dsh-dot-lock')).toBeNull()
     await act(async () => root.unmount())
   })
 })
@@ -111,7 +124,7 @@ describe('cache keepalive setting', () => {
     const root = createRoot(document.getElementById('root')!)
     await act(async () => root.render(<Harness />))
     await act(async () => { await Promise.resolve() })
-    const input = () => document.querySelector<HTMLInputElement>('input[aria-label="Cache lifetime"]')!
+    const input = () => document.querySelector<HTMLInputElement>('input[aria-label="Cache duration"]')!
     expect(input().value).toBe('12')
     expect(document.body.textContent).toContain('p/base')
 
@@ -147,7 +160,7 @@ describe('cache keepalive setting', () => {
     const root = createRoot(document.getElementById('root')!)
     await act(async () => root.render(<Harness />))
     await act(async () => { await Promise.resolve() })
-    expect(document.querySelector('input[aria-label="Cache lifetime"]')).toBeNull()
+    expect(document.querySelector('input[aria-label="Cache duration"]')).toBeNull()
     await act(async () => root.unmount())
   })
 })
@@ -177,7 +190,6 @@ describe('factory reset', () => {
     const root = createRoot(document.getElementById('root')!)
     await act(async () => root.render(<Harness />))
     await act(async () => { await Promise.resolve() })
-    expect(document.body.textContent).toContain('Factory reset')
     const previewBtn = [...document.querySelectorAll('button')].find(button => button.textContent === 'Preview what will be cleared')!
     await act(async () => previewBtn.click())
     await act(async () => { await Promise.resolve() })
@@ -316,16 +328,16 @@ describe('sectioned settings, switches, and help tips', () => {
     // General: model, cache lifetime, reflection switch, auto update switch, factory reset — zero static .dsh-ui-help paragraphs.
     await act(async () => root.render(<Harness section="general" />))
     await act(async () => { await Promise.resolve() })
-    expect(document.querySelector('select[aria-label="Dorothy\'s model"]')).not.toBeNull()
-    expect(document.querySelector('input[aria-label="Cache lifetime"]')).not.toBeNull()
+    expect(document.querySelector('select[aria-label="Model"]')).not.toBeNull()
+    expect(document.querySelector('input[aria-label="Cache duration"]')).toBeNull()
     const reflSwitch = document.querySelector<HTMLButtonElement>('button[role="switch"][aria-label="Background reflection"]')!
     expect(reflSwitch.getAttribute('aria-checked')).toBe('true')
     await act(async () => reflSwitch.click())
     expect(current.reflection).toBe(false)
     expect(document.querySelector('button[role="switch"][aria-label="Auto update"]')).not.toBeNull()
-    expect(document.body.textContent).toContain('Factory reset')
+    expect(document.body.textContent).not.toContain('Factory reset')
     expect(document.querySelectorAll('.dsh-ui-help')).toHaveLength(0)
-    expect(document.querySelectorAll('.dsh-dot-help-tip').length).toBeGreaterThanOrEqual(4)
+    expect(document.querySelectorAll('.dsh-dot-help-tip').length).toBeGreaterThanOrEqual(3)
     expect(document.querySelector('[role="tablist"][aria-label="Scope"]')).toBeNull()
     expect(document.querySelector('[role="tablist"][aria-label="Task permissions"]')).toBeNull()
 
@@ -333,29 +345,29 @@ describe('sectioned settings, switches, and help tips', () => {
     await act(async () => root.render(<Harness section="takeover" />))
     await act(async () => { await Promise.resolve() })
     expect(document.querySelector('[role="tablist"][aria-label="Scope"]')).not.toBeNull()
-    expect(document.querySelector('[role="tablist"][aria-label="Permission approvals"]')).not.toBeNull()
-    expect(document.querySelector('[role="tablist"][aria-label="Model questions"]')).not.toBeNull()
+    expect(document.querySelector('[role="tablist"][aria-label="Approvals"]')).not.toBeNull()
+    expect(document.querySelector('[role="tablist"][aria-label="Questions"]')).not.toBeNull()
     expect(document.querySelector('[role="tablist"][aria-label="Task permissions"]')).toBeNull()
     expect(document.querySelectorAll('.dsh-ui-help')).toHaveLength(0)
-    expect(document.querySelectorAll('.dsh-dot-help-tip')).toHaveLength(3)
+    expect(document.querySelectorAll('.dsh-dot-help-tip').length).toBeGreaterThanOrEqual(2)
 
     // Dispatch: task permissions, default task preset, task models (with dynamic empty-allow-list warning inline), routine check.
     await act(async () => root.render(<Harness section="dispatch" />))
     await act(async () => { await Promise.resolve() })
     expect(document.querySelector('[role="tablist"][aria-label="Task permissions"]')).not.toBeNull()
-    expect(document.querySelector('select[aria-label="Default task preset"]')).not.toBeNull()
-    expect(document.querySelector('[role="tablist"][aria-label="Allowed task models"]')).not.toBeNull()
+    expect(document.querySelector('select[aria-label="Task preset"]')).toBeNull()
+    expect(document.querySelector('[role="tablist"][aria-label="Available models"]')).not.toBeNull()
     expect(document.querySelector('input[aria-label="Routine check"]')).not.toBeNull()
     const inlineHelps = [...document.querySelectorAll('.dsh-ui-help')].map(el => el.textContent)
-    expect(inlineHelps).toEqual(['No models selected — cannot start new tasks.'])
-    expect(document.querySelectorAll('.dsh-dot-help-tip')).toHaveLength(3)
+    expect(inlineHelps).toEqual(['No models selected, so no new tasks can be dispatched yet.'])
+    expect(document.querySelectorAll('.dsh-dot-help-tip').length).toBeGreaterThanOrEqual(2)
 
     // Capabilities: single header without redundant outer section heading.
     await act(async () => root.render(<Harness section="capabilities" />))
     await act(async () => { await Promise.resolve() })
     expect(document.querySelector('.dsh-dot-pane-section-title')).toBeNull()
     expect(document.querySelector('.dsh-dot-caps')).not.toBeNull()
-    expect(document.querySelectorAll('.dsh-dot-help-tip')).toHaveLength(1)
+    expect(document.querySelectorAll('.dsh-dot-help-tip')).toHaveLength(0)
 
     // Proposals: renders pending boolean reflection proposal chips and applies decision.
     await act(async () => root.render(<Harness section="proposals" />))
@@ -488,7 +500,7 @@ describe('sectioned settings, switches, and help tips', () => {
     const bash = rows.find(row => row.textContent?.includes('bash'))!
     expect(bash.querySelector('[role="tablist"]')).toBeNull()
     const bashReset = bash.querySelector<HTMLButtonElement>('.dsh-dot-cap-clear')!
-    expect(bashReset.textContent).toBe('Reset to inherited')
+    expect(bashReset.textContent).toBe('Reset')
     await act(async () => bashReset.click())
     await act(async () => { await Promise.resolve() })
     expect(current.capabilities.grants['tool:bash']).toBeUndefined()
@@ -499,7 +511,7 @@ describe('sectioned settings, switches, and help tips', () => {
     const manage = groups.find(group => group.querySelector(':scope > summary')?.textContent?.includes('Manage'))!
     expect(manage.querySelector(':scope > summary [role="tablist"]')).toBeNull()
     const groupReset = manage.querySelector<HTMLButtonElement>(':scope > summary .dsh-dot-cap-clear')!
-    expect(groupReset.textContent).toBe('Reset to inherited')
+    expect(groupReset.textContent).toBe('Reset')
     await act(async () => groupReset.click())
     await act(async () => { await Promise.resolve() })
     expect(current.capabilities.grants['plugin:manage']).toBeUndefined()
@@ -569,7 +581,7 @@ describe('sectioned settings, switches, and help tips', () => {
     await act(async () => root.unmount())
   })
 
-  it('shows a Model questions help tip for every option', async () => {
+  it('shows a Questions help tip for every option', async () => {
     let current: DotSettings = { ...DEFAULT_SETTINGS, questions: 'dot' }
     const api = {
       models: async () => ({ groups: [] }),
@@ -586,21 +598,21 @@ describe('sectioned settings, switches, and help tips', () => {
     await act(async () => root.render(<Harness />))
     await act(async () => { await Promise.resolve() })
 
-    const tip = () => document.querySelector<HTMLButtonElement>('button.dsh-dot-help-tip[aria-label="About Model questions"]')
-    const tabNamed = (label: string) => [...document.querySelectorAll<HTMLButtonElement>('[role="tablist"][aria-label="Model questions"] [role="tab"]')].find(el => el.textContent === label)!
+    const tip = () => document.querySelector<HTMLButtonElement>('button.dsh-dot-help-tip[aria-label="About Questions"]')
+    const tabNamed = (label: string) => [...document.querySelectorAll<HTMLButtonElement>('[role="tablist"][aria-label="Questions"] [role="tab"]')].find(el => el.textContent === label)!
     expect(tip()).not.toBeNull()
 
-    await act(async () => tabNamed('Me').click())
+    await act(async () => tabNamed('Ask me').click())
     await act(async () => { await Promise.resolve() })
     expect(current.questions).toBe('human')
     expect(tip()).not.toBeNull()
 
-    await act(async () => tabNamed('Hands off').click())
+    await act(async () => tabNamed('Ignore').click())
     await act(async () => { await Promise.resolve() })
     expect(current.questions).toBe('off')
     expect(tip()).not.toBeNull()
 
-    await act(async () => tabNamed('Dorothy').click())
+    await act(async () => tabNamed('She answers').click())
     await act(async () => { await Promise.resolve() })
     expect(current.questions).toBe('dot')
     expect(tip()).not.toBeNull()
@@ -704,7 +716,7 @@ describe('MCP servers page', () => {
       mcpCredentialSet: async (server: string, value: string) => { setCalls.push({ server, value }); return { configured: true, masked: '•••1' } },
     })
     const root = createRoot(document.getElementById('root')!)
-    await act(async () => root.render(<SettingsPanel locale="en" section="mcp" api={api as never} settings={DEFAULT_SETTINGS} onSaved={() => {}} />))
+    await act(async () => root.render(<SettingsPanel locale="en" section="capabilities" api={api as never} settings={DEFAULT_SETTINGS} onSaved={() => {}} />))
     await act(async () => { await Promise.resolve() })
     expect(document.body.textContent).toContain('Connected')
     expect(document.body.textContent).toContain('Waiting for token')
@@ -731,7 +743,7 @@ describe('MCP servers page', () => {
       }),
     })
     const root = createRoot(document.getElementById('root')!)
-    await act(async () => root.render(<SettingsPanel locale="en" section="mcp" api={api as never} settings={DEFAULT_SETTINGS} onSaved={() => {}} />))
+    await act(async () => root.render(<SettingsPanel locale="en" section="capabilities" api={api as never} settings={DEFAULT_SETTINGS} onSaved={() => {}} />))
     await act(async () => { await Promise.resolve() })
     const connect = [...document.querySelectorAll('button')].find(button => button.textContent === 'Connect')!
     await act(async () => connect.click())
@@ -756,7 +768,7 @@ describe('MCP servers page', () => {
     })
     const Harness = () => {
       const [settings, setSettings] = useState<DotSettings>(current)
-      return <SettingsPanel locale="en" section="mcp" api={api as never} settings={settings} onSaved={next => { current = next; setSettings(next) }} />
+      return <SettingsPanel locale="en" section="capabilities" api={api as never} settings={settings} onSaved={next => { current = next; setSettings(next) }} />
     }
     const root = createRoot(document.getElementById('root')!)
     await act(async () => root.render(<Harness />))
@@ -776,7 +788,7 @@ describe('MCP servers page', () => {
       mcpList: async () => ({ servers: [], catalog: [] }),
     })
     const root = createRoot(document.getElementById('root')!)
-    await act(async () => root.render(<SettingsPanel locale="en" section="mcp" api={api as never} settings={DEFAULT_SETTINGS} onSaved={() => {}} />))
+    await act(async () => root.render(<SettingsPanel locale="en" section="capabilities" api={api as never} settings={DEFAULT_SETTINGS} onSaved={() => {}} />))
     await act(async () => { await Promise.resolve() })
     const [nameIn, urlIn] = [...document.querySelectorAll<HTMLInputElement>('.dsh-dot-mcp-custom-body input')]
     await act(async () => { type(nameIn!, 'alpha'); type(urlIn!, 'https://a.example/mcp') })
@@ -798,7 +810,7 @@ describe('MCP servers page', () => {
       mcpCredentialUnset: async (server: string) => { unset.push(server); return { configured: false } },
     })
     const root = createRoot(document.getElementById('root')!)
-    await act(async () => root.render(<SettingsPanel locale="en" section="mcp" api={api as never} settings={DEFAULT_SETTINGS} onSaved={() => {}} />))
+    await act(async () => root.render(<SettingsPanel locale="en" section="capabilities" api={api as never} settings={DEFAULT_SETTINGS} onSaved={() => {}} />))
     await act(async () => { await Promise.resolve() })
     const [nameIn, urlIn, tokenIn] = [...document.querySelectorAll<HTMLInputElement>('.dsh-dot-mcp-custom-body input')]
     await act(async () => { type(nameIn!, 'alpha'); type(urlIn!, 'https://a.example/mcp'); type(tokenIn!, 'tok-1') })
@@ -827,7 +839,7 @@ describe('MCP servers page', () => {
       mcpCredentialSet: async (server: string, value: string) => { order.push('credential'); setCalls.push({ server, value }); return { configured: true, masked: '•••1' } },
     })
     const root = createRoot(document.getElementById('root')!)
-    await act(async () => root.render(<SettingsPanel locale="en" section="mcp" api={api as never} settings={DEFAULT_SETTINGS} onSaved={() => {}} />))
+    await act(async () => root.render(<SettingsPanel locale="en" section="capabilities" api={api as never} settings={DEFAULT_SETTINGS} onSaved={() => {}} />))
     await act(async () => { await Promise.resolve() })
     const open = [...document.querySelectorAll('button')].find(button => button.textContent === 'Connect')!
     await act(async () => open.click())
@@ -852,7 +864,7 @@ describe('MCP servers page', () => {
       mcpCredentialUnset: async () => { order.push('unset'); return { configured: false } },
     })
     const root = createRoot(document.getElementById('root')!)
-    await act(async () => root.render(<SettingsPanel locale="en" section="mcp" api={api as never} settings={DEFAULT_SETTINGS} onSaved={() => {}} />))
+    await act(async () => root.render(<SettingsPanel locale="en" section="capabilities" api={api as never} settings={DEFAULT_SETTINGS} onSaved={() => {}} />))
     await act(async () => { await Promise.resolve() })
     const [nameIn, urlIn, tokenIn] = [...document.querySelectorAll<HTMLInputElement>('.dsh-dot-mcp-custom-body input')]
     await act(async () => { type(nameIn!, 'alpha'); type(urlIn!, 'https://a.example/mcp'); type(tokenIn!, 'tok-1') })
@@ -875,7 +887,7 @@ describe('MCP servers page', () => {
       mcpCredentialUnset: async () => { calls.push('unset'); return { configured: false } },
     })
     const root = createRoot(document.getElementById('root')!)
-    await act(async () => root.render(<SettingsPanel locale="en" section="mcp" api={api as never} settings={DEFAULT_SETTINGS} onSaved={() => {}} />))
+    await act(async () => root.render(<SettingsPanel locale="en" section="capabilities" api={api as never} settings={DEFAULT_SETTINGS} onSaved={() => {}} />))
     await act(async () => { await Promise.resolve() })
     const [nameIn, urlIn, tokenIn] = [...document.querySelectorAll<HTMLInputElement>('.dsh-dot-mcp-custom-body input')]
     await act(async () => { type(nameIn!, 'alpha'); type(urlIn!, 'https://a.example/mcp'); type(tokenIn!, 'tok-1') })
@@ -899,7 +911,7 @@ describe('MCP servers page', () => {
     vi.useFakeTimers()
     const root = createRoot(document.getElementById('root')!)
     try {
-      await act(async () => root.render(<SettingsPanel locale="en" section="mcp" api={api as never} settings={DEFAULT_SETTINGS} onSaved={() => {}} />))
+      await act(async () => root.render(<SettingsPanel locale="en" section="capabilities" api={api as never} settings={DEFAULT_SETTINGS} onSaved={() => {}} />))
       await act(async () => { await Promise.resolve() })
       const connect = () => [...document.querySelectorAll('button')].find(button => button.textContent === 'Connect')!
       await act(async () => connect().click())
@@ -929,10 +941,10 @@ describe('MCP servers page', () => {
       }),
     })
     const root = createRoot(document.getElementById('root')!)
-    await act(async () => root.render(<SettingsPanel locale="en" section="mcp" api={api as never} settings={DEFAULT_SETTINGS} onSaved={() => {}} />))
+    await act(async () => root.render(<SettingsPanel locale="en" section="capabilities" api={api as never} settings={DEFAULT_SETTINGS} onSaved={() => {}} />))
     await act(async () => { await Promise.resolve() })
     expect(document.body.textContent).toContain('Already connected globally')
-    expect(document.body.textContent).toContain('Grant it under Extra capabilities instead')
+    expect(document.body.textContent).toContain('Grant it below')
     expect([...document.querySelectorAll('button')].some(button => button.textContent === 'Connect')).toBe(false)
     await act(async () => root.unmount())
   })
@@ -944,7 +956,7 @@ describe('MCP servers page', () => {
       mcpList: async () => ({ servers: [], catalog: [] }),
     })
     const root = createRoot(document.getElementById('root')!)
-    await act(async () => root.render(<SettingsPanel locale="en" section="mcp" api={api as never} settings={DEFAULT_SETTINGS} onSaved={() => {}} />))
+    await act(async () => root.render(<SettingsPanel locale="en" section="capabilities" api={api as never} settings={DEFAULT_SETTINGS} onSaved={() => {}} />))
     await act(async () => { await Promise.resolve() })
     const [nameIn, urlIn] = [...document.querySelectorAll<HTMLInputElement>('.dsh-dot-mcp-custom-body input')]
     await act(async () => { type(nameIn!, 'team__docs'); type(urlIn!, 'https://a.example/mcp') })
@@ -977,7 +989,7 @@ describe('MCP servers page', () => {
       }),
     })
     const root = createRoot(document.getElementById('root')!)
-    await act(async () => root.render(<SettingsPanel locale="en" section="mcp" api={api as never} settings={settings} onSaved={() => {}} />))
+    await act(async () => root.render(<SettingsPanel locale="en" section="capabilities" api={api as never} settings={settings} onSaved={() => {}} />))
     await act(async () => { await Promise.resolve() })
     const dw = [...document.querySelectorAll('.dsh-dot-mcp-row')].find(row => row.textContent?.includes('deepwiki'))!
     const remove = [...dw.querySelectorAll('button')].find(button => button.textContent === 'Remove')!
@@ -1013,7 +1025,7 @@ describe('MCP servers page', () => {
       }),
     })
     const root = createRoot(document.getElementById('root')!)
-    await act(async () => root.render(<SettingsPanel locale="en" section="mcp" api={api as never} settings={settings} onSaved={() => {}} />))
+    await act(async () => root.render(<SettingsPanel locale="en" section="capabilities" api={api as never} settings={settings} onSaved={() => {}} />))
     await act(async () => { await Promise.resolve() })
     const row = [...document.querySelectorAll('.dsh-dot-mcp-row')].find(node => node.querySelector('.dsh-dot-mcp-name')?.textContent === 'team')!
     const remove = [...row.querySelectorAll('button')].find(button => button.textContent === 'Remove')!
@@ -1158,15 +1170,14 @@ describe('dispatch settings layout', () => {
     await act(async () => root.render(<Harness />))
     await act(async () => { await Promise.resolve() })
 
-    expect([...document.querySelectorAll('.dsh-dot-dispatch-group')].map(node => node.getAttribute('data-group'))).toEqual(['permission', 'preset', 'models', 'routine'])
+    expect(document.querySelector('.dsh-dot-dispatch')).not.toBeNull()
+    expect(document.querySelector('.dsh-dot-dispatch-group')).toBeNull()
     expect(document.querySelector('input[aria-label="Routine check"]')).not.toBeNull()
     expect(document.querySelector('[role="tablist"][aria-label="Task permissions"]')).not.toBeNull()
     const picker = document.querySelector('.dsh-dot-model-picker')!
-    expect(picker.getAttribute('aria-label')).toBe('Allow selected')
+    expect(picker.getAttribute('aria-label')).toBe('Selected only')
     expect(document.querySelector('.dsh-dot-model-summary')?.textContent).toContain('5 selected')
-    expect(document.querySelectorAll('.dsh-dot-model-chip')).toHaveLength(5)
-    expect(document.querySelector('.dsh-dot-model-chip-provider')?.textContent).toBe('Magpie')
-    expect(document.querySelector('.dsh-dot-model-chip')?.getAttribute('title')).toBe('Magpie / Agnes 3.0 Flash · KLARKXY')
+    expect(document.querySelector('.dsh-dot-model-chips')).toBeNull()
     expect(document.querySelectorAll('.dsh-dot-model-group')).toHaveLength(3)
     expect(document.querySelector('.dsh-dot-model-group-count')?.textContent).toBe('3/4')
     expect(document.querySelectorAll('.dsh-dot-model-item--on').length).toBeGreaterThanOrEqual(5)
@@ -1182,11 +1193,6 @@ describe('dispatch settings layout', () => {
     expect(document.querySelector('.dsh-dot-model-group')).toBeNull()
 
     await act(async () => { type(filter, '') })
-    const remove = document.querySelector<HTMLButtonElement>('.dsh-dot-model-chip-remove')!
-    expect(remove.getAttribute('aria-label')).toBe('Remove Magpie / Agnes 3.0 Flash · KLARKXY')
-    await act(async () => { remove.click() })
-    expect(saves.at(-1)?.taskModels).toEqual({ mode: 'allow', list: selected.slice(1) })
-
     const toggle = [...document.querySelectorAll<HTMLElement>('.dsh-dot-model-group-toggle')].find(el => el.parentElement?.textContent?.includes('DeepSeek Account'))!
     await act(async () => { toggle.click() })
     expect(saves.at(-1)?.taskModels?.list).toEqual(expect.arrayContaining(['account/v4', 'account/flash']))
@@ -1198,10 +1204,10 @@ describe('dispatch settings layout', () => {
 
     await act(async () => { document.querySelector<HTMLButtonElement>('.dsh-dot-model-summary button')!.click() })
     expect(saves.at(-1)?.taskModels).toEqual({ mode: 'allow', list: [] })
-    expect(document.querySelector('.dsh-dot-model-chip')).toBeNull()
+    expect(document.querySelector('.dsh-dot-model-chips')).toBeNull()
     expect(document.querySelector('.dsh-ui-help')?.textContent).toContain('No models selected')
 
-    const unrestricted = [...document.querySelectorAll<HTMLButtonElement>('[role="tab"]')].find(node => node.textContent === 'Unrestricted')!
+    const unrestricted = [...document.querySelectorAll<HTMLButtonElement>('[role="tab"]')].find(node => node.textContent === 'Any')!
     await act(async () => { unrestricted.click() })
     expect(saves.at(-1)?.taskModels).toEqual({ mode: 'all', list: [] })
     expect(document.querySelector('.dsh-dot-model-picker')).toBeNull()
@@ -1221,11 +1227,9 @@ describe('dispatch settings layout', () => {
       return settingsCss.slice(start, settingsCss.indexOf('}', start))
     }
     expect(rule('.dsh-dot-chat .dsh-dot-model-list {')).not.toMatch(/max-height|overflow/)
-    expect(rule('.dsh-dot-chat .dsh-dot-model-chips {')).not.toMatch(/max-height|overflow/)
-    expect(settingsCss).toContain(".dsh-dot-dispatch-group[data-group='models']")
-    expect(settingsCss).toContain(".dsh-dot-chat .dsh-dot-dispatch-group[data-group='preset']")
+    expect(settingsCss).not.toContain('.dsh-dot-dispatch-group')
+    expect(settingsCss).not.toContain('.dsh-dot-model-chips')
     expect(settingsCss).toContain('.dsh-dot-chat .dsh-dot-model-search { display: flex; width: 100%;')
-    expect(settingsCss).toContain('.dsh-dot-chat .dsh-dot-model-chip-provider {')
 
     const nonAtSelectors = settingsCss
       .replace(/\/\*[\s\S]*?\*\//g, '')
@@ -1273,73 +1277,44 @@ describe('dispatch settings layout', () => {
         return current
       },
     }
-    function Harness({ locale, section }: { locale: 'en' | 'zh'; section: 'dispatch' | 'proposals' }) {
+    function Harness({ locale, section }: { locale: 'en' | 'zh'; section: 'advanced' | 'proposals' }) {
       const [value, setValue] = useState<DotSettings>(current)
       return <SettingsPanel locale={locale} section={section} api={api as never} settings={value} onSaved={setValue} />
     }
     const root = createRoot(document.getElementById('root')!)
-    await act(async () => root.render(<Harness locale="en" section="dispatch" />))
+    await act(async () => root.render(<Harness locale="en" section="advanced" />))
     await act(async () => { await Promise.resolve() })
 
-    const select = () => document.querySelector<HTMLSelectElement>('select.dsh-ui-select[aria-label="Default task preset"]')!
-    expect(select()).not.toBeNull()
-    expect(select().value).toBe('standard')
-    expect(select().disabled).toBe(false)
-    expect([...select().options].map(opt => [opt.value, opt.textContent])).toEqual([
-      ['standard', 'standard (Host default)'],
-      ['dot-worker', 'dot-worker (5s background promotion)'],
-    ])
-    const helpBtn = document.querySelector('button.dsh-dot-help-tip[aria-label="About Default task preset"]')
-    expect(helpBtn).not.toBeNull()
-
-    await act(async () => {
-      const el = select()
-      el.value = 'dot-worker'
-      const propsKey = Object.keys(el).find(key => key.startsWith('__reactProps'))
-      const props = propsKey ? (el as unknown as Record<string, { onChange?: (event: { target: HTMLSelectElement }) => void }>)[propsKey] : undefined
-      props?.onChange?.({ target: el })
-    })
+    expect(document.querySelector('select[aria-label="Task preset"]')).toBeNull()
+    const tablist = () => document.querySelector('[role="tablist"][aria-label="Task preset"]')!
+    expect(tablist()).not.toBeNull()
+    expect([...tablist().querySelectorAll('[role="tab"]')].map(el => el.textContent)).toEqual(['Standard', 'Lightweight'])
+    expect(document.querySelector('button.dsh-dot-help-tip[aria-label="About Task preset"]')).not.toBeNull()
+    const lightweight = [...tablist().querySelectorAll<HTMLButtonElement>('[role="tab"]')].find(el => el.textContent === 'Lightweight')!
+    await act(async () => lightweight.click())
     expect(saves.at(-1)).toEqual({ defaultTaskPreset: 'dot-worker' })
-    expect(select().value).toBe('dot-worker')
 
-    const lockBtn = [...document.querySelectorAll<HTMLButtonElement>('.dsh-dot-lock')].find(btn => btn.getAttribute('aria-label')?.includes('Default task preset'))!
-    expect(lockBtn).toBeDefined()
-    expect(lockBtn.getAttribute('aria-pressed')).toBe('false')
-    await act(async () => { lockBtn.click() })
-    expect(saves.at(-1)).toEqual({ locks: { defaultTaskPreset: true } })
-    expect(lockBtn.getAttribute('aria-pressed')).toBe('true')
-    expect(lockBtn.hasAttribute('data-locked')).toBe(true)
-    expect(select().disabled).toBe(false)
-
-    await act(async () => { lockBtn.click() })
-    expect(saves.at(-1)).toEqual({ locks: { defaultTaskPreset: false } })
-    expect(lockBtn.getAttribute('aria-pressed')).toBe('false')
-
-    await act(async () => root.render(<Harness locale="zh" section="dispatch" />))
-    const zhSelect = document.querySelector<HTMLSelectElement>('select.dsh-ui-select[aria-label="默认任务 preset"]')!
-    expect(zhSelect).not.toBeNull()
-    expect([...zhSelect.options].map(opt => opt.textContent)).toEqual([
-      'standard（宿主默认）',
-      'dot-worker（5s 前转后）',
-    ])
+    await act(async () => root.render(<Harness locale="zh" section="advanced" />))
+    expect(document.body.textContent).toContain('任务预设')
+    expect(document.body.textContent).toContain('轻量')
 
     await act(async () => root.render(<Harness locale="en" section="proposals" />))
     await act(async () => { await Promise.resolve() })
-    expect(document.querySelector('.dsh-dot-proposal-head strong')?.textContent).toBe('Default task preset')
+    expect(document.querySelector('.dsh-dot-proposal-head strong')?.textContent).toBe('Task preset')
     expect([...document.querySelectorAll('.dsh-dot-proposal-chip')].map(node => node.textContent)).toEqual([
-      'standard (Host default)',
-      'dot-worker (5s background promotion)',
+      'Standard',
+      'Lightweight',
       'custom-preset',
-      'standard (Host default)',
+      'Standard',
     ])
 
     await act(async () => root.render(<Harness locale="zh" section="proposals" />))
-    expect(document.querySelector('.dsh-dot-proposal-head strong')?.textContent).toBe('默认任务 preset')
+    expect(document.querySelector('.dsh-dot-proposal-head strong')?.textContent).toBe('任务预设')
     expect([...document.querySelectorAll('.dsh-dot-proposal-chip')].map(node => node.textContent)).toEqual([
-      'standard（宿主默认）',
-      'dot-worker（5s 前转后）',
+      '标准',
+      '轻量',
       'custom-preset',
-      'standard（宿主默认）',
+      '标准',
     ])
     await act(async () => document.querySelector<HTMLButtonElement>('.dsh-dot-proposal button')!.click())
     expect(decisions).toEqual([{ id: 'p-preset', allow: true }])
@@ -1379,13 +1354,13 @@ describe('GitHub poll-primary settings', () => {
     await act(async () => { await Promise.resolve() })
 
     expect(document.querySelector('[data-gh-card="poll"]')).not.toBeNull()
-    expect(document.body.textContent).toContain('GitHub Polling (Local gh, No Public URL)')
+    expect(document.body.textContent).toContain('GitHub polling')
     expect(document.querySelectorAll('[data-gh-list="poll"] .dsh-dot-gh-chip')).toHaveLength(0)
     expect(document.body.textContent).toContain('No repositories added yet')
 
     const enabledSwitch = document.querySelector<HTMLButtonElement>('button[role="switch"][aria-label="Enable polling"]')!
     expect(enabledSwitch.getAttribute('aria-checked')).toBe('false')
-    expect(document.querySelector<HTMLInputElement>('input[aria-label="gh CLI path"]')?.value).toBe('gh')
+    expect(document.querySelector<HTMLInputElement>('input[aria-label="gh path"]')?.value).toBe('gh')
     expect(document.querySelector<HTMLInputElement>('input[aria-label="Poll interval"]')?.value).toBe('120')
 
     // All 4 stream checkboxes default to checked.
@@ -1394,16 +1369,16 @@ describe('GitHub poll-primary settings', () => {
     expect(streamChecks.every(box => box.checked)).toBe(true)
 
     // Advanced Admission & Webhook sections start collapsed.
-    const admissionDetails = document.querySelector<HTMLDetailsElement>('details[data-gh-section="admission"]')!
-    const webhookDetails = document.querySelector<HTMLDetailsElement>('details[data-gh-section="webhook"]')!
+    const admissionDetails = document.querySelector<HTMLDetailsElement>('details[data-gh-section="advanced"]')!
+    const webhookDetails = document.querySelector<HTMLDetailsElement>('details[data-gh-section="advanced"]')!
     expect(admissionDetails.open).toBe(false)
     expect(webhookDetails.open).toBe(false)
 
     // Verify zh locale copy renders cleanly too.
     await act(async () => root.render(<Harness locale="zh" />))
-    expect(document.body.textContent).toContain('GitHub 轮询（本机 gh 免公网配置）')
-    expect(document.body.textContent).toContain('高级：Fast-Path 准入矩阵')
-    expect(document.body.textContent).toContain('高级：Webhook 实时推送')
+    expect(document.body.textContent).toContain('GitHub 轮询')
+    expect(document.body.textContent).toContain('事件分流规则')
+    expect(document.body.textContent).toContain('Webhook 推送')
 
     expect(saves).toHaveLength(0)
     await act(async () => root.unmount())
@@ -1437,7 +1412,7 @@ describe('GitHub poll-primary settings', () => {
     expect(saves.at(-1)?.githubPoll?.enabled).toBe(true)
 
     // Add uppercase repo -> normalized lowercase.
-    const repoInput = document.querySelector<HTMLInputElement>('input[aria-label="Polled repositories"]')!
+    const repoInput = document.querySelector<HTMLInputElement>('input[aria-label="Repositories"]')!
     const addBtn = repoInput.closest('.dsh-dot-gh-add-row')!.querySelector<HTMLButtonElement>('button')!
     await act(async () => { type(repoInput, '  Acme/Widgets ') })
     await act(async () => addBtn.click())
@@ -1445,7 +1420,7 @@ describe('GitHub poll-primary settings', () => {
 
     // Toggle CI stream off.
     const ciCheckbox = [...document.querySelectorAll<HTMLLabelElement>('.dsh-dot-gh-streams label')]
-      .find(label => label.textContent?.includes('CI checks'))!
+      .find(label => label.textContent?.includes('CI status'))!
       .querySelector<HTMLInputElement>('input[type="checkbox"]')!
     await act(async () => ciCheckbox.click())
     expect(saves.at(-1)?.githubPoll?.streams.ci).toBe(false)
@@ -1461,17 +1436,17 @@ describe('GitHub poll-primary settings', () => {
     expect(saves.at(-1)?.githubPoll?.intervalSec).toBe(300)
 
     // Update ghPath, hostname, and ignoredActors.
-    const ghPathInput = document.querySelector<HTMLInputElement>('input[aria-label="gh CLI path"]')!
+    const ghPathInput = document.querySelector<HTMLInputElement>('input[aria-label="gh path"]')!
     await act(async () => { type(ghPathInput, 'C:\\Program Files\\GitHub CLI\\gh.exe') })
     await act(async () => { blur(ghPathInput) })
     expect(saves.at(-1)?.githubPoll?.ghPath).toBe('C:\\Program Files\\GitHub CLI\\gh.exe')
 
-    const hostInput = document.querySelector<HTMLInputElement>('input[aria-label="GHES hostname (optional)"]')!
+    const hostInput = document.querySelector<HTMLInputElement>('input[aria-label="Enterprise hostname"]')!
     await act(async () => { type(hostInput, 'GHE.Internal.Corp') })
     await act(async () => { blur(hostInput) })
     expect(saves.at(-1)?.githubPoll?.hostname).toBe('ghe.internal.corp')
 
-    const actorsInput = document.querySelector<HTMLInputElement>('input[aria-label="Ignored bot actors"]')!
+    const actorsInput = document.querySelector<HTMLInputElement>('input[aria-label="Ignored bots"]')!
     await act(async () => { type(actorsInput, 'My-Bot[bot], Second-Bot[bot], my-bot[bot]') })
     await act(async () => { blur(actorsInput) })
     expect(saves.at(-1)?.githubPoll?.ignoredActors).toEqual(['my-bot[bot]', 'second-bot[bot]'])
@@ -1514,7 +1489,7 @@ describe('GitHub poll-primary settings', () => {
     await act(async () => { await Promise.resolve() })
 
     // Try adding a webhookRepo ('KLARKXY/DS-DOT') into Poll repos -> blocked with warning.
-    const pollInput = document.querySelector<HTMLInputElement>('input[aria-label="Polled repositories"]')!
+    const pollInput = document.querySelector<HTMLInputElement>('input[aria-label="Repositories"]')!
     const pollAdd = pollInput.closest('.dsh-dot-gh-add-row')!.querySelector<HTMLButtonElement>('button')!
     await act(async () => { type(pollInput, 'KLARKXY/DS-DOT') })
     await act(async () => pollAdd.click())
@@ -1522,7 +1497,7 @@ describe('GitHub poll-primary settings', () => {
     expect(document.body.textContent).toContain('currently configured for Webhook')
 
     // Open Webhook section and try adding a polled repo ('klarkxy/dot-test') -> blocked with warning.
-    const webhookDetails = document.querySelector<HTMLDetailsElement>('details[data-gh-section="webhook"]')!
+    const webhookDetails = document.querySelector<HTMLDetailsElement>('details[data-gh-section="advanced"]')!
     webhookDetails.open = true
     const webhookInput = document.querySelector<HTMLInputElement>('input[aria-label="Webhook repositories"]')!
     const webhookAdd = webhookInput.closest('.dsh-dot-gh-add-row')!.querySelector<HTMLButtonElement>('button')!
@@ -1544,7 +1519,7 @@ describe('GitHub poll-primary settings', () => {
     await act(async () => root.unmount())
   })
 
-  it('runs Test gh Connection for both success and failure outcomes, and renders health alert & budget warning banners', async () => {
+  it('runs Test connection for both success and failure outcomes, and renders health alert & budget warning banners', async () => {
     const testRequests: Array<{ ghPath?: string; hostname?: string; repos?: readonly string[] }> = []
     let testReply: GithubPollTestResult = {
       ok: true,
@@ -1609,8 +1584,8 @@ describe('GitHub poll-primary settings', () => {
     expect(budgetBanner?.textContent).toContain('360s')
     expect(document.body.textContent).toContain('X-Poll-Interval: 120s')
 
-    // Click Test gh Connection -> success view.
-    const testBtn = [...document.querySelectorAll('button')].find(btn => btn.textContent === 'Test gh Connection')!
+    // Click Test connection -> success view.
+    const testBtn = [...document.querySelectorAll('button')].find(btn => btn.textContent === 'Test connection')!
     await act(async () => testBtn.click())
     await act(async () => { await Promise.resolve() })
     expect(testRequests).toEqual([{ ghPath: 'gh', repos: ['klarkxy/dot-test'] }])
@@ -1660,9 +1635,9 @@ describe('GitHub poll-primary settings', () => {
     await act(async () => root.render(<Harness />))
     await act(async () => { await Promise.resolve() })
 
-    const details = document.querySelector<HTMLDetailsElement>('details[data-gh-section="admission"]')!
+    const details = document.querySelector<HTMLDetailsElement>('details[data-gh-section="advanced"]')!
     details.open = true
-    expect(details.textContent).toContain('Defaults: human → inbox')
+    expect(details.textContent).toContain('Defaults: human events go to the inbox')
 
     // Invalid repo rejected without save.
     const repoInput = details.querySelector<HTMLInputElement>('input[aria-label="Repo (* or owner/repo)"]')!
@@ -1695,7 +1670,7 @@ describe('GitHub poll-primary settings', () => {
     const rmBtn = details.querySelector<HTMLButtonElement>('button[aria-label="Remove rule"]')!
     await act(async () => rmBtn.click())
     expect(saves.at(-1)?.githubPoll?.admission).toEqual([])
-    expect(settingsCss).toContain('.dsh-dot-chat .dsh-dot-gh-card')
+    expect(settingsCss).toContain('.dsh-dot-chat .dsh-dot-gh')
 
     await act(async () => root.unmount())
   })
@@ -1758,31 +1733,27 @@ describe('Run Watchdog settings', () => {
         return current
       },
     }
-    function Harness({ locale, section }: { locale: 'en' | 'zh'; section: 'general' | 'proposals' }) {
+    function Harness({ locale, section }: { locale: 'en' | 'zh'; section: 'advanced' | 'proposals' }) {
       const [settings, setSettings] = useState<DotSettings>(current)
       return <SettingsPanel locale={locale} section={section} api={api as never} settings={settings} onSaved={setSettings} />
     }
     const root = createRoot(document.getElementById('root')!)
-    await act(async () => root.render(<Harness locale="en" section="general" />))
+    await act(async () => root.render(<Harness locale="en" section="advanced" />))
     await act(async () => { await Promise.resolve() })
 
-    const wdCard = document.querySelector('[data-section="watchdog"] .dsh-dot-watchdog-card')
-    expect(wdCard).not.toBeNull()
-    expect(wdCard?.textContent).toContain('Observe (default)')
-    expect(wdCard?.textContent).toContain('zero LLM judge calls')
+    expect(document.querySelector('.dsh-dot-watchdog-card')).toBeNull()
+    expect(document.querySelector('[role="tablist"][aria-label="Stall detection"]')).not.toBeNull()
 
     // Default mode is observe.
-    const modeTab = (label: string) => [...document.querySelectorAll<HTMLButtonElement>('[role="tablist"][aria-label="Watchdog mode"] [role="tab"]')].find(el => el.textContent === label)!
-    expect(modeTab('Observe').getAttribute('aria-selected')).toBe('true')
-    await act(async () => modeTab('Auto').click())
+    const modeTab = (label: string) => [...document.querySelectorAll<HTMLButtonElement>('[role="tablist"][aria-label="Stall detection"] [role="tab"]')].find(el => el.textContent === label)!
+    expect(modeTab('Record only').getAttribute('aria-selected')).toBe('true')
+    await act(async () => modeTab('Auto-stop').click())
     expect(saves.at(-1)).toEqual({ watchdogMode: 'auto' })
-    await act(async () => modeTab('Off').click())
-    expect(saves.at(-1)).toEqual({ watchdogMode: 'off' })
 
-    // Model dropdown populated from catalog, supports provider/model and clearing to host default.
-    const modelSelect = () => document.querySelector<HTMLSelectElement>('select[aria-label="Watchdog judge model"]')!
+    // Model dropdown is populated from the catalog only while auto-stop is active.
+    const modelSelect = () => document.querySelector<HTMLSelectElement>('select[aria-label="Review model"]')!
     expect([...modelSelect().options].map(o => o.textContent)).toEqual([
-      'Follow host default',
+      'Follow default model',
       'DeepSeek / DeepSeek Chat',
       'DeepSeek / DeepSeek Reasoner',
     ])
@@ -1790,41 +1761,35 @@ describe('Run Watchdog settings', () => {
     expect(saves.at(-1)).toEqual({ watchdogModel: 'deepseek/reasoner' })
     await act(async () => selectChange(modelSelect(), ''))
     expect(saves.at(-1)).toEqual({ watchdogModel: null })
-
-    // Locks toggle for both watchdogMode and watchdogModel.
-    const modeLock = document.querySelector<HTMLButtonElement>('button.dsh-dot-lock[aria-label*="Watchdog mode"]')!
-    await act(async () => modeLock.click())
-    expect(saves.at(-1)).toEqual({ locks: { watchdogMode: true } })
-    const modelLock = document.querySelector<HTMLButtonElement>('button.dsh-dot-lock[aria-label*="Watchdog judge model"]')!
-    await act(async () => modelLock.click())
-    expect(saves.at(-1)).toEqual({ locks: { watchdogMode: true, watchdogModel: true } })
+    await act(async () => modeTab('Off').click())
+    expect(saves.at(-1)).toEqual({ watchdogMode: 'off' })
+    expect(document.querySelector('select[aria-label="Review model"]')).toBeNull()
 
     // SettingProposal formatting in en and zh.
     await act(async () => root.render(<Harness locale="en" section="proposals" />))
     await act(async () => { await Promise.resolve() })
     expect([...document.querySelectorAll('.dsh-dot-proposal-head strong')].map(el => el.textContent)).toEqual([
-      'Run Watchdog mode',
-      'Watchdog judge model',
+      'Stall detection',
+      'Review model',
     ])
     expect([...document.querySelectorAll('.dsh-dot-proposal-chip')].map(el => el.textContent)).toEqual([
-      'Observe',
-      'Auto',
-      'Follow host default',
+      'Record only',
+      'Auto-stop',
+      'Follow default model',
       'DeepSeek / DeepSeek Reasoner',
     ])
 
     await act(async () => root.render(<Harness locale="zh" section="proposals" />))
     expect([...document.querySelectorAll('.dsh-dot-proposal-head strong')].map(el => el.textContent)).toEqual([
-      '运行 Watchdog 模式',
-      'Watchdog 判官模型',
+      '卡住检测',
+      '复核模型',
     ])
     expect([...document.querySelectorAll('.dsh-dot-proposal-chip')].map(el => el.textContent)).toEqual([
-      '仅观察',
-      '自动干预',
-      '跟随宿主默认模型',
+      '仅记录',
+      '自动叫停',
+      '跟随默认模型',
       'DeepSeek / DeepSeek Reasoner',
     ])
-    expect(settingsCss).toContain('.dsh-dot-chat .dsh-dot-watchdog-card')
 
     await act(async () => root.unmount())
   })

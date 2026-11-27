@@ -57,25 +57,17 @@ describe('Dorothy self-management controls', () => {
     expect(document.body.textContent).toContain('待确认的修改')
     expect(document.body.textContent).toContain('less noise')
     const chips = [...document.querySelectorAll('.dsh-dot-proposal-chip')].map(node => node.textContent)
-    expect(chips).toEqual(['所有会话', '仅她跟进的任务'])
-
-    const lock = document.querySelector<HTMLButtonElement>('button[aria-label="禁止桃乐丝修改：桃乐丝的模型"]')!
-    expect(lock.getAttribute('title')).toContain('允许她提议修改')
-    await act(async () => lock.click())
-    expect(current.locks).toEqual({ model: true })
-    const unlock = document.querySelector<HTMLButtonElement>('button[aria-label="允许桃乐丝申请修改：桃乐丝的模型"]')!
-    expect(unlock.hasAttribute('data-locked')).toBe(true)
-    expect(unlock.getAttribute('title')).toContain('已锁定')
+    expect(chips).toEqual(['所有会话', '仅她的任务'])
 
     await act(async () => document.querySelector<HTMLButtonElement>('.dsh-dot-proposal button')!.click())
     expect(decisions).toEqual([{ id: 'setting-1', allow: true }])
 
     expect(document.body.textContent).not.toContain('默认任务权限')
     const tabLabels = [...document.querySelectorAll<HTMLButtonElement>('[role="tab"]')].map(node => node.textContent)
-    expect(tabLabels).toEqual(expect.arrayContaining(['桃乐丝管', '我来管', '一律拒绝']))
+    expect(tabLabels).toEqual(expect.arrayContaining(['她来批', '问我', '全部拒绝']))
     // The blanket allow mode is gone; the task permission is its own field.
     expect(tabLabels).not.toContain('一律允许')
-    expect(tabLabels).toEqual(expect.arrayContaining(['工作区写入', '完全访问']))
+    expect(tabLabels).toEqual(expect.arrayContaining(['仅工作区', '完全访问']))
 
     const fullAccessTab = [...document.querySelectorAll<HTMLButtonElement>('[role="tab"]')].find(node => node.textContent === '完全访问')!
     await act(async () => fullAccessTab.click())
@@ -86,10 +78,10 @@ describe('Dorothy self-management controls', () => {
     await act(async () => reflectionSwitch.click())
     expect(current.reflection).toBe(false)
 
-    const allowTab = [...document.querySelectorAll<HTMLButtonElement>('[role="tab"]')].find(node => node.textContent === '仅允许所选')!
+    const allowTab = [...document.querySelectorAll<HTMLButtonElement>('[role="tab"]')].find(node => node.textContent === '只用所选')!
     await act(async () => allowTab.click())
     expect(current.taskModels.mode).toBe('allow')
-    expect(document.body.textContent).toContain('尚未勾选任何模型')
+    expect(document.body.textContent).toContain('还没选模型')
 
     const filterInput = document.querySelector<HTMLInputElement>('input[aria-label="筛选模型…"]')!
     await act(async () => { changeValue(filterInput, 'DeepSeek') })
@@ -161,7 +153,10 @@ describe('Dorothy self-management controls', () => {
     await act(async () => { await Promise.resolve() })
 
     const personaBox = document.querySelector<HTMLTextAreaElement>('textarea[aria-label="性格与说话方式"]')!
+    expect([...document.querySelectorAll<HTMLButtonElement>('button')].some(btn => btn.textContent === '保存修改')).toBe(false)
+    expect([...document.querySelectorAll<HTMLButtonElement>('button')].some(btn => btn.textContent === '放弃改动')).toBe(false)
     await act(async () => { changeValue(personaBox, '沉稳干练') })
+    expect([...document.querySelectorAll<HTMLButtonElement>('button')].some(btn => btn.textContent === '保存修改')).toBe(true)
     const buttons = () => [...document.querySelectorAll<HTMLButtonElement>('button')]
     await act(async () => buttons().find(btn => btn.textContent === '放弃改动')!.click())
     expect(personaBox.value).not.toBe('沉稳干练')
@@ -186,13 +181,6 @@ describe('Dorothy self-management controls', () => {
     expect(dormant.textContent).toContain('一条休眠认知。')
     expect(dormant.textContent).toContain('休眠')
     expect(cognitionSection.textContent).toContain('休眠条目当前不出现在桃乐丝的提示词里')
-
-    // The agreements keep a lock toggle, so an existing lock can be lifted here.
-    const lock = document.querySelector<HTMLButtonElement>('button[aria-label="禁止桃乐丝修改：约定"]')!
-    await act(async () => lock.click())
-    expect(current.locks).toEqual({ agreements: true })
-    const unlock = document.querySelector<HTMLButtonElement>('button[aria-label="允许桃乐丝申请修改：约定"]')!
-    expect(unlock.hasAttribute('data-locked')).toBe(true)
 
     // Adding an agreement entry calls the agreements edit endpoint only.
     const addInput = agreementsSection.querySelector<HTMLInputElement>('input[aria-label="添加"]')!

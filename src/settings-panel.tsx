@@ -76,33 +76,49 @@ function useModels(api: SettingsApi): { choices?: ModelMenuChoice[]; failed: boo
   return state
 }
 
-function PadlockGlyph({ locked }: { locked: boolean }) {
-  return (
-    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-      <rect x="3.25" y="7.25" width="9.5" height="6.5" rx="1.6" stroke="currentColor" strokeWidth="1.25" />
-      {locked
-        ? <path d="M5.25 7.25V5.2a2.75 2.75 0 0 1 5.5 0v2.05" stroke="currentColor" strokeWidth="1.25" strokeLinecap="round" />
-        : <path d="M5.25 7.25V5.1a2.75 2.75 0 0 1 5.15-1.35" stroke="currentColor" strokeWidth="1.25" strokeLinecap="round" />}
-    </svg>
-  )
-}
-
-/** Subtle monochrome lock toggle: quiet icon while unlocked, visible badge once locked. */
-export function LockToggle({ locale, label, locked, onLock }: { locale: CopyLocale; label: string; locked: boolean; onLock: (locked: boolean) => void }) {
-  return (
-    <button
-      type="button"
-      className="dsh-dot-lock"
-      data-locked={locked ? '' : undefined}
-      aria-label={t(locale, locked ? 'sUnlock' : 'sLock').replace('{field}', label)}
-      title={t(locale, locked ? 'sLockTip' : 'sUnlockTip')}
-      aria-pressed={locked}
-      onClick={() => onLock(!locked)}
-    >
-      <PadlockGlyph locked={locked} />
-      {locked ? <span className="dsh-dot-lock-badge">{t(locale, 'sLockedBadge')}</span> : null}
-    </button>
-  )
+/** Shared trigger for the main and review-model pickers; the optional factory upgrades the same write path when installed. */
+function ModelPickerInput({ locale, renderFactorySlot, choices, selected, onPick, onClear, followLabel, label }: {
+  locale: CopyLocale
+  renderFactorySlot: RenderFactorySlot | undefined
+  choices: readonly ModelMenuChoice[]
+  selected: { provider: string; model: string } | undefined
+  onPick: (choice: { provider: string; model: string }) => void
+  onClear: () => void
+  followLabel: string
+  label: string
+}) {
+  const groups = groupModelMenuChoices(choices, '')
+  const pickKey = (key: string) => {
+    if (key === FOLLOW) { onClear(); return }
+    const choice = choices.find(item => keyOf(item) === key)
+    if (choice) onPick({ provider: choice.provider, model: choice.model })
+  }
+  return renderModelPicker(renderFactorySlot, {
+    locale,
+    choices,
+    selected,
+    onPick,
+    leading: [{ id: 'follow', label: followLabel, selected: selected === undefined }],
+    onPickLeading: onClear,
+    triggerLabel: selected ? (choices.find(item => item.provider === selected.provider && item.model === selected.model)?.label ?? `${selected.provider} / ${selected.model}`) : followLabel,
+    modelLabel: label,
+    searchPlaceholder: t(locale, 'sTaskModelsFilter'),
+    emptyLabel: t(locale, 'sTaskModelsNoMatch'),
+    clearSearchLabel: t(locale, 'sTaskModelsClear'),
+    retryLabel: t(locale, 'retry'),
+    listClassName: 'dsh-dot-chat',
+  }, {
+    fallback: (
+      <select className="dsh-ui-select" aria-label={label} value={selected ? keyOf(selected) : FOLLOW} onChange={event => pickKey(event.target.value)}>
+        <option value={FOLLOW}>{followLabel}</option>
+        {groups.map(group => (
+          <optgroup key={group.provider} label={group.name}>
+            {group.items.map(choice => <option key={keyOf(choice)} value={keyOf(choice)}>{choice.label}</option>)}
+          </optgroup>
+        ))}
+      </select>
+    ),
+  })
 }
 
 /** Info icon button that shows field guidance on hover/focus and pins it on click or tap. */
@@ -120,30 +136,21 @@ export function HelpTip({ locale, fieldLabel, text }: { locale: CopyLocale; fiel
   )
 }
 
-function Field({ label, tip, help, helpTone, trailing, children, locked, onLock, wide }: {
+function Field({ label, tip, help, helpTone, children }: {
   label: string
   tip?: string | undefined
   help?: string | undefined
   helpTone?: 'warn' | undefined
-  trailing?: ReactNode
   children: ReactNode
-  locked?: boolean
-  onLock?: (locked: boolean) => void
-  /** Spans every column of the responsive form grid (long pickers and lists). */
-  wide?: boolean
 }) {
   const locale = useContext(LocaleContext)
   return (
-    <div className={wide === true ? 'dsh-ui-field dsh-dot-field-wide' : 'dsh-ui-field'}>
+    <div className="dsh-ui-field">
       <div className="dsh-dot-setting-head">
         <span className="dsh-ui-label">
           <span>{label}</span>
           {tip ? <HelpTip locale={locale} fieldLabel={label} text={tip} /> : null}
         </span>
-        <div className="dsh-dot-setting-tools">
-          {trailing}
-          {onLock ? <LockToggle locale={locale} label={label} locked={locked === true} onLock={onLock} /> : null}
-        </div>
       </div>
       {children}
       {help ? <span className={helpTone === 'warn' ? 'dsh-ui-help dsh-ui-warn' : 'dsh-ui-help'}>{help}</span> : null}
@@ -151,24 +158,12 @@ function Field({ label, tip, help, helpTone, trailing, children, locked, onLock,
   )
 }
 
-/** Micro-headed group inside one settings card: separates topics without splitting the card. */
-export function Subgroup({ label, children }: { label: string; children: ReactNode }) {
-  return (
-    <div className="dsh-dot-subgroup">
-      <div className="dsh-dot-subhead">{label}</div>
-      <div className="dsh-ui-form">{children}</div>
-    </div>
-  )
-}
-
 /** Single-row setting for boolean switches and compact numeric inputs. */
-function InlineField({ label, tip, control, below, locked, onLock }: {
+function InlineField({ label, tip, control, below }: {
   label: string
   tip?: string | undefined
   control: ReactNode
   below?: ReactNode
-  locked?: boolean
-  onLock?: (locked: boolean) => void
 }) {
   const locale = useContext(LocaleContext)
   return (
@@ -178,10 +173,7 @@ function InlineField({ label, tip, control, below, locked, onLock }: {
           <span>{label}</span>
           {tip ? <HelpTip locale={locale} fieldLabel={label} text={tip} /> : null}
         </span>
-        <div className="dsh-dot-inline-control">
-          {onLock ? <LockToggle locale={locale} label={label} locked={locked === true} onLock={onLock} /> : null}
-          {control}
-        </div>
+        <div className="dsh-dot-inline-control">{control}</div>
       </div>
       {below}
     </div>
@@ -753,8 +745,8 @@ function GithubSettingsSection({ locale, api, settings, onSave }: {
   const showBudgetWarn = Boolean(pollStatus && (pollStatus.budgetAdjusted || pollStatus.budgetWarning))
 
   return (
-    <div className="dsh-dot-pane-section dsh-dot-gh">
-      <div className="dsh-dot-gh-card" data-gh-card="poll">
+    <>
+      <div className="dsh-dot-pane-section dsh-dot-gh" data-gh-card="poll">
         <div className="dsh-dot-gh-head">
           <h4 className="dsh-dot-gh-title">{t(locale, 'sGhPollCardTitle')}</h4>
           {pollStatus ? (
@@ -802,7 +794,6 @@ function GithubSettingsSection({ locale, api, settings, onSave }: {
             tip={t(locale, 'sGhReposDesc')}
             help={pollRepoError || undefined}
             helpTone={pollRepoError ? 'warn' : undefined}
-            wide
           >
             {gh.repos.length > 0 ? (
               <div className="dsh-dot-gh-chips" data-gh-list="poll">
@@ -836,7 +827,55 @@ function GithubSettingsSection({ locale, api, settings, onSave }: {
             </div>
           </Field>
 
-          <Field label={t(locale, 'sGhStreams')} tip={t(locale, 'sGhStreamsDesc')} wide>
+        </div>
+
+        <div className="dsh-dot-gh-test-bar">
+          <Button variant="outline" size="sm" disabled={testBusy || !api.githubPollTest} onClick={runTest}>
+            {testBusy ? t(locale, 'sGhTesting') : t(locale, 'sGhTestBtn')}
+          </Button>
+        </div>
+
+        {testError ? <div className="dsh-ui-error" role="alert">{testError}</div> : null}
+        {testResult ? (
+          <div className="dsh-dot-gh-test-result" data-ok={testResult.ok ? '' : undefined} role="status">
+            <div className="dsh-dot-gh-test-head">
+              {testResult.ok ? <IconCheckOutlineRegular size={14} /> : <IconWarningOutlineRegular size={14} />}
+              <strong>{t(locale, testResult.ok ? 'sGhTestOk' : 'sGhTestFail')}</strong>
+            </div>
+            <div className="dsh-dot-gh-test-lines">
+              <div>
+                {testResult.ghFound
+                  ? t(locale, 'sGhTestCliFound').replace('{path}', testResult.resolvedPath ?? gh.ghPath).replace('{version}', testResult.version ?? '?')
+                  : t(locale, 'sGhTestCliMissing')}
+              </div>
+              {testResult.ghFound ? (
+                <div>
+                  {testResult.authenticated
+                    ? t(locale, 'sGhTestAuthOk').replace('{login}', testResult.login ?? '?').replace('{host}', testResult.host)
+                    : t(locale, 'sGhTestAuthFail').replace('{host}', testResult.host)}
+                </div>
+              ) : null}
+              {testResult.rateLimitRemaining !== undefined ? (
+                <div>{t(locale, 'sGhRateQuota').replace('{remaining}', String(testResult.rateLimitRemaining)).replace('{limit}', String(testResult.rateLimitLimit ?? '?'))}</div>
+              ) : null}
+              {testResult.repoChecks?.map(chk => (
+                <div key={chk.repo} className="dsh-dot-gh-test-repo" data-ok={chk.ok ? '' : undefined}>
+                  <code>{chk.repo}</code>: {chk.ok ? t(locale, 'sGhTestRepoOk') : (chk.error ?? 'error')}
+                </div>
+              ))}
+              {testResult.error ? <div className="dsh-ui-error">{testResult.error}</div> : null}
+            </div>
+          </div>
+        ) : null}
+      </div>
+
+      <details className="dsh-dot-gh-details dsh-dot-gh-advanced" data-gh-section="advanced">
+        <summary className="dsh-dot-gh-details-summary">
+          <span>{t(locale, 'sGhAdvanced')}</span>
+        </summary>
+        <div className="dsh-dot-gh-details-body">
+          <div className="dsh-ui-form">
+          <Field label={t(locale, 'sGhStreams')} tip={t(locale, 'sGhStreamsDesc')}>
             <div className="dsh-dot-gh-streams" role="group" aria-label={t(locale, 'sGhStreams')}>
               <Checkbox checked={gh.streams.issues} label={t(locale, 'sGhStreamIssues')} onChange={checked => commit({ streams: { ...gh.streams, issues: checked } })} />
               <Checkbox checked={gh.streams.pulls} label={t(locale, 'sGhStreamPulls')} onChange={checked => commit({ streams: { ...gh.streams, pulls: checked } })} />
@@ -897,7 +936,7 @@ function GithubSettingsSection({ locale, api, settings, onSave }: {
             />
           </Field>
 
-          <Field label={t(locale, 'sGhIgnoredActors')} tip={t(locale, 'sGhIgnoredActorsDesc')} wide>
+          <Field label={t(locale, 'sGhIgnoredActors')} tip={t(locale, 'sGhIgnoredActorsDesc')}>
             <Input
               aria-label={t(locale, 'sGhIgnoredActors')}
               placeholder={t(locale, 'sGhIgnoredActorsPlaceholder')}
@@ -907,54 +946,9 @@ function GithubSettingsSection({ locale, api, settings, onSave }: {
               onKeyDown={event => { if (event.key === 'Enter') event.currentTarget.blur() }}
             />
           </Field>
-        </div>
-
-        <div className="dsh-dot-gh-test-bar">
-          <Button variant="outline" size="sm" disabled={testBusy || !api.githubPollTest} onClick={runTest}>
-            {testBusy ? t(locale, 'sGhTesting') : t(locale, 'sGhTestBtn')}
-          </Button>
-        </div>
-
-        {testError ? <div className="dsh-ui-error" role="alert">{testError}</div> : null}
-        {testResult ? (
-          <div className="dsh-dot-gh-test-result" data-ok={testResult.ok ? '' : undefined} role="status">
-            <div className="dsh-dot-gh-test-head">
-              {testResult.ok ? <IconCheckOutlineRegular size={14} /> : <IconWarningOutlineRegular size={14} />}
-              <strong>{t(locale, testResult.ok ? 'sGhTestOk' : 'sGhTestFail')}</strong>
-            </div>
-            <div className="dsh-dot-gh-test-lines">
-              <div>
-                {testResult.ghFound
-                  ? t(locale, 'sGhTestCliFound').replace('{path}', testResult.resolvedPath ?? gh.ghPath).replace('{version}', testResult.version ?? '?')
-                  : t(locale, 'sGhTestCliMissing')}
-              </div>
-              {testResult.ghFound ? (
-                <div>
-                  {testResult.authenticated
-                    ? t(locale, 'sGhTestAuthOk').replace('{login}', testResult.login ?? '?').replace('{host}', testResult.host)
-                    : t(locale, 'sGhTestAuthFail').replace('{host}', testResult.host)}
-                </div>
-              ) : null}
-              {testResult.rateLimitRemaining !== undefined ? (
-                <div>{t(locale, 'sGhRateQuota').replace('{remaining}', String(testResult.rateLimitRemaining)).replace('{limit}', String(testResult.rateLimitLimit ?? '?'))}</div>
-              ) : null}
-              {testResult.repoChecks?.map(chk => (
-                <div key={chk.repo} className="dsh-dot-gh-test-repo" data-ok={chk.ok ? '' : undefined}>
-                  <code>{chk.repo}</code>: {chk.ok ? t(locale, 'sGhTestRepoOk') : (chk.error ?? 'error')}
-                </div>
-              ))}
-              {testResult.error ? <div className="dsh-ui-error">{testResult.error}</div> : null}
-            </div>
           </div>
-        ) : null}
-      </div>
-
-      <details className="dsh-dot-gh-details" data-gh-section="admission">
-        <summary className="dsh-dot-gh-details-summary">
-          <span>{t(locale, 'sGhAdvAdmissionTitle')}</span>
-          {rules.length > 0 ? <span className="dsh-dot-model-group-count">{rules.length}</span> : null}
-        </summary>
-        <div className="dsh-dot-gh-details-body">
+          <div className="dsh-dot-gh-subhead">{t(locale, 'sGhAdvAdmissionTitle')}</div>
+          <div data-gh-section="admission">
           <p className="dsh-dot-gh-desc">{t(locale, 'sGhAdmissionDefaults')}</p>
           {rules.length > 0 ? (
             <div className="dsh-dot-gh-rules">
@@ -1022,22 +1016,15 @@ function GithubSettingsSection({ locale, api, settings, onSave }: {
             <Button variant="outline" size="sm" onClick={addAdmissionRule}>{t(locale, 'sGhAdmissionAdd')}</Button>
           </div>
           {admError ? <span className="dsh-ui-help dsh-ui-warn">{admError}</span> : null}
-        </div>
-      </details>
-
-      <details className="dsh-dot-gh-details" data-gh-section="webhook">
-        <summary className="dsh-dot-gh-details-summary">
-          <span>{t(locale, 'sGhAdvWebhookTitle')}</span>
-          {gh.webhookRepos.length > 0 ? <span className="dsh-dot-model-group-count">{gh.webhookRepos.length}</span> : null}
-        </summary>
-        <div className="dsh-dot-gh-details-body">
+          </div>
+          <div className="dsh-dot-gh-subhead">{t(locale, 'sGhAdvWebhookTitle')}</div>
+          <div data-gh-section="webhook">
           <p className="dsh-dot-gh-desc">{t(locale, 'sGhWebhookDesc')}</p>
           <div className="dsh-ui-form">
             <Field
               label={t(locale, 'sGhWebhookRepos')}
               help={webhookRepoError || undefined}
               helpTone={webhookRepoError ? 'warn' : undefined}
-              wide
             >
               {gh.webhookRepos.length > 0 ? (
                 <div className="dsh-dot-gh-chips" data-gh-list="webhook">
@@ -1067,7 +1054,7 @@ function GithubSettingsSection({ locale, api, settings, onSave }: {
                 <Button variant="outline" size="sm" onClick={addWebhookRepo}>{t(locale, 'sGhRepoAdd')}</Button>
               </div>
             </Field>
-            <Field label={t(locale, 'sGhSourceId')} tip={t(locale, 'sGhSourceIdDesc')} wide>
+            <Field label={t(locale, 'sGhSourceId')} tip={t(locale, 'sGhSourceIdDesc')}>
               <Input
                 aria-label={t(locale, 'sGhSourceId')}
                 value={draftSourceId}
@@ -1077,13 +1064,19 @@ function GithubSettingsSection({ locale, api, settings, onSave }: {
               />
             </Field>
           </div>
+          </div>
         </div>
       </details>
-    </div>
+    </>
   )
 }
 
-export function SettingsPanel({ locale, api, settings, section = 'all', proposals, onSaved, onStatusChange, onProposalCount, onSectionChange, renderFactorySlot }: {
+const LOCK_SETTING_FIELDS: readonly SettingField[] = [
+  'model', 'reflection', 'scope', 'approvals', 'questions', 'taskPermission', 'taskModels', 'idleCheckMinutes',
+  'capabilities', 'address', 'persona', 'agreements', 'defaultTaskPreset', 'watchdogMode', 'watchdogModel',
+]
+
+export function SettingsPanel({ locale, api, settings, section = 'all', proposals, onSaved, onStatusChange, onProposalCount, renderFactorySlot }: {
   locale: CopyLocale
   api: SettingsApi
   settings?: DotSettings
@@ -1092,8 +1085,6 @@ export function SettingsPanel({ locale, api, settings, section = 'all', proposal
   onSaved: (next: DotSettings) => void
   onStatusChange?: (status: SaveNotice | undefined) => void
   onProposalCount?: (count: number) => void
-  /** Switch the drawer to another settings section (MCP page link). */
-  onSectionChange?: (section: SettingsSection) => void
   renderFactorySlot?: RenderFactorySlot
 }) {
   const models = useModels(api)
@@ -1102,6 +1093,9 @@ export function SettingsPanel({ locale, api, settings, section = 'all', proposal
   const [keepalive, setKeepalive] = useState<KeepaliveInfo>()
   const [keepaliveRefresh, setKeepaliveRefresh] = useState(0)
   const [livePermissions, setLivePermissions] = useState<TaskPermission[]>(['workspace-write', 'danger-full-access'])
+  const manualOpen = useRef<Record<string, boolean | undefined>>({})
+  const manualAuto = useRef<Record<string, boolean | undefined>>({})
+  const [, bumpDetails] = useState(0)
   const show = (target: SettingsSection) => section === 'all' || section === target
   const reloadSettings = useCallback(() => {
     api.settings(new AbortController().signal).then(onSaved, () => {})
@@ -1149,22 +1143,10 @@ export function SettingsPanel({ locale, api, settings, section = 'all', proposal
   if (chosen && !choices.some(choice => choice.provider === chosen.provider && choice.model === chosen.model)) {
     choices.push({ provider: chosen.provider, model: chosen.model, label: `${chosen.provider} / ${chosen.model}`, efforts: [] })
   }
-  const modelGroups = groupModelMenuChoices(choices, '')
-  const pickModel = (key: string) => {
-    if (key === FOLLOW) { save({ model: null }); return }
-    const choice = choices.find(item => keyOf(item) === key)
-    if (choice) save({ model: { provider: choice.provider, model: choice.model } })
-  }
   const watchdogChosen = parseWatchdogModelChoice(settings.watchdogModel)
   const watchdogChoices = [...models.choices ?? []]
   if (watchdogChosen && !watchdogChoices.some(choice => choice.provider === watchdogChosen.provider && choice.model === watchdogChosen.model)) {
     watchdogChoices.push({ provider: watchdogChosen.provider, model: watchdogChosen.model, label: `${watchdogChosen.provider} / ${watchdogChosen.model}`, efforts: [] })
-  }
-  const watchdogModelGroups = groupModelMenuChoices(watchdogChoices, '')
-  const pickWatchdogModel = (key: string) => {
-    if (key === FOLLOW) { save({ watchdogModel: null }); return }
-    const choice = watchdogChoices.find(item => keyOf(item) === key)
-    if (choice) save({ watchdogModel: `${choice.provider}/${choice.model}` })
   }
   const watchdogModes: readonly [WatchdogMode, WatchdogMode, WatchdogMode] = WATCHDOG_MODES
   const approvalModes: readonly [ApprovalMode, ApprovalMode, ApprovalMode] = ['dot', 'human', 'deny']
@@ -1172,7 +1154,6 @@ export function SettingsPanel({ locale, api, settings, section = 'all', proposal
   const permissionModes: readonly [TaskPermission, ...TaskPermission[]] = (livePermissions.includes(settings.taskPermission)
     ? livePermissions
     : [...livePermissions, settings.taskPermission]) as [TaskPermission, ...TaskPermission[]]
-  const lock = (field: SettingField) => ({ locked: settings?.locks?.[field] === true, onLock: (locked: boolean) => save({ locks: { ...settings?.locks, [field]: locked } }) })
 
   // Models dot may start tasks on: provider-grouped catalog choices, followed by listed entries the catalog no longer has.
   const rule = settings.taskModels
@@ -1195,9 +1176,6 @@ export function SettingsPanel({ locale, api, settings, section = 'all', proposal
    * user folded or unfolded the group by hand; that manual answer is forgotten
    * when the automatic answer changes, so the list never sticks open or closed.
    */
-  const manualOpen = useRef<Record<string, boolean | undefined>>({})
-  const manualAuto = useRef<Record<string, boolean | undefined>>({})
-  const [, bumpDetails] = useState(0)
   const expandDetails = (id: string, auto: boolean): boolean => {
     if (needle !== '') return auto
     const picked = manualOpen.current[id]
@@ -1229,286 +1207,163 @@ export function SettingsPanel({ locale, api, settings, section = 'all', proposal
     : settings.approvals === 'human' ? t(locale, 'sApprovalsDesc_human')
     : t(locale, 'sApprovalsDesc_deny')
   const allSections = section === 'all'
+  const cacheKey = keepalive ? `${keepalive.provider}/${keepalive.model}` : ''
+  const saveCapabilityGrant = (selector: string, grant: CapabilityGrant | undefined) => {
+    const grants = { ...settings.capabilities?.grants }
+    if (grant === undefined) delete grants[selector]
+    else grants[selector] = grant
+    save({ capabilities: { grants } })
+  }
 
   return (
     <LocaleContext.Provider value={locale}><div className="dsh-dot-pane dsh-dot-settings-pane">
       {!onStatusChange && status?.kind === 'saved' ? <div className="dsh-ui-notice" role="status">{t(locale, 'saved')}</div> : null}
       {!onStatusChange && status?.kind === 'error' ? <div className="dsh-ui-error" role="alert">{t(locale, 'saveFailed')}{status.message}</div> : null}
       {show('proposals') ? <Proposals locale={locale} choices={choices} state={proposalState} showTitle={allSections} /> : null}
+
       {show('general') ? (
         <>
           <div className="dsh-dot-pane-section">
-            <div className="dsh-dot-subgroups">
-              <Subgroup label={t(locale, 'sGroupModel')}>
-              <Field label={t(locale, 'sModel')} help={modelHelp} helpTone={models.failed ? 'warn' : undefined} wide {...lock('model')}>
-                {renderModelPicker(renderFactorySlot, {
-                  locale,
-                  choices,
-                  selected: chosen ? { provider: chosen.provider, model: chosen.model } : undefined,
-                  onPick: picked => save({ model: { provider: picked.provider, model: picked.model } }),
-                  leading: [{ id: 'follow', label: t(locale, 'sModelFollow'), selected: !chosen }],
-                  onPickLeading: () => save({ model: null }),
-                  triggerLabel: chosen ? (choices.find(item => item.provider === chosen.provider && item.model === chosen.model)?.label ?? `${chosen.provider} / ${chosen.model}`) : t(locale, 'sModelFollow'),
-                  modelLabel: t(locale, 'sModel'),
-                  searchPlaceholder: t(locale, 'sTaskModelsFilter'),
-                  emptyLabel: t(locale, 'sTaskModelsNoMatch'),
-                  clearSearchLabel: t(locale, 'sTaskModelsClear'),
-                  retryLabel: t(locale, 'retry'),
-                  listClassName: 'dsh-dot-chat',
-                }, {
-                  fallback: (
-                    <select className="dsh-ui-select" aria-label={t(locale, 'sModel')} value={chosen ? keyOf(chosen) : FOLLOW} onChange={event => pickModel(event.target.value)}>
-                      <option value={FOLLOW}>{t(locale, 'sModelFollow')}</option>
-                      {modelGroups.map(group => (
-                        <optgroup key={group.provider} label={group.name}>
-                          {group.items.map(choice => <option key={keyOf(choice)} value={keyOf(choice)}>{choice.label}</option>)}
-                        </optgroup>
-                      ))}
-                    </select>
-                  ),
-                })}
-                {keepalive ? (
-                  <div className="dsh-dot-keepalive-row">
-                    <span className="dsh-dot-keepalive-label">
-                      <span>{t(locale, 'sCacheTtl')}</span>
-                      <HelpTip
-                        locale={locale}
-                        fieldLabel={t(locale, 'sCacheTtl')}
-                        text={t(locale, 'sCacheTtlDesc').replace('{key}', `${keepalive.provider}/${keepalive.model}`).replace('{n}', String(keepalive.defaultMinutes))}
-                      />
-                    </span>
-                    <IdleCheckInput
-                      locale={locale}
-                      label={t(locale, 'sCacheTtl')}
-                      unit={t(locale, 'sCacheTtlUnit')}
-                      value={settings.cacheTtl?.[`${keepalive.provider}/${keepalive.model}`] ?? keepalive.minutes}
-                      onCommit={minutes => {
-                        const key = `${keepalive.provider}/${keepalive.model}`
-                        const next = { ...settings.cacheTtl }
-                        if (minutes === keepalive.defaultMinutes) delete next[key]
-                        else next[key] = minutes
-                        save({ cacheTtl: next })
-                      }}
-                    />
-                  </div>
-                ) : null}
+            <div className="dsh-ui-form">
+              <Field label={t(locale, 'sModel')} help={modelHelp} helpTone={models.failed ? 'warn' : undefined}>
+                <ModelPickerInput
+                  locale={locale}
+                  renderFactorySlot={renderFactorySlot}
+                  choices={choices}
+                  selected={chosen ? { provider: chosen.provider, model: chosen.model } : undefined}
+                  onPick={picked => save({ model: { provider: picked.provider, model: picked.model } })}
+                  onClear={() => save({ model: null })}
+                  followLabel={t(locale, 'sModelFollow')}
+                  label={t(locale, 'sModel')}
+                />
               </Field>
-              </Subgroup>
-              <Subgroup label={t(locale, 'sGroupBehavior')}>
+            </div>
+          </div>
+          <div className="dsh-dot-pane-section">
+            <div className="dsh-ui-form">
               <InlineField
                 label={t(locale, 'sReflection')}
                 tip={t(locale, 'sReflectionDesc')}
-                {...lock('reflection')}
                 control={<Switch checked={settings.reflection} label={t(locale, 'sReflection')} onChange={next => save({ reflection: next })} />}
               />
+              <DesktopNotifyField locale={locale} />
               <InlineField
                 label={t(locale, 'sAutoUpdate')}
                 tip={t(locale, 'sAutoUpdateDesc')}
                 control={<Switch checked={settings.autoUpdate} label={t(locale, 'sAutoUpdate')} onChange={next => save({ autoUpdate: next })} />}
                 below={api.updateStatus ? <AutoUpdateLine locale={locale} api={api} /> : null}
               />
-              <DesktopNotifyField locale={locale} />
-              </Subgroup>
             </div>
           </div>
-          <div className="dsh-dot-pane-section" data-section="watchdog">
-            <div className="dsh-dot-watchdog-card">
-              <div className="dsh-dot-watchdog-head">
-                <h3 className="dsh-dot-watchdog-title">{t(locale, 'sGroupWatchdog')}</h3>
-                <p className="dsh-dot-watchdog-desc">{t(locale, 'sWatchdogDesc')}</p>
-              </div>
-              <div className="dsh-ui-form">
-                <Field label={t(locale, 'sWatchdogMode')} tip={t(locale, 'sWatchdogModeDesc')} {...lock('watchdogMode')}>
-                  <SegmentedChoice
-                    locale={locale}
-                    label={t(locale, 'sWatchdogMode')}
-                    value={settings.watchdogMode ?? 'observe'}
-                    options={watchdogModes}
-                    labelKeyOf={opt => `sWatchdogMode_${opt}`}
-                    onChange={next => save({ watchdogMode: next })}
-                  />
-                </Field>
-                <Field label={t(locale, 'sWatchdogModel')} tip={t(locale, 'sWatchdogModelDesc')} help={modelHelp} helpTone={models.failed ? 'warn' : undefined} wide {...lock('watchdogModel')}>
-                  {renderModelPicker(renderFactorySlot, {
-                    locale,
-                    choices: watchdogChoices,
-                    selected: watchdogChosen ? { provider: watchdogChosen.provider, model: watchdogChosen.model } : undefined,
-                    onPick: picked => save({ watchdogModel: `${picked.provider}/${picked.model}` }),
-                    leading: [{ id: 'follow', label: t(locale, 'sWatchdogModelFollow'), selected: !watchdogChosen }],
-                    onPickLeading: () => save({ watchdogModel: null }),
-                    triggerLabel: watchdogChosen ? (watchdogChoices.find(item => item.provider === watchdogChosen.provider && item.model === watchdogChosen.model)?.label ?? `${watchdogChosen.provider} / ${watchdogChosen.model}`) : t(locale, 'sWatchdogModelFollow'),
-                    modelLabel: t(locale, 'sWatchdogModel'),
-                    searchPlaceholder: t(locale, 'sTaskModelsFilter'),
-                    emptyLabel: t(locale, 'sTaskModelsNoMatch'),
-                    clearSearchLabel: t(locale, 'sTaskModelsClear'),
-                    retryLabel: t(locale, 'retry'),
-                    listClassName: 'dsh-dot-chat',
-                  }, {
-                    fallback: (
-                      <select className="dsh-ui-select" aria-label={t(locale, 'sWatchdogModel')} value={watchdogChosen ? keyOf(watchdogChosen) : FOLLOW} onChange={event => pickWatchdogModel(event.target.value)}>
-                        <option value={FOLLOW}>{t(locale, 'sWatchdogModelFollow')}</option>
-                        {watchdogModelGroups.map(group => (
-                          <optgroup key={group.provider} label={group.name}>
-                            {group.items.map(choice => <option key={keyOf(choice)} value={keyOf(choice)}>{choice.label}</option>)}
-                          </optgroup>
-                        ))}
-                      </select>
-                    ),
-                  })}
-                </Field>
-              </div>
-            </div>
-          </div>
-          {api.previewFactoryReset && api.confirmFactoryReset ? <FactoryResetField locale={locale} api={api} onSaved={onSaved} /> : null}
         </>
       ) : null}
+
       {show('takeover') ? (
         <div className="dsh-dot-pane-section">
-          {allSections ? <h3 className="dsh-dot-pane-section-title">{t(locale, 'sRequests')}</h3> : null}
           <div className="dsh-ui-form">
-            <Field label={t(locale, 'sScope')} tip={t(locale, 'sScopeDesc')} {...lock('scope')}>
+            <Field label={t(locale, 'sScope')} tip={t(locale, 'sScopeDesc')}>
               <SegmentedChoice locale={locale} label={t(locale, 'sScope')} value={settings.scope} options={['all', 'tracked']} labelKeyOf={opt => `sScope_${opt}`} onChange={next => save({ scope: next })} />
             </Field>
-            <Field label={t(locale, 'sApprovals')} tip={approvalHelp} {...lock('approvals')}>
+            <Field label={t(locale, 'sApprovals')} tip={approvalHelp}>
               <SegmentedChoice locale={locale} label={t(locale, 'sApprovals')} value={settings.approvals} options={approvalModes} labelKeyOf={opt => `sApprovals_${opt}`} onChange={next => save({ approvals: next })} />
             </Field>
-            <Field label={t(locale, 'sQuestions')} tip={t(locale, `sQuestionsDesc_${settings.questions}` as TextKey)} {...lock('questions')}>
+            <Field label={t(locale, 'sQuestions')} tip={t(locale, `sQuestionsDesc_${settings.questions}` as TextKey)}>
               <SegmentedChoice locale={locale} label={t(locale, 'sQuestions')} value={settings.questions} options={questionModes} labelKeyOf={opt => `sQuestions_${opt}`} onChange={next => save({ questions: next })} />
             </Field>
           </div>
         </div>
       ) : null}
+
       {show('dispatch') ? (
         <div className="dsh-dot-pane-section dsh-dot-dispatch">
-          {allSections ? <h3 className="dsh-dot-pane-section-title">{t(locale, 'sTasks')}</h3> : null}
           <div className="dsh-ui-form dsh-dot-dispatch-stack">
-            <div className="dsh-dot-dispatch-group" data-group="permission">
-              <Field
-                label={t(locale, 'sTaskPermission')}
-                tip={t(locale, `sTaskPermissionDesc_${settings.taskPermission}` as TextKey)}
-                help={livePermissions.includes(settings.taskPermission) ? undefined : t(locale, 'sTaskPermissionUnavailable').replace('{name}', t(locale, `sTaskPermission_${settings.taskPermission}` as TextKey))}
-                helpTone={livePermissions.includes(settings.taskPermission) ? undefined : 'warn'}
-                {...lock('taskPermission')}
-              >
-                <SegmentedChoice locale={locale} label={t(locale, 'sTaskPermission')} value={settings.taskPermission} options={permissionModes} labelKeyOf={opt => `sTaskPermission_${opt}`} onChange={next => save({ taskPermission: next })} />
-              </Field>
-            </div>
-            <div className="dsh-dot-dispatch-group" data-group="preset">
-              <Field
-                label={t(locale, 'sDefaultTaskPreset')}
-                tip={t(locale, 'sDefaultTaskPresetDesc')}
-                {...lock('defaultTaskPreset')}
-              >
-                <select
-                  className="dsh-ui-select"
-                  aria-label={t(locale, 'sDefaultTaskPreset')}
-                  value={settings.defaultTaskPreset ?? 'standard'}
-                  onChange={event => save({ defaultTaskPreset: event.target.value as DefaultTaskPreset })}
-                >
-                  {TASK_PRESET_OPTIONS.map(opt => (
-                    <option key={opt} value={opt}>{t(locale, `sDefaultTaskPreset_${opt}`)}</option>
-                  ))}
-                </select>
-              </Field>
-            </div>
-            <div className="dsh-dot-dispatch-group" data-group="models">
-              <Field label={t(locale, 'sTaskModels')} help={taskModelsHelp} helpTone={taskModelsHelp ? 'warn' : undefined} {...lock('taskModels')}>
-                <SegmentedChoice locale={locale} label={t(locale, 'sTaskModels')} value={rule.mode} options={['all', 'allow', 'deny']} labelKeyOf={opt => `sTaskModels_${opt}`} onChange={next => save({ taskModels: { mode: next, list: rule.list } })} />
-                {rule.mode === 'all' ? null : (
-                  <div className="dsh-dot-model-picker" role="group" aria-label={t(locale, `sTaskModels_${rule.mode}`)}>
-                    <div className="dsh-dot-model-toolbar">
-                      <Input
-                        className="dsh-dot-model-search"
-                        icon={<IconSearchOutlineRegular size={13} />}
-                        type="search"
-                        aria-label={t(locale, 'sTaskModelsFilter')}
-                        placeholder={t(locale, 'sTaskModelsFilter')}
-                        value={modelFilter}
-                        onChange={event => setModelFilter(event.target.value)}
-                      />
-                      <div className="dsh-dot-model-summary">
-                        <span className="dsh-ui-meta">{t(locale, 'sTaskModelsSelected').replace('{n}', String(rule.list.length))}</span>
-                        {rule.list.length > 0 ? (
-                          <Button variant="ghost" size="sm" onClick={() => save({ taskModels: { mode: rule.mode, list: [] } })}>{t(locale, 'sTaskModelsClear')}</Button>
-                        ) : null}
-                      </div>
-                    </div>
-                    {rule.list.length > 0 ? (
-                      <div className="dsh-dot-model-chips" data-tone={rule.mode} aria-label={t(locale, 'sTaskModelsSelected').replace('{n}', String(rule.list.length))}>
-                        {rule.list.map(key => {
-                          const choice = catalogChoices.find(item => taskModelKey(item) === key)
-                          const stale = choice === undefined
-                          return (
-                            <span key={key} className="dsh-dot-model-chip" data-stale={stale ? '' : undefined} title={stale ? `${key} ${t(locale, 'sTaskModelsGone')}` : choice.label}>
-                              <span className="dsh-dot-model-chip-name">{choice ? modelMenuShortName(choice) : key}</span>
-                              {choice ? <span className="dsh-dot-model-chip-provider">{choice.providerLabel ?? choice.provider}</span> : null}
-                              <button type="button" className="dsh-dot-model-chip-remove" aria-label={t(locale, 'sTaskModelsRemove').replace('{name}', choice ? choice.label : key)} onClick={() => toggleTaskModel(key, false)}>×</button>
-                            </span>
-                          )
-                        })}
-                      </div>
-                    ) : null}
-                    <div className="dsh-dot-model-list">
-                      {filteredGroups.length === 0 && staleKeys.length === 0 ? (
-                        <div className="dsh-dot-model-empty">{catalogChoices.length === 0 && !models.failed ? t(locale, 'sModelLoading') : t(locale, 'sTaskModelsNoMatch')}</div>
-                      ) : null}
-                      {filteredGroups.map(group => {
-                        const keys = group.items.map(taskModelKey)
-                        const selected = keys.filter(key => rule.list.includes(key))
-                        const auto = needle !== '' || selected.length > 0
-                        return (
-                          <details className="dsh-dot-model-group" key={group.provider} open={expandDetails(group.provider, auto)}>
-                            <summary className="dsh-dot-model-group-title" onClick={onDetailsClick(group.provider, auto)}>
-                              <span className="dsh-dot-model-group-label"><span className="dsh-dot-model-group-name" title={group.name}>{group.name}</span><span className="dsh-dot-model-group-count">{selected.length}/{keys.length}</span></span>
-                              <button type="button" className="dsh-dot-model-group-toggle" onClick={event => { event.preventDefault(); event.stopPropagation(); toggleTaskGroup(keys, selected.length !== keys.length) }} onKeyDown={event => event.stopPropagation()} onKeyUp={event => event.stopPropagation()}>{t(locale, selected.length === keys.length ? 'sTaskModelsGroupNone' : 'sTaskModelsGroupAll')}</button>
-                            </summary>
-                            {group.items.map(choice => {
-                              const key = taskModelKey(choice)
-                              const on = rule.list.includes(key)
-                              return (
-                                <Checkbox
-                                  key={key}
-                                  className={on ? 'dsh-dot-model-item dsh-dot-model-item--on' : 'dsh-dot-model-item'}
-                                  checked={on}
-                                  label={modelMenuShortName(choice)}
-                                  title={choice.label}
-                                  onChange={checked => toggleTaskModel(key, checked)}
-                                />
-                              )
-                            })}
-                          </details>
-                        )
-                      })}
-                      {staleKeys.length > 0 ? (
-                        <div className="dsh-dot-model-group">
-                          <div className="dsh-dot-model-group-title">{t(locale, 'sTaskModelsStaleGroup')}</div>
-                          {staleKeys.map(key => (
-                            <Checkbox
-                              key={key}
-                              className="dsh-dot-model-item dsh-dot-model-item--on"
-                              checked={rule.list.includes(key)}
-                              label={`${key} ${t(locale, 'sTaskModelsGone')}`}
-                              onChange={checked => toggleTaskModel(key, checked)}
-                            />
-                          ))}
-                        </div>
+            <Field
+              label={t(locale, 'sTaskPermission')}
+              tip={t(locale, `sTaskPermissionDesc_${settings.taskPermission}` as TextKey)}
+              help={livePermissions.includes(settings.taskPermission) ? undefined : t(locale, 'sTaskPermissionUnavailable').replace('{name}', t(locale, `sTaskPermission_${settings.taskPermission}` as TextKey))}
+              helpTone={livePermissions.includes(settings.taskPermission) ? undefined : 'warn'}
+            >
+              <SegmentedChoice locale={locale} label={t(locale, 'sTaskPermission')} value={settings.taskPermission} options={permissionModes} labelKeyOf={opt => `sTaskPermission_${opt}`} onChange={next => save({ taskPermission: next })} />
+            </Field>
+            <Field label={t(locale, 'sTaskModels')} help={taskModelsHelp} helpTone={taskModelsHelp ? 'warn' : undefined}>
+              <SegmentedChoice locale={locale} label={t(locale, 'sTaskModels')} value={rule.mode} options={['all', 'allow', 'deny']} labelKeyOf={opt => `sTaskModels_${opt}`} onChange={next => save({ taskModels: { mode: next, list: rule.list } })} />
+              {rule.mode === 'all' ? null : (
+                <div className="dsh-dot-model-picker" role="group" aria-label={t(locale, `sTaskModels_${rule.mode}`)}>
+                  <div className="dsh-dot-model-toolbar">
+                    <Input
+                      className="dsh-dot-model-search"
+                      icon={<IconSearchOutlineRegular size={13} />}
+                      type="search"
+                      aria-label={t(locale, 'sTaskModelsFilter')}
+                      placeholder={t(locale, 'sTaskModelsFilter')}
+                      value={modelFilter}
+                      onChange={event => setModelFilter(event.target.value)}
+                    />
+                    <div className="dsh-dot-model-summary">
+                      <span className="dsh-ui-meta">{t(locale, 'sTaskModelsSelected').replace('{n}', String(rule.list.length))}</span>
+                      {rule.list.length > 0 ? (
+                        <Button variant="ghost" size="sm" onClick={() => save({ taskModels: { mode: rule.mode, list: [] } })}>{t(locale, 'sTaskModelsClear')}</Button>
                       ) : null}
                     </div>
                   </div>
-                )}
-              </Field>
-            </div>
-            <div className="dsh-dot-dispatch-group" data-group="routine">
-              <InlineField
-                label={t(locale, 'sIdleCheck')}
-                tip={t(locale, 'sIdleCheckDesc')}
-                {...lock('idleCheckMinutes')}
-                control={<IdleCheckInput locale={locale} value={settings.idleCheckMinutes} onCommit={minutes => save({ idleCheckMinutes: minutes })} />}
-              />
-            </div>
+                  <div className="dsh-dot-model-list">
+                    {filteredGroups.length === 0 && staleKeys.length === 0 ? (
+                      <div className="dsh-dot-model-empty">{catalogChoices.length === 0 && !models.failed ? t(locale, 'sModelLoading') : t(locale, 'sTaskModelsNoMatch')}</div>
+                    ) : null}
+                    {filteredGroups.map(group => {
+                      const keys = group.items.map(taskModelKey)
+                      const selected = keys.filter(key => rule.list.includes(key))
+                      const auto = needle !== '' || selected.length > 0
+                      return (
+                        <details className="dsh-dot-model-group" key={group.provider} open={expandDetails(group.provider, auto)}>
+                          <summary className="dsh-dot-model-group-title" onClick={onDetailsClick(group.provider, auto)}>
+                            <span className="dsh-dot-model-group-label"><span className="dsh-dot-model-group-name" title={group.name}>{group.name}</span><span className="dsh-dot-model-group-count">{selected.length}/{keys.length}</span></span>
+                            <button type="button" className="dsh-dot-model-group-toggle" onClick={event => { event.preventDefault(); event.stopPropagation(); toggleTaskGroup(keys, selected.length !== keys.length) }} onKeyDown={event => event.stopPropagation()} onKeyUp={event => event.stopPropagation()}>{t(locale, selected.length === keys.length ? 'sTaskModelsGroupNone' : 'sTaskModelsGroupAll')}</button>
+                          </summary>
+                          {group.items.map(choice => {
+                            const key = taskModelKey(choice)
+                            const on = rule.list.includes(key)
+                            return (
+                              <Checkbox
+                                key={key}
+                                className={on ? 'dsh-dot-model-item dsh-dot-model-item--on' : 'dsh-dot-model-item'}
+                                checked={on}
+                                label={modelMenuShortName(choice)}
+                                title={choice.label}
+                                onChange={checked => toggleTaskModel(key, checked)}
+                              />
+                            )
+                          })}
+                        </details>
+                      )
+                    })}
+                    {staleKeys.length > 0 ? (
+                      <div className="dsh-dot-model-group">
+                        <div className="dsh-dot-model-group-title">{t(locale, 'sTaskModelsStaleGroup')}</div>
+                        {staleKeys.map(key => (
+                          <Checkbox
+                            key={key}
+                            className="dsh-dot-model-item dsh-dot-model-item--on"
+                            checked={rule.list.includes(key)}
+                            label={`${key} ${t(locale, 'sTaskModelsGone')}`}
+                            onChange={checked => toggleTaskModel(key, checked)}
+                          />
+                        ))}
+                      </div>
+                    ) : null}
+                  </div>
+                </div>
+              )}
+            </Field>
+            <InlineField
+              label={t(locale, 'sIdleCheck')}
+              tip={t(locale, 'sIdleCheckDesc')}
+              control={<IdleCheckInput locale={locale} value={settings.idleCheckMinutes} onCommit={minutes => save({ idleCheckMinutes: minutes })} />}
+            />
           </div>
         </div>
       ) : null}
+
       {show('github') ? (
         <GithubSettingsSection
           locale={locale}
@@ -1517,35 +1372,84 @@ export function SettingsPanel({ locale, api, settings, section = 'all', proposal
           onSave={next => save({ githubPoll: next })}
         />
       ) : null}
+
       {show('capabilities') ? (
-        <div className="dsh-dot-pane-section">
-          {allSections ? <h3 className="dsh-dot-pane-section-title">{t(locale, 'sCapabilities')}</h3> : null}
-          <div className="dsh-ui-form">
-            <Field label={t(locale, 'sCapGrants')} tip={t(locale, 'sCapabilitiesDesc')} wide {...lock('capabilities')}>
-              <CapabilitiesMcpPanel locale={locale} api={api} settings={settings} zone="capabilities" onSaved={onSaved} onPick={(selector, grant) => {
-                const grants = { ...settings.capabilities?.grants }
-                if (grant === undefined) delete grants[selector]
-                else grants[selector] = grant
-                save({ capabilities: { grants } })
-              }} />
-            </Field>
-          </div>
-        </div>
+        <CapabilitiesMcpPanel locale={locale} api={api} settings={settings} onSaved={onSaved} onPick={saveCapabilityGrant} />
       ) : null}
-      {/* In 'all' the unified panel already renders once under capabilities above; the mcp section re-renders it only when opened on its own. */}
-      {section === 'mcp' ? (
-        <div className="dsh-dot-pane-section">
-          <div className="dsh-ui-form">
-            <Field label={t(locale, 'sCapGrants')} tip={t(locale, 'sCapabilitiesDesc')} wide {...lock('capabilities')}>
-              <CapabilitiesMcpPanel locale={locale} api={api} settings={settings} zone="mcp" onSaved={onSaved} onPick={(selector, grant) => {
-                const grants = { ...settings.capabilities?.grants }
-                if (grant === undefined) delete grants[selector]
-                else grants[selector] = grant
-                save({ capabilities: { grants } })
-              }} />
-            </Field>
+
+      {show('advanced') ? (
+        <>
+          <div className="dsh-dot-pane-section">
+            <div className="dsh-ui-form">
+              {keepalive ? (
+                <InlineField
+                  label={t(locale, 'sCacheTtl')}
+                  tip={t(locale, 'sCacheTtlDesc').replace('{key}', cacheKey).replace('{n}', String(keepalive.defaultMinutes))}
+                  control={<IdleCheckInput
+                    locale={locale}
+                    label={t(locale, 'sCacheTtl')}
+                    unit={t(locale, 'sCacheTtlUnit')}
+                    value={settings.cacheTtl?.[cacheKey] ?? keepalive.minutes}
+                    onCommit={minutes => {
+                      const next = { ...settings.cacheTtl }
+                      if (minutes === keepalive.defaultMinutes) delete next[cacheKey]
+                      else next[cacheKey] = minutes
+                      save({ cacheTtl: next })
+                    }}
+                  />}
+                />
+              ) : null}
+              <Field label={t(locale, 'sDefaultTaskPreset')} tip={t(locale, 'sDefaultTaskPresetDesc')}>
+                <SegmentedChoice locale={locale} label={t(locale, 'sDefaultTaskPreset')} value={settings.defaultTaskPreset ?? 'standard'} options={TASK_PRESET_OPTIONS} labelKeyOf={opt => `sDefaultTaskPreset_${opt}`} onChange={next => save({ defaultTaskPreset: next })} />
+              </Field>
+              <Field label={t(locale, 'sWatchdogMode')} tip={t(locale, 'sWatchdogModeDesc')}>
+                <SegmentedChoice
+                  locale={locale}
+                  label={t(locale, 'sWatchdogMode')}
+                  value={settings.watchdogMode ?? 'observe'}
+                  options={watchdogModes}
+                  labelKeyOf={opt => `sWatchdogMode_${opt}`}
+                  onChange={next => save({ watchdogMode: next })}
+                />
+              </Field>
+              {(settings.watchdogMode ?? 'observe') === 'auto' ? (
+                <Field label={t(locale, 'sWatchdogModel')} tip={t(locale, 'sWatchdogModelDesc')} help={modelHelp} helpTone={models.failed ? 'warn' : undefined}>
+                  <ModelPickerInput
+                    locale={locale}
+                    renderFactorySlot={renderFactorySlot}
+                    choices={watchdogChoices}
+                    selected={watchdogChosen ? { provider: watchdogChosen.provider, model: watchdogChosen.model } : undefined}
+                    onPick={picked => save({ watchdogModel: `${picked.provider}/${picked.model}` })}
+                    onClear={() => save({ watchdogModel: null })}
+                    followLabel={t(locale, 'sWatchdogModelFollow')}
+                    label={t(locale, 'sWatchdogModel')}
+                  />
+                </Field>
+              ) : null}
+            </div>
           </div>
-        </div>
+          <div className="dsh-dot-pane-section">
+            <div className="dsh-ui-form">
+              <Field label={t(locale, 'sLocks')} tip={t(locale, 'sLocksDesc')}>
+                <div className="dsh-dot-lock-grid">
+                  {LOCK_SETTING_FIELDS.map(field => {
+                    const label = t(locale, `field_${field}` as TextKey)
+                    return (
+                      <Checkbox
+                        key={field}
+                        className="dsh-dot-lock-check"
+                        checked={settings.locks?.[field] === true}
+                        label={label}
+                        onChange={checked => save({ locks: { ...settings.locks, [field]: checked } })}
+                      />
+                    )
+                  })}
+                </div>
+              </Field>
+            </div>
+          </div>
+          {api.previewFactoryReset && api.confirmFactoryReset ? <FactoryResetField locale={locale} api={api} onSaved={onSaved} /> : null}
+        </>
       ) : null}
     </div></LocaleContext.Provider>
   )
@@ -1553,25 +1457,8 @@ export function SettingsPanel({ locale, api, settings, section = 'all', proposal
 
 // Selectors spell the root out (.dsh-dot-chat = CHAT_ROOT) so the repository scope check can read them.
 export const settingsCss = `
-/* Settings layout: micro-headed subgroups inside each card, and a responsive
-   two-column form grid once the drawer content is wide enough for it. */
-.dsh-dot-chat .dsh-dot-subgroups { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
-.dsh-dot-chat .dsh-dot-subgroup { display: flex; flex-direction: column; min-width: 0; }
-.dsh-dot-chat .dsh-dot-subhead {
-  margin: 6px 0 0; padding: 0 0 2px; font-size: 11px; line-height: 16px; font-weight: 600;
-  letter-spacing: 0.05em; text-transform: uppercase; color: var(--dsw-alias-label-tertiary); user-select: none;
-}
 .dsh-dot-chat .dsh-dot-settings-pane .dsh-ui-form { display: flex; flex-direction: column; }
 .dsh-dot-chat .dsh-dot-settings-pane .dsh-ui-form > .dsh-ui-field { min-width: 0; }
-/* Wide drawer: sibling fields pair into two aligned columns; composite inner
-   bodies (the task-model browser, capability list) keep their flex column. */
-@container (min-width: 600px) {
-  .dsh-dot-chat .dsh-dot-settings-pane .dsh-ui-form:has(> .dsh-ui-field + .dsh-ui-field) {
-    display: grid; grid-template-columns: repeat(2, minmax(0, 1fr));
-    column-gap: 24px; align-items: start;
-  }
-  .dsh-dot-chat .dsh-dot-settings-pane .dsh-ui-form > .dsh-dot-field-wide { grid-column: 1 / -1; }
-}
 .dsh-dot-chat .dsh-dot-setting-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 22px; }
 .dsh-dot-chat .dsh-dot-setting-tools { display: inline-flex; align-items: center; gap: 8px; flex-shrink: 0; }
 .dsh-dot-chat .dsh-dot-help-tip {
@@ -1597,16 +1484,6 @@ export const settingsCss = `
 }
 .dsh-dot-chat .dsh-dot-danger { background: var(--dsw-alias-state-error-primary); color: var(--dsw-alias-label-primary-foreground); }
 .dsh-dot-chat .dsh-dot-danger:hover:not(:disabled) { background: var(--dsw-alias-state-error-primary); filter: brightness(0.9); }
-.dsh-dot-chat .dsh-dot-lock {
-  display: inline-flex; align-items: center; gap: 4px; flex-shrink: 0; white-space: nowrap; height: 22px; padding: 0 5px;
-  border: 0; border-radius: var(--dsw-radius-sm); background: transparent;
-  color: var(--dsw-alias-label-secondary); font: inherit; font-size: 11px; line-height: 16px; cursor: pointer;
-  transition: opacity var(--ds-transition-duration, 0.2s) var(--ds-ease-in-out, ease-in-out), background-color var(--ds-transition-duration, 0.2s) var(--ds-ease-in-out, ease-in-out), color var(--ds-transition-duration, 0.2s) var(--ds-ease-in-out, ease-in-out);
-}
-.dsh-dot-chat .dsh-dot-lock:hover,
-.dsh-dot-chat .dsh-dot-lock:focus-visible { opacity: 1; background: var(--dsw-alias-interactive-bg-hover); color: var(--dsw-alias-label-primary); }
-.dsh-dot-chat .dsh-dot-lock[data-locked] { opacity: 1; padding: 0 7px; background: var(--dsw-alias-interactive-bg-active); color: var(--dsw-alias-state-warn-primary); }
-.dsh-dot-chat .dsh-dot-lock-badge { font-size: 11px; line-height: 16px; font-weight: 500; }
 .dsh-dot-chat .dsh-dot-proposals { display: flex; flex-direction: column; gap: 10px; }
 .dsh-dot-chat .dsh-dot-proposal {
   display: flex; flex-direction: column; gap: 8px; padding: 12px 14px;
@@ -1630,24 +1507,6 @@ export const settingsCss = `
 }
 .dsh-dot-chat .dsh-dot-dispatch { min-width: 0; }
 .dsh-dot-chat .dsh-dot-dispatch-stack { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
-.dsh-dot-chat .dsh-dot-dispatch-group { min-width: 0; }
-.dsh-dot-chat .dsh-dot-dispatch-group[data-group='permission'],
-.dsh-dot-chat .dsh-dot-dispatch-group[data-group='preset'],
-.dsh-dot-chat .dsh-dot-dispatch-group[data-group='models'] {
-  padding: 12px 12px 14px; border-radius: var(--dsw-radius-md);
-  background: var(--dsw-alias-bg-layer-2); box-shadow: var(--dsw-elevation-stroke);
-}
-.dsh-dot-chat .dsh-dot-dispatch-group[data-group='routine'] {
-  padding: 10px 2px 10px; border-top: 0.5px solid var(--dsw-alias-border-l2);
-}
-.dsh-dot-chat .dsh-dot-dispatch-group .dsh-ui-field { min-width: 0; padding-top: 0; padding-bottom: 0; }
-.dsh-dot-chat .dsh-dot-dispatch-group[data-group='routine'] .dsh-dot-inline-row { flex-wrap: wrap; }
-.dsh-dot-chat .dsh-dot-dispatch [role='tablist'] {
-  display: grid; width: 100%; max-width: 100%; min-width: 0; box-sizing: border-box;
-}
-.dsh-dot-chat .dsh-dot-dispatch [role='tablist'] [role='tab'] {
-  min-width: 0; padding-left: 8px; padding-right: 8px;
-}
 .dsh-dot-chat .dsh-dot-model-picker {
   display: flex; flex-direction: column; gap: 10px; min-width: 0; margin-top: 10px;
 }
@@ -1658,27 +1517,8 @@ export const settingsCss = `
 .dsh-dot-chat .dsh-dot-model-search { display: flex; width: 100%; min-width: 0; height: 32px; box-sizing: border-box; }
 /* The settings scroller is the only vertical scroll. Capping the list or the tokens adds a nested scrollbar. */
 .dsh-dot-chat .dsh-dot-model-list { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
-.dsh-dot-chat .dsh-dot-model-chips { display: flex; flex-wrap: wrap; gap: 6px; min-width: 0; }
-.dsh-dot-chat .dsh-dot-model-chip {
-  display: inline-flex; align-items: center; gap: 4px; min-width: 0; max-width: 100%; min-height: 24px;
-  padding: 2px 2px 2px 8px; border-radius: var(--dsw-radius-sm); background: var(--dsw-alias-bg-base);
-  box-shadow: var(--dsw-elevation-stroke); font-size: 12px; line-height: 18px; color: var(--dsw-alias-label-primary);
-}
-.dsh-dot-chat .dsh-dot-model-chip[data-stale] { color: var(--dsw-alias-label-tertiary); }
-.dsh-dot-chat .dsh-dot-model-chip[data-stale] .dsh-dot-model-chip-name { text-decoration: line-through; }
-.dsh-dot-chat .dsh-dot-model-chips[data-tone='deny'] .dsh-dot-model-chip { color: var(--dsw-alias-state-warn-primary); }
-.dsh-dot-chat .dsh-dot-model-chip-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.dsh-dot-chat .dsh-dot-model-chip-provider { flex-shrink: 0; font-size: 10px; color: var(--dsw-alias-label-tertiary); }
-.dsh-dot-chat .dsh-dot-model-chip-remove {
-  display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0;
-  width: 18px; height: 18px; padding: 0; border: 0; border-radius: var(--dsw-radius-sm);
-  background: transparent; color: var(--dsw-alias-label-tertiary); cursor: pointer; font-size: 13px; line-height: 1;
-}
-.dsh-dot-chat .dsh-dot-model-chip-remove:hover { background: var(--dsw-alias-interactive-bg-hover); color: var(--dsw-alias-label-primary); }
-.dsh-dot-chat .dsh-dot-model-chip-remove:focus-visible { background: var(--dsw-alias-interactive-bg-hover); color: var(--dsw-alias-label-primary); outline: 1.5px solid var(--dsw-alias-state-business-primary); outline-offset: 1px; }
 .dsh-dot-chat .dsh-dot-model-group {
-  display: flex; flex-direction: column; gap: 1px; min-width: 0; padding: 4px;
-  border-radius: var(--dsw-radius-sm); background: var(--dsw-alias-bg-base);
+  display: flex; flex-direction: column; gap: 1px; min-width: 0; padding: 2px 0;
 }
 .dsh-dot-chat .dsh-dot-model-group > summary {
   display: flex; align-items: center; gap: 8px; min-width: 0; min-height: 28px; padding: 2px 4px 2px 2px;
@@ -1854,8 +1694,15 @@ export const settingsCss = `
 .dsh-dot-chat .dsh-dot-gh-rule-select { margin-left: auto; width: auto; }
 .dsh-dot-chat .dsh-dot-gh-rule-form { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
 .dsh-dot-chat .dsh-dot-gh-rule-form > :first-child { flex: 1 1 120px; min-width: 100px; }
-.dsh-dot-chat .dsh-dot-watchdog-card { display: flex; flex-direction: column; gap: 10px; padding: 12px 14px; border-radius: var(--dsw-radius-md); background: var(--dsw-alias-bg-layer-1); box-shadow: var(--dsw-elevation-stroke); min-width: 0; }
-.dsh-dot-chat .dsh-dot-watchdog-head { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
-.dsh-dot-chat .dsh-dot-watchdog-title { margin: 0; font-size: 14px; line-height: 20px; font-weight: 600; color: var(--dsw-alias-label-primary); }
-.dsh-dot-chat .dsh-dot-watchdog-desc { margin: 0; font-size: 12px; line-height: 18px; color: var(--dsw-alias-label-secondary); }
+.dsh-dot-chat .dsh-dot-lock-grid { display: grid; grid-template-columns: 1fr; gap: 2px 18px; }
+@container (min-width: 560px) {
+  .dsh-dot-chat .dsh-dot-lock-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+.dsh-dot-chat .dsh-dot-lock-check { min-height: 30px; padding: 4px 0; }
+.dsh-dot-chat .dsh-dot-gh-subhead { margin-top: 12px; font-size: 12px; line-height: 18px; font-weight: 600; color: var(--dsw-alias-label-tertiary); }
+.dsh-dot-chat .dsh-dot-cap-section { text-transform: none; letter-spacing: normal; font-size: 12px; }
+.dsh-dot-chat .dsh-dot-cap-section--main { margin-top: 14px; }
+.dsh-dot-chat .dsh-dot-cap-body .dsh-dot-cap-group { background: transparent; }
+.dsh-dot-chat .dsh-dot-factory-preview { background: transparent; box-shadow: none; border: 0.5px solid var(--dsw-alias-border-l2); }
+.dsh-dot-chat .dsh-dot-mcp-custom-body { background: transparent; box-shadow: none; border: 0.5px solid var(--dsw-alias-border-l2); }
 `

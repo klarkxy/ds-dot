@@ -5,9 +5,9 @@
  */
 import { Button, Input, Tag } from '@deepseek-ai/dsh-client-ui-primitives'
 import { useCallback, useEffect, useRef, useState } from 'react'
-import type { CognitionEntry, DotSettings, KnowledgeEdit, KnowledgeView, SettingField } from './contracts.ts'
+import type { CognitionEntry, DotSettings, KnowledgeEdit, KnowledgeView } from './contracts.ts'
 import { ADDRESS_MAX_CHARS, PERSONA_MAX_CHARS, defaultAddress, defaultPersona } from './persona.ts'
-import { HelpTip, LockToggle, PaneSkeleton, Subgroup, type SaveNotice, type SettingsApi, type SettingsPatch } from './settings-panel.tsx'
+import { HelpTip, PaneSkeleton, type SaveNotice, type SettingsApi, type SettingsPatch } from './settings-panel.tsx'
 import { formatWhen, t, type CopyLocale } from './ui-copy.ts'
 
 export interface KnowledgeApi {
@@ -195,12 +195,10 @@ function CognitionHistory({ locale, knowledge, busy, onRestore }: {
  * Dorothy's knowledge: the agreements you set and her own cognition. The
  * agreements keep one step of undo; the cognition keeps its last versions.
  */
-function KnowledgeSection({ locale, api, onStatus, locked, onLock, discardSignal, onDirtyChange }: {
+function KnowledgeSection({ locale, api, onStatus, discardSignal, onDirtyChange }: {
   locale: CopyLocale
   api: KnowledgeApi
   onStatus: (status: SaveNotice | undefined) => void
-  locked: boolean
-  onLock: (field: SettingField, locked: boolean) => void
   discardSignal?: number
   onDirtyChange?: (dirty: boolean) => void
 }) {
@@ -257,7 +255,6 @@ function KnowledgeSection({ locale, api, onStatus, locked, onLock, discardSignal
               </span>
               <div className="dsh-dot-setting-tools">
                 {agreements.canUndo ? <Button variant="outline" size="sm" disabled={busy} onClick={() => void run(() => api.undoAgreements())}>{t(locale, 'pAgreementsUndo')}</Button> : null}
-                <LockToggle locale={locale} label={t(locale, 'pAgreements')} locked={locked} onLock={next => onLock('agreements', next)} />
               </div>
             </div>
             <EntryList
@@ -361,21 +358,16 @@ export function PersonaPanel({ locale, api, settings, onSaved, onStatusChange, d
   const personaChanged = persona !== savedPersona
   const personaCustom = settings.persona !== undefined
   const addressCustom = settings.address !== undefined
-  const onLock = (field: SettingField, locked: boolean) => save({ locks: { ...settings.locks, [field]: locked } })
 
   return (
     <div className="dsh-dot-pane dsh-dot-settings-pane">
       {!onStatusChange && status?.kind === 'saved' ? <div className="dsh-ui-notice" role="status">{t(locale, 'saved')}</div> : null}
       {!onStatusChange && status?.kind === 'error' ? <div className="dsh-ui-error" role="alert">{t(locale, 'saveFailed')}{status.message}</div> : null}
       <div className="dsh-dot-pane-section">
-        <div className="dsh-dot-subgroups">
-        <Subgroup label={t(locale, 'sGroupVoice')}>
+        <div className="dsh-ui-form">
         <div className="dsh-ui-field">
           <div className="dsh-dot-setting-head">
             <span className="dsh-ui-label">{t(locale, 'pAddress')}</span>
-            <div className="dsh-dot-setting-tools">
-              <LockToggle locale={locale} label={t(locale, 'pAddress')} locked={settings.locks?.address === true} onLock={next => onLock('address', next)} />
-            </div>
           </div>
           <div className="dsh-dot-persona-row">
             <Input aria-label={t(locale, 'pAddress')} maxLength={ADDRESS_MAX_CHARS} placeholder={defaultAddr} value={address}
@@ -392,22 +384,24 @@ export function PersonaPanel({ locale, api, settings, onSaved, onStatusChange, d
             </span>
             <div className="dsh-dot-setting-tools">
               <span className="dsh-ui-hint">{t(locale, 'pCharCount').replace('{n}', String(persona.length)).replace('{max}', String(PERSONA_MAX_CHARS))}</span>
-              <LockToggle locale={locale} label={t(locale, 'pPersona')} locked={settings.locks?.persona === true} onLock={next => onLock('persona', next)} />
             </div>
           </div>
           <textarea className="dsh-ui-textarea dsh-dot-persona-text" aria-label={t(locale, 'pPersona')} rows={9} maxLength={PERSONA_MAX_CHARS}
             value={persona} onChange={event => setPersona(event.target.value)} />
           <div className="dsh-ui-actions">
-            <Button variant="primary" size="sm" disabled={!personaChanged} onClick={() => save({ persona })}>{t(locale, 'pSave')}</Button>
-            <Button variant="ghost" size="sm" disabled={!personaChanged} onClick={() => setPersona(savedPersona)}>{t(locale, 'pDiscard')}</Button>
+            {personaChanged ? (
+              <>
+                <Button variant="primary" size="sm" onClick={() => save({ persona })}>{t(locale, 'pSave')}</Button>
+                <Button variant="ghost" size="sm" onClick={() => setPersona(savedPersona)}>{t(locale, 'pDiscard')}</Button>
+              </>
+            ) : null}
             <span className="dsh-ui-spacer" />
-            <Button variant="outline" size="sm" disabled={!personaCustom && !personaChanged} onClick={() => { setPersona(defaultPers); save({ persona: null }) }}>{t(locale, 'pRestore')}</Button>
+            <Button variant="ghost" size="sm" disabled={!personaCustom && !personaChanged} onClick={() => { setPersona(defaultPers); save({ persona: null }) }}>{t(locale, 'pRestore')}</Button>
           </div>
         </div>
-        </Subgroup>
         </div>
       </div>
-      <KnowledgeSection locale={locale} api={api} onStatus={reportStatus} locked={settings.locks?.agreements === true} onLock={onLock} {...discardSignal === undefined ? {} : { discardSignal }} onDirtyChange={setKnowledgeDirty} />
+      <KnowledgeSection locale={locale} api={api} onStatus={reportStatus} {...discardSignal === undefined ? {} : { discardSignal }} onDirtyChange={setKnowledgeDirty} />
       <p className="dsh-ui-hint dsh-dot-settings-note">{t(locale, 'pNote')}</p>
     </div>
   )
@@ -416,9 +410,9 @@ export function PersonaPanel({ locale, api, settings, onSaved, onStatusChange, d
 // Selectors spell the root out (.dsh-dot-chat = CHAT_ROOT) so the repository scope check can read them.
 export const personaCss = `
 .dsh-dot-chat .dsh-dot-persona-row { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
-.dsh-dot-chat .dsh-dot-persona-row > :first-child { flex: 1 1 160px; min-width: 0; max-width: 340px; }
+.dsh-dot-chat .dsh-dot-persona-row > :first-child { flex: 1 1 160px; min-width: 0; }
 .dsh-dot-chat .dsh-dot-persona-row > button { flex-shrink: 0; white-space: nowrap; }
-.dsh-dot-chat .dsh-dot-persona-text { min-height: 180px; font-family: inherit; font-size: 13px; line-height: 1.6; }
+.dsh-dot-chat .dsh-dot-persona-text { min-height: 220px; font-family: inherit; font-size: 13px; line-height: 1.6; }
 .dsh-dot-chat .dsh-dot-entries { display: flex; flex-direction: column; gap: 6px; }
 .dsh-dot-chat .dsh-dot-entry { display: flex; flex-direction: column; gap: 6px; padding: 8px 10px; border-radius: var(--dsw-radius-sm); background: var(--dsw-alias-bg-layer-1); box-shadow: var(--dsw-elevation-stroke); }
 .dsh-dot-chat .dsh-dot-entry-row { display: flex; align-items: flex-start; gap: 8px; }

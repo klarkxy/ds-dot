@@ -987,7 +987,7 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
       }
     } catch (error) {
       logger.error('rpc.handler-failed', 'Dot RPC request failed.', error, { endpoint })
-      return { ok: false, error: { code: 'dot/failed', message: messageOf(error) } }
+      return { ok: false, error: { code: error instanceof DotError ? error.code : 'dot/failed', message: messageOf(error) } }
     }
   }, { logger, maxBodyBytes: CHAT_RPC_BODY_BYTES }), 'dot.rpc')
 }

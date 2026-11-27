@@ -32,6 +32,7 @@ const ptUi: UiText = {
   fileTooLarge: "O arquivo é grande demais; máximo {max} por arquivo.",
   fileTooMany: "Você pode adicionar no máximo {max} arquivos por mensagem.",
   fileUploadFailed: "Falha ao enviar arquivo: {message}",
+  fileReceiptExpired: "Os anexos enviados expiraram e estão sendo reenviados; envie de novo quando terminar.",
   removeImage: 'Remover imagem',
   imageAttached: 'Imagem',
   quickActions: 'Ações rápidas',

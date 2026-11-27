@@ -7,6 +7,7 @@ import { ChatPanel, chatCss, rowsOf, type ChatApi } from './chat-panel.tsx'
 import { noteBackendError, resetBackendOutdated, SELF_BACKUP_KEY } from './backend-state.ts'
 import { filterVisibleChat } from './chat-filter.ts'
 import { createDotCards } from './client.tsx'
+import { CHAT_FILE_BYTES } from './chat-files.ts'
 
 const dom = new JSDOM('<div id="root"></div>', { url: 'https://local.test' })
 vi.stubGlobal('window', dom.window)
@@ -1057,6 +1058,66 @@ describe('Composer images', () => {
     expect(document.body.textContent).toContain('TXT · 4 B')
     await act(async () => { document.querySelector<HTMLButtonElement>('button[aria-label="Send"]')!.click() })
     expect(api.say).toHaveBeenCalledWith('', [], ['file-1'])
+    await act(async () => root.unmount())
+  })
+
+
+  it('re-uploads ready files after an expired receipt rejection and sends the new receipt', async () => {
+    const snapshot: ChatSnapshot = { sessionId: 'dot-1', running: false, streaming: '', rev: 1, itemsRev: 1, items: [] }
+    const api = makeApi(snapshot)
+    api.attach = vi.fn()
+      .mockImplementationOnce(async (name: string) => ({ id: 'old-1', name, bytes: 4 }))
+      .mockImplementationOnce(async (name: string) => ({ id: 'new-1', name, bytes: 4 }))
+    const expired = Object.assign(new Error('That attachment upload is no longer available.'), { code: 'dot/file-expired' })
+    api.say = vi.fn()
+      .mockImplementationOnce(async () => { throw expired })
+      .mockImplementationOnce(async () => {})
+    const root = createRoot(document.getElementById('root')!)
+    await act(async () => { root.render(<ChatPanel locale="en" api={api} onOpenSession={() => {}} />) })
+    await pick(new File([Uint8Array.from([1, 2, 3, 4])], 'note.txt', { type: 'text/plain' }))
+    expect(api.attach).toHaveBeenCalledTimes(1)
+
+    await act(async () => { document.querySelector<HTMLButtonElement>('button[aria-label="Send"]')!.click() })
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 0)) })
+    expect(api.attach).toHaveBeenCalledTimes(2)
+    expect(api.attach).toHaveBeenNthCalledWith(2, 'note.txt', 'AQIDBA==')
+    expect(document.body.textContent).toContain('Attachment uploads expired and are uploading again; send once more when they finish.')
+
+    await act(async () => { document.querySelector<HTMLButtonElement>('button[aria-label="Send"]')!.click() })
+    await act(async () => { await Promise.resolve() })
+    expect(api.say).toHaveBeenLastCalledWith('', [], ['new-1'])
+    await act(async () => root.unmount())
+  })
+
+  it('does not re-upload files after a non-expiry send rejection', async () => {
+    const snapshot: ChatSnapshot = { sessionId: 'dot-1', running: false, streaming: '', rev: 1, itemsRev: 1, items: [] }
+    const api = makeApi(snapshot)
+    api.attach = vi.fn(async (name: string) => ({ id: 'file-1', name, bytes: 4 }))
+    api.say = vi.fn(async () => { throw Object.assign(new Error('invalid'), { code: 'dot/invalid' }) })
+    const root = createRoot(document.getElementById('root')!)
+    await act(async () => { root.render(<ChatPanel locale="en" api={api} onOpenSession={() => {}} />) })
+    await pick(new File([Uint8Array.from([1, 2, 3, 4])], 'note.txt', { type: 'text/plain' }))
+    await act(async () => { document.querySelector<HTMLButtonElement>('button[aria-label="Send"]')!.click() })
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 0)) })
+    expect(api.attach).toHaveBeenCalledTimes(1)
+    expect(document.body.textContent).not.toContain('Attachment uploads expired')
+    await act(async () => root.unmount())
+  })
+
+  it('rejects an oversized file before reading its bytes', async () => {
+    const snapshot: ChatSnapshot = { sessionId: 'dot-1', running: false, streaming: '', rev: 1, itemsRev: 1, items: [] }
+    const api = makeApi(snapshot)
+    api.attach = vi.fn(async (name: string) => ({ id: 'file-1', name, bytes: 4 }))
+    const root = createRoot(document.getElementById('root')!)
+    await act(async () => { root.render(<ChatPanel locale="en" api={api} onOpenSession={() => {}} />) })
+    const file = new File([Uint8Array.from([1])], 'big.bin', { type: 'application/octet-stream' })
+    Object.defineProperty(file, 'size', { value: CHAT_FILE_BYTES + 1 })
+    const arrayBuffer = vi.fn(file.arrayBuffer.bind(file))
+    file.arrayBuffer = arrayBuffer
+    await pick(file)
+    expect(arrayBuffer).not.toHaveBeenCalled()
+    expect(api.attach).not.toHaveBeenCalled()
+    expect(document.body.textContent).toContain('That file is too large; each file must be 32 MB or smaller.')
     await act(async () => root.unmount())
   })
 

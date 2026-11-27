@@ -12,7 +12,7 @@ import { existsSync, lstatSync, readlinkSync, realpathSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
-import { credentialLikePath } from './approval-risk.ts'
+import { credentialLikePath, credentialLikeText } from './approval-risk.ts'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { checkShownView } from '@klarkxy/dsh-deep-view/core'
 import type { ShownView } from '@klarkxy/dsh-deep-view/contracts'
@@ -96,7 +96,7 @@ export const TASK_ACTIONS = ['create', 'revise', 'dispatch', 'check', 'read', 'l
 const CREDENTIAL_GUARD_TOOLS: ReadonlySet<string> = new Set(['read', 'read_image', 'glob', 'grep', 'office_render', 'office_convert'])
 const CREDENTIAL_GUARD_KEYS = ['file_path', 'path', 'pattern', 'glob', 'input', 'output_dir', 'output'] as const
 const CREDENTIAL_GUARD_REASON = 'That path looks like a credential file and will not be read.'
-const GLOB_META = /[*?[\]{}]/
+const GLOB_META = /[*?\[\]]/
 
 function guardArgs(args: unknown): Record<string, unknown> | undefined {
   if (typeof args === 'string') {
@@ -112,6 +112,126 @@ function expandHome(raw: string): string {
   if (raw === '~') return homedir()
   if (raw.startsWith('~/') || raw.startsWith('~\\')) return join(homedir(), raw.slice(2))
   return raw
+}
+
+
+const CREDENTIAL_GLOB_PROBES = ['.ssh', '.aws', '.gnupg', '.kube', 'id_rsa', 'id_ed25519', 'id_ecdsa', 'id_dsa', '.npmrc', '.pypirc', '.netrc', '.env', '.env.local', 'x.pem', 'x.key', 'x.p12', 'x.pfx', 'x.env'] as const
+const GLOB_NOT_SEPARATOR = '[^/' + '\\'.repeat(2) + ']'
+
+interface BraceGroup {
+  readonly end: number
+  readonly alternatives: readonly string[]
+  readonly hasComma: boolean
+}
+
+function scanBraceGroup(text: string, start: number): BraceGroup | undefined {
+  let depth = 0
+  let partStart = start + 1
+  const alternatives: string[] = []
+  let hasComma = false
+  for (let index = start; index < text.length; index += 1) {
+    const char = text[index]
+    if (char === '{') depth += 1
+    else if (char === '}') {
+      depth -= 1
+      if (depth === 0) {
+        alternatives.push(text.slice(partStart, index))
+        return { end: index, alternatives, hasComma }
+      }
+    } else if (char === ',' && depth === 1) {
+      hasComma = true
+      alternatives.push(text.slice(partStart, index))
+      partStart = index + 1
+    }
+  }
+  return undefined
+}
+
+function findBraceExpansion(text: string): (BraceGroup & { readonly start: number }) | undefined {
+  for (let start = 0; start < text.length; start += 1) {
+    if (text[start] !== '{') continue
+    const group = scanBraceGroup(text, start)
+    if (group?.hasComma) return { start, ...group }
+  }
+  return undefined
+}
+
+/** Shell-style comma brace expansion for the small path patterns this guard understands. */
+export function expandBraces(value: string, limit = 64): readonly string[] | undefined {
+  const expand = (text: string): string[] | undefined => {
+    const group = findBraceExpansion(text)
+    if (!group) return [text]
+    const alternatives: string[][] = []
+    for (const alternative of group.alternatives) {
+      const expanded = expand(alternative)
+      if (expanded === undefined) return undefined
+      alternatives.push([...expanded])
+    }
+    const suffixes = expand(text.slice(group.end + 1))
+    if (suffixes === undefined) return undefined
+    const prefix = text.slice(0, group.start)
+    const out: string[] = []
+    for (const expandedAlternatives of alternatives) {
+      for (const alternative of expandedAlternatives) {
+        for (const suffix of suffixes) {
+          out.push(prefix + alternative + suffix)
+          if (out.length > limit) return undefined
+        }
+      }
+    }
+    return out
+  }
+  return expand(value)
+}
+
+function regexEscaped(char: string): string {
+  return '\\^$.*+?()[]{}|'.includes(char) ? `\\${char}` : char
+}
+
+function wildcardSegmentRegex(segment: string): RegExp | undefined {
+  if (!segment.includes('?') && !segment.includes('[')) return undefined
+  if (/^[*]+$/.test(segment)) return undefined
+  let out = ''
+  for (let index = 0; index < segment.length; index += 1) {
+    const char = segment[index]!
+    if (char === '*') out += `${GLOB_NOT_SEPARATOR}*`
+    else if (char === '?') out += GLOB_NOT_SEPARATOR
+    else if (char === '[') {
+      let end = index + 1
+      let negated = false
+      if (segment[end] === '!' || segment[end] === '^') {
+        negated = true
+        end += 1
+      }
+      let content = ''
+      if (segment[end] === ']') {
+        content += regexEscaped(']')
+        end += 1
+      }
+      let closed = false
+      for (; end < segment.length; end += 1) {
+        if (segment[end] === ']') {
+          closed = true
+          break
+        }
+        content += regexEscaped(segment[end]!)
+      }
+      if (!closed || content === '') out += regexEscaped(char)
+      else {
+        out += `[${negated ? '^' : ''}${content}]`
+        index = end
+      }
+    } else out += regexEscaped(char)
+  }
+  return new RegExp(`^${out}$`, 'i')
+}
+
+function credentialWildcardProbe(target: string): boolean {
+  for (const segment of target.split(/[/\\]/)) {
+    const regex = wildcardSegmentRegex(segment)
+    if (regex && CREDENTIAL_GLOB_PROBES.some(probe => regex.test(probe))) return true
+  }
+  return false
 }
 
 function splitGlobPrefix(target: string): { readonly prefix: string; readonly suffix: string } {
@@ -164,17 +284,18 @@ function resolveExistingAndLinks(candidate: string): readonly string[] {
   return [...out]
 }
 
-function resolvedCredentialPath(raw: string, baseDir?: string): boolean {
+function resolvedCredentialPath(raw: string, bases: readonly string[]): boolean {
   const trimmed = raw.trim()
   if (!trimmed) return false
   if (credentialLikePath(trimmed)) return true
   const expanded = expandHome(trimmed)
   if (credentialLikePath(expanded)) return true
+  if (credentialWildcardProbe(expanded)) return true
   const { prefix, suffix } = splitGlobPrefix(expanded)
   if (!prefix) return false
   const roots = isAbsolute(prefix)
     ? [resolve(prefix)]
-    : [...(baseDir ? [resolve(baseDir, prefix)] : []), resolve(prefix)]
+    : bases.map(base => resolve(base, prefix))
   const joinSuffix = (resolvedPrefix: string) =>
     suffix ? `${resolvedPrefix}${suffix.startsWith('/') || suffix.startsWith('\\') ? '' : '/'}${suffix}` : resolvedPrefix
   for (const root of roots) {
@@ -187,6 +308,30 @@ function resolvedCredentialPath(raw: string, baseDir?: string): boolean {
   return false
 }
 
+function credentialBases(args: Record<string, unknown>, key: string, baseDir?: string): readonly string[] {
+  const bases: string[] = []
+  const seen = new Set<string>()
+  const add = (base: string | undefined) => {
+    if (!base) return
+    const resolved = resolve(base)
+    if (!seen.has(resolved)) {
+      seen.add(resolved)
+      bases.push(resolved)
+    }
+  }
+  if (key !== 'path' && key !== 'file_path' && typeof args.path === 'string' && args.path.trim()) {
+    const expandedPath = expandHome(args.path.trim())
+    if (isAbsolute(expandedPath)) add(expandedPath)
+    else {
+      if (baseDir) add(resolve(baseDir, expandedPath))
+      add(resolve(expandedPath))
+    }
+  }
+  if (baseDir) add(baseDir)
+  add(resolve())
+  return bases
+}
+
 export function credentialToolGuard(exec: { readonly name: string; readonly arguments?: unknown }, baseDir?: string): string | undefined {
   if (!CREDENTIAL_GUARD_TOOLS.has(exec.name)) return undefined
   const args = guardArgs(exec.arguments)
@@ -195,10 +340,14 @@ export function credentialToolGuard(exec: { readonly name: string; readonly argu
     const value = args[key]
     if (value === undefined || value === null) continue
     if (typeof value !== 'string') return CREDENTIAL_GUARD_REASON
-    const bad = exec.name === 'grep' && key === 'pattern'
-      ? credentialLikePath(value)
-      : resolvedCredentialPath(value, baseDir)
-    if (bad) return CREDENTIAL_GUARD_REASON
+    if (exec.name === 'grep' && key === 'pattern') {
+      if (credentialLikeText(value)) return CREDENTIAL_GUARD_REASON
+      continue
+    }
+    const expanded = expandBraces(value)
+    if (expanded === undefined) return CREDENTIAL_GUARD_REASON
+    const bases = credentialBases(args, key, baseDir)
+    if (expanded.some(candidate => resolvedCredentialPath(candidate, bases))) return CREDENTIAL_GUARD_REASON
   }
   return undefined
 }

@@ -32,6 +32,7 @@ const deUi: UiText = {
   fileTooLarge: "Die Datei ist zu groß; höchstens {max} pro Datei.",
   fileTooMany: "Höchstens {max} Dateien pro Nachricht.",
   fileUploadFailed: "Datei-Upload fehlgeschlagen: {message}",
+  fileReceiptExpired: "Die hochgeladenen Anhänge sind abgelaufen und werden erneut hochgeladen; danach bitte noch einmal senden.",
   removeImage: 'Bild entfernen',
   imageAttached: 'Bild',
   quickActions: 'Schnellaktionen',

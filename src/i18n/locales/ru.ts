@@ -32,6 +32,7 @@ const ruUi: UiText = {
   fileTooLarge: "Файл слишком большой; не более {max} на файл.",
   fileTooMany: "Не более {max} файлов в одном сообщении.",
   fileUploadFailed: "Не удалось загрузить файл: {message}",
+  fileReceiptExpired: "Срок загруженных вложений истёк, они загружаются заново; отправьте сообщение ещё раз, когда загрузка завершится.",
   removeImage: 'Удалить изображение',
   imageAttached: 'Изображение',
   quickActions: 'Быстрые команды',

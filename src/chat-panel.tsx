@@ -664,7 +664,8 @@ export function ChatPanel({ locale, api, Card, onOpenSession, renderFactorySlot 
     } catch (failure) {
       removeEcho(echo)
       const message = failure instanceof Error ? failure.message : String(failure)
-      setSendError(/\bHTTP 413\b/.test(message) ? t(locale, 'sendTooLarge') : message)
+      const code = (failure as { readonly code?: unknown } | null | undefined)?.code
+      setSendError(code === 'dot/file-expired' ? t(locale, 'fileReceiptExpired') : /\bHTTP 413\b/.test(message) ? t(locale, 'sendTooLarge') : message)
       throw failure
     }
     // Keep the local bytes only for a message the host accepted: a rejected send must not

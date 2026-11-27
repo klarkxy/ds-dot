@@ -812,7 +812,7 @@ export class DotService {
       if (seen.has(id)) throw new DotError('dot/invalid', 'Duplicate attachment receipt id; nothing was sent.')
       seen.add(id)
       const row = this.fileReceipts.get(id)
-      if (!row) throw new DotError('dot/invalid', 'That attachment upload is no longer available. Attach the file again and resend; nothing was sent.')
+      if (!row) throw new DotError('dot/file-expired', 'That attachment upload is no longer available. Attach the file again and resend; nothing was sent.')
       refs.push(row.ref)
     }
     return refs

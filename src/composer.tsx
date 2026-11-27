@@ -212,6 +212,10 @@ export function Composer({
     let imageCount = images.length
     let fileCount = filesRef.current.length
     for (const file of picked) {
+      if (file.size > CHAT_FILE_BYTES) {
+        setLocalError(fillText(t(locale, 'fileTooLarge'), { max: humanBytes(CHAT_FILE_BYTES) }))
+        continue
+      }
       const bytes = new Uint8Array(await file.arrayBuffer())
       const inspected = inspectImageBytes(bytes, file.type)
       if (inspected.ok && imageCount < CHAT_IMAGE_LIMIT) {
@@ -261,9 +265,18 @@ export function Composer({
         updateFiles([])
         setHistoryCursor(-1)
         setExpanded(false)
-      }, () => {})
+      }, failure => {
+        if ((failure as { readonly code?: unknown } | null | undefined)?.code !== 'dot/file-expired') return
+        const resetting = filesRef.current
+          .filter(file => file.status === 'ready')
+          .map(file => ({ ...file, status: 'uploading' as const, receipt: undefined, error: undefined }))
+        if (resetting.length === 0) return
+        const byKey = new Map(resetting.map(file => [file.key, file]))
+        updateFiles(list => list.map(file => byKey.get(file.key) ?? file))
+        for (const file of resetting) void uploadOne(file)
+      })
       .finally(() => { setBusy(false); area.current?.focus() })
-  }, [text, images, files, busy, disabled, sessionId, onSend, updateFiles])
+  }, [text, images, files, busy, disabled, sessionId, onSend, updateFiles, uploadOne])
 
   const startNewSegment = useCallback(() => {
     if (disabled || running || segmentBusy) return

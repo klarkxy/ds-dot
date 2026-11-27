@@ -140,12 +140,20 @@ describe('approval risk', () => {
       '.pypirc',
       'prod.env',
       '*.env',
+      '/workspace/app.prod.env',
+      'docker.local.env',
+      '/tmp/my key.key',
+      'cert (1).pem',
+      '私钥.key',
     ]) {
       expect(credentialLikePath(cred), cred).toBe(true)
     }
     expect(credentialLikePath('/tmp/id_ed25519.pub')).toBe(false)
     expect(credentialLikePath('/home/u/.ssh/id_ed25519.pub')).toBe(true)
     expect(credentialLikePath('src/hotkey.ts')).toBe(false)
+    expect(credentialLikePath('app.env.example')).toBe(false)
+    expect(credentialLikePath('id_rsa.pub')).toBe(false)
+    expect(credentialLikePath('src/main.ts')).toBe(false)
     expect(credentialLikePath('/outside/secret.txt')).toBe(false)
     expect(assessApprovalRisk({ toolName: 'bash', arguments: 'grep -R begin ~/.ssh' }).reasons).toContain('credential')
     expect(assessApprovalRisk({ toolName: 'bash', arguments: 'ls /Users/alice/.aws' }).reasons).toContain('credential')

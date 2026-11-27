@@ -33,6 +33,7 @@ export const zhUi = {
   fileTooLarge: "文件体积超出限制，单个不超过 {max}。",
   fileTooMany: "单次最多添加 {max} 个文件。",
   fileUploadFailed: "文件上传未成功：{message}",
+  fileReceiptExpired: "附件上传已过期，正在自动重新上传，完成后请再发送一次。",
   removeImage: '移除图片',
   imageAttached: '图片',
   quickActions: '快捷指令',

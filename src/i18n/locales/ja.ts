@@ -32,6 +32,7 @@ const jaUi: UiText = {
   fileTooLarge: "ファイルが大きすぎます。1 件 {max} 以下にしてください。",
   fileTooMany: "1 回のメッセージに添付できるファイルは {max} 件までです。",
   fileUploadFailed: "ファイルのアップロードに失敗しました：{message}",
+  fileReceiptExpired: "添付ファイルのアップロードが期限切れのため再アップロードしています。完了したらもう一度送信してください。",
   removeImage: '画像を削除',
   imageAttached: '画像',
   quickActions: 'クイック操作',

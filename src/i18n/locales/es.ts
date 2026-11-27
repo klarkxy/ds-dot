@@ -32,6 +32,7 @@ const esUi: UiText = {
   fileTooLarge: "El archivo es demasiado grande; máximo {max} por archivo.",
   fileTooMany: "Puedes añadir como máximo {max} archivos por mensaje.",
   fileUploadFailed: "No se pudo subir el archivo: {message}",
+  fileReceiptExpired: "Los adjuntos subidos caducaron y se están volviendo a subir; envía de nuevo cuando terminen.",
   removeImage: 'Quitar imagen',
   imageAttached: 'Imagen',
   quickActions: 'Acciones rápidas',

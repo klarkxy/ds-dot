@@ -8,6 +8,7 @@ import type { RawEvent } from './chat.ts'
 import { DEFAULT_SETTINGS, PRESET_ID, REMINDER_HEAD, type DotContextView, type DotSettings } from './contracts.ts'
 import { bindHost, FULL_ACCESS, type DotHost, type SessionRow, type WorkspaceRow } from './host.ts'
 import { DotService, HOME_TITLE } from './service.ts'
+import { CHAT_FILE_RECEIPT_TTL_MS } from './chat-files.ts'
 import { readSnapshot, saveSnapshot } from './artifacts.ts'
 import * as artifacts from './artifacts.ts'
 import { launchReservedRun } from './execution.ts'
@@ -278,6 +279,15 @@ describe('DotService.ensureDot', () => {
     const before = h.calls.filter(call => call.startsWith('say ')).length
     await expect(h.service.say('again', undefined, [], [receipt.id])).rejects.toThrow(/Attach the file again/)
     expect(h.calls.filter(call => call.startsWith('say '))).toHaveLength(before)
+  })
+
+  it('rejects unknown and TTL-expired attachment receipts with dot/file-expired and duplicate ids as invalid', async () => {
+    const h = setup()
+    await expect(h.service.say('unknown', undefined, [], ['missing-receipt'])).rejects.toMatchObject({ code: 'dot/file-expired' })
+    const receipt = await h.service.attachFile('note.txt', Buffer.from('hello').toString('base64'))
+    h.advance(CHAT_FILE_RECEIPT_TTL_MS + 1)
+    await expect(h.service.say('expired', undefined, [], [receipt.id])).rejects.toMatchObject({ code: 'dot/file-expired' })
+    await expect(h.service.say('duplicate', undefined, [], [receipt.id, receipt.id])).rejects.toMatchObject({ code: 'invalid' })
   })
 })
 

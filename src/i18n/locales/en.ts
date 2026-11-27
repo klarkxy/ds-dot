@@ -33,6 +33,7 @@ const enUi: UiText = {
   fileTooLarge: "That file is too large; each file must be {max} or smaller.",
   fileTooMany: "You can add at most {max} files per message.",
   fileUploadFailed: "File upload failed: {message}",
+  fileReceiptExpired: "Attachment uploads expired and are uploading again; send once more when they finish.",
   removeImage: 'Remove image',
   imageAttached: 'Image',
   quickActions: 'Quick actions',

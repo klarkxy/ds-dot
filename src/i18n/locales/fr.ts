@@ -32,6 +32,7 @@ const frUi: UiText = {
   fileTooLarge: "Le fichier est trop volumineux ; maximum {max} par fichier.",
   fileTooMany: "Vous pouvez ajouter au maximum {max} fichiers par message.",
   fileUploadFailed: "Échec du téléversement du fichier : {message}",
+  fileReceiptExpired: "Les pièces jointes ont expiré et sont en cours de nouveau téléversement ; renvoyez le message une fois terminé.",
   removeImage: 'Retirer l’image',
   imageAttached: 'Image',
   quickActions: 'Actions rapides',

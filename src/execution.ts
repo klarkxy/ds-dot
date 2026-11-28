@@ -293,16 +293,14 @@ export async function reconcileReserved(book: WorkBook, host: RunSessionHost, ru
     return { ok: false, code: 'unknown', message: `${runId} session lookup failed (${cause}); no second session was created` }
   }
   if (!located) {
-    let resetUnknown = false
     if (run.creation === 'unknown' && run.sessionId === undefined) {
       const reset = await book.abandonUnknownCreation(runId, at)
       if (!reset.ok) return reset
-      resetUnknown = true
     }
     const current = book.run(runId) ?? run
-    const neverStarted = current.creation === 'intent' && current.actionClaim === undefined
+    const neverStarted = current.creation === 'intent' && current.actionClaim === undefined && !book.liveSessionClaim(runId)
       && !current.deliveries.some(item => item.status === 'accepted' || item.status === 'unknown' || item.hostRequestId !== undefined)
-    if (resetUnknown && neverStarted && at - current.createdAt > RESERVED_UNSENT_RELEASE_MS) {
+    if (neverStarted && current.launchAttemptedAt !== undefined && at - current.launchAttemptedAt > RESERVED_UNSENT_RELEASE_MS) {
       const released = await book.releaseUnsent(runId, current.updatedAt, at)
       if (!released.ok) return released
       return { ok: true, action: 'closed', created: false, prompted: false }
@@ -414,8 +412,10 @@ async function continueClose(book: WorkBook, host: RunSessionHost, runId: string
         if (!host.watch) { quiet = false; break }
         try {
           const seen = await host.watch(id)
-          if (!(seen.running === false && seen.queue === 'empty')) { quiet = false; break }
+          if (!(seen.running === false && seen.queue === 'empty') || seen.seq === undefined) { quiet = false; break }
           if (!host.jobsSettled || await host.jobsSettled(id) !== true) { quiet = false; break }
+          const again = await host.watch(id)
+          if (!(again.running === false && again.queue === 'empty') || again.seq !== seen.seq) { quiet = false; break }
         } catch { quiet = false; break }
       }
       if (quiet) {

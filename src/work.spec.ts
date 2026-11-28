@@ -875,6 +875,7 @@ describe('run origin provenance', () => {
       createdAt: 1, updatedAt: 1,
     }
     expect(parseRun(validRun)).toBeDefined()
+    expect(parseRun({ ...validRun, launchAttemptedAt: 7 })).toMatchObject({ launchAttemptedAt: 7 })
     expect(parseRun({ ...validRun, origin: { strength: 'explicit', source: 'user' } })).toBeDefined()
     expect(parseRun({ ...validRun, origin: { strength: 'inferred', source: 'speculative', sender: 'alice', policyVersion: 'v1' } })).toBeDefined()
 

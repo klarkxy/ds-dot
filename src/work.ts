@@ -202,6 +202,8 @@ export interface RunRecord {
   readonly closeIntent?: 'completed' | 'failed' | 'stopped'
   /** One in-flight session lookup. The prompt claim is the initial delivery status, not a second flag. */
   readonly actionClaim?: 'session' | 'prompt'
+  /** Last time a session-launch attempt was claimed; survives crash recovery after the claim itself is reset. */
+  readonly launchAttemptedAt?: number
   readonly closureEvidence?: { readonly queueCleared: boolean; readonly agentIdle: boolean; readonly jobsSettled: boolean }
   readonly observation?: string
   readonly cursor?: RunCursor
@@ -355,6 +357,7 @@ export const runSchema = z.object({
   closeReason: z.string().optional(),
   closeIntent: z.enum(['completed', 'failed', 'stopped']).optional(),
   actionClaim: z.enum(['session', 'prompt']).optional(),
+  launchAttemptedAt: z.number().optional(),
   closureEvidence: z.object({ queueCleared: z.boolean(), agentIdle: z.boolean(), jobsSettled: z.boolean() }).optional(),
   observation: z.string().optional(),
   cursor: z.object({
@@ -1713,6 +1716,7 @@ export class WorkBook {
       const next: RunRecord = {
         ...run,
         actionClaim: 'session',
+        launchAttemptedAt: at,
         creation: run.creation === 'unknown' ? 'unknown' : 'inflight',
         ...(preset ? { expectedPreset: preset } : {}),
         updatedAt: at,
@@ -1799,7 +1803,8 @@ export class WorkBook {
       if (TERMINAL.has(run.phase)) return { ok: false, code: 'closed-run', message: `${runId} is ${run.phase}` }
       if (this.liveSessionClaims.has(runId)) return { ok: true, abandoned: false }
       if (run.actionClaim !== 'session' && run.creation !== 'inflight') return { ok: true, abandoned: false }
-      const next: RunRecord = dropClaim({ ...run, creation: run.sessionId ? 'unknown' : 'intent', updatedAt: at })
+      const launchAttemptedAt = run.launchAttemptedAt ?? (run.creation === 'unknown' || run.creation === 'inflight' || run.actionClaim === 'session' ? run.updatedAt : undefined)
+      const next: RunRecord = dropClaim({ ...run, ...(launchAttemptedAt !== undefined ? { launchAttemptedAt } : {}), creation: run.sessionId ? 'unknown' : 'intent', updatedAt: at })
       await this.commit('runs', next.id, next)
       this.runs.set(next.id, next)
       this.currentRevision += 1
@@ -1819,7 +1824,8 @@ export class WorkBook {
       if (run.deliveries.some(item => item.status === 'accepted' || item.status === 'unknown' || item.hostRequestId !== undefined)) {
         return { ok: true, reset: false }
       }
-      const next: RunRecord = dropClaim({ ...run, creation: 'intent', updatedAt: at })
+      const launchAttemptedAt = run.launchAttemptedAt ?? run.updatedAt
+      const next: RunRecord = dropClaim({ ...run, launchAttemptedAt, creation: 'intent', updatedAt: at })
       await this.commit('runs', next.id, next)
       this.runs.set(next.id, next)
       this.currentRevision += 1

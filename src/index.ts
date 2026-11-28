@@ -7,7 +7,6 @@
  * the clock of dot's own reminders, and routes the approvals and questions of
  * other top-level sessions to dot first.
  */
-import { homedir } from 'node:os'
 import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-agent'
@@ -27,6 +26,7 @@ import { checkChatImages } from './chat-images.ts'
 import { CHAT_RPC_BODY_BYTES, checkChatFileIds } from './chat-files.ts'
 import { ChatFeed } from './feed.ts'
 import { hostImport } from './host-import.ts'
+import { dshHomeDir } from './dsh-home.ts'
 import { DotCapabilities, type CapabilityPluginManager, type CapabilityTools } from './capabilities.ts'
 import { bindHost } from './host.ts'
 import { InboxLedger } from './inbox.ts'
@@ -202,7 +202,7 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
     capabilities,
     peers: new PeerLedger(domain.table('peers'), parsePeerDelivery),
     inbox: new InboxLedger(domain.table('inbox'), parseInboxRecord),
-    homeDir: config.homeDir?.trim() || join(process.env.DSH_HOME?.trim() || join(homedir(), '.dsh'), 'dot'),
+    homeDir: config.homeDir?.trim() || join(dshHomeDir(), 'dot'),
     log,
     trace: logger,
     approvalGraceMs: Number.isFinite(config.approvalGraceMs) ? Math.max(0, Math.min(60_000, config.approvalGraceMs!)) : APPROVAL_GRACE_MS,

@@ -6,22 +6,14 @@ import { constants, type Dirent } from 'node:fs'
 import { open, readdir, realpath, stat } from 'node:fs/promises'
 import { isAbsolute, relative, resolve, sep } from 'node:path'
 import { credentialLikePath } from './approval-risk.ts'
+import { pathInsideRoot, withoutNamespace } from './path-inspect.ts'
+import { dotReadRefusal } from './read-guard.ts'
+
+export { pathInsideRoot, withoutNamespace } from './path-inspect.ts'
 
 export const WORKSPACE_LIST_MAX = 200
 export const WORKSPACE_LIST_DEPTH = 2
 const SKIP = new Set(['node_modules', '.git'])
-
-/** Strip a Windows long-path prefix so relative() compares the same volume. */
-export function withoutNamespace(path: string): string {
-  if (path.startsWith('\\\\?\\UNC\\')) return `\\\\${path.slice(8)}`
-  if (path.startsWith('\\\\?\\')) return path.slice(4)
-  return path
-}
-
-export function pathInsideRoot(root: string, target: string): boolean {
-  const rel = relative(withoutNamespace(resolve(root)), withoutNamespace(resolve(target)))
-  return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel))
-}
 
 export interface WorkspaceFileRow {
   readonly path: string
@@ -93,12 +85,15 @@ export interface WorkspaceRead {
 }
 
 /**
- * Read a text file. Relative targets resolve under `baseDir` and must stay
- * inside it; absolute targets may be anywhere. Credential-like paths, binary
- * files, and large files remain refused, and the opened file is checked against
- * the realpath that passed those checks.
+ * Read a text file inside one of the authorized roots. Relative targets resolve
+ * under `baseDir` and must stay inside it; absolute targets must land inside a
+ * registered workspace, a change directory, Dorothy's home, chat attachments,
+ * or Office outputs. Credential-like paths, binary files, and large files
+ * remain refused, and the opened file is checked against the realpath that
+ * passed those checks.
  */
 export async function readWorkspaceText(
+  authorizedRoots: readonly string[],
   baseDir: string | undefined,
   target: string,
   options?: { readonly startLine?: number; readonly maxLines?: number },
@@ -109,6 +104,8 @@ export async function readWorkspaceText(
   const maxLines = options?.maxLines ?? WORKSPACE_READ_DEFAULT_LINES
   if (!Number.isInteger(startLine) || startLine < 1) throw new Error('start_line must be a positive integer')
   const limit = Math.min(Math.max(1, Math.floor(maxLines)), WORKSPACE_READ_MAX_LINES)
+  const refusal = dotReadRefusal(trimmed, { bases: baseDir ? [baseDir] : [], roots: authorizedRoots })
+  if (refusal) throw new Error(refusal)
   const absolute = isAbsolute(trimmed)
   if (!absolute && !baseDir) throw new Error('no workspace applies to a relative path')
   const raw = absolute ? resolve(trimmed) : resolve(baseDir!, trimmed)

@@ -47,7 +47,11 @@ export function gateToolExecution(ctx: Context, allowedNames: readonly string[],
     if (decideExtra !== undefined) {
       try {
         const verdict = await decideExtra({ name: exec.name, callId: exec.callId, arguments: exec.arguments, signal: exec.signal })
-        if (verdict === 'next') return next()
+        if (verdict === 'next') {
+          const denied = await guard?.(exec)
+          if (denied !== undefined) return { kind: 'deny', reason: denied }
+          return next()
+        }
         if (verdict !== undefined) return verdict
       } catch { /* a failed check denies rather than leaks a call */ }
     }

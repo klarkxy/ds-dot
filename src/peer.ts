@@ -323,11 +323,12 @@ export function guardRunWriteTool(
   run: { readonly id: string; readonly cwd: string; readonly workspaceRoot: string; readonly writeScope: WriteScope; readonly access?: 'read' | 'write' },
   exec: PreExecuteToolCall,
   platform: NodeJS.Platform = process.platform,
+  mcpServers?: readonly string[],
 ): { readonly allow: true } | { readonly allow: false; readonly reason: string } {
   const readOnly = run.access === 'read' || !scopeWrites(run.writeScope)
   // MCP servers run outside the sandbox, so a read-only run refuses any MCP
   // tool whose name does not read as a lookup.
-  if (readOnly && mcpToolMayWrite(exec.name)) {
+  if (readOnly && mcpToolMayWrite(exec.name, mcpServers)) {
     return { allow: false, reason: `Run ${run.id} is read-only and cannot call MCP tool "${exec.name}", which may write outside the sandbox.` }
   }
   const tool = exec.name.trim().toLowerCase()

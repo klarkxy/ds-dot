@@ -59,6 +59,16 @@ describe('dot preset tool restrictions on the rc.3 registry', () => {
     await f.preset.dispose()
     await expect(gate('scoped_secret')).resolves.toEqual({ kind: 'allow' })
   })
+  it('denies a granted extra when the shared guard refuses it', async () => {
+    const f = fixture()
+    gateToolExecution(f.preset.ctx, ['show_view'], async () => 'next', () => 'outside readable roots')
+    const agentKey = scopeOf(f.agent.ctx)
+    const gate = (name: string) => f.ctx.waterfall(scopeTarget(f.ctx.tools, agentKey), 'tools/pre-execute', { name } as never, async () => ({ kind: 'allow' as const }))
+    bindScopeParent(f.agentKey, f.presetKey)
+    await expect(gate('read')).resolves.toEqual({ kind: 'deny', reason: 'outside readable roots' })
+    await f.agent.dispose()
+    await f.preset.dispose()
+  })
   it('names the host never registered are skipped, not fatal', async () => {
     const f = fixture()
     bindScopeParent(f.agentKey, f.presetKey)

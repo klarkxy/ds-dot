@@ -143,32 +143,6 @@ describe('cache keepalive setting', () => {
     await act(async () => root.unmount())
   })
 
-  it('removes provider-renamed aliases when the default is committed', async () => {
-    const saved: Array<Partial<DotSettings>> = []
-    const model = 'klarkxy/gemini-4-hydrogen'
-    let current: DotSettings = { ...DEFAULT_SETTINGS, cacheTtl: { 'magpie/klarkxy/gemini-4-hydrogen': 0 } }
-    const api = {
-      models: async () => ({ groups: [] }),
-      settings: async () => current,
-      settingProposals: async () => [],
-      decideSetting: async () => 'ok',
-      keepalive: async () => ({ provider: 'magpie-gemini', model, minutes: 0, defaultMinutes: 5 }),
-      setSettings: async (patch: Partial<DotSettings>) => { saved.push(patch); current = { ...current, ...patch } as DotSettings; return current },
-    }
-    function Harness() {
-      const [settings, setSettings] = useState<DotSettings>(current)
-      return <SettingsPanel locale="en" api={api as never} settings={settings} onSaved={setSettings} />
-    }
-    const root = createRoot(document.getElementById('root')!)
-    await act(async () => root.render(<Harness />))
-    await act(async () => { await Promise.resolve() })
-    const input = document.querySelector<HTMLInputElement>('input[aria-label="Cache duration"]')!
-    await act(async () => { type(input, '5') })
-    await act(async () => { blur(input) })
-    expect(saved.at(-1)).toEqual({ cacheTtl: { 'magpie/klarkxy/gemini-4-hydrogen': 0, 'magpie-gemini/klarkxy/gemini-4-hydrogen': 5 } })
-    await act(async () => root.unmount())
-  })
-
   it('keeps independent same-model overrides for other providers', async () => {
     const saved: Array<Partial<DotSettings>> = []
     let current: DotSettings = { ...DEFAULT_SETTINGS, cacheTtl: { 'provider-a/model-x': 15, 'provider-b/model-x': 0 } }

@@ -30,20 +30,9 @@ export function defaultCacheTtl(provider: string, model: string): number {
   return CACHE_TTL_TABLE.find(row => row.match.test(key))?.minutes ?? DEFAULT_CACHE_TTL_MINUTES
 }
 
-/** The model part of a provider/model override key. */
-export function cacheTtlModelOf(key: string): string | undefined {
-  const slash = key.indexOf('/')
-  return slash >= 0 ? key.slice(slash + 1) : undefined
-}
-
-/** The human's per-model override wins; 0 disables keepalive for that model. */
+/** The human's exact per-provider/model override wins; 0 disables keepalive for that model. */
 export function cacheTtlMinutes(settings: DotSettings, provider: string, model: string): number {
-  const exact = settings.cacheTtl?.[cacheTtlKey(provider, model)]
-  if (exact !== undefined) return exact
-  for (const [key, minutes] of Object.entries(settings.cacheTtl ?? {})) {
-    if (cacheTtlModelOf(key) === model) return minutes
-  }
-  return defaultCacheTtl(provider, model)
+  return settings.cacheTtl?.[cacheTtlKey(provider, model)] ?? defaultCacheTtl(provider, model)
 }
 
 /** Ping at 80% of the cache lifetime so the next request still lands inside it. */

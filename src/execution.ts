@@ -7,7 +7,7 @@ import type { TaskPermission } from './contracts.ts'
 import { onDiskPath, scopeWrites, type RunCursor, type RunPhase, type RunRecord, type WorkBook, type WorkRefusal } from './work.ts'
 
 export interface FoundSession { readonly cwd?: string; readonly preset?: string }
-const RESERVED_UNSENT_RELEASE_MS = 10 * 60_000
+export const RESERVED_UNSENT_RELEASE_MS = 10 * 60_000
 export interface CreatedSession { readonly sessionId: string; readonly cwd?: string; readonly preset?: string }
 export interface StopReport {
   readonly cancelAccepted: boolean

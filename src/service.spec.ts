@@ -991,6 +991,10 @@ describe('DotService history', () => {
     await h.store.apply({ type: 'status', sessionId: 'running-old', status: 'running', at: 2 }, [])
     h.events.set('running-old', [human('friday still running', 40)])
     expect(await h.service.searchHistory({ query: 'friday', since })).toContain('· running-old')
+    await h.store.track({ sessionId: 'archived-old', origin: 'watched', title: 'archived old', goal: 'g', cwd: '/w', at: 1 })
+    await h.store.apply({ type: 'archived', sessionId: 'archived-old', at: 2 }, [])
+    h.events.set('archived-old', [human('friday after archive', 40)])
+    expect(await h.service.searchHistory({ query: 'friday', since })).toContain('· archived-old')
     await expect(h.service.searchHistory({ query: 'friday', since: 'yesterday' })).rejects.toMatchObject({ code: 'dot/invalid' })
   })
 
@@ -2406,6 +2410,42 @@ describe('DotService.relayRequest', () => {
 })
 
 describe('DotService work dispatch', () => {
+
+  it('schedules one recheck for a failed launch attempt that is not yet stale', async () => {
+    const h = setup()
+    h.advance(10 * 60_000)
+    const now = 1_000 + 10 * 60_000
+    const change = await h.service.createWorkChange({ title: 'Read', cwd: 'H:\\repo', goal: 'look', at: 1 })
+    const reserved = await h.service.reserveWorkRun({ changeId: change.id, cwd: 'H:\\repo', writeScope: { kind: 'paths', paths: [] }, at: 2 })
+    if (!reserved.ok) throw new Error(reserved.message)
+    const attemptedAt = now - 5 * 60_000
+    expect(await h.store.work.claimSession(reserved.run.id, undefined, attemptedAt)).toMatchObject({ ok: true, owned: true })
+    h.store.work.releaseLiveSessionClaim(reserved.run.id)
+
+    await h.service.reconcile()
+    expect(h.store.work.run(reserved.run.id)).toMatchObject({ phase: 'reserved', creation: 'intent', launchAttemptedAt: attemptedAt })
+    const delay = 5 * 60_000 + 1_000
+    expect(h.delays().filter(ms => ms === delay)).toHaveLength(1)
+    await h.service.reconcile()
+    expect(h.delays().filter(ms => ms === delay)).toHaveLength(1)
+
+    h.advance(delay)
+    h.fire()
+    await vi.waitFor(() => expect(h.store.work.run(reserved.run.id)).toMatchObject({ phase: 'stopped', closeReason: 'unsent' }))
+    await h.service.dispose()
+  })
+
+  it('does not schedule a launch recheck for a deliberate reservation', async () => {
+    const h = setup()
+    const change = await h.service.createWorkChange({ title: 'Read', cwd: 'H:\\repo', goal: 'look', at: 1 })
+    const reserved = await h.service.reserveWorkRun({ changeId: change.id, cwd: 'H:\\repo', writeScope: { kind: 'paths', paths: [] }, at: 2 })
+    if (!reserved.ok) throw new Error(reserved.message)
+    await h.service.reconcile()
+    expect(h.store.work.run(reserved.run.id)).toMatchObject({ phase: 'reserved', creation: 'intent' })
+    expect(h.store.work.run(reserved.run.id)?.launchAttemptedAt).toBeUndefined()
+    expect(h.delays()).toEqual([])
+    await h.service.dispose()
+  })
 
   it('does not create a session when the reserved id cannot be read back', async () => {
     const h = setup()

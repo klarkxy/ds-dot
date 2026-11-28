@@ -2130,7 +2130,7 @@ export class WorkBook {
       if (run.updatedAt !== seenUpdatedAt) return { ok: false, code: 'stale', message: `${runId} changed while it was stopping` }
       if (run.phase !== 'settling' || run.creation !== 'rejected' || !run.closeIntent) return { ok: false, code: 'closed-run', message: `${runId} is ${run.phase}` }
       if (this.liveSessionClaims.has(runId)) return { ok: false, code: 'unknown', message: `${runId} creation is still bound` }
-      const next: RunRecord = dropClaim({ ...run, phase: run.closeIntent, closeReason: 'identity-rejected', updatedAt: at })
+      const next: RunRecord = dropClaim({ ...run, phase: 'stopped', closeReason: 'identity-rejected', updatedAt: at })
       await this.commit('runs', next.id, next)
       this.runs.set(next.id, next)
       this.currentRevision += 1

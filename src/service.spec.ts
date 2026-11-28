@@ -2452,6 +2452,20 @@ describe('DotService work dispatch', () => {
     await h.service.dispose()
   })
 
+  it('reopens a failed launch reservation and releases it only when the session is absent', async () => {
+    const absent = await failedLaunchReopen(false)
+    expect(absent.run).toMatchObject({ phase: 'stopped', closeReason: 'unsent' })
+    expect(absent.run?.actionClaim).toBeUndefined()
+    expect(absent.occupied).toEqual([])
+    expect(absent.hostCalls.filter(call => call.startsWith('create ') || call.startsWith('prompt '))).toEqual([])
+
+    const present = await failedLaunchReopen(true)
+    expect(present.run).toMatchObject({ phase: 'reserved', creation: 'confirmed' })
+    expect(present.run?.closeReason).toBeUndefined()
+    expect(present.occupied.map(run => run.id)).toEqual([present.runId])
+    expect(present.hostCalls.filter(call => call.startsWith('create ') || call.startsWith('prompt '))).toEqual([])
+  })
+
   it('startup recovery leaves a deliberate reservation reserved', async () => {
     const h = setup()
     const change = await h.service.createWorkChange({ title: 'Read', cwd: 'H:\\repo', goal: 'look', at: 1 })
@@ -2974,6 +2988,52 @@ async function startupPreset(actual: string | undefined) {
   })
   await again.reconcile()
   return { stops, run: book.work.run(reserved.run.id), occupied: book.work.occupying().length }
+}
+
+/** Persist a create-error launch attempt, reopen its rows in a fresh service, and run startup recovery. */
+async function failedLaunchReopen(present: boolean) {
+  const { domain, tables } = memoryDomain()
+  const first = setup()
+  const host = first.host as DotHost
+  host.createSession = async () => { throw new Error('create exploded') }
+  const store = new DotStore(domain)
+  await store.setSettings({ ...DEFAULT_SETTINGS, reflection: false, idleCheckMinutes: 0 })
+  const service = new DotService({
+    host, store, homeDir: join(tmpdir(), 'dsh-dot-spec'), approvalGraceMs: 0, timer: first.timer, now: () => 1000,
+  })
+  const change = await service.createWorkChange({ title: 'Ship', cwd: 'H:\\repo', goal: 'land it', at: 1 })
+  const reserved = await service.reserveWorkRun({ changeId: change.id, cwd: 'H:\\repo', root: { workspaceRoot: 'H:\\repo' }, writeScope: { kind: 'paths', paths: [] }, at: 2 })
+  if (!reserved.ok) throw new Error(reserved.message)
+  const launched = await service.launchWorkRun(reserved.run.id, 'go')
+  expect(launched).toMatchObject({ ok: false, code: 'unknown' })
+  const before = store.work.run(reserved.run.id)
+  expect(before).toMatchObject({ phase: 'reserved', creation: 'unknown', actionClaim: 'session' })
+  expect(before?.launchAttemptedAt).toEqual(expect.any(Number))
+  const seed: Record<string, Record<string, unknown>> = {}
+  for (const [name, table] of Object.entries(tables)) {
+    seed[name] = {}
+    for (const [key, value] of table) seed[name]![key] = structuredClone(value)
+  }
+  await service.dispose()
+
+  const restarted = memoryDomain(seed)
+  const next = setup()
+  const recovered = next.host as DotHost
+  recovered.findSession = async id => present && id === reserved.run.requestedSessionId ? { cwd: reserved.run.cwd } : undefined
+  const book = new DotStore(restarted.domain)
+  await book.setSettings({ ...DEFAULT_SETTINGS, reflection: false, idleCheckMinutes: 0 })
+  const again = new DotService({
+    host: recovered, store: book, homeDir: join(tmpdir(), 'dsh-dot-spec'), approvalGraceMs: 0, timer: next.timer, now: () => 2000,
+  })
+  await again.reconcile()
+  const result = {
+    runId: reserved.run.id,
+    run: book.work.run(reserved.run.id),
+    occupied: book.work.occupying(),
+    hostCalls: next.calls,
+  }
+  await again.dispose()
+  return result
 }
 
 describe('factory reset', () => {

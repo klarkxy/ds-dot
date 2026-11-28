@@ -126,7 +126,7 @@ export class GithubPollSourceAdapter {
         }
         if (run.phase === 'active' && !terminalChange) {
           activeTargets.push({ change, run })
-        } else if (run.phase === 'completed' || run.phase === 'failed') {
+        } else if (run.phase === 'completed' || run.phase === 'failed' || run.phase === 'stopped') {
           hasNonStoppedFinishedRun = true
         }
       }

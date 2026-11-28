@@ -727,6 +727,8 @@ describe('PR-5 mandatory 17+ polling, admission, routing & security scenarios', 
       await h.store.putLink(makeTaskLink(stoppedChange.id, { repo: 'acme/widgets', number: 99 }, 'dot', now))
       await h.store.putLink(makeTaskLink(doneChange.id, { repo: 'acme/widgets', number: 77 }, 'dot', now))
       await h.store.putLink(makeTaskLink(rejectedChange.id, { repo: 'acme/widgets', number: 98 }, 'dot', now))
+      await h.store.putLink(makeTaskLink(stoppedChange.id, { repo: 'acme/widgets', number: 95 }, 'dot', now))
+      await h.store.putLink(makeTaskLink(rejectedChange.id, { repo: 'acme/widgets', number: 95 }, 'dot', now))
       await h.store.putLink(makeTaskLink(unsentChange.id, { repo: 'acme/widgets', number: 96 }, 'dot', now))
       await h.store.putLink(makeTaskLink(cancelledUnsentChange.id, { repo: 'acme/widgets', number: 97 }, 'dot', now))
 
@@ -919,6 +921,19 @@ describe('PR-5 mandatory 17+ polling, admission, routing & security scenarios', 
       expect(resCancelledUnsent.skippedStoppedRunIds).toEqual([ruc.run.id])
       expect(resCancelledUnsent.inboxResult).toBeUndefined()
       expect(h.inbox.list()).toHaveLength(inboxCountBeforeCancelledUnsent)
+
+      // One thread may mix a user-cancelled change with a non-user-stopped terminal run; the latter keeps the thread deliverable.
+      const inboxCountBeforeMixed = h.inbox.list().length
+      const resMixed = await adapter.receive({
+        source: 'github', sourceId: 'primary-github', deliveryId: 'gh-poll:mixed-stopped-1',
+        type: 'issue_comment.created', subject: 'acme/widgets#95', title: 'Ping mixed stopped thread',
+        actor: 'alice', summary: 'Can someone still see this?', receivedAt: now, originSource: 'github-poll',
+      }, { repo: 'acme/widgets', rawBody: 'Can someone still see this?' })
+      expect(resMixed.directRunIds).toEqual([])
+      expect(resMixed.skippedStoppedRunIds).toEqual([rs.run.id])
+      expect(resMixed.inboxResult).toBe('stored')
+      expect(h.inbox.list()).toHaveLength(inboxCountBeforeMixed + 1)
+      expect(h.relayed.filter(r => r.target === rs.run.requestedSessionId)).toHaveLength(0)
 
       // 16: PR opened never triggers closure; PR merged updates links.ts, flags Change closureReady, emits 1 result notice!
       await adapter.receive({

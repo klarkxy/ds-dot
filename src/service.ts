@@ -17,7 +17,7 @@ import { writerPrior, parseEvidenceRef, reportBullet, deliveryScope, scopeContai
 import { captureScopeAsync, defaultIgnoreCover, foldRel, ignoreCovered, isLinkReason, pruneSnapshots, readManifest, readSnapshotEntry, relativePath, saveSnapshot, scanScope, scanScopeAsync, baselineCaptures, wipeArtifacts, type SnapshotExclusion, type SnapshotSource } from './artifacts.ts'
 import { attentionItems } from './board-groups.ts'
 import { renderBrief, renderSupplement, runTitle } from './brief.ts'
-import { RESERVED_UNSENT_RELEASE_MS, bindRunSession, cancelWork, countRelayInserts, finishWork, launchReservedRun, observeRun, reconcileRun, supplementRun } from './execution.ts'
+import { bindRunSession, cancelWork, countRelayInserts, finishWork, launchReservedRun, observeRun, reconcileRun, supplementRun } from './execution.ts'
 import { detectWorkspaceRoot } from './git-root.ts'
 import { commitDelivery, createTaskWorktree, listTaskWorktrees, mergeInto, removeTaskWorktree, runGit, sanitizeRemoteDisplay, taskWorktreeRoot, type GitRunner, type TaskWorktree } from './git-worktree.ts'
 import { defaultSelfBuild, insideOrEqual, libHashOf, realpathOrResolve, type SelfBackup, type SelfInstall, type SelfUpgradeMarker } from './self-root.ts'
@@ -196,7 +196,6 @@ export class DotService {
   private closing = false
   private disposal?: Promise<void>
   private readonly inFlight = new Set<Promise<unknown>>()
-  private readonly launchRechecks = new Map<string, { readonly handle: unknown; readonly attemptedAt: number }>()
   /** One host-list reconciliation at a time; overlapping board polls share it. */
   private watchedSync?: Promise<void>
   private readonly now: () => number
@@ -273,7 +272,7 @@ export class DotService {
         return dot !== undefined && !this.options.host.isRunning(dot)
       },
       recipeHints: () => this.reflectionRecipeHints(),
-      sessions: () => this.historySessions('all', options.store.lastReflectedAt).slice(0, 50),
+      sessions: () => this.reflectionSessions(options.store.lastReflectedAt),
       ...options.log ? { log: options.log } : {},
     })
     this.pending.onChange(() => {
@@ -1793,7 +1792,7 @@ export class DotService {
     for (const run of this.store.work.occupying()) {
       if (this.closing) return
       try {
-        const res = await reconcileRun(this.store.work, this.runHost(), run.id, this.now())
+        const res = await reconcileRun(this.store.work, this.runHost(), run.id, this.now(), { startup: true })
         if (res.ok) this.watchdog.noteReconcileSuccess(run)
         else this.watchdog.noteReconcileFailure(run, res.message)
       } catch (error) {
@@ -1805,7 +1804,6 @@ export class DotService {
         await this.rememberRun(current.id)
       }
     }
-    this.scheduleLaunchRechecks()
     this.backfillManagedRetryHealth()
     if (this.canIdleCheck()) this.idleChecker.run()
     this.recoverDecisionWakes()
@@ -1814,27 +1812,6 @@ export class DotService {
     // Runs that terminalized before this start still have their sessions'
     // events around, so one capture pass backfills their cost up front.
     await this.captureRunUsage()
-  }
-  private scheduleLaunchRechecks(): void {
-    if (this.closing) return
-    const now = this.now()
-    for (const run of this.store.work.listRuns()) {
-      if (run.phase !== 'reserved' || run.creation !== 'intent' || run.launchAttemptedAt === undefined) continue
-      if (this.store.work.liveSessionClaim(run.id)) continue
-      const dueAt = run.launchAttemptedAt + RESERVED_UNSENT_RELEASE_MS + 1_000
-      if (now >= dueAt) continue
-      const existing = this.launchRechecks.get(run.id)
-      if (existing?.attemptedAt === run.launchAttemptedAt) continue
-      if (existing) this.timer.clear(existing.handle)
-      let handle: unknown
-      handle = this.timer.set(() => {
-        if (this.launchRechecks.get(run.id)?.handle === handle) this.launchRechecks.delete(run.id)
-        if (this.closing) return
-        void this.track(() => reconcileRun(this.store.work, this.runHost(), run.id, this.now()))
-          .catch(error => this.options.log?.(`dsh-dot: run ${run.id} launch recheck failed: ${messageOf(error)}`))
-      }, dueAt - now)
-      this.launchRechecks.set(run.id, { handle, attemptedAt: run.launchAttemptedAt })
-    }
   }
 
   /** The human removed a reminder in the board. */
@@ -2971,6 +2948,25 @@ export class DotService {
     return [...out, ...rest.map(item => item.row)]
   }
 
+  /** Recent activity for reflection: stricter than search, so archived old tasks do not count as recent. */
+  private reflectionSessions(since?: number): { sessionId: string; what: string; own: boolean }[] {
+    const out: { sessionId: string; what: string; own: boolean }[] = []
+    const current = this.store.dotSessionId
+    if (current) out.push({ sessionId: current, what: 'Your conversation, current session', own: true })
+    const rest: { readonly activity: number; readonly row: { sessionId: string; what: string; own: boolean } }[] = []
+    for (const past of this.store.pastSegments) {
+      if (since !== undefined && past.endedAt < since) continue
+      const span = past.startedAt > 0 ? ` (${stamp(past.startedAt)} to ${stamp(past.endedAt)})` : ` (until ${stamp(past.endedAt)})`
+      rest.push({ activity: past.endedAt, row: { sessionId: past.sessionId, what: `Your conversation, earlier session${span}`, own: true } })
+    }
+    for (const task of this.store.list()) {
+      if (since !== undefined && task.updatedAt < since && task.status !== 'running') continue
+      rest.push({ activity: task.updatedAt, row: { sessionId: task.sessionId, what: `Task "${task.title}"${task.status === 'archived' ? ' (archived)' : ''}`, own: false } })
+    }
+    rest.sort((a, b) => b.activity - a.activity)
+    return [...out, ...rest.map(item => item.row)].slice(0, 50)
+  }
+
   private describeSession(sessionId: string): { sessionId: string; what: string; own: boolean } {
     return this.historySessions('all').find(row => row.sessionId === sessionId) ?? { sessionId, what: 'Session not on your ledger', own: false }
   }
@@ -3724,8 +3720,6 @@ export class DotService {
     this.batcher.dispose()
     this.idleChecker.cancel()
     this.cancelKeepalive()
-    for (const recheck of this.launchRechecks.values()) this.timer.clear(recheck.handle)
-    this.launchRechecks.clear()
     if (this.usageHandle !== undefined) this.timer.clear(this.usageHandle)
     this.reminders.dispose()
     this.updates.dispose()

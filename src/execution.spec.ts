@@ -959,11 +959,23 @@ describe('zombie run recovery', () => {
     const book = openBook()
     const held = await reserved(book)
     const { host, calls } = hostOf({ async findSession() { return undefined } })
+    expect(await reconcileRun(book, host, held.run.id, 3, { startup: true })).toMatchObject({ action: 'absent' })
+    expect(book.run(held.run.id)?.phase).toBe('reserved')
     const result = await reconcileRun(book, host, held.run.id, 2 + 24 * 60 * 60_000)
     expect(result).toMatchObject({ ok: true, action: 'absent', created: false, prompted: false })
     expect(book.run(held.run.id)?.phase).toBe('reserved')
     expect(book.run(held.run.id)?.launchAttemptedAt).toBeUndefined()
     expect(calls).toEqual([])
+  })
+
+  it('closes a young failed launch attempt during startup recovery', async () => {
+    const book = openBook()
+    const held = await reserved(book)
+    expect(await book.claimSession(held.run.id, undefined, 2)).toMatchObject({ ok: true, owned: true })
+    book.releaseLiveSessionClaim(held.run.id)
+    const { host } = hostOf({ async findSession() { return undefined } })
+    expect(await reconcileRun(book, host, held.run.id, 2 + 60_000, { startup: true })).toMatchObject({ action: 'closed' })
+    expect(book.run(held.run.id)).toMatchObject({ phase: 'stopped', closeReason: 'unsent', launchAttemptedAt: 2 })
   })
 
   it('closes a persisted session-claim launch attempt once its evidence is older than ten minutes', async () => {

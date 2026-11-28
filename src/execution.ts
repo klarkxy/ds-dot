@@ -7,7 +7,7 @@ import type { TaskPermission } from './contracts.ts'
 import { onDiskPath, scopeWrites, type RunCursor, type RunPhase, type RunRecord, type WorkBook, type WorkRefusal } from './work.ts'
 
 export interface FoundSession { readonly cwd?: string; readonly preset?: string }
-export const RESERVED_UNSENT_RELEASE_MS = 10 * 60_000
+const RESERVED_UNSENT_RELEASE_MS = 10 * 60_000
 export interface CreatedSession { readonly sessionId: string; readonly cwd?: string; readonly preset?: string }
 export interface StopReport {
   readonly cancelAccepted: boolean
@@ -281,7 +281,7 @@ export async function observeRun(book: WorkBook, host: RunSessionHost, runId: st
  * Recovery reads the reserved id. It never creates another session and never
  * sends the first prompt.
  */
-export async function reconcileReserved(book: WorkBook, host: RunSessionHost, runId: string, at = Date.now()): Promise<{ readonly ok: true; readonly action: 'absent' | 'confirmed' | 'held' | 'left' | 'closed'; readonly created: false; readonly prompted: false } | WorkRefusal> {
+export async function reconcileReserved(book: WorkBook, host: RunSessionHost, runId: string, at = Date.now(), options?: { readonly startup?: boolean }): Promise<{ readonly ok: true; readonly action: 'absent' | 'confirmed' | 'held' | 'left' | 'closed'; readonly created: false; readonly prompted: false } | WorkRefusal> {
   const run = book.run(runId)
   if (!run) return { ok: false, code: 'missing', message: `unknown run ${runId}` }
   if (run.phase !== 'reserved') return { ok: true, action: 'left', created: false, prompted: false }
@@ -300,7 +300,7 @@ export async function reconcileReserved(book: WorkBook, host: RunSessionHost, ru
     const current = book.run(runId) ?? run
     const neverStarted = current.creation === 'intent' && current.actionClaim === undefined && !book.liveSessionClaim(runId)
       && !current.deliveries.some(item => item.status === 'accepted' || item.status === 'unknown' || item.hostRequestId !== undefined)
-    if (neverStarted && current.launchAttemptedAt !== undefined && at - current.launchAttemptedAt > RESERVED_UNSENT_RELEASE_MS) {
+    if (neverStarted && current.launchAttemptedAt !== undefined && (options?.startup === true || at - current.launchAttemptedAt > RESERVED_UNSENT_RELEASE_MS)) {
       const released = await book.releaseUnsent(runId, current.updatedAt, at)
       if (!released.ok) return released
       return { ok: true, action: 'closed', created: false, prompted: false }
@@ -317,7 +317,7 @@ export async function reconcileReserved(book: WorkBook, host: RunSessionHost, ru
 }
 
 /** Recover a reserved or active run without creating a session or sending again. A cancelled change pulls every open run back into its stop. */
-export async function reconcileRun(book: WorkBook, host: RunSessionHost, runId: string, at = Date.now()): Promise<{ readonly ok: true; readonly action: string; readonly created: false; readonly prompted: false } | WorkRefusal> {
+export async function reconcileRun(book: WorkBook, host: RunSessionHost, runId: string, at = Date.now(), options?: { readonly startup?: boolean }): Promise<{ readonly ok: true; readonly action: string; readonly created: false; readonly prompted: false } | WorkRefusal> {
   const run = book.run(runId)
   if (!run) return { ok: false, code: 'missing', message: `unknown run ${runId}` }
   if (run.phase === 'completed' || run.phase === 'failed' || run.phase === 'stopped') return { ok: true, action: 'left', created: false, prompted: false }
@@ -329,7 +329,7 @@ export async function reconcileRun(book: WorkBook, host: RunSessionHost, runId: 
   if (!current) return { ok: false, code: 'missing', message: `unknown run ${runId}` }
   if (current.phase === 'settling') return continueClose(book, host, runId, at)
   if (current.phase === 'reserved') {
-    const session = await reconcileReserved(book, host, runId, at)
+    const session = await reconcileReserved(book, host, runId, at, options)
     if (!session.ok) return session
     return session
   }

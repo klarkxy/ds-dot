@@ -688,9 +688,23 @@ describe('PR-5 mandatory 17+ polling, admission, routing & security scenarios', 
       await h.store.work.prepareFinish(rd.run.id, 'completed', now)
       await h.store.work.finishSettled(rd.run.id, now, 'completed', { queueCleared: true, agentIdle: true, jobsSettled: true }, now)
 
+      // Identity-rejected is not a user stop: later human comments still reach Dorothy.
+      const rejectedChange = await h.store.work.createChange({
+        title: 'Rejected task', cwd: h.home, goal: 'Rejected',
+        requirements: [{ requirementRef: 'R1', text: 'Rejected', required: true }], at: now,
+      })
+      const rj = await h.store.work.reserveRun({ changeId: rejectedChange.id, kind: 'work', cwd: h.home, writeScope: { kind: 'paths', paths: [] }, at: now })
+      if (!rj.ok) throw new Error('reserve rejected failed')
+      await h.store.work.markCreation(rj.run.id, 'rejected', now)
+      const rejectedClose = await h.store.work.prepareFinish(rj.run.id, 'stopped', now)
+      if (!rejectedClose.ok) throw new Error(rejectedClose.message)
+      expect(await h.store.work.releaseRejected(rj.run.id, rejectedClose.updatedAt, now)).toMatchObject({ ok: true, phase: 'stopped' })
+      expect(h.store.work.run(rj.run.id)).toMatchObject({ phase: 'stopped', closeReason: 'identity-rejected' })
+
       await h.store.putLink(makeTaskLink(change.id, { repo: 'acme/widgets', number: 42 }, 'dot', now))
       await h.store.putLink(makeTaskLink(stoppedChange.id, { repo: 'acme/widgets', number: 99 }, 'dot', now))
       await h.store.putLink(makeTaskLink(doneChange.id, { repo: 'acme/widgets', number: 77 }, 'dot', now))
+      await h.store.putLink(makeTaskLink(rejectedChange.id, { repo: 'acme/widgets', number: 98 }, 'dot', now))
 
       const settings: DotSettings = patchSettings(DEFAULT_SETTINGS, {
         reflection: false,
@@ -846,6 +860,18 @@ describe('PR-5 mandatory 17+ polling, admission, routing & security scenarios', 
       expect(resStopped.skippedStoppedRunIds).toEqual([rs.run.id])
       expect(h.relayed.filter(r => r.target === rs.run.requestedSessionId)).toHaveLength(0)
       expect(h.inbox.list()).toHaveLength(inboxCountBeforeStopped)
+
+      // Identity-rejected is unproven delivery, not a user stop: the comment is still delivered to Dorothy's inbox.
+      const inboxCountBeforeRejected = h.inbox.list().length
+      const resRejected = await adapter.receive({
+        source: 'github', sourceId: 'primary-github', deliveryId: 'gh-poll:rejected-1',
+        type: 'issue_comment.created', subject: 'acme/widgets#98', title: 'Ping rejected',
+        actor: 'alice', summary: 'Can you pick this up again?', receivedAt: now, originSource: 'github-poll',
+      }, { repo: 'acme/widgets', rawBody: 'Can you pick this up again?' })
+      expect(resRejected.directRunIds).toEqual([])
+      expect(resRejected.skippedStoppedRunIds).toEqual([])
+      expect(resRejected.inboxResult).toBe('stored')
+      expect(h.inbox.list()).toHaveLength(inboxCountBeforeRejected + 1)
 
       // 16: PR opened never triggers closure; PR merged updates links.ts, flags Change closureReady, emits 1 result notice!
       await adapter.receive({

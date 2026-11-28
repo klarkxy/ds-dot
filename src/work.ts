@@ -48,7 +48,7 @@ export function runStoppedByUser(
   change?: Pick<ChangeRecord, 'control'>,
 ): boolean {
   if (change?.control === 'cancelled') return true
-  if (run.closeReason === 'watchdog') return false
+  if (run.closeReason === 'watchdog' || run.closeReason === 'identity-rejected') return false
   if (run.closeIntent === 'stopped') return true
   if (run.phase === 'stopped' && run.closeReason !== 'closeout' && run.closeReason !== 'rework') return true
   return false

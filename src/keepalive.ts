@@ -30,7 +30,7 @@ export function defaultCacheTtl(provider: string, model: string): number {
   return CACHE_TTL_TABLE.find(row => row.match.test(key))?.minutes ?? DEFAULT_CACHE_TTL_MINUTES
 }
 
-/** The human's exact per-provider/model override wins; 0 disables keepalive for that model. */
+/** The human's per-model override wins; 0 disables keepalive for that model. */
 export function cacheTtlMinutes(settings: DotSettings, provider: string, model: string): number {
   return settings.cacheTtl?.[cacheTtlKey(provider, model)] ?? defaultCacheTtl(provider, model)
 }

@@ -19,6 +19,7 @@ import { attentionItems } from './board-groups.ts'
 import { renderBrief, renderSupplement, runTitle } from './brief.ts'
 import { bindRunSession, cancelWork, countRelayInserts, finishWork, launchReservedRun, observeRun, reconcileRun, supplementRun } from './execution.ts'
 import { detectWorkspaceRoot } from './git-root.ts'
+import { dshHomeDir } from './dsh-home.ts'
 import { commitDelivery, createTaskWorktree, listTaskWorktrees, mergeInto, removeTaskWorktree, runGit, sanitizeRemoteDisplay, taskWorktreeRoot, type GitRunner, type TaskWorktree } from './git-worktree.ts'
 import { defaultSelfBuild, insideOrEqual, libHashOf, realpathOrResolve, type SelfBackup, type SelfInstall, type SelfUpgradeMarker } from './self-root.ts'
 import {
@@ -435,6 +436,34 @@ export class DotService {
   get dotSessionId(): string | undefined { return this.store.dotSessionId }
   get locale(): CopyLocale { return this.currentLocale ?? this.store.uiLocale ?? 'zh' }
 
+  /** Live roots Dorothy may read; recomputed so workspace, task, and Office changes apply immediately. */
+  readRoots(): readonly string[] {
+    const roots: string[] = []
+    const seen = new Set<string>()
+    const add = (root: string | undefined) => {
+      if (!root || !root.trim() || seen.has(root)) return
+      seen.add(root)
+      roots.push(root)
+    }
+    for (const row of this.host.listWorkspaces()) add(row.path)
+    for (const change of this.store.work.listChanges()) add(change.cwd)
+    for (const run of this.store.work.listRuns()) add(run.workspaceRoot)
+    add(this.homeDir)
+    const dshHome = dshHomeDir()
+    add(join(dshHome, 'attachments', 'v1', 'files'))
+    let officeOutput: string | undefined
+    try {
+      const officeKit = this.getService?.('officeKit') as { readonly outputDirectory?: unknown } | undefined
+      if (typeof officeKit?.outputDirectory === 'string' && officeKit.outputDirectory.trim()) officeOutput = officeKit.outputDirectory
+    } catch { /* optional service probe */ }
+    add(officeOutput ?? join(dshHome, 'office-kit', 'outputs'))
+    return roots
+  }
+
+  private mcpServerNames(): string[] {
+    return [...new Set([...(this.options.globalMcpNames?.() ?? []), ...Object.keys(this.store.settings.mcpServers ?? {})])]
+  }
+
   async syncLocale(raw: string | undefined): Promise<CopyLocale> {
     if (!raw?.trim()) return this.locale
     const next = copyLocale(raw, 'en')
@@ -629,7 +658,7 @@ export class DotService {
     const guard = typeof id === 'string'
       ? (exec: Parameters<typeof guardRunWriteTool>[1]) => {
           const run = this.store.work.sessionRun(id)
-          return run ? guardRunWriteTool(run, exec) : { allow: true as const }
+          return run ? guardRunWriteTool(run, exec, process.platform, this.mcpServerNames()) : { allow: true as const }
         }
       : undefined
     const sealed = sealChildSession(agent, input => this.peerSend(input), this.childRefreshers, guard)
@@ -1578,9 +1607,9 @@ export class DotService {
 
   /**
    * Read-only file access for dot: relative paths stay inside the named (or her
-   * own) workspace; absolute paths must land inside a registered workspace or a
-   * change root. Refusals cover symlink escapes, directories, binaries, files
-   * over 2 MiB, and credential-like paths.
+   * own) workspace; absolute paths must land inside a registered workspace, a
+   * change root, her home, chat attachments, or Office outputs. Refusals cover
+   * symlink escapes, directories, binaries, files over 2 MiB, and credential-like paths.
    */
   async readWorkspaceFile(id: string | undefined, target: string | undefined, startLine?: number, maxLines?: number): Promise<string> {
     const home = await this.homeWorkspace().catch(error => { this.options.log?.(`dsh-dot: dot's own workspace is unavailable: ${messageOf(error)}`); return undefined })
@@ -1595,7 +1624,7 @@ export class DotService {
       baseDir = row.path
     }
     try {
-      const read = await readWorkspaceText(baseDir, trimmed, { startLine, maxLines })
+      const read = await readWorkspaceText(this.readRoots(), baseDir, trimmed, { startLine, maxLines })
       const width = String(read.totalLines).length
       const numbered = read.lines.map((line, index) => `${String(read.start + index).padStart(width)}│${line}`)
       const header = `${read.path} — ${read.totalLines} line${read.totalLines === 1 ? '' : 's'} total, showing ${read.lines.length === 0 ? 'none' : `${read.start}–${read.end}`}`
@@ -3464,6 +3493,7 @@ export class DotService {
           ...(input.viaSubagent ? { viaSubagent: true } : {}),
           ...(run?.access === 'read' ? { readOnly: true } : {}),
           ...(ownWorktree ? { ownWorktree: true } : {}),
+          mcpServers: this.mcpServerNames(),
         })
       : undefined
     const detail = notice?.text ?? input.detail

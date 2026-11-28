@@ -203,6 +203,51 @@ function setup(settings?: Partial<DotSettings>, trace?: { info: (event: string, 
   return { ...fake, ...clock, store, service, advance: (ms: number) => { at += ms } }
 }
 
+describe('DotService readable roots', () => {
+  it('computes workspace, task, home, attachment, and office roots live', async () => {
+    const previousDshHome = process.env.DSH_HOME
+    const dshHome = mkdtempSync(join(tmpdir(), 'dsh-dot-dsh-home-'))
+    process.env.DSH_HOME = dshHome
+    try {
+      const home = mkdtempSync(join(tmpdir(), 'dsh-dot-home-root-'))
+      const office = mkdtempSync(join(tmpdir(), 'dsh-dot-office-root-'))
+      const h = setup({}, undefined, home, { get: name => name === 'officeKit' ? { outputDirectory: office } : undefined })
+      const workspace = mkdtempSync(join(tmpdir(), 'dsh-dot-workspace-root-'))
+      await h.host.createWorkspace(workspace, 'Workspace')
+      const changeDir = mkdtempSync(join(tmpdir(), 'dsh-dot-change-root-'))
+      const runDir = mkdtempSync(join(tmpdir(), 'dsh-dot-run-root-'))
+      const change = await h.store.work.createChange({ title: 'Read roots', cwd: changeDir, goal: 'inspect', at: 1 })
+      const reserved = await h.store.work.reserveRun({ changeId: change.id, cwd: runDir, root: { workspaceRoot: runDir }, writeScope: { kind: 'workspace-exclusive' }, at: 2 })
+      expect(reserved.ok).toBe(true)
+      const roots = h.service.readRoots()
+      expect(roots).toEqual(expect.arrayContaining([
+        workspace,
+        h.store.work.listChanges()[0]!.cwd,
+        h.store.work.listRuns()[0]!.workspaceRoot,
+        home,
+        join(dshHome, 'attachments', 'v1', 'files'),
+        office,
+      ]))
+    } finally {
+      if (previousDshHome === undefined) delete process.env.DSH_HOME
+      else process.env.DSH_HOME = previousDshHome
+    }
+  })
+
+  it('falls back to the DSH office output directory when the office service has none', () => {
+    const previousDshHome = process.env.DSH_HOME
+    const dshHome = mkdtempSync(join(tmpdir(), 'dsh-dot-dsh-home-'))
+    process.env.DSH_HOME = dshHome
+    try {
+      const h = setup({}, undefined, mkdtempSync(join(tmpdir(), 'dsh-dot-home-root-')), { get: name => name === 'officeKit' ? { outputDirectory: '  ' } : undefined })
+      expect(h.service.readRoots()).toContain(join(dshHome, 'office-kit', 'outputs'))
+    } finally {
+      if (previousDshHome === undefined) delete process.env.DSH_HOME
+      else process.env.DSH_HOME = previousDshHome
+    }
+  })
+})
+
 describe('DotService asynchronous card replies', () => {
   const shown = { title: 'Choose target', interactive: true, view: { type: 'options' as const, id: 'target', options: [{ label: 'staging' }] } }
   it('rejects a late card answer after the active segment changes', async () => {

@@ -117,6 +117,33 @@ describe('approval risk', () => {
       expect(credentialLikePath(name)).toBe(false)
       expect(credentialLikePath(`/workspace/${name}`)).toBe(false)
     }
+    // Credential stores that are not private-key extensions are caught as paths.
+    for (const cred of [
+      '.config/gh/hosts.yml',
+      '~/.config/gh/hosts.yml',
+      String.raw`C:\Users\u\AppData\Roaming\GitHub CLI\hosts.yml`,
+      'GitHub CLI/hosts.yml',
+      'github cli\\hosts.yml',
+      '~/.git-credentials',
+      '~/.docker/config.json',
+      '~/.config/gcloud/application_default_credentials.json',
+      '~/.azure/accessTokens.json',
+      '/proc/self/environ',
+      '/proc/1234/environ',
+      'terraform.tfstate',
+      '/infra/terraform.tfstate.backup',
+      '.credentials.yaml',
+      '/x/.credentials.yml',
+      '/x/.credentials.json',
+      '/x/credentials.json',
+      '/workspace/.env.example.local',
+      '/workspace/.env.local.example',
+      '/workspace/.env.bak~',
+      '/workspace/.env.bak',
+      '/workspace/.env.production',
+    ]) {
+      expect(credentialLikePath(cred), cred).toBe(true)
+    }
     // Credential directories (with or without trailing slash), private keys, certs, and rc token files are caught.
     for (const cred of [
       '~/.ssh',
@@ -154,6 +181,9 @@ describe('approval risk', () => {
     expect(credentialLikePath('/home/u/.ssh/id_ed25519.pub')).toBe(true)
     expect(credentialLikePath('src/hotkey.ts')).toBe(false)
     expect(credentialLikePath('app.env.example')).toBe(false)
+    expect(credentialLikePath('x/.env.example/y')).toBe(false)
+    expect(credentialLikePath('notcredentials.json')).toBe(false)
+    expect(credentialLikePath('.config/gh/other.yml')).toBe(false)
     expect(credentialLikePath('id_rsa.pub')).toBe(false)
     expect(credentialLikePath('src/main.ts')).toBe(false)
     expect(credentialLikePath('/outside/secret.txt')).toBe(false)
@@ -193,13 +223,21 @@ describe('approval risk', () => {
     expect(mcpToolMayWrite('mcp__fs__read-file')).toBe(false)
     expect(mcpToolMayWrite('mcp__github__get_issue_0123456789ab')).toBe(false)
     expect(mcpToolMayWrite('MCP__github__listRepos')).toBe(false)
-    // A server name may itself contain `__`; the raw name is the last segment.
-    expect(mcpToolMayWrite('mcp__team__docs__search_docs')).toBe(false)
+    // A server name may itself contain `__`: known servers disambiguate it, while the fallback fails closed.
+    expect(mcpToolMayWrite('mcp__team__docs__search_docs')).toBe(true)
+    expect(mcpToolMayWrite('mcp__team__docs__search_docs', ['team__docs'])).toBe(false)
+    expect(mcpToolMayWrite('mcp__srv__delete_all__status')).toBe(true)
+    expect(mcpToolMayWrite('mcp__bridge__exec__check')).toBe(true)
     // Anything else may write.
     expect(mcpToolMayWrite('mcp__github__create_issue')).toBe(true)
     expect(mcpToolMayWrite('mcp__agent_bridge__dispatch_task')).toBe(true)
     expect(mcpToolMayWrite('mcp__fs__write_file')).toBe(true)
     expect(mcpToolMayWrite('mcp__team__docs__delete_page')).toBe(true)
+    expect(mcpToolMayWrite('mcp__team__docs__delete_page', ['team__docs'])).toBe(true)
+    // A clipped hashed prefix can be attributed to its server, but its raw name is unknowable.
+    const longServer = 'a-very-long-server-name-that-keeps-going-and-going-yes'
+    const hashed = `${`mcp__${longServer}__`.slice(0, 51)}_abcd1234abcd`
+    expect(mcpToolMayWrite(hashed, [longServer])).toBe(true)
     // Malformed mcp__ names fail closed.
     expect(mcpToolMayWrite('mcp__x')).toBe(true)
     expect(mcpToolMayWrite('mcp__x__')).toBe(true)
@@ -210,6 +248,8 @@ describe('approval risk', () => {
     // Only read-only sessions flag them in the risk assessment.
     expect(assessApprovalRisk({ toolName: 'mcp__agent_bridge__dispatch_task', readOnly: true }).reasons).toContain('read-only-write')
     expect(assessApprovalRisk({ toolName: 'mcp__github__get_issue', readOnly: true }).forced).toBe(false)
+    expect(assessApprovalRisk({ toolName: 'mcp__team__docs__search_docs', readOnly: true }).reasons).toContain('read-only-write')
+    expect(assessApprovalRisk({ toolName: 'mcp__team__docs__search_docs', readOnly: true, mcpServers: ['team__docs'] }).forced).toBe(false)
     expect(assessApprovalRisk({ toolName: 'mcp__github__create_issue' }).forced).toBe(false)
   })
 

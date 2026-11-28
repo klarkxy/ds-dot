@@ -4,7 +4,8 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 import { SHOW_VIEW_MIXED_SUMMARY, showViewSharesStep } from './card-step.ts'
-import { apply, TASK_ACTIONS } from './tools.ts'
+import { apply, credentialToolGuard, TASK_ACTIONS } from './tools.ts'
+import { CREDENTIAL_READ_REFUSAL, OUTSIDE_READ_REFUSAL } from './read-guard.ts'
 import { ArenaQueryError } from './arena-models.ts'
 import { DotError } from './service.ts'
 import { formatTaskModels } from './task-models.ts'
@@ -31,6 +32,11 @@ const catalog = {
 
 /** An id allocator standing in for the persisted counter. */
 const ids = (prefix: 'a' | 'c') => { let n = 0; return () => `${prefix}${++n}` }
+
+const guardHome = mkdtempSync(join(tmpdir(), 'dsh-dot-tools-home-'))
+const attachmentRoot = mkdtempSync(join(tmpdir(), 'dsh-dot-tools-attachments-'))
+const officeRoot = mkdtempSync(join(tmpdir(), 'dsh-dot-tools-office-'))
+const guardRoots: string[] = [guardHome, attachmentRoot, officeRoot]
 
 /** Load the preset row against a recording host: every definition must compile. */
 function load(settings: { current: DotSettings; segment?: Seg; notes?: string; cognition?: string } = { current: DEFAULT_SETTINGS }) {
@@ -79,6 +85,9 @@ function load(settings: { current: DotSettings; segment?: Seg; notes?: string; c
       },
       currentAgreementsBlock: () => settings.notes ?? '',
       currentCognitionBlock: () => settings.cognition ?? '',
+      homeDir: guardHome,
+      readRoots: () => guardRoots,
+      capabilityGate: async () => undefined,
       cognitionList: async (input?: { query?: string; offset?: number; limit?: number }) => JSON.stringify(input ?? {}),
       selfSettings: realSelf,
       answer: (id: string, answer: unknown) => JSON.stringify({ id, answer }),
@@ -146,6 +155,7 @@ describe('dot tools', () => {
 
     // Workspace symlinks/junctions escaping to .ssh or .env are resolved and denied.
     const sandbox = mkdtempSync(join(tmpdir(), 'dsh-dot-guard-'))
+    guardRoots.push(sandbox)
     try {
       const ws = join(sandbox, 'workspace')
       const sshDir = join(sandbox, '.ssh')
@@ -169,10 +179,39 @@ describe('dot tools', () => {
     } finally {
       rmSync(sandbox, { recursive: true, force: true })
     }
-    await expect(gate!({ name: 'read', arguments: { file_path: '/tmp/notes.md' } }, next)).resolves.toEqual({ kind: 'next' })
-    await expect(gate!({ name: 'read_image', arguments: { file_path: '/tmp/photo.png' } }, next)).resolves.toEqual({ kind: 'next' })
-    await expect(gate!({ name: 'office_render', arguments: { input: '/tmp/deck.pptx', output_dir: '/tmp/rendered' } }, next)).resolves.toEqual({ kind: 'next' })
-    await expect(gate!({ name: 'office_convert', arguments: { input: '/tmp/report.docx', output: '/tmp/report.txt' } }, next)).resolves.toEqual({ kind: 'next' })
+    await expect(gate!({ name: 'read', arguments: { file_path: join(guardHome, 'notes.md') } }, next)).resolves.toEqual({ kind: 'next' })
+    await expect(gate!({ name: 'read_image', arguments: { file_path: join(guardHome, 'photo.png') } }, next)).resolves.toEqual({ kind: 'next' })
+    await expect(gate!({ name: 'read', arguments: { file_path: join(attachmentRoot, 'ab', 'abcdef', 'notes.md') } }, next)).resolves.toEqual({ kind: 'next' })
+    const outsideRead = gate!({ name: 'read', arguments: { file_path: join(tmpdir(), 'dsh-dot-outside-readable-roots.txt') } }, next)
+    await expect(outsideRead).resolves.toMatchObject({ kind: 'deny', reason: expect.stringMatching(/outside/) })
+    await expect(gate!({ name: 'office_render', arguments: { input: join(guardHome, 'deck.pptx'), output_dir: join(officeRoot, 'rendered') } }, next)).resolves.toEqual({ kind: 'next' })
+    await expect(gate!({ name: 'office_convert', arguments: { input: join(guardHome, 'report.docx'), output: join(officeRoot, 'report.txt') } }, next)).resolves.toEqual({ kind: 'next' })
+    const outsideOffice = gate!({ name: 'office_render', arguments: { input: join(tmpdir(), 'dsh-dot-outside-office-input.pptx') } }, next)
+    await expect(outsideOffice).resolves.toMatchObject({ kind: 'deny', reason: expect.stringMatching(/outside/) })
+  })
+
+  it('resolves relative reads against Dorothy home instead of the process cwd', async () => {
+    const gate = load().listeners['tools/pre-execute']?.[0]
+    const next = async () => ({ kind: 'next' })
+    expect(guardHome).not.toBe(process.cwd())
+    expect(guardRoots).not.toContain(process.cwd())
+    await expect(gate!({ name: 'read', arguments: { file_path: 'notes.md' } }, next)).resolves.toEqual({ kind: 'next' })
+    expect(credentialToolGuard({ name: 'glob', arguments: { path: 'sub', pattern: '**/*.md' } }, guardHome, guardRoots)).toBeUndefined()
+    const outside = gate!({ name: 'read', arguments: { file_path: '../outside.txt' } }, next)
+    await expect(outside).resolves.toMatchObject({ kind: 'deny', reason: OUTSIDE_READ_REFUSAL })
+  })
+
+  it('refuses glob and grep filters that escape the search root or name credentials', () => {
+    expect(credentialToolGuard({ name: 'glob', arguments: { path: 'sub', pattern: '**/*.md' } }, guardHome, guardRoots)).toBeUndefined()
+    expect(credentialToolGuard({ name: 'grep', arguments: { path: 'sub', pattern: 'needle', include: '*.ts' } }, guardHome, guardRoots)).toBeUndefined()
+    for (const pattern of ['/tmp/*.md', '//host/share/*.md', String.raw`C:\tmp\*.md`, String.raw`\\host\share\*.md`, '../*.md', 'sub/../x.md']) {
+      expect(credentialToolGuard({ name: 'glob', arguments: { path: 'sub', pattern } }, guardHome, guardRoots), pattern).toBe(OUTSIDE_READ_REFUSAL)
+      expect(credentialToolGuard({ name: 'grep', arguments: { path: 'sub', pattern: 'needle', include: pattern } }, guardHome, guardRoots), pattern).toBe(OUTSIDE_READ_REFUSAL)
+    }
+    for (const pattern of ['**/.env', '**/.ssh/id_rsa']) {
+      expect(credentialToolGuard({ name: 'glob', arguments: { path: 'sub', pattern } }, guardHome, guardRoots), pattern).toBe(CREDENTIAL_READ_REFUSAL)
+      expect(credentialToolGuard({ name: 'grep', arguments: { path: 'sub', pattern: 'needle', include: pattern } }, guardHome, guardRoots), pattern).toBe(CREDENTIAL_READ_REFUSAL)
+    }
   })
 
   it('matches widened credential names and symlinked exact paths without blocking safe files', async () => {
@@ -195,7 +234,7 @@ describe('dot tools', () => {
     }
 
     for (const filePath of ['.env.example', 'app.env.example', 'id_rsa.pub']) {
-      await expect(gate!({ name: 'read', arguments: { file_path: filePath } }, next)).resolves.toEqual({ kind: 'next' })
+      await expect(gate!({ name: 'read', arguments: { file_path: join(guardHome, filePath) } }, next)).resolves.toEqual({ kind: 'next' })
     }
   })
 

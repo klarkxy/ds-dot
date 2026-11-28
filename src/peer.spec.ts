@@ -326,6 +326,20 @@ describe('child-session seal', () => {
     expect(host.denied).toEqual([['subagent']])
   })
 
+  it('uses configured MCP server names when judging a read-only run', () => {
+    const run = {
+      id: 'run-read',
+      cwd: '/workspace',
+      workspaceRoot: '/workspace',
+      writeScope: { kind: 'paths' as const, paths: [] },
+      access: 'read' as const,
+    }
+    const lookup = { name: 'mcp__team__docs__search_docs', input: {} }
+    expect(guardRunWriteTool(run, lookup)).toMatchObject({ allow: false })
+    expect(guardRunWriteTool(run, lookup, process.platform, ['team__docs'])).toEqual({ allow: true })
+    expect(guardRunWriteTool(run, { name: 'mcp__team__docs__delete_page', input: {} }, process.platform, ['team__docs'])).toMatchObject({ allow: false })
+  })
+
   it.skipIf(process.platform !== 'win32' || !existsSync('C:\\PROGRA~1'))('allows writes under expanded long paths when Windows 8.3 short paths are in workspaceRoot or writeScope', () => {
     const longBase = realpathSync.native('C:\\PROGRA~1')
     const shortRoot = 'c:\\progra~1\\dot-8dot3-proj'

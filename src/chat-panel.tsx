@@ -7,8 +7,8 @@
  */
 import {
   Button, DisclosureRow, IconCheckOutlineRegular, IconChecklistOutlineRegular, IconChevronDownOutlineRegular,
-  IconCloseOutlineRegular, IconCordisPluginOutlineRegular, IconEditOutlineRegular, IconGaugeOutlineRegular, IconGlobeOutlineRegular,
-  IconInspectOutlineRegular, IconRefreshOutlineRegular, IconShieldOutlineRegular, IconSlidersTwoOutlineRegular, IconUserOutlineRegular,
+  IconCloseOutlineRegular, IconCordisPluginOutlineRegular, IconEditOutlineRegular, IconGaugeOutlineRegular,
+  IconInspectOutlineRegular, IconRefreshOutlineRegular, IconSettingsOutlineRegular, IconShieldOutlineRegular, IconSlidersTwoOutlineRegular, IconUserOutlineRegular,
   IconWarningOutlineRegular, MarkdownText, Modal, modalSelector, StateDot, Tag, TextShimmer, Tooltip, UserMessageBubble,
   type MarkdownLabels, type StateDotState, type TagTone,
 } from '@deepseek-ai/dsh-client-ui-primitives'
@@ -123,7 +123,7 @@ interface DrawerProps {
 }
 
 const SETTINGS_SECTIONS: ReadonlySet<DrawerTab> = new Set<SettingsSection>([
-  'proposals', 'general', 'takeover', 'dispatch', 'github', 'capabilities', 'mcp',
+  'proposals', 'general', 'takeover', 'dispatch', 'github', 'capabilities', 'advanced',
 ])
 
 function isSettingsSection(tab: DrawerTab): tab is SettingsSection {
@@ -249,20 +249,20 @@ function WorkDrawer({ locale, api, tab, wide, settings, trajectoryRev, running, 
   }, [tab])
 
   const proposalItems: readonly DrawerNavItem[] = !isTasks && (proposalCount > 0 || tab === 'proposals') ? [
-    { value: 'proposals', label: t(locale, 'tabProposals'), title: t(locale, 'sProposals'), icon: <IconEditOutlineRegular size={15} />, badge: proposalCount },
+    { value: 'proposals', label: t(locale, 'tabProposals'), title: t(locale, 'tabProposals'), icon: <IconEditOutlineRegular size={15} />, badge: proposalCount },
   ] : []
   const configItems: readonly DrawerNavItem[] = isTasks ? [] : [
     { value: 'general', label: t(locale, 'tabGeneral'), title: t(locale, 'tabGeneral'), icon: <IconSlidersTwoOutlineRegular size={15} /> },
-    { value: 'takeover', label: t(locale, 'tabTakeover'), title: t(locale, 'sRequests'), icon: <IconShieldOutlineRegular size={15} /> },
-    { value: 'dispatch', label: t(locale, 'tabDispatch'), title: t(locale, 'sTasks'), icon: <IconChecklistOutlineRegular size={15} /> },
-    { value: 'github', label: t(locale, 'tabGithub'), title: t(locale, 'sGithubTitle'), icon: <IconRefreshOutlineRegular size={15} /> },
-    { value: 'capabilities', label: t(locale, 'tabCapabilities'), title: t(locale, 'sCapabilities'), icon: <IconCordisPluginOutlineRegular size={15} /> },
-    { value: 'mcp', label: t(locale, 'tabMcp'), title: t(locale, 'sMcp'), icon: <IconGlobeOutlineRegular size={15} /> },
-    { value: 'persona', label: t(locale, 'tabPersona'), title: t(locale, 'personaTitle'), icon: <IconUserOutlineRegular size={15} />, dirty: personaDirty },
+    { value: 'takeover', label: t(locale, 'tabTakeover'), title: t(locale, 'tabTakeover'), icon: <IconShieldOutlineRegular size={15} /> },
+    { value: 'dispatch', label: t(locale, 'tabDispatch'), title: t(locale, 'tabDispatch'), icon: <IconChecklistOutlineRegular size={15} /> },
+    { value: 'capabilities', label: t(locale, 'tabCapabilities'), title: t(locale, 'tabCapabilities'), icon: <IconCordisPluginOutlineRegular size={15} /> },
+    { value: 'github', label: t(locale, 'tabGithub'), title: t(locale, 'tabGithub'), icon: <IconRefreshOutlineRegular size={15} /> },
+    { value: 'persona', label: t(locale, 'tabPersona'), title: t(locale, 'tabPersona'), icon: <IconUserOutlineRegular size={15} />, dirty: personaDirty },
+    { value: 'advanced', label: t(locale, 'tabAdvanced'), title: t(locale, 'tabAdvanced'), icon: <IconSettingsOutlineRegular size={15} /> },
   ]
   const inspectItems: readonly DrawerNavItem[] = isTasks ? [] : [
-    { value: 'context', label: t(locale, 'tabContext'), title: t(locale, 'ctxTitle'), icon: <IconGaugeOutlineRegular size={15} /> },
-    { value: 'trajectory', label: t(locale, 'viewTrajectory'), title: t(locale, 'trTitle'), icon: <IconInspectOutlineRegular size={15} /> },
+    { value: 'context', label: t(locale, 'tabContext'), title: t(locale, 'tabContext'), icon: <IconGaugeOutlineRegular size={15} /> },
+    { value: 'trajectory', label: t(locale, 'viewTrajectory'), title: t(locale, 'viewTrajectory'), icon: <IconInspectOutlineRegular size={15} /> },
   ]
   const allItems: readonly DrawerNavItem[] = isTasks
     ? [{ value: 'tasks', label: t(locale, 'tasks'), title: t(locale, 'tasks'), icon: null, badge: waiting }]
@@ -357,7 +357,7 @@ function WorkDrawer({ locale, api, tab, wide, settings, trajectoryRev, running, 
             {tab === 'tasks'
               ? tasks
               : isSettingsSection(tab)
-                ? <SettingsPanel locale={locale} api={api} section={tab} proposals={proposalState} {...settings ? { settings } : {}} onSaved={onSaved} onStatusChange={setSaveNotice} onProposalCount={onProposalCount} onSectionChange={requestTab} {...renderFactorySlot ? { renderFactorySlot } : {}} />
+                ? <SettingsPanel locale={locale} api={api} section={tab} proposals={proposalState} {...settings ? { settings } : {}} onSaved={onSaved} onStatusChange={setSaveNotice} onProposalCount={onProposalCount} {...renderFactorySlot ? { renderFactorySlot } : {}} />
                 : tab === 'persona'
                   ? <PersonaPanel locale={locale} api={api} {...settings ? { settings } : {}} discardSignal={discardSignal} onDirtyChange={onDirtyChange} onSaved={onSaved} onStatusChange={setSaveNotice} />
                   : tab === 'context'

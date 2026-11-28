@@ -17,6 +17,23 @@
 
   const RECORDINGS = [
     {
+      id: 'settings-redesign',
+      pr: 100,
+      date: '2026.11.27',
+      post: 'notes-and-quiet',
+      file: 'dot-settings-redesign.gif',
+      title: {
+        zh: '重新分好类的设置抽屉',
+        en: 'The regrouped settings drawer',
+        ja: '整理し直した設定の引き出し',
+      },
+      desc: {
+        zh: '从常规一路点到高级：不常碰的开关收在高级里，锁定设置也在那一张清单上。',
+        en: 'A walk from General to Advanced: rarely touched switches live under Advanced, next to the one locked-settings checklist.',
+        ja: '一般から詳細まで順に開きます。滅多に触らない項目とロックの一覧は詳細にまとめました。',
+      },
+    },
+    {
       id: 'run-watchdog',
       pr: 99,
       date: '2026.11.26',
@@ -62,9 +79,9 @@
         ja: '引き出しは会話の上に重なり、タスク板にも余白ができた',
       },
       desc: {
-        zh: '点开任务看空板，再进设置：卡片分组、拖左边加宽，额外能力页里就能接入 MCP。',
-        en: 'Open Tasks, then Settings: cards, a drag on the left edge, and MCP connect sits on the extra-capabilities page.',
-        ja: 'タスクを開いてから設定へ。カード分け、左端のドラッグ、追加機能のページから MCP もつなげます。',
+        zh: '点开任务看空板，再进设置：卡片分组、拖左边加宽，也能在工具页接入 MCP。',
+        en: 'Open Tasks, then Settings: cards, a drag on the left edge, and MCP connect on the tools page.',
+        ja: 'タスクを開いてから設定へ。カード分け、左端のドラッグ、ツールページから MCP もつなげます。',
       },
     },
     {
@@ -318,6 +335,47 @@
       showInvite: true,
     },
     {
+      slug: 'notes-and-quiet',
+      date: '2026.11.27',
+      category: 'work',
+      image: 'images/chibi-memory.jpg',
+      aspect: 'square',
+      imageAlt: {
+        zh: '阳光窗台边支着下巴记笔记的Q版桃乐丝，旁边有柑橘碟和酣睡的小粉鲸玩偶',
+        en: 'Chibi Dorothy writing in a sketchbook by a sunlit bay window with oranges and a pink whale plushie',
+        ja: '出窓でみかんとクジラのぬいぐるみのそばで手帳を書くちびドロシー',
+      },
+      caption: {
+        zh: '你的习惯、加锁的设置，还有平时顺手记的备忘。',
+        en: 'Noting your house habits, locked switches, and quiet threads.',
+        ja: 'お気に入りのやり方や鍵をかけた設定を控えておく午後。',
+      },
+      title: {
+        zh: '设置收拾顺了，锁住的还是不会去碰',
+        en: 'Settings, tidied up—and the locks stay put',
+        ja: '設定をすっきり整理、ロックした項目は触りません',
+      },
+      excerpt: {
+        zh: '设置抽屉重新分了类：常用的就那几页，不常碰的旋钮收进高级；锁设置也集中到一张清单里了。',
+        en: 'The settings drawer has fewer, plainer pages now. Rarely touched knobs live under Advanced, and every lock sits in one checklist.',
+        ja: '設定の引き出しは少ない分かりやすいページに整理され、めったに触らない項目は詳細設定へ。ロックも一枚のリストに集まりました。',
+      },
+      paragraphs: {
+        zh: [
+          '最近把设置抽屉又重新收拾了一遍。现在左边就剩几页好懂的名字：常规、接管、任务、工具、GitHub、人设；平时真要碰的开关基本都在这几页里。缓存、任务预设、卡住检测和恢复出厂这类不常动的东西，统一收进「高级」，不用每次都被它们晃一眼。',
+          '锁设置也不再散在各处了，高级页里有一张「锁定设置」清单，勾上哪项，我以后连修改建议也不会提；没勾的我也只能先提建议，等你点头才算数。关注列表里，已经在会话那边归档掉的不会再一直显示空闲，不想继续盯就点那一行的 ×，会话本身不动；选任务模型时我仍会参考固定的榜单快照，但你点名的模型绝不擅自换掉。嗯，收拾完顺眼多了，doro~',
+        ],
+        en: [
+          'I tidied the settings drawer again. The rail now has a handful of plain names: General, Takeover, Tasks, Tools, GitHub, and Persona, with the everyday switches close at hand. Cache time, task presets, stall detection, and factory reset—the things you rarely touch—sit together under Advanced instead of asking for attention every time.',
+          'Locks are gathered there too, in one Locked settings checklist. Tick one and I will not even propose changing it; unticked items can still be proposed, but nothing applies until you approve. A watch you already archived no longer sits there as idle, and the × on that row only stops watching — the session stays put. I still consult a pinned ranking snapshot when weighing task models, and I never swap a model you named. Much easier on the eyes, doro~',
+        ],
+        ja: [
+          '設定の引き出しをもう一度整理しました。左側は「一般・引き継ぎ・タスク・ツール・GitHub・ペルソナ」だけの分かりやすい並びになり、ふだん触るスイッチはそこにそろえました。キャッシュ時間やタスクプリセット、停止検知、初期化のような滅多に触らないものは「詳細」へまとめています。',
+          'ロックもあちこちに散らばらず、詳細設定の「ロックする設定」リストに集めました。チェックした項目は変更提案も出しませんし、それ以外は提案だけして、あなたが承認して初めて反映されます。アーカイブ済みの監視は空きのまま残らず、行の × は監視をやめるだけでセッションはそのままです。タスク用モデルは固定版の順位表を参考にしますが、あなたが指名したモデルを勝手に差し替えることはありません。少し見やすくなりました、doro~',
+        ],
+      },
+    },
+    {
       slug: 'run-watchdog',
       date: '2026.11.26',
       category: 'rules',
@@ -396,47 +454,6 @@
         ja: [
           '設定の GitHub タブを開いて接続テストを押し、ログイン状態と残り枠を確かめたら、見守りたいリポジトリを足すだけです。有効にした時点から先だけを見に行くので過去の通知がどっと押し寄せることはありませんし、定番ボットの動きは必要なタスクへだけそっと届けます。ご自身のアカウントで書いたコメントはちゃんと拾い、こちらから送ったばかりの返信は聞き流して堂々巡りを防ぎます。残り枠が少なくなれば間隔を自動で緩め、何度か続けて失敗したときは設定画面でお知らせします。',
           '新しいコメントが来ると、その PR に結び付いている進行中のタスクみんなへ短い要約が直接届き（長文はファイルに控えて場所を添えます）、担当外の話題はわたしの元へ戻して振り直します。あなたが手動で止めたタスクにはもう一切話しかけませんし、PR がマージまたはクローズされたら最終チェックへ進めて結果を一度だけお伝えします。あとから公開環境でリアルタイム通知へ切り替えるときも、同じリポジトリでは片方だけ動いて引き継ぎも途切れません、doro~',
-        ],
-      },
-    },
-    {
-      slug: 'notes-and-quiet',
-      date: '2026.11.25',
-      category: 'work',
-      image: 'images/chibi-memory.jpg',
-      aspect: 'square',
-      imageAlt: {
-        zh: '阳光窗台边支着下巴记笔记的Q版桃乐丝，旁边有柑橘碟和酣睡的小粉鲸玩偶',
-        en: 'Chibi Dorothy writing in a sketchbook by a sunlit bay window with oranges and a pink whale plushie',
-        ja: '出窓でみかんとクジラのぬいぐるみのそばで手帳を書くちびドロシー',
-      },
-      caption: {
-        zh: '你的习惯、加锁的设置，还有平时顺手记的备忘。',
-        en: 'Noting your house habits, locked switches, and quiet threads.',
-        ja: 'お気に入りのやり方や鍵をかけた設定を控えておく午後。',
-      },
-      title: {
-        zh: '你的规矩我记在本子上了，锁住的不会去碰',
-        en: 'Remembering your habits—and leaving locked knobs alone',
-        ja: 'いつものやり方はメモ済み、ロックした設定は触りません',
-      },
-      excerpt: {
-        zh: '设置抽屉现在浮在对话上面，拖左边就能调宽；里面按卡片分成几组，任务板也把状态和操作分开摆了。锁住的项我还是不会去提议改，归档过的关注不会再挂成空闲，不想盯了就点 ×。',
-        en: 'The settings drawer now floats over the chat and drags wider from the left edge. Sections sit in cards, the task board separates status from actions, a locked option still never gets a change proposal from me, and an archived watch no longer sits idle — × stops watching without touching the session.',
-        ja: '設定の引き出しは会話の上に重なるようになって、左端をドラッグして幅を変えられます。中はカードで分かれ、タスク板も状態と操作を分けて置いてあります。鍵をかけた項目は今まで通り提案せず、アーカイブ済みの監視は空きのまま残らず、× で監視だけやめられます。',
-      },
-      paragraphs: {
-        zh: [
-          '说真的，要是每次新开对话都得重新解释怎么称呼你、平时放多松，人烦我也记不过来。现在这些都收在设置抽屉里，抽屉浮在对话上面，点空白处就收起，嫌窄就拖左边那条边。里面按卡片分组，小标题把同一张卡里的话题隔开，宽了会自己排成几列；隔壁插件带过来的额外工具默认还是关着。',
-          '任务板也松快了些，状态单独摆着，相关按钮收在一起，做完的默认折起来。哪项你觉得不用再动了，点一下旁边的小锁，以后我连修改建议也不会提。关注列表里，已经在会话那边归档掉的不会再一直显示空闲；不想继续盯的，点那一行的 × 就取消关注，会话本身不动。选任务模型时我仍会参考固定的榜单快照，但你点名的模型绝不会擅自换掉；只想先聊两句不建任务，也随时说就行。',
-        ],
-        en: [
-          'Nobody wants to re-explain tone or permissions every week. Those choices now live in a settings drawer that floats over the chat—click the backdrop and it folds away, and if it feels tight, drag the left edge. Inside, sections sit in cards with small headings, and a wider drawer lays the fields out in columns. Companion plugin tools stay off unless you turn them on.',
-          'The task board has more room too: status sits apart from the grouped actions, and finished work stays folded. Click the small lock beside any option you want left alone and I will not propose edits to it. A watch you already archived no longer stays listed as idle, and the × on that row only stops watching — the session itself stays put. I still consult a pinned ranking snapshot when weighing task models, and I never swap a model you named. If you just want to talk an idea through, we can do that without opening a task.',
-        ],
-        ja: [
-          '呼び方や任せる範囲を毎回言い直すのは大変ですよね。設定は会話の上に重なる引き出しにまとめてあって、余白を押すと閉じて、狭ければ左端をドラッグして幅を変えられます。中はカードで分かれ、小さな見出しで話題を区切り、幅が足りると項目は横に並びます。他プラグインの追加機能は今まで通り、既定ではオフです。',
-          'タスクの板も少しゆとりができて、状態と操作が分かれて置かれ、終わった仕事は折りたたんだままです。決めた項目の横の鍵を押せば、以後は変更の提案もしません。もうアーカイブした監視は空きのまま残らず、行の × は監視をやめるだけで、セッション自体はそのままです。タスク用モデルは固定版の順位表を参考にしますが、あなたが指名したモデルを勝手に差し替えることはありません。雑談だけしたいときも、そのまま声をかけてください。',
         ],
       },
     },

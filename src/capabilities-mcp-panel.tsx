@@ -152,15 +152,10 @@ function useMcpList(api: SettingsApi): McpViewState {
   return state
 }
 
-/** Which half of the unified view the drawer opened on; the other half renders beside it. */
-export type CapabilitiesZone = 'capabilities' | 'mcp'
-
-export function CapabilitiesMcpPanel({ locale, api, settings, zone, onPick, onSaved }: {
+export function CapabilitiesMcpPanel({ locale, api, settings, onPick, onSaved }: {
   locale: CopyLocale
   api: SettingsApi
   settings: DotSettings
-  /** The tab the human opened: only a default-open hint, both halves render. */
-  zone: CapabilitiesZone
   onPick: (selector: string, grant: CapabilityGrant | undefined) => void
   onSaved: (next: DotSettings) => void
 }) {
@@ -393,8 +388,6 @@ export function CapabilitiesMcpPanel({ locale, api, settings, zone, onPick, onSa
     // The host and builtin groups are display-only: their tools grant one by one / via children.
     const chain = group.kind === 'host' || group.id === 'builtin' ? parents : [group.id, ...parents]
     const changed = group.tools.some(tool => countsTowardGroup(tool) && (applied[tool.name] ?? 'off') !== effectiveFor([`tool:${tool.name}`, ...chain]))
-    const granted = group.tools.some(tool => countsTowardGroup(tool) && effectiveFor([`tool:${tool.name}`, ...chain]) !== 'off')
-      || (group.children ?? []).some(child => child.tools.some(tool => countsTowardGroup(tool) && effectiveFor([`tool:${tool.name}`, child.id, ...chain]) !== 'off'))
     const label = displayedLabel(group)
     const selfHit = showFull || groupSelfHits(group)
     if (capNeedle !== '' && !selfHit && !groupHits(group)) return null
@@ -403,7 +396,7 @@ export function CapabilitiesMcpPanel({ locale, api, settings, zone, onPick, onSa
     // Host/builtin roots always show their tools: they are display-only and
     // collapsing them would hide the only grant controls those tools have.
     const displayOnly = group.kind === 'host' || group.id === 'builtin'
-    const autoOpen = displayOnly || granted || capNeedle !== ''
+    const autoOpen = displayOnly || capNeedle !== ''
     const open = expandDetails(`group:${group.id}`, autoOpen)
     return (
       <details key={group.id} className="dsh-dot-cap-group" data-grant={displayGrant === 'off' ? 'off' : undefined} open={open}>
@@ -483,8 +476,7 @@ export function CapabilitiesMcpPanel({ locale, api, settings, zone, onPick, onSa
     const needsToken = server.auth === 'token' && server.credential?.configured !== true
     const groupChain = [`mcp:${server.name}`]
     const serverTools = group?.tools ?? []
-    const grantedNow = serverTools.some(tool => countsTowardGroup(tool) && effectiveFor([`tool:${tool.name}`, ...groupChain]) !== 'off')
-    const autoOpen = grantedNow || capNeedle !== '' || needsToken
+    const autoOpen = capNeedle !== '' || needsToken
     const open = expandDetails(`server:${server.name}`, autoOpen)
     const body = (
       <>
@@ -570,7 +562,6 @@ export function CapabilitiesMcpPanel({ locale, api, settings, zone, onPick, onSa
 
   const mcpHalf = api.mcpList === undefined ? null : (
     <div className="dsh-dot-mcp">
-      <p className="dsh-dot-cap-intro">{t(locale, 'sMcpIntro')}</p>
       {mcp.error ? <div className="dsh-ui-error" role="alert">{mcp.error}</div> : null}
       {saveError !== '' ? (
         <div className="dsh-ui-error" role="alert">
@@ -621,7 +612,7 @@ export function CapabilitiesMcpPanel({ locale, api, settings, zone, onPick, onSa
 
   const capHalf = api.capabilities === undefined ? null : (
     <div className="dsh-dot-caps">
-      {zone === 'capabilities' ? <p className="dsh-dot-cap-intro">{t(locale, 'sCapIntro')}</p> : null}
+      <div className="dsh-dot-cap-section dsh-dot-cap-section--main">{t(locale, 'sCapGrants')}</div>
       <div className="dsh-dot-cap-toolbar">
         <Input
           className="dsh-dot-cap-search"
@@ -637,13 +628,6 @@ export function CapabilitiesMcpPanel({ locale, api, settings, zone, onPick, onSa
       {cap.error ? <div className="dsh-ui-error" role="alert">{cap.error}</div> : null}
       {capView === undefined ? null : (
         <>
-          <details className="dsh-dot-cap-group dsh-dot-cap-group--locked">
-            <summary className="dsh-dot-cap-head">
-              <span className="dsh-dot-cap-name">{t(locale, 'sCapLockedTitle')}<span className="dsh-dot-cap-count">{t(locale, 'sCapToolCount').replace('{n}', String(capView.locked.length))}</span></span>
-              <span className="dsh-dot-cap-badge dsh-dot-cap-badge--on">{t(locale, 'sCapAlways')}</span>
-            </summary>
-            <div className="dsh-dot-cap-body dsh-dot-cap-locked">{capView.locked.map(name => <span key={name} className="dsh-dot-cap-locked-name">{name}</span>)}</div>
-          </details>
           {capView.groups.length === 0 ? <div className="dsh-dot-model-empty">{t(locale, 'sCapEmpty')}</div> : null}
           {(['mcp', 'plugin', 'host'] as const).map(section => {
             const rows = shownGroups.filter(group => sectionOf(group) === section)
@@ -655,15 +639,23 @@ export function CapabilitiesMcpPanel({ locale, api, settings, zone, onPick, onSa
               </div>
             )
           })}
+          <details className="dsh-dot-cap-group dsh-dot-cap-group--locked">
+            <summary className="dsh-dot-cap-head">
+              <span className="dsh-dot-cap-name">{t(locale, 'sCapLockedTitle')}<span className="dsh-dot-cap-count">{t(locale, 'sCapToolCount').replace('{n}', String(capView.locked.length))}</span></span>
+              <span className="dsh-dot-cap-badge dsh-dot-cap-badge--on">{t(locale, 'sCapAlways')}</span>
+            </summary>
+            <div className="dsh-dot-cap-body dsh-dot-cap-locked">{capView.locked.map(name => <span key={name} className="dsh-dot-cap-locked-name">{name}</span>)}</div>
+          </details>
         </>
       )}
     </div>
   )
 
-  // The opened zone leads; the other half follows, so both are one scroll away.
   return (
-    <div className="dsh-dot-capmcp" data-zone={zone}>
-      {zone === 'mcp' ? <>{mcpHalf}{capHalf}</> : <>{capHalf}{mcpHalf}</>}
+    <div className="dsh-dot-capmcp">
+      <p className="dsh-dot-cap-intro">{t(locale, 'sCapIntro')}</p>
+      {mcpHalf}
+      {capHalf}
     </div>
   )
 }

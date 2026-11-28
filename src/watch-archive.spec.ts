@@ -162,10 +162,15 @@ describe('archived watched sessions leave the active ledger', () => {
   it('does not archive a watch created while the host list is in flight, and shares that list', async () => {
     let release: (rows: SessionRow[]) => void = () => {}
     const pending = new Promise<SessionRow[]>(resolve => { release = resolve })
-    let calls = 0
-    const { service, store } = harness(async () => {
-      calls += 1
-      return calls === 1 ? pending : [row('session-old', false), row('session-new', false)]
+    let sharedCalls = 0
+    let freshCalls = 0
+    const { service, store } = harness(async (_signal, options) => {
+      if (options?.fresh === true) {
+        freshCalls += 1
+        return [row('session-new', false)]
+      }
+      sharedCalls += 1
+      return pending
     })
     await service.watch('session-old', 'old')
     const first = service.syncWatched()
@@ -174,7 +179,8 @@ describe('archived watched sessions leave the active ledger', () => {
     await service.watch('session-new', 'new')
     release([])
     await Promise.all([first, second])
-    expect(calls).toBe(1)
+    expect(sharedCalls).toBe(1)
+    expect(freshCalls).toBe(1)
     expect(store.task('session-old')?.status).toBe('archived')
     expect(store.task('session-new')?.status).toBe('idle')
     expect(store.task('session-new')?.origin).toBe('watched')
@@ -183,10 +189,15 @@ describe('archived watched sessions leave the active ledger', () => {
   it('keeps reconciling after one caller aborts, and does not notify a turn that ends during archive', async () => {
     let releaseList: (rows: SessionRow[]) => void = () => {}
     const pendingList = new Promise<SessionRow[]>(resolve => { releaseList = resolve })
-    let calls = 0
+    let sharedCalls = 0
+    let freshCalls = 0
     let listedSignal: AbortSignal | undefined
-    const { service, store } = harness(async signal => {
-      calls += 1
+    const { service, store } = harness(async (signal, options) => {
+      if (options?.fresh === true) {
+        freshCalls += 1
+        return []
+      }
+      sharedCalls += 1
       listedSignal = signal
       return pendingList
     })
@@ -199,7 +210,8 @@ describe('archived watched sessions leave the active ledger', () => {
     const second = service.syncWatched()
     releaseList([])
     await second
-    expect(calls).toBe(1)
+    expect(sharedCalls).toBe(1)
+    expect(freshCalls).toBe(1)
     expect(listedSignal?.aborted).toBe(false)
     expect(store.task('session-old')?.status).toBe('archived')
 

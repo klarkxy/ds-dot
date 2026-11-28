@@ -1170,14 +1170,52 @@ describe('session failure causes', () => {
   })
 
 describe('reserved zombie compatibility', () => {
-  it('closes the real reserved unknown zombie shape after the absent id is confirmed and the run is old', async () => {
+  it('does not treat a legacy unknown reservation without launch evidence as a failed launch', async () => {
     const book = openBook()
     const held = await reserved(book)
     expect('id' in await book.markCreation(held.run.id, 'unknown', 2)).toBe(true)
     const { host, calls } = hostOf({ async findSession() { return undefined } })
     const result = await reconcileRun(book, host, held.run.id, 2 + 10 * 60_000 + 1)
-    expect(result).toMatchObject({ ok: true, action: 'closed', created: false, prompted: false })
-    expect(book.run(held.run.id)).toMatchObject({ phase: 'stopped', closeReason: 'unsent' })
+    expect(result).toMatchObject({ ok: true, action: 'absent', created: false, prompted: false })
+    expect(book.run(held.run.id)?.phase).toBe('reserved')
+    expect(book.run(held.run.id)?.creation).toBe('intent')
+    expect(book.run(held.run.id)?.launchAttemptedAt).toBeUndefined()
     expect(calls).toEqual([])
+  })
+
+  it('keeps a deliberate reservation after a lookup failure made it unknown', async () => {
+    const book = openBook()
+    const held = await reserved(book)
+    let failLookup = true
+    const { host } = hostOf({
+      async findSession() {
+        if (failLookup) throw new Error('persistence timeout')
+        return undefined
+      },
+    })
+    expect(await reconcileRun(book, host, held.run.id, 3)).toMatchObject({ ok: false, code: 'unknown' })
+    expect(book.run(held.run.id)).toMatchObject({ phase: 'reserved', creation: 'unknown' })
+
+    failLookup = false
+    expect(await reconcileRun(book, host, held.run.id, 4)).toMatchObject({ action: 'absent' })
+    expect(book.run(held.run.id)).toMatchObject({ phase: 'reserved', creation: 'intent' })
+    expect(book.run(held.run.id)?.launchAttemptedAt).toBeUndefined()
+
+    expect(await reconcileRun(book, host, held.run.id, 4 + 24 * 60 * 60_000)).toMatchObject({ action: 'absent' })
+    expect(book.run(held.run.id)?.phase).toBe('reserved')
+  })
+
+  it('infers a legacy persisted session claim attempt from its old updatedAt', async () => {
+    const book = openBook()
+    const held = await reserved(book)
+    const change = book.change(held.run.changeId)
+    const input = book.input(held.run.inputRef)
+    if (!change || !input) throw new Error('missing reserved rows')
+    const legacyRun = { ...held.run, creation: 'inflight' as const, actionClaim: 'session' as const, updatedAt: 2 }
+    const restored = WorkBook.restore({ changes: [change], inputs: [input], runs: [legacyRun] }, async () => undefined, 'win32')
+    expect(restored.recoveryError).toBeUndefined()
+    const { host } = hostOf({ async findSession() { return undefined } })
+    expect(await reconcileRun(restored, host, held.run.id, 2 + 10 * 60_000 + 1)).toMatchObject({ action: 'closed' })
+    expect(restored.run(held.run.id)).toMatchObject({ phase: 'stopped', closeReason: 'unsent', launchAttemptedAt: 2 })
   })
 })

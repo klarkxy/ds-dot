@@ -1803,7 +1803,7 @@ export class WorkBook {
       if (TERMINAL.has(run.phase)) return { ok: false, code: 'closed-run', message: `${runId} is ${run.phase}` }
       if (this.liveSessionClaims.has(runId)) return { ok: true, abandoned: false }
       if (run.actionClaim !== 'session' && run.creation !== 'inflight') return { ok: true, abandoned: false }
-      const launchAttemptedAt = run.launchAttemptedAt ?? (run.creation === 'unknown' || run.creation === 'inflight' || run.actionClaim === 'session' ? run.updatedAt : undefined)
+      const launchAttemptedAt = run.launchAttemptedAt ?? (run.creation === 'inflight' || run.actionClaim === 'session' ? run.updatedAt : undefined)
       const next: RunRecord = dropClaim({ ...run, ...(launchAttemptedAt !== undefined ? { launchAttemptedAt } : {}), creation: run.sessionId ? 'unknown' : 'intent', updatedAt: at })
       await this.commit('runs', next.id, next)
       this.runs.set(next.id, next)
@@ -1824,8 +1824,7 @@ export class WorkBook {
       if (run.deliveries.some(item => item.status === 'accepted' || item.status === 'unknown' || item.hostRequestId !== undefined)) {
         return { ok: true, reset: false }
       }
-      const launchAttemptedAt = run.launchAttemptedAt ?? run.updatedAt
-      const next: RunRecord = dropClaim({ ...run, launchAttemptedAt, creation: 'intent', updatedAt: at })
+      const next: RunRecord = dropClaim({ ...run, creation: 'intent', updatedAt: at })
       await this.commit('runs', next.id, next)
       this.runs.set(next.id, next)
       this.currentRevision += 1

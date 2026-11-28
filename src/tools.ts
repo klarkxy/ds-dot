@@ -558,8 +558,9 @@ export function apply(ctx: Context): void {
       session_id: { type: 'string', description: 'Restrict search to one specific session id.' },
       tools: { type: 'boolean', description: 'Also search tool call arguments and results; default false (messages only).' },
       limit: { type: 'integer', description: 'Maximum matches to return (default 12, max 40).' },
+      since: { type: 'string', description: 'Only sessions and messages at or after this time.' },
     },
-    execute: async (args) => {
+    execute: async (args, exec) => {
       const limit = num(args, 'limit')
       return dot().searchHistory({
         query: str(args, 'query') ?? '',
@@ -567,6 +568,8 @@ export function apply(ctx: Context): void {
         ...str(args, 'session_id') ? { sessionId: str(args, 'session_id')! } : {},
         tools: bool(args, 'tools'),
         ...limit === undefined ? {} : { limit },
+        ...str(args, 'since') ? { since: str(args, 'since')! } : {},
+        ...exec.signal ? { signal: exec.signal } : {},
       })
     },
     title: 'Search history',

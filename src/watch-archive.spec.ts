@@ -162,31 +162,48 @@ describe('archived watched sessions leave the active ledger', () => {
   it('does not archive a watch created while the host list is in flight, and shares that list', async () => {
     let release: (rows: SessionRow[]) => void = () => {}
     const pending = new Promise<SessionRow[]>(resolve => { release = resolve })
-    let calls = 0
-    const { service, store } = harness(async () => {
-      calls += 1
-      return calls === 1 ? pending : [row('session-old', false), row('session-new', false)]
+    let sharedCalls = 0
+    let freshCalls = 0
+    let storeRef!: DotStore
+    const { service, store } = harness(async (_signal, options) => {
+      if (options?.fresh === true) {
+        freshCalls += 1
+        await storeRef.track({ sessionId: 'session-race', origin: 'watched', title: 'race', goal: 'rewritten', cwd: '/w', at: 1_001 })
+        return []
+      }
+      sharedCalls += 1
+      return pending
     })
+    storeRef = store
     await service.watch('session-old', 'old')
+    await service.watch('session-race', 'race')
     const first = service.syncWatched()
     const second = service.syncWatched()
     await Promise.resolve()
     await service.watch('session-new', 'new')
     release([])
     await Promise.all([first, second])
-    expect(calls).toBe(1)
+    expect(sharedCalls).toBe(1)
+    expect(freshCalls).toBe(1)
     expect(store.task('session-old')?.status).toBe('archived')
     expect(store.task('session-new')?.status).toBe('idle')
     expect(store.task('session-new')?.origin).toBe('watched')
+    expect(store.task('session-race')?.status).toBe('idle')
+    expect(store.task('session-race')?.updatedAt).toBe(1_001)
   })
 
   it('keeps reconciling after one caller aborts, and does not notify a turn that ends during archive', async () => {
     let releaseList: (rows: SessionRow[]) => void = () => {}
     const pendingList = new Promise<SessionRow[]>(resolve => { releaseList = resolve })
-    let calls = 0
+    let sharedCalls = 0
+    let freshCalls = 0
     let listedSignal: AbortSignal | undefined
-    const { service, store } = harness(async signal => {
-      calls += 1
+    const { service, store } = harness(async (signal, options) => {
+      if (options?.fresh === true) {
+        freshCalls += 1
+        return []
+      }
+      sharedCalls += 1
       listedSignal = signal
       return pendingList
     })
@@ -199,7 +216,8 @@ describe('archived watched sessions leave the active ledger', () => {
     const second = service.syncWatched()
     releaseList([])
     await second
-    expect(calls).toBe(1)
+    expect(sharedCalls).toBe(1)
+    expect(freshCalls).toBe(1)
     expect(listedSignal?.aborted).toBe(false)
     expect(store.task('session-old')?.status).toBe('archived')
 

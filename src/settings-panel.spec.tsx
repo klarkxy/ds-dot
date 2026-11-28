@@ -143,6 +143,31 @@ describe('cache keepalive setting', () => {
     await act(async () => root.unmount())
   })
 
+  it('keeps independent same-model overrides for other providers', async () => {
+    const saved: Array<Partial<DotSettings>> = []
+    let current: DotSettings = { ...DEFAULT_SETTINGS, cacheTtl: { 'provider-a/model-x': 15, 'provider-b/model-x': 0 } }
+    const api = {
+      models: async () => ({ groups: [] }),
+      settings: async () => current,
+      settingProposals: async () => [],
+      decideSetting: async () => 'ok',
+      keepalive: async () => ({ provider: 'provider-a', model: 'model-x', minutes: 15, defaultMinutes: 5 }),
+      setSettings: async (patch: Partial<DotSettings>) => { saved.push(patch); current = { ...current, ...patch } as DotSettings; return current },
+    }
+    function Harness() {
+      const [settings, setSettings] = useState<DotSettings>(current)
+      return <SettingsPanel locale="en" api={api as never} settings={settings} onSaved={setSettings} />
+    }
+    const root = createRoot(document.getElementById('root')!)
+    await act(async () => root.render(<Harness />))
+    await act(async () => { await Promise.resolve() })
+    const input = document.querySelector<HTMLInputElement>('input[aria-label="Cache duration"]')!
+    await act(async () => { type(input, '20') })
+    await act(async () => { blur(input) })
+    expect(saved.at(-1)).toEqual({ cacheTtl: { 'provider-a/model-x': 20, 'provider-b/model-x': 0 } })
+    await act(async () => root.unmount())
+  })
+
   it('hides the row when the host reports no model', async () => {
     let current: DotSettings = { ...DEFAULT_SETTINGS }
     const api = {

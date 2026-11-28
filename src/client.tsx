@@ -13,7 +13,7 @@ export { createDotCards } from './card-client.tsx'
 import { useMemo, useSyncExternalStore } from 'react'
 import { BOARD_ROOT, boardCss } from './board.tsx'
 import { CHAT_ROOT, ChatPanel, chatCss, type CardComponent, type ChatApi } from './chat-panel.tsx'
-import { createAttentionWatcher, DESKTOP_NOTIFY_KEY, type AttentionWatcher } from './attention-client.ts'
+import { attentionValue, createAttentionWatcher, DESKTOP_NOTIFY_KEY, type AttentionWatcher } from './attention-client.ts'
 import { contextCss } from './context-panel.tsx'
 import { personaCss } from './persona-panel.tsx'
 import { trajectoryCss } from './trajectory-panel.tsx'
@@ -46,7 +46,7 @@ type Client = Context & {
   remote?: { session?: { modelCatalog?: () => Promise<unknown> } }
 }
 
-type RpcReply<T> = { ok: true; value: T } | { ok: false; error: { message: string } }
+type RpcReply<T> = { ok: true; value: T } | { ok: false; error: { message: string; code?: string } }
 
 export function apply(ctx: Context): void {
   const client = ctx as Client
@@ -141,8 +141,7 @@ export function apply(ctx: Context): void {
       const rpc = client.connection?.rpc
       if (!rpc) throw new Error('connection unavailable')
       const reply = await rpc.call(RPC_CHANNEL, 'attention', {}, signal) as RpcReply<AttentionView>
-      if (!reply || reply.ok !== true) throw new Error(reply?.ok === false ? reply.error.message : 'rpc failed')
-      return reply.value
+      return attentionValue(reply)
     },
     isAttended: () => document.visibilityState === 'visible' && document.hasFocus(),
     notify: item => {
@@ -166,6 +165,9 @@ export function apply(ctx: Context): void {
       }
     },
     log: error => logger.warn('attention.poll-failed', 'Dot attention poll failed.', error),
+    isFatal: error => (error as { code?: unknown; message?: unknown })?.code === 'not-found'
+      && typeof (error as { message?: unknown }).message === 'string'
+      && ((error as { message: string }).message).startsWith('unknown endpoint:'),
   })
   // Reuse the renderer, but keep every pending/reply request on dot's durable
   // asynchronous channel. The adapter runs once, so feed updates do not remount inputs.

@@ -875,6 +875,7 @@ describe('run origin provenance', () => {
       createdAt: 1, updatedAt: 1,
     }
     expect(parseRun(validRun)).toBeDefined()
+    expect(parseRun({ ...validRun, launchAttemptedAt: 7 })).toMatchObject({ launchAttemptedAt: 7 })
     expect(parseRun({ ...validRun, origin: { strength: 'explicit', source: 'user' } })).toBeDefined()
     expect(parseRun({ ...validRun, origin: { strength: 'inferred', source: 'speculative', sender: 'alice', policyVersion: 'v1' } })).toBeDefined()
 
@@ -969,6 +970,11 @@ describe('run origin provenance', () => {
     expect(runStoppedByUser({ phase: 'stopped', closeReason: 'stopped' }, { control: 'open' })).toBe(true)
     expect(runStoppedByUser({ phase: 'settling', closeIntent: 'stopped' }, { control: 'open' })).toBe(true)
     expect(runStoppedByUser({ phase: 'stopped', closeReason: 'watchdog' }, { control: 'open' })).toBe(false)
+    expect(runStoppedByUser({ phase: 'stopped', closeReason: 'identity-rejected' }, { control: 'open' })).toBe(false)
+    expect(runStoppedByUser({ phase: 'stopped', closeReason: 'unsent' }, { control: 'open' })).toBe(false)
+    expect(runStoppedByUser({ phase: 'stopped', closeIntent: 'stopped', closeReason: 'unsent' }, { control: 'open' })).toBe(true)
+    expect(runStoppedByUser({ phase: 'stopped', closeReason: 'unsent' }, { control: 'cancelled' })).toBe(true)
+    expect(runStoppedByUser({ phase: 'settling', closeIntent: 'stopped', closeReason: 'identity-rejected' }, { control: 'open' })).toBe(false)
     expect(runStoppedByUser({ phase: 'settling', closeIntent: 'stopped', closeReason: 'watchdog' }, { control: 'open' })).toBe(false)
     expect(runStoppedByUser({ phase: 'active' }, { control: 'cancelled' })).toBe(true)
   })

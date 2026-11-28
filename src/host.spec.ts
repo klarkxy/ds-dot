@@ -768,6 +768,38 @@ describe('single-session lookup and session list caching', () => {
     expect(slowLists).toBe(2)
   })
 
+  it('does not let an older list overwrite a newer fresh result', async () => {
+    let lists = 0
+    let releaseOld!: () => void
+    let releaseFresh!: () => void
+    const oldGate = new Promise<void>(done => { releaseOld = done })
+    const freshGate = new Promise<void>(done => { releaseFresh = done })
+    const host = bindHost(name => {
+      if (name === 'sessionController') return {
+        list: async () => {
+          lists++
+          if (lists === 1) {
+            await oldGate
+            return { items: [{ sessionId: 'old', cwd: 'H:\repo', running: false, updatedAt: 1 }] }
+          }
+          await freshGate
+          return { items: [{ sessionId: 'new', cwd: 'H:\repo', running: true, updatedAt: 2 }] }
+        },
+      }
+      if (name === 'workspaceRegistry') return { archivedSessionIds: [] }
+      return undefined
+    })
+    const oldList = host.listSessions(AbortSignal.timeout(1_000))
+    await new Promise(done => setTimeout(done, 5))
+    const freshList = host.listSessions(AbortSignal.timeout(1_000), { fresh: true })
+    releaseFresh()
+    expect((await freshList)[0]?.sessionId).toBe('new')
+    releaseOld()
+    expect((await oldList)[0]?.sessionId).toBe('old')
+    expect((await host.listSessions(AbortSignal.timeout(1_000)))[0]?.sessionId).toBe('new')
+    expect(lists).toBe(2)
+  })
+
   it('archives a half-created dot session when agent creation fails', async () => {
     const archived: string[] = []
     const host = bindHost(name => {

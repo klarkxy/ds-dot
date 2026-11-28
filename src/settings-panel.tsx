@@ -1397,8 +1397,9 @@ export function SettingsPanel({ locale, api, settings, section = 'all', proposal
                     value={settings.cacheTtl?.[cacheKey] ?? keepalive.minutes}
                     onCommit={minutes => {
                       const next = { ...settings.cacheTtl }
-                      for (const key of Object.keys(next)) if (cacheTtlModelOf(key) === keepalive.model) delete next[key]
-                      if (minutes !== keepalive.defaultMinutes) next[cacheKey] = minutes
+                      const aliased = Object.keys(next).some(key => key !== cacheKey && cacheTtlModelOf(key) === keepalive.model)
+                      if (minutes !== keepalive.defaultMinutes || aliased) next[cacheKey] = minutes
+                      else delete next[cacheKey]
                       save({ cacheTtl: next })
                     }}
                   />}

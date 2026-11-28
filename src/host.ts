@@ -496,6 +496,7 @@ export function bindHost(get: Get, log?: (message: string) => void, modelOf?: ()
       const cached = sessionListCache
       if (options?.fresh !== true && cached && Date.now() - cached.at < 3_000) return raceSignal(Promise.resolve(cached.rows), signal)
       const start = (generation: number) => (async () => {
+        const startedAt = Date.now()
         const { items } = await controller().list({}, AbortSignal.timeout(30_000))
         const archived = new Set(registry().archivedSessionIds ?? [])
         const rows = items.map(item => ({
@@ -507,7 +508,7 @@ export function bindHost(get: Get, log?: (message: string) => void, modelOf?: ()
           subagent: item.origin === 'subagent' || typeof item.parentSessionId === 'string',
           archived: archived.has(String(item.sessionId)),
         }))
-        if (sessionListGeneration === generation) sessionListCache = { at: Date.now(), rows }
+        if (sessionListGeneration === generation && (!sessionListCache || startedAt >= sessionListCache.at)) sessionListCache = { at: startedAt, rows }
         return rows
       })()
       if (options?.fresh === true) return raceSignal(start(sessionListGeneration), signal)

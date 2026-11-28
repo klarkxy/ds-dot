@@ -212,14 +212,14 @@ export async function cancelWork(book: WorkBook, host: RunSessionHost, changeId:
 }
 
 /** Move one open run through settling without cancelling its change. Idle alone does not finish it. */
-export async function finishWork(book: WorkBook, host: RunSessionHost, runId: string, phase: 'completed' | 'failed', at = Date.now()): Promise<{ readonly ok: true; readonly phase: RunPhase } | WorkRefusal> {
+export async function finishWork(book: WorkBook, host: RunSessionHost, runId: string, phase: 'completed' | 'failed' | 'stopped', at = Date.now(), closeReason?: string): Promise<{ readonly ok: true; readonly phase: RunPhase } | WorkRefusal> {
   const current = book.run(runId)
   const owner = current ? book.change(current.changeId) : undefined
   // A review keeps the workspace until closeout. finish must not release it or look like a missing stop.
   if (current?.kind === 'review' && owner && owner.control !== 'cancelled' && !owner.closeout && current.phase !== 'completed' && current.phase !== 'failed' && current.phase !== 'stopped') {
     return { ok: false, code: 'unknown', message: `${runId} stays reserved until closeout; use action=closeout or action=reject for the review instead of finish` }
   }
-  const prepared = await book.prepareFinish(runId, phase, at)
+  const prepared = await book.prepareFinish(runId, phase, at, closeReason)
   if (!prepared.ok) return prepared
   const released = await releaseStopped(book, host, runId, prepared.updatedAt, phase, at)
   if (!released) return { ok: false, code: 'unknown', message: `${runId} is not confirmed ${phase}` }

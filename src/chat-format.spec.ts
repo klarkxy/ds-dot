@@ -264,4 +264,12 @@ describe('chat-format', () => {
       session: { label: '#3f7328' },
     })
   })
+
+  it('parses result notice bullets cleanly with dedicated result kind and localized summary', () => {
+    const parsed = parseNotice('[dot notice] Updates:\nTasks:\n- result · dot-1: PR acme/widgets#5 merged')
+    expect(parsed.fallback).toBeUndefined()
+    expect(parsed.entries).toEqual([{ kind: 'result', sessionId: 'dot-1', summary: 'PR acme/widgets#5 merged' }])
+    expect(summarizeNotice(parsed, 'en', EMPTY_TASKS)).toContain('Result')
+    expect(summarizeNotice(parsed, 'zh', EMPTY_TASKS)).toContain('结果')
+  })
 })

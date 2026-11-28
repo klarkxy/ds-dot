@@ -125,6 +125,26 @@ describe('PendingHub', () => {
     await expect(second.settled).resolves.toEqual({ kind: 'approval', allow: false })
     await expect(third.settled).resolves.toBeUndefined()
   })
+
+  it('tracks overlapping closed and open wait intervals per session without double-counting', () => {
+    let now = 100
+    const hub = new PendingHub(() => now)
+    const ap1 = hub.open({ kind: 'approval', sessionId: 's1', subject: 'bash' }) // [100, ...]
+    now = 200
+    const q1 = hub.open({ kind: 'question', sessionId: 's1', subject: 'Which?', questions: [{ id: 'a', question: 'Which?' }] }) // [200, ...]
+    now = 350
+    hub.answer(ap1.id, { kind: 'approval', allow: true }) // closed [100, 350]
+    now = 500
+    // q1 still open [200, 500]; union of [100, 350] and [200, 500] = [100, 500] = 400ms (NOT 250 + 300 = 550ms)
+    expect(hub.pendingWaitMs('s1', 500, 0)).toBe(400)
+    expect(hub.pendingWaitMs('s1', 500, 250)).toBe(250)
+    expect(hub.pendingWaitMs('s2', 500, 0)).toBe(0)
+
+    hub.answer(q1.id, { kind: 'question', answers: [{ id: 'a', selected: ['x'] }] })
+    expect(hub.pendingWaitMs('s1', 800, 0)).toBe(400)
+    hub.reset()
+    expect(hub.pendingWaitMs('s1', 800, 0)).toBe(0)
+  })
 })
 
 describe('rules', () => {

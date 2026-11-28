@@ -7,8 +7,8 @@
  */
 import {
   Button, DisclosureRow, IconCheckOutlineRegular, IconChecklistOutlineRegular, IconChevronDownOutlineRegular,
-  IconCloseOutlineRegular, IconCordisPluginOutlineRegular, IconEditOutlineRegular, IconGaugeOutlineRegular, IconGlobeOutlineRegular,
-  IconInspectOutlineRegular, IconShieldOutlineRegular, IconSlidersTwoOutlineRegular, IconUserOutlineRegular,
+  IconCloseOutlineRegular, IconCordisPluginOutlineRegular, IconEditOutlineRegular, IconGaugeOutlineRegular,
+  IconInspectOutlineRegular, IconRefreshOutlineRegular, IconSettingsOutlineRegular, IconShieldOutlineRegular, IconSlidersTwoOutlineRegular, IconUserOutlineRegular,
   IconWarningOutlineRegular, MarkdownText, Modal, modalSelector, StateDot, Tag, TextShimmer, Tooltip, UserMessageBubble,
   type MarkdownLabels, type StateDotState, type TagTone,
 } from '@deepseek-ai/dsh-client-ui-primitives'
@@ -20,7 +20,7 @@ import { filterVisibleChat } from './chat-filter.ts'
 import { formatToolDetail, parseNotice, permissionLabel, resolveSessionBadge, summarizeNotice, summarizeToolCall, summarizeToolGroup, type NoticeEntry, type ParsedNotice, type SessionBadge, type TaskLookup } from './chat-format.ts'
 import { BellGlyph, Composer, GearGlyph, JumpGlyph, NarrowGlyph, ToolGlyph, WidenGlyph } from './composer.tsx'
 import {
-  useBoard, useChatFeed, useContextUse, useDrawerGuard, useLocalEchoes, useRecipes, useReminderRemoval, useScrollPin, useSettings,
+  DRAWER_MIN_PX, useBoard, useChatFeed, useContextUse, useDrawerGuard, useLocalEchoes, useRecipes, useReminderRemoval, useScrollPin, useSettings,
   type DrawerAction, type DrawerTab, type SettingsSection,
 } from './chat-hooks.ts'
 import { ContextPanel, type ContextApi } from './context-panel.tsx'
@@ -28,6 +28,7 @@ import { PersonaPanel, type KnowledgeApi } from './persona-panel.tsx'
 import { TrajectoryPanel, type TrajectoryApi } from './trajectory-panel.tsx'
 import type { BoardView, ChatItem, ChatSnapshot, DotSettings, RecipeBoardRow, RolloverReason, SelfStatusView } from './contracts.ts'
 import type { ChatImage } from './chat-images.ts'
+import { humanBytes, type ChatFileReceipt } from './chat-files.ts'
 import { SettingsPanel, useSettingProposals, type SaveNotice, type SettingsApi } from './settings-panel.tsx'
 import type { RenderFactorySlot } from '@klarkxy/dsh-plugin-kit/model-picker'
 import { cardCopy, fillText, formatDuration, formatTokens, formatWhen, intlLocale, t, toolLabel, type CopyLocale, type TextKey } from './ui-copy.ts'
@@ -45,11 +46,14 @@ export const CHAT_ROOT = 'dsh-dot-chat'
 export interface ChatApi extends SettingsApi, ContextApi, TrajectoryApi, KnowledgeApi {
   chat(itemsRev: number, signal: AbortSignal): Promise<ChatSnapshot | undefined>
   wait(rev: number, itemsRev: number, signal: AbortSignal): Promise<ChatSnapshot | undefined>
-  say(text: string, images?: readonly ChatImage[]): Promise<void>
+  attach(name: string, data: string): Promise<ChatFileReceipt>
+  say(text: string, images?: readonly ChatImage[], files?: readonly string[]): Promise<void>
   stop(): Promise<void>
   board(signal: AbortSignal): Promise<BoardView>
   /** Remove one of Dorothy's reminders from the board. */
   removeSchedule(id: string): Promise<boolean>
+  /** Stop watching a session. Does not archive or change the host session. */
+  unwatch?(sessionId: string): Promise<boolean>
   /** Recipes with per-revision stats, in-flight changes and bound reminders. */
   recipes?(signal: AbortSignal): Promise<readonly RecipeBoardRow[]>
   /** Create + dispatch a recipe task from the Tasks panel. */
@@ -114,12 +118,14 @@ interface DrawerProps {
   readonly onDiscardPending: () => void
   readonly onDirtyChange: (dirty: boolean) => void
   readonly onWide: () => void
+  readonly widthPx: number | undefined
+  readonly onWidth: (px: number | undefined) => void
   readonly onSaved: (next: DotSettings) => void
   readonly onProposalCount: (count: number) => void
 }
 
 const SETTINGS_SECTIONS: ReadonlySet<DrawerTab> = new Set<SettingsSection>([
-  'proposals', 'general', 'takeover', 'dispatch', 'capabilities', 'mcp',
+  'proposals', 'general', 'takeover', 'dispatch', 'github', 'capabilities', 'advanced',
 ])
 
 function isSettingsSection(tab: DrawerTab): tab is SettingsSection {
@@ -136,14 +142,70 @@ interface DrawerNavItem {
 }
 
 /**
- * One drawer docked beside the chat for the board and every settings page.
- * It has no backdrop, so the conversation and the composer stay usable while it is open.
+ * Overlay drawer for the board and every settings page: it always floats over the
+ * chat stage behind a backdrop, never docking side-by-side. The left edge is a drag
+ * handle — dragging resizes within safe bounds, Arrow keys nudge, double-click resets.
  */
-function WorkDrawer({ locale, api, tab, wide, settings, trajectoryRev, running, waiting, proposalCount, tasks, renderFactorySlot, personaDirty, pendingAction, discardSignal, onRequest, onCancelPending, onDiscardPending, onDirtyChange, onWide, onSaved, onProposalCount }: DrawerProps) {
+function WorkDrawer({ locale, api, tab, wide, settings, trajectoryRev, running, waiting, proposalCount, tasks, renderFactorySlot, personaDirty, pendingAction, discardSignal, onRequest, onCancelPending, onDiscardPending, onDirtyChange, onWide, widthPx, onWidth, onSaved, onProposalCount }: DrawerProps) {
   const [saveNotice, setSaveNotice] = useState<SaveNotice>()
   useEffect(() => { setSaveNotice(undefined) }, [tab])
   const requestClose = useCallback(() => { onRequest({ kind: 'close' }) }, [onRequest])
   const requestTab = useCallback((next: DrawerTab) => { onRequest({ kind: 'tab', tab: next }) }, [onRequest])
+  const asideRef = useRef<HTMLElement>(null)
+  const dragRef = useRef<{ right: number }>()
+  const [dragging, setDragging] = useState(false)
+  const [sliderMax, setSliderMax] = useState(1200)
+  const [sliderNow, setSliderNow] = useState(DRAWER_MIN_PX)
+  const effectiveWide = wide && widthPx === undefined
+  /** Clamp into [min, layer width]; the overlay layer spans the stage, so 100% is the natural ceiling. */
+  const clampWidth = useCallback((px: number) => {
+    const layer = asideRef.current?.parentElement
+    const max = layer ? layer.clientWidth : window.innerWidth
+    return Math.max(DRAWER_MIN_PX, Math.min(px, max))
+  }, [])
+  const onResizePointerDown = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
+    const aside = asideRef.current
+    if (!aside || event.button !== 0) return
+    dragRef.current = { right: aside.getBoundingClientRect().right }
+    setDragging(true)
+    event.currentTarget.setPointerCapture(event.pointerId)
+    event.preventDefault()
+  }, [])
+  const onResizePointerMove = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
+    const drag = dragRef.current
+    if (!drag) return
+    onWidth(clampWidth(drag.right - event.clientX))
+  }, [clampWidth, onWidth])
+  const endResizeDrag = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
+    if (!dragRef.current) return
+    dragRef.current = undefined
+    setDragging(false)
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId)
+  }, [])
+  const onResizeKeyDown = useCallback((event: React.KeyboardEvent<HTMLDivElement>) => {
+    if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return
+    const aside = asideRef.current
+    if (!aside) return
+    event.preventDefault()
+    const step = (event.shiftKey ? 64 : 16) * (event.key === 'ArrowLeft' ? 1 : -1)
+    onWidth(clampWidth(aside.getBoundingClientRect().width + step))
+  }, [clampWidth, onWidth])
+  const resetWidth = useCallback(() => { dragRef.current = undefined; onWidth(undefined) }, [onWidth])
+  useEffect(() => {
+    const aside = asideRef.current
+    const layer = aside?.parentElement
+    if (!aside || !layer) return
+    const sync = () => {
+      setSliderMax(Math.max(DRAWER_MIN_PX, layer.clientWidth || 0))
+      const measured = Math.round(aside.getBoundingClientRect().width)
+      setSliderNow(measured > 0 ? measured : (widthPx ?? DRAWER_MIN_PX))
+    }
+    sync()
+    if (typeof ResizeObserver === 'undefined') return
+    const observer = new ResizeObserver(sync)
+    observer.observe(layer)
+    return () => observer.disconnect()
+  }, [widthPx, wide])
   useEffect(() => {
     const close = (event: globalThis.KeyboardEvent) => {
       if (event.key === 'Escape' && !event.defaultPrevented && !document.querySelector(modalSelector)) requestClose()
@@ -189,19 +251,20 @@ function WorkDrawer({ locale, api, tab, wide, settings, trajectoryRev, running, 
   }, [tab])
 
   const proposalItems: readonly DrawerNavItem[] = !isTasks && (proposalCount > 0 || tab === 'proposals') ? [
-    { value: 'proposals', label: t(locale, 'tabProposals'), title: t(locale, 'sProposals'), icon: <IconEditOutlineRegular size={15} />, badge: proposalCount },
+    { value: 'proposals', label: t(locale, 'tabProposals'), title: t(locale, 'tabProposals'), icon: <IconEditOutlineRegular size={15} />, badge: proposalCount },
   ] : []
   const configItems: readonly DrawerNavItem[] = isTasks ? [] : [
     { value: 'general', label: t(locale, 'tabGeneral'), title: t(locale, 'tabGeneral'), icon: <IconSlidersTwoOutlineRegular size={15} /> },
-    { value: 'takeover', label: t(locale, 'tabTakeover'), title: t(locale, 'sRequests'), icon: <IconShieldOutlineRegular size={15} /> },
-    { value: 'dispatch', label: t(locale, 'tabDispatch'), title: t(locale, 'sTasks'), icon: <IconChecklistOutlineRegular size={15} /> },
-    { value: 'capabilities', label: t(locale, 'tabCapabilities'), title: t(locale, 'sCapabilities'), icon: <IconCordisPluginOutlineRegular size={15} /> },
-    { value: 'mcp', label: t(locale, 'tabMcp'), title: t(locale, 'sMcp'), icon: <IconGlobeOutlineRegular size={15} /> },
-    { value: 'persona', label: t(locale, 'tabPersona'), title: t(locale, 'personaTitle'), icon: <IconUserOutlineRegular size={15} />, dirty: personaDirty },
+    { value: 'takeover', label: t(locale, 'tabTakeover'), title: t(locale, 'tabTakeover'), icon: <IconShieldOutlineRegular size={15} /> },
+    { value: 'dispatch', label: t(locale, 'tabDispatch'), title: t(locale, 'tabDispatch'), icon: <IconChecklistOutlineRegular size={15} /> },
+    { value: 'capabilities', label: t(locale, 'tabCapabilities'), title: t(locale, 'tabCapabilities'), icon: <IconCordisPluginOutlineRegular size={15} /> },
+    { value: 'github', label: t(locale, 'tabGithub'), title: t(locale, 'tabGithub'), icon: <IconRefreshOutlineRegular size={15} /> },
+    { value: 'persona', label: t(locale, 'tabPersona'), title: t(locale, 'tabPersona'), icon: <IconUserOutlineRegular size={15} />, dirty: personaDirty },
+    { value: 'advanced', label: t(locale, 'tabAdvanced'), title: t(locale, 'tabAdvanced'), icon: <IconSettingsOutlineRegular size={15} /> },
   ]
   const inspectItems: readonly DrawerNavItem[] = isTasks ? [] : [
-    { value: 'context', label: t(locale, 'tabContext'), title: t(locale, 'ctxTitle'), icon: <IconGaugeOutlineRegular size={15} /> },
-    { value: 'trajectory', label: t(locale, 'viewTrajectory'), title: t(locale, 'trTitle'), icon: <IconInspectOutlineRegular size={15} /> },
+    { value: 'context', label: t(locale, 'tabContext'), title: t(locale, 'tabContext'), icon: <IconGaugeOutlineRegular size={15} /> },
+    { value: 'trajectory', label: t(locale, 'viewTrajectory'), title: t(locale, 'viewTrajectory'), icon: <IconInspectOutlineRegular size={15} /> },
   ]
   const allItems: readonly DrawerNavItem[] = isTasks
     ? [{ value: 'tasks', label: t(locale, 'tasks'), title: t(locale, 'tasks'), icon: null, badge: waiting }]
@@ -229,7 +292,24 @@ function WorkDrawer({ locale, api, tab, wide, settings, trajectoryRev, running, 
   return (
     <div className="dsh-dot-drawer-layer" data-kind={isTasks ? 'tasks' : 'settings'}>
     <button type="button" tabIndex={-1} className="dsh-dot-drawer-backdrop" aria-label={t(locale, 'closeDrawer')} onClick={requestClose} />
-    <aside className="dsh-dot-drawer" data-kind={isTasks ? 'tasks' : 'settings'} data-wide={wide ? '' : undefined} role="dialog" aria-label={isTasks ? t(locale, 'tasks') : t(locale, 'settings')}>
+    <aside ref={asideRef} className="dsh-dot-drawer" data-kind={isTasks ? 'tasks' : 'settings'} data-wide={wide && widthPx === undefined ? '' : undefined} data-resizing={dragging ? '' : undefined} role="dialog" aria-label={isTasks ? t(locale, 'tasks') : t(locale, 'settings')} {...widthPx === undefined ? {} : { style: { width: widthPx } }}>
+      <div
+        className="dsh-dot-drawer-resize"
+        role="slider"
+        tabIndex={0}
+        aria-label={t(locale, 'resizeDrawer')}
+        aria-orientation="vertical"
+        aria-valuemin={DRAWER_MIN_PX}
+        aria-valuemax={sliderMax}
+        aria-valuenow={sliderNow}
+        title={t(locale, 'resizeDrawer')}
+        onPointerDown={onResizePointerDown}
+        onPointerMove={onResizePointerMove}
+        onPointerUp={endResizeDrag}
+        onPointerCancel={endResizeDrag}
+        onKeyDown={onResizeKeyDown}
+        onDoubleClick={resetWidth}
+      />
       <header className="dsh-dot-drawer-head">
         <h2 className="dsh-dot-drawer-title">
           {activeItem.title}
@@ -247,7 +327,7 @@ function WorkDrawer({ locale, api, tab, wide, settings, trajectoryRev, running, 
             {t(locale, 'saveFailed')}{saveNotice.message}
           </span>
         ) : null}
-        <Button variant="ghost" size="sm" className="dsh-dot-drawer-widen" icon={wide ? <NarrowGlyph /> : <WidenGlyph />} aria-label={t(locale, wide ? 'narrowDrawer' : 'widenDrawer')} title={t(locale, wide ? 'narrowDrawer' : 'widenDrawer')} aria-pressed={wide} onClick={onWide} />
+        <Button variant="ghost" size="sm" className="dsh-dot-drawer-widen" icon={effectiveWide ? <NarrowGlyph /> : <WidenGlyph />} aria-label={t(locale, effectiveWide ? 'narrowDrawer' : 'widenDrawer')} title={t(locale, effectiveWide ? 'narrowDrawer' : 'widenDrawer')} aria-pressed={effectiveWide} onClick={onWide} />
         <Button variant="ghost" size="sm" icon={<IconCloseOutlineRegular size={15} />} aria-label={t(locale, 'closeDrawer')} title={t(locale, 'closeDrawer')} onClick={requestClose} />
       </header>
       {pendingAction ? (
@@ -279,7 +359,7 @@ function WorkDrawer({ locale, api, tab, wide, settings, trajectoryRev, running, 
             {tab === 'tasks'
               ? tasks
               : isSettingsSection(tab)
-                ? <SettingsPanel locale={locale} api={api} section={tab} proposals={proposalState} {...settings ? { settings } : {}} onSaved={onSaved} onStatusChange={setSaveNotice} onProposalCount={onProposalCount} onSectionChange={requestTab} {...renderFactorySlot ? { renderFactorySlot } : {}} />
+                ? <SettingsPanel locale={locale} api={api} section={tab} proposals={proposalState} {...settings ? { settings } : {}} onSaved={onSaved} onStatusChange={setSaveNotice} onProposalCount={onProposalCount} {...renderFactorySlot ? { renderFactorySlot } : {}} />
                 : tab === 'persona'
                   ? <PersonaPanel locale={locale} api={api} {...settings ? { settings } : {}} discardSignal={discardSignal} onDirtyChange={onDirtyChange} onSaved={onSaved} onStatusChange={setSaveNotice} />
                   : tab === 'context'
@@ -334,10 +414,10 @@ function ProposalDiff({ locale, proposal }: { locale: CopyLocale; proposal: NonN
       {rows.map((row, index) => (
         <div key={`${row.label}-${index}`} className="dsh-dot-recipe-proposal-field">
           <span className="dsh-ui-meta">{row.label}</span>
-          {row.before !== undefined ? <span className="dsh-ui-meta">«{row.before}» → «{row.after}»</span> : null}
-          {row.changed?.map(pair => <span key={`~${pair.before}`} className="dsh-ui-meta">«{pair.before}» → «{pair.after}»</span>)}
-          {row.added?.map(text => <span key={`+${text}`} className="dsh-ui-meta">+ {text}</span>)}
-          {row.removed?.map(text => <span key={`-${text}`} className="dsh-ui-meta">− {text}</span>)}
+          {row.before !== undefined ? <span className="dsh-ui-meta dsh-dot-recipe-diff-change">«{row.before}» → «{row.after}»</span> : null}
+          {row.changed?.map(pair => <span key={`~${pair.before}`} className="dsh-ui-meta dsh-dot-recipe-diff-change">«{pair.before}» → «{pair.after}»</span>)}
+          {row.added?.map(text => <span key={`+${text}`} className="dsh-ui-meta dsh-dot-recipe-diff-add">+ {text}</span>)}
+          {row.removed?.map(text => <span key={`-${text}`} className="dsh-ui-meta dsh-dot-recipe-diff-remove">− {text}</span>)}
         </div>
       ))}
     </div>
@@ -402,7 +482,7 @@ export function RecipesView({ locale, api, rows, error, onChanged }: {
     return <div className="dsh-ui-row" role="alert"><span className="dsh-ui-error" style={{ whiteSpace: 'pre-line' }}>{backendMissingText(locale, error) ?? `${t(locale, 'loadFailed')}: ${error}`}</span><Button variant="ghost" onClick={onChanged}>{t(locale, 'retry')}</Button></div>
   }
   return (
-    <div className="dsh-dot-recipes">
+    <div className="dsh-dot-board dsh-dot-recipes">
       {error !== undefined ? <p className="dsh-ui-hint" role="status">{t(locale, 'recipesRefreshFailed')}: {error}</p> : null}
       {rows.map(row => {
         const inFlight = row.inFlight.length > 0
@@ -504,7 +584,7 @@ function TasksTab({ locale, view, api, workApi, boardError, pendingRemoveTitle, 
       ) : null}
       {filter === 'recipes' ? <RecipesView locale={locale} api={api} rows={recipes} {...recipesError === undefined ? {} : { error: recipesError }} onChanged={() => { refreshRecipes(); onRetry() }} /> : null}
       {workApi && filter !== 'watch' && filter !== 'recipes' ? <WorkBoardPanel locale={locale} api={workApi} filter={filter} items={view?.work ?? NO_WORK} pending={view?.pending ?? NO_PENDING} onChanged={onRetry} onOpenSession={onOpen} /> : null}
-      {filter !== 'recipes' ? <Board locale={locale} view={view} filter={filter} suppressEmpty={(view?.work?.length ?? 0) > 0 || (Boolean(workApi) && filter === 'all')} {...boardError === undefined ? {} : { error: boardError }} onOpen={onOpen} onRetry={onRetry} onRemoveSchedule={onRemoveSchedule} /> : null}
+      {filter !== 'recipes' ? <Board locale={locale} view={view} filter={filter} suppressEmpty={(view?.work?.length ?? 0) > 0 || (Boolean(workApi) && filter === 'all')} {...boardError === undefined ? {} : { error: boardError }} onOpen={onOpen} onRetry={onRetry} onRemoveSchedule={onRemoveSchedule} onUnwatch={sessionId => { if (!api.unwatch) return; void api.unwatch(sessionId).then(onRetry, onRetry) }} /> : null}
     </div>
   )
 }
@@ -568,7 +648,7 @@ export function ChatPanel({ locale, api, Card, onOpenSession, renderFactorySlot 
     if (snapshot?.lastBackup) writeSelfBackup(snapshot.lastBackup)
   }, [snapshot?.lastBackup?.dir, snapshot?.lastBackup?.lib])
   const backendOutdated = useSyncExternalStore(backendOutdatedStore.subscribe, backendOutdatedStore.getSnapshot)
-  const { drawerTab, drawerWide, personaDirty, discardSignal, pendingDrawerAction, configOpen, requestDrawer, discardDrawerAction, cancelDrawerAction, setPersonaDirty, toggleDrawerWide } = useDrawerGuard()
+  const { drawerTab, drawerWide, drawerWidthPx, personaDirty, discardSignal, pendingDrawerAction, configOpen, requestDrawer, discardDrawerAction, cancelDrawerAction, setPersonaDirty, toggleDrawerWide, setDrawerWidthPx } = useDrawerGuard()
   const labels = useMemo<MarkdownLabels>(() => {
     const c = cardCopy(locale)
     return { code: { copyLabel: c.copy, copiedLabel: c.copied }, footnotes: c.footnotes }
@@ -576,15 +656,16 @@ export function ChatPanel({ locale, api, Card, onOpenSession, renderFactorySlot 
 
   const { pendingEchoes, pushEcho, removeEcho } = useLocalEchoes(state.items)
 
-  const send = useCallback(async (text: string, images: readonly ChatImage[]) => {
+  const send = useCallback(async (text: string, images: readonly ChatImage[], files: readonly ChatFileReceipt[]) => {
     setSendError(undefined)
-    const echo = pushEcho(text, images)
+    const echo = pushEcho(text, images, files)
     try {
-      await api.say(text, images)
+      await api.say(text, images, files.map(file => file.id))
     } catch (failure) {
       removeEcho(echo)
       const message = failure instanceof Error ? failure.message : String(failure)
-      setSendError(/\bHTTP 413\b/.test(message) ? t(locale, 'sendTooLarge') : message)
+      const code = (failure as { readonly code?: unknown } | null | undefined)?.code
+      setSendError(code === 'dot/file-expired' ? t(locale, 'fileReceiptExpired') : /\bHTTP 413\b/.test(message) ? t(locale, 'sendTooLarge') : message)
       throw failure
     }
     // Keep the local bytes only for a message the host accepted: a rejected send must not
@@ -666,7 +747,13 @@ export function ChatPanel({ locale, api, Card, onOpenSession, renderFactorySlot 
             </div>
           ) : null}
           {logRows}
-          {pendingEchoes.map(echo => <div key={'echo:' + echo.at} className="dsh-dot-user dsh-dot-echo">{echo.text ? <UserMessageBubble>{echo.text}</UserMessageBubble> : null}{echo.images.length > 0 ? <ImageNotes locale={locale} images={echo.images.map(image => ({ mediaType: image.mediaType, previewUrl: `data:${image.mediaType};base64,${image.data}`, ...(image.name ? { name: image.name } : {}) }))} onPreview={openPreview} /> : null}</div>)}
+          {pendingEchoes.map(echo => (
+            <div key={'echo:' + echo.at} className="dsh-dot-user dsh-dot-echo">
+              {echo.text ? <UserMessageBubble>{echo.text}</UserMessageBubble> : null}
+              {echo.images.length > 0 ? <ImageNotes locale={locale} images={echo.images.map(image => ({ mediaType: image.mediaType, previewUrl: `data:${image.mediaType};base64,${image.data}`, ...(image.name ? { name: image.name } : {}) }))} onPreview={openPreview} /> : null}
+              {echo.files.length > 0 ? <FileNotes files={echo.files} /> : null}
+            </div>
+          ))}
           {showStreaming ? <BotLine lead={!lastInReply}><MarkdownText text={streaming} labels={labels} variant="body" streaming /></BotLine> : null}
           {preparingCard ? <BotLine lead={!lastInReply}><span role="status"><TextShimmer active>{t(locale, 'cardPreparing')}</TextShimmer></span></BotLine> : null}
           {showThinking ? <BotLine lead={!lastInReply}><TextShimmer active>{t(locale, 'thinking')}</TextShimmer></BotLine> : null}
@@ -705,6 +792,7 @@ export function ChatPanel({ locale, api, Card, onOpenSession, renderFactorySlot 
         onNewSegment={() => api.newSegment()}
         onOpenTasks={() => requestDrawer({ kind: 'tab', tab: 'tasks' })}
         onOpenSettings={() => requestDrawer({ kind: 'tab', tab: 'general' })}
+        onAttach={(name, data) => api.attach(name, data)}
         onSend={send}
         onStop={() => { void api.stop() }}
         onDismissError={() => setSendError(undefined)}
@@ -733,6 +821,8 @@ export function ChatPanel({ locale, api, Card, onOpenSession, renderFactorySlot 
           onDiscardPending={discardDrawerAction}
           onDirtyChange={setPersonaDirty}
           onWide={toggleDrawerWide}
+          widthPx={drawerWidthPx}
+          onWidth={setDrawerWidthPx}
           onSaved={setSettings}
           onProposalCount={setProposalCount}
         />
@@ -819,6 +909,7 @@ function renderRow(row: Row, context: RenderContext): ReactNode {
               onPreview={context.onPreviewImage}
             />
           ) : null}
+          {item.files && item.files.length > 0 ? <FileNotes files={item.files} /> : null}
         </div>
       )
     }
@@ -982,6 +1073,7 @@ const NOTICE_TAG_TONE: Record<Exclude<NoticeEntry['kind'], 'reminder'>, TagTone>
   inbox: 'info',
   'recipe-run': 'success',
   'recipe-proposal': 'info',
+  result: 'success',
 }
 
 function noticeTagLabel(locale: CopyLocale, kind: Exclude<NoticeEntry['kind'], 'reminder'>): string {
@@ -995,6 +1087,7 @@ function noticeTagLabel(locale: CopyLocale, kind: Exclude<NoticeEntry['kind'], '
     case 'inbox': return t(locale, 'inboxEvent')
     case 'recipe-run': return t(locale, 'recipeRunTag')
     case 'recipe-proposal': return t(locale, 'recipeProposalTag')
+    case 'result': return t(locale, 'resultNotice')
   }
 }
 
@@ -1035,6 +1128,7 @@ function NoticeCard({ entry, locale, tasks, onOpenSession }: { entry: NoticeEntr
       <div className="dsh-dot-card-head">
         <Tag tone={NOTICE_TAG_TONE[entry.kind]}>{noticeTagLabel(locale, entry.kind)}</Tag>
         {entry.kind === 'approval' && entry.subject ? <code className="dsh-dot-code-pill">{entry.subject}</code> : null}
+        {entry.kind === 'task-human' && entry.subject ? <span className="dsh-dot-card-subject">{entry.subject}</span> : null}
         {entry.requestId ? <span className="dsh-dot-req-id">{entry.requestId}</span> : null}
         {perm ? <Tag tone="outline">{perm}</Tag> : null}
         {entry.viaSubagent ? <Tag tone="quiet">{t(locale, 'subagentTag')}</Tag> : null}
@@ -1114,6 +1208,14 @@ function Notice({ locale, text, structured, hiddenRequestIds, tasks, onOpenSessi
             : <div className="dsh-dot-notice-entry"><div className="dsh-dot-card-body">{parsed.fallback ?? text}</div></div>}
         </div>
       </DisclosureRow>
+    </div>
+  )
+}
+
+function FileNotes({ files }: { files: readonly { readonly name: string; readonly bytes: number }[] }) {
+  return (
+    <div className="dsh-dot-files">
+      {files.map((file, index) => <span key={`${file.name}:${index}`} className="dsh-dot-file-chip">{file.name} · {humanBytes(file.bytes)}</span>)}
     </div>
   )
 }

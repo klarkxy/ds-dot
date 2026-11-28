@@ -7,6 +7,7 @@ import { ChatPanel, chatCss, rowsOf, type ChatApi } from './chat-panel.tsx'
 import { noteBackendError, resetBackendOutdated, SELF_BACKUP_KEY } from './backend-state.ts'
 import { filterVisibleChat } from './chat-filter.ts'
 import { createDotCards } from './client.tsx'
+import { CHAT_FILE_BYTES } from './chat-files.ts'
 
 const dom = new JSDOM('<div id="root"></div>', { url: 'https://local.test' })
 vi.stubGlobal('window', dom.window)
@@ -41,6 +42,7 @@ function makeApi(snapshot: ChatSnapshot): ChatApi {
   return {
     chat: async () => snapshot,
     wait: (_rev, _itemsRev, signal) => new Promise(resolve => { signal.addEventListener('abort', () => resolve(undefined), { once: true }) }),
+    attach: async (name, data) => ({ id: `receipt-${name}`, name, bytes: Math.floor(data.length * 3 / 4) }),
     say: async () => {},
     stop: async () => {},
     board: async () => ({ tasks: [], tickets: [], pending: [], schedules: [] }),
@@ -482,20 +484,19 @@ describe('ChatPanel activity and notice cards', () => {
 
       // The composer /settings shortcut is another drawer entrance: it must pass the
       // same guard instead of swapping tabs underneath the dirty draft.
-      const quickBtn = document.querySelector<HTMLButtonElement>('button[aria-label="快捷指令"]')!
-      await act(async () => { quickBtn.click() })
+      await openPlusAndClick('快捷指令', '添加')
       const settingsOption = [...document.querySelectorAll<HTMLButtonElement>('.dsh-dot-slash-item')].find(b => b.textContent?.includes('/settings'))!
       await act(async () => { settingsOption.click(); await Promise.resolve() })
       expect(document.querySelector('.dsh-dot-unsaved-bar')?.textContent).toContain('当前页有未保存的修改')
-      expect(document.querySelector('aside.dsh-dot-drawer [role="region"]')?.getAttribute('aria-label')).toBe('人设与约定')
+      expect(document.querySelector('aside.dsh-dot-drawer [role="region"]')?.getAttribute('aria-label')).toBe('人设')
 
       await act(async () => { nav('context').click() })
       expect(document.querySelector('.dsh-dot-unsaved-bar')?.textContent).toContain('当前页有未保存的修改')
-      expect(document.querySelector('aside.dsh-dot-drawer [role="region"]')?.getAttribute('aria-label')).toBe('人设与约定')
+      expect(document.querySelector('aside.dsh-dot-drawer [role="region"]')?.getAttribute('aria-label')).toBe('人设')
 
       const discard = [...document.querySelectorAll<HTMLButtonElement>('.dsh-dot-unsaved-bar button')].find(b => b.textContent === '放弃改动')!
       await act(async () => { discard.click() })
-      expect(document.querySelector('aside.dsh-dot-drawer [role="region"]')?.getAttribute('aria-label')).toBe('上下文用量')
+      expect(document.querySelector('aside.dsh-dot-drawer [role="region"]')?.getAttribute('aria-label')).toBe('上下文')
 
       const tasksBtn = [...document.querySelectorAll<HTMLButtonElement>('.dsh-dot-head button')].find(b => b.textContent?.startsWith('任务'))!
       await act(async () => { tasksBtn.click() })
@@ -539,7 +540,7 @@ describe('ChatPanel activity and notice cards', () => {
     await act(async () => { personaTab().click() })
     await act(async () => { await Promise.resolve(); await Promise.resolve() })
 
-    const address = () => document.querySelector<HTMLInputElement>('input[aria-label="对你的称呼"]')!
+    const address = () => document.querySelector<HTMLInputElement>('input[aria-label="怎么称呼你"]')!
     await act(async () => { Simulate.change(address(), { target: { value: '朋友' } } as never) })
     expect(document.querySelector('.dsh-dot-dirty-dot')).not.toBeNull()
     // Blur commits the address before the click that leaves, so the guard must not
@@ -548,7 +549,7 @@ describe('ChatPanel activity and notice cards', () => {
     const contextTab = document.querySelector<HTMLButtonElement>('.dsh-dot-drawer-nav button[data-nav="context"]')!
     await act(async () => { contextTab.click() })
     expect(document.querySelector('.dsh-dot-unsaved-bar')).toBeNull()
-    expect(document.querySelector('aside.dsh-dot-drawer [role="region"]')?.getAttribute('aria-label')).toBe('上下文用量')
+    expect(document.querySelector('aside.dsh-dot-drawer [role="region"]')?.getAttribute('aria-label')).toBe('上下文')
     expect(saved).toEqual([{ address: '朋友' }])
 
     await act(async () => { personaTab().click() })
@@ -558,7 +559,7 @@ describe('ChatPanel activity and notice cards', () => {
       document.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
     })
     expect(document.querySelector('.dsh-dot-unsaved-bar')?.textContent).toContain('当前页有未保存的修改')
-    expect(document.querySelector('aside.dsh-dot-drawer [role="region"]')?.getAttribute('aria-label')).toBe('人设与约定')
+    expect(document.querySelector('aside.dsh-dot-drawer [role="region"]')?.getAttribute('aria-label')).toBe('人设')
     expect(saved).toEqual([{ address: '朋友' }])
     const discard = [...document.querySelectorAll<HTMLButtonElement>('.dsh-dot-unsaved-bar button')].find(b => b.textContent === '放弃改动')!
     await act(async () => { discard.click() })
@@ -773,7 +774,7 @@ describe('ChatPanel activity and notice cards', () => {
     const navButtons = () => [...drawer.querySelectorAll<HTMLButtonElement>('.dsh-dot-drawer-nav button')]
     const navBy = (key: string) => drawer.querySelector<HTMLButtonElement>(`.dsh-dot-drawer-nav button[data-nav="${key}"]`)!
     expect(navButtons().map(node => node.querySelector('.dsh-dot-nav-label')?.textContent)).toEqual([
-      '待确认', '常规', '会话接管', '派发任务', '额外能力', 'MCP 服务', '人设', '上下文', '轨迹',
+      '待确认', '常规', '接管', '任务', '工具', 'GitHub', '人设', '高级', '上下文', '轨迹',
     ])
     expect(navBy('proposals').querySelector('.dsh-dot-nav-badge')?.textContent).toBe('1')
     expect(region()).toBe('常规')
@@ -781,29 +782,32 @@ describe('ChatPanel activity and notice cards', () => {
 
     // Switch to Takeover, trigger a save and confirm the non-jumping header status appears.
     await act(async () => { navBy('takeover').click() })
-    expect(region()).toBe('会话接管')
-    expect(headerTitle()).toBe('会话接管')
+    expect(region()).toBe('接管')
+    expect(headerTitle()).toBe('接管')
     const trackedTab = [...drawer.querySelectorAll<HTMLButtonElement>('[role="tab"]')].find(node => node.textContent === '所有会话')!
     await act(async () => { trackedTab.click() })
     await act(async () => { await Promise.resolve() })
     expect(drawer.querySelector('.dsh-dot-settings-status')?.textContent).toContain('已保存')
 
     await act(async () => { navBy('dispatch').click() })
-    expect(region()).toBe('派发任务')
+    expect(region()).toBe('任务')
     expect(drawer.querySelector('.dsh-dot-settings-status')).toBeNull()
+    await act(async () => { navBy('github').click() })
+    expect(region()).toBe('GitHub')
+    expect(drawer.querySelector('[data-gh-card="poll"]')).not.toBeNull()
     await act(async () => { navBy('capabilities').click() })
-    expect(region()).toBe('额外能力')
+    expect(region()).toBe('工具')
     await act(async () => { navBy('persona').click() })
-    expect(region()).toBe('人设与约定')
+    expect(region()).toBe('人设')
     await act(async () => { navBy('context').click() })
-    expect(region()).toBe('上下文用量')
+    expect(region()).toBe('上下文')
     await act(async () => { navBy('trajectory').click() })
-    expect(region()).toBe('运行轨迹')
+    expect(region()).toBe('轨迹')
 
     // Resolving the last proposal removes the Proposals nav item and returns to General.
     await act(async () => { navBy('proposals').click() })
     await act(async () => { await Promise.resolve() })
-    expect(region()).toBe('待确认的修改')
+    expect(region()).toBe('待确认')
     const approveBtn = drawer.querySelector<HTMLButtonElement>('.dsh-dot-proposal button')!
     await act(async () => { approveBtn.click() })
     await act(async () => { await Promise.resolve(); await Promise.resolve() })
@@ -814,6 +818,44 @@ describe('ChatPanel activity and notice cards', () => {
     const widen = drawer.querySelector<HTMLButtonElement>('button[aria-label="加宽抽屉"]')!
     await act(async () => { widen.click() })
     expect(drawer.hasAttribute('data-wide')).toBe(true)
+
+    // The drawer always overlays the stage: the layer stays absolutely positioned and the backdrop is never hidden.
+    expect(chatCss).not.toContain('@container (min-width: 860px)')
+    expect(chatCss).not.toContain('@container (min-width: 960px)')
+    expect(chatCss).not.toContain('.dsh-dot-drawer-backdrop { display: none')
+
+    // Dragging the left edge resizes the drawer and persists the width across reopens.
+    const layer = document.querySelector<HTMLElement>('.dsh-dot-drawer-layer')!
+    Object.defineProperty(layer, 'clientWidth', { configurable: true, value: 1000 })
+    Object.defineProperty(drawer, 'getBoundingClientRect', { configurable: true, value: () => { const width = Number.parseFloat(drawer.style.width) || 800; return { left: 1000 - width, right: 1000, width, top: 0, bottom: 600, height: 600, x: 1000 - width, y: 0, toJSON: () => ({}) } } })
+    const handle = drawer.querySelector<HTMLElement>('.dsh-dot-drawer-resize')!
+    expect(handle.getAttribute('role')).toBe('slider')
+    await act(async () => { handle.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'ArrowLeft', bubbles: true })) })
+    expect(drawer.style.width).toBe('816px')
+    expect(dom.window.localStorage.getItem('dsh-dot:drawer-width')).toBe('816')
+    await act(async () => { handle.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true })) })
+    expect(drawer.style.width).toBe('800px')
+    // The clamp never lets the drawer exceed the stage width.
+    await act(async () => { handle.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'ArrowLeft', shiftKey: true, bubbles: true })) })
+    await act(async () => { handle.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'ArrowLeft', shiftKey: true, bubbles: true })) })
+    await act(async () => { handle.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'ArrowLeft', shiftKey: true, bubbles: true })) })
+    expect(drawer.style.width).toBe('992px')
+    await act(async () => { handle.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'ArrowLeft', shiftKey: true, bubbles: true })) })
+    expect(drawer.style.width).toBe('1000px')
+    // Double-click resets to the CSS preset and clears the stored width; a dragged width hides the wide preset.
+    await act(async () => { handle.dispatchEvent(new dom.window.MouseEvent('dblclick', { bubbles: true })) })
+    expect(drawer.style.width).toBe('')
+    expect(dom.window.localStorage.getItem('dsh-dot:drawer-width')).toBeNull()
+    expect(drawer.hasAttribute('data-wide')).toBe(true)
+    await act(async () => { handle.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'ArrowLeft', bubbles: true })) })
+    expect(drawer.hasAttribute('data-wide')).toBe(false)
+    // A dragged width is not the wide preset: the button offers widen again, and clicking it clears the pixels.
+    const widenAgain = drawer.querySelector<HTMLButtonElement>('button[aria-label="加宽抽屉"]')!
+    expect(widenAgain.getAttribute('aria-pressed')).toBe('false')
+    await act(async () => { widenAgain.click() })
+    expect(drawer.hasAttribute('data-wide')).toBe(true)
+    expect(drawer.style.width).toBe('')
+    expect(dom.window.localStorage.getItem('dsh-dot:drawer-width')).toBeNull()
 
     // The gear closes its own drawer; the tasks button opens the other one, with no settings nav.
     await act(async () => { gear.click() })
@@ -883,8 +925,10 @@ describe('ChatPanel activity and notice cards', () => {
       await act(flush)
       expect(keepaliveCalls).toBeGreaterThan(callsBeforeApprove)
       expect(document.querySelector('aside.dsh-dot-drawer [role="region"]')?.getAttribute('aria-label')).toBe('General')
+      await act(async () => { document.querySelector<HTMLButtonElement>('.dsh-dot-drawer-nav button[data-nav="advanced"]')!.click() })
+      await act(flush)
       expect(document.body.textContent).toContain(expectedKey)
-      const ttlInput = document.querySelector<HTMLInputElement>('input[aria-label="Cache lifetime"]')!
+      const ttlInput = document.querySelector<HTMLInputElement>('input[aria-label="Cache duration"]')!
       await act(async () => { setInputValue(ttlInput, String(nextMinutes)) })
       await act(async () => { ttlInput.dispatchEvent(new dom.window.FocusEvent('focusout', { bubbles: true })) })
       expect(saved.at(-1)).toEqual({ cacheTtl: { [expectedKey]: nextMinutes } })
@@ -905,6 +949,8 @@ describe('ChatPanel activity and notice cards', () => {
     const block = chatCss.slice(queryIndex, chatCss.indexOf('\n}\n', queryIndex) + 3)
     expect(block).toContain('.dsh-dot-chat .dsh-dot-settings { padding: 14px 14px 28px; }')
     expect(block).toContain('white-space: normal;')
+    expect(block).toContain('.dsh-dot-nav-label')
+    expect(chatCss).toContain('box-shadow: inset 2px 0 0 var(--dsw-alias-state-business-primary)')
   })
 })
 
@@ -959,6 +1005,15 @@ describe('ChatPanel bottom pin', () => {
   })
 })
 
+function plusMenuItem(label: string): HTMLButtonElement {
+  return [...document.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')].find(button => button.textContent?.includes(label))!
+}
+
+async function openPlusAndClick(label: string, plusLabel = 'Add') {
+  await act(async () => { document.querySelector<HTMLButtonElement>(`button[aria-label="${plusLabel}"]`)!.click() })
+  await act(async () => { plusMenuItem(label).click() })
+}
+
 describe('Composer images', () => {
   const proto = dom.window.HTMLElement.prototype as HTMLElement & { attachEvent?: () => void; detachEvent?: () => void }
   proto.attachEvent = () => {}
@@ -980,7 +1035,10 @@ describe('Composer images', () => {
     await act(async () => { root.render(<ChatPanel locale="en" api={api} onOpenSession={() => {}} />) })
     await pick(new File([Uint8Array.from(Buffer.from(PNG_B64, 'base64'))], 'dot.png', { type: 'image/png' }))
     expect(document.body.textContent).toContain('dot.png')
-    await act(async () => { [...document.querySelectorAll('button')].find(button => button.textContent === 'Send')!.click() })
+    const addTile = document.querySelector<HTMLButtonElement>('.dsh-dot-attachment-add')!
+    expect(addTile.getAttribute('aria-label')).toBe('Add image or file')
+    expect(addTile.textContent).toBe('')
+    await act(async () => { document.querySelector<HTMLButtonElement>('button[aria-label="Send"]')!.click() })
     await act(async () => { await Promise.resolve() })
     expect(document.body.textContent).toContain('Not sent: That message is too large')
     expect(document.body.textContent).toContain('8 MB')
@@ -989,13 +1047,79 @@ describe('Composer images', () => {
     await act(async () => root.unmount())
   })
 
-  it('says what is wrong with a file that is not an image', async () => {
+  it('accepts a text file as a generic attachment and sends its upload receipt', async () => {
     const snapshot: ChatSnapshot = { sessionId: 'dot-1', running: false, streaming: '', rev: 1, itemsRev: 1, items: [] }
+    const api = makeApi(snapshot)
+    api.attach = vi.fn(async (name: string) => ({ id: 'file-1', name, bytes: 4 }))
+    api.say = vi.fn(async () => {})
     const root = createRoot(document.getElementById('root')!)
-    await act(async () => { root.render(<ChatPanel locale="en" api={makeApi(snapshot)} onOpenSession={() => {}} />) })
+    await act(async () => { root.render(<ChatPanel locale="en" api={api} onOpenSession={() => {}} />) })
     await pick(new File([Uint8Array.from([1, 2, 3, 4])], 'note.txt', { type: 'text/plain' }))
-    expect(document.body.textContent).toContain('Only PNG, JPEG, WebP and GIF')
-    expect(document.body.textContent).not.toContain('note.txt')
+    expect(api.attach).toHaveBeenCalledWith('note.txt', 'AQIDBA==')
+    expect(document.body.textContent).toContain('note.txt')
+    expect(document.body.textContent).toContain('TXT · 4 B')
+    await act(async () => { document.querySelector<HTMLButtonElement>('button[aria-label="Send"]')!.click() })
+    expect(api.say).toHaveBeenCalledWith('', [], ['file-1'])
+    await act(async () => root.unmount())
+  })
+
+
+  it('re-uploads ready files after an expired receipt rejection and sends the new receipt', async () => {
+    const snapshot: ChatSnapshot = { sessionId: 'dot-1', running: false, streaming: '', rev: 1, itemsRev: 1, items: [] }
+    const api = makeApi(snapshot)
+    api.attach = vi.fn()
+      .mockImplementationOnce(async (name: string) => ({ id: 'old-1', name, bytes: 4 }))
+      .mockImplementationOnce(async (name: string) => ({ id: 'new-1', name, bytes: 4 }))
+    const expired = Object.assign(new Error('That attachment upload is no longer available.'), { code: 'dot/file-expired' })
+    api.say = vi.fn()
+      .mockImplementationOnce(async () => { throw expired })
+      .mockImplementationOnce(async () => {})
+    const root = createRoot(document.getElementById('root')!)
+    await act(async () => { root.render(<ChatPanel locale="en" api={api} onOpenSession={() => {}} />) })
+    await pick(new File([Uint8Array.from([1, 2, 3, 4])], 'note.txt', { type: 'text/plain' }))
+    expect(api.attach).toHaveBeenCalledTimes(1)
+
+    await act(async () => { document.querySelector<HTMLButtonElement>('button[aria-label="Send"]')!.click() })
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 0)) })
+    expect(api.attach).toHaveBeenCalledTimes(2)
+    expect(api.attach).toHaveBeenNthCalledWith(2, 'note.txt', 'AQIDBA==')
+    expect(document.body.textContent).toContain('Attachment uploads expired and are uploading again; send once more when they finish.')
+
+    await act(async () => { document.querySelector<HTMLButtonElement>('button[aria-label="Send"]')!.click() })
+    await act(async () => { await Promise.resolve() })
+    expect(api.say).toHaveBeenLastCalledWith('', [], ['new-1'])
+    await act(async () => root.unmount())
+  })
+
+  it('does not re-upload files after a non-expiry send rejection', async () => {
+    const snapshot: ChatSnapshot = { sessionId: 'dot-1', running: false, streaming: '', rev: 1, itemsRev: 1, items: [] }
+    const api = makeApi(snapshot)
+    api.attach = vi.fn(async (name: string) => ({ id: 'file-1', name, bytes: 4 }))
+    api.say = vi.fn(async () => { throw Object.assign(new Error('invalid'), { code: 'dot/invalid' }) })
+    const root = createRoot(document.getElementById('root')!)
+    await act(async () => { root.render(<ChatPanel locale="en" api={api} onOpenSession={() => {}} />) })
+    await pick(new File([Uint8Array.from([1, 2, 3, 4])], 'note.txt', { type: 'text/plain' }))
+    await act(async () => { document.querySelector<HTMLButtonElement>('button[aria-label="Send"]')!.click() })
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 0)) })
+    expect(api.attach).toHaveBeenCalledTimes(1)
+    expect(document.body.textContent).not.toContain('Attachment uploads expired')
+    await act(async () => root.unmount())
+  })
+
+  it('rejects an oversized file before reading its bytes', async () => {
+    const snapshot: ChatSnapshot = { sessionId: 'dot-1', running: false, streaming: '', rev: 1, itemsRev: 1, items: [] }
+    const api = makeApi(snapshot)
+    api.attach = vi.fn(async (name: string) => ({ id: 'file-1', name, bytes: 4 }))
+    const root = createRoot(document.getElementById('root')!)
+    await act(async () => { root.render(<ChatPanel locale="en" api={api} onOpenSession={() => {}} />) })
+    const file = new File([Uint8Array.from([1])], 'big.bin', { type: 'application/octet-stream' })
+    Object.defineProperty(file, 'size', { value: CHAT_FILE_BYTES + 1 })
+    const arrayBuffer = vi.fn(file.arrayBuffer.bind(file))
+    file.arrayBuffer = arrayBuffer
+    await pick(file)
+    expect(arrayBuffer).not.toHaveBeenCalled()
+    expect(api.attach).not.toHaveBeenCalled()
+    expect(document.body.textContent).toContain('That file is too large; each file must be 32 MB or smaller.')
     await act(async () => root.unmount())
   })
 
@@ -1036,9 +1160,8 @@ describe('Composer images', () => {
     })
     expect(input.value).toBe('')
 
-    // Quick actions button opens the slash menu and inserts the structured task template.
-    const quickBtn = document.querySelector<HTMLButtonElement>('button[aria-label="Quick actions"]')!
-    await act(async () => { quickBtn.click() })
+    // The + menu opens quick actions, which inserts the structured task template.
+    await openPlusAndClick('Quick actions')
     const taskOption = [...document.querySelectorAll<HTMLButtonElement>('.dsh-dot-slash-item')].find(btn => btn.textContent?.includes('/task'))!
     expect(taskOption).toBeDefined()
     await act(async () => { taskOption.click() })
@@ -1049,19 +1172,18 @@ describe('Composer images', () => {
     const expandBtn = document.querySelector<HTMLButtonElement>('button[aria-label="Expand editor"]')!
     await act(async () => { expandBtn.click() })
     expect(document.querySelector('.dsh-dot-composer-card')?.hasAttribute('data-expanded')).toBe(true)
-    const clearBtn = document.querySelector<HTMLButtonElement>('button[aria-label="Clear input"]')!
-    await act(async () => { clearBtn.click() })
+    await openPlusAndClick('Clear input')
     expect(input.value).toBe('')
     expect(document.querySelector('.dsh-dot-composer-card')?.hasAttribute('data-expanded')).toBe(false)
 
     // Low-frequency /segment and /settings entries remain reachable via the / menu.
-    await act(async () => { quickBtn.click() })
+    await openPlusAndClick('Quick actions')
     const segOption = [...document.querySelectorAll<HTMLButtonElement>('.dsh-dot-slash-item')].find(btn => btn.textContent?.includes('/segment'))!
     await act(async () => { segOption.click(); await Promise.resolve() })
     expect(api.newSegment).toHaveBeenCalledOnce()
     expect(document.querySelector('.dsh-dot-seg-feedback')?.textContent).toContain('Started a new segment')
 
-    await act(async () => { quickBtn.click() })
+    await openPlusAndClick('Quick actions')
     const settingsOption = [...document.querySelectorAll<HTMLButtonElement>('.dsh-dot-slash-item')].find(btn => btn.textContent?.includes('/settings'))!
     await act(async () => { settingsOption.click(); await Promise.resolve() })
     expect(document.querySelector('aside.dsh-dot-drawer')?.getAttribute('data-kind')).toBe('settings')
@@ -1143,11 +1265,10 @@ describe('Composer images', () => {
     expect(input.value).toBe('/segment')
     expect(api.newSegment).not.toHaveBeenCalled()
 
-    const quickBtn = document.querySelector<HTMLButtonElement>('button[aria-label="Quick actions"]')!
     expect(document.querySelector('.dsh-dot-slash-menu')).not.toBeNull()
-    await act(async () => { quickBtn.click() })
+    await openPlusAndClick('Quick actions')
     expect(document.querySelector('.dsh-dot-slash-menu')).toBeNull()
-    await act(async () => { quickBtn.click() })
+    await openPlusAndClick('Quick actions')
     expect(document.querySelector('.dsh-dot-slash-menu')).not.toBeNull()
     expect(activeCmd()).toBe('/segment')
     await act(async () => root.unmount())
@@ -1421,6 +1542,116 @@ describe('backend health banners', () => {
     const root = createRoot(document.getElementById('root')!)
     await act(async () => { root.render(<ChatPanel locale="en" api={api} onOpenSession={() => {}} />) })
     expect(document.body.textContent).toContain('newer than')
+    await act(async () => root.unmount())
+  })
+
+  it('renders result notice entries with a localized Result tag', async () => {
+    const snap: ChatSnapshot = {
+      ...empty,
+      items: [{
+        kind: 'notice',
+        key: 'n-res-1',
+        text: '[dot notice] Updates:\nTasks:\n- result · dot-1: PR acme/widgets#7 merged',
+        at: 100,
+      }],
+    }
+    const root = createRoot(document.getElementById('root')!)
+    await act(async () => { root.render(<ChatPanel locale="en" api={makeApi(snap)} onOpenSession={() => {}} />) })
+    const row = document.querySelector<HTMLElement>('.dsh-dot-notice .dsh-stub-disclosure__row')!
+    await act(async () => { row.click() })
+    const entry = document.querySelector('.dsh-dot-notice-entry[data-kind="result"]')
+    expect(entry).not.toBeNull()
+    const tag = entry?.querySelector('.dsh-stub-tag')
+    expect(tag?.textContent).toBe('Result')
+    expect(tag?.getAttribute('data-tone')).toBe('success')
+    expect(entry?.textContent).toContain('PR acme/widgets#7 merged')
+    await act(async () => root.unmount())
+  })
+
+  it('renders task-human Watchdog stop subject and Context tab Watchdog Diagnostics annotation flow', async () => {
+    let watchdogState = {
+      mode: 'auto' as const,
+      configuredModel: 'deepseek/chat',
+      watchdogStops: 1,
+      calibration: {
+        windowDays: 14 as const,
+        total14d: 1,
+        reviewed14d: 0,
+        accurate14d: 0,
+        falsePositive14d: 0,
+        falsePositiveRate: null as number | null,
+      },
+      hits: [{
+        id: 'wd-hit-1',
+        at: Date.UTC(2026, 10, 26, 15, 30),
+        runId: 'run-9',
+        changeId: 'chg-9',
+        inputRef: 'issue#9',
+        inputRevision: 1,
+        sessionId: 'sess-9',
+        signal: 'no-progress' as const,
+        runPhase: 'active',
+        mode: 'auto' as const,
+        evidence: ['netActiveMs=920000ms with 0 writes'],
+        stopped: true,
+      }],
+    }
+    const snap: ChatSnapshot = {
+      ...empty,
+      items: [{
+        kind: 'notice',
+        key: 'n-wd-1',
+        text: '[dot notice] Updates:\nTasks:\n- task-human · sess-9: Watchdog stopped run-9',
+        notice: {
+          isReminder: false,
+          entries: [{
+            kind: 'task-human',
+            sessionId: 'sess-9',
+            subject: 'Watchdog circuit breaker: run-9',
+            summary: 'Stopped after repeated spinning.',
+          }],
+        },
+        at: 100,
+      }],
+    }
+    const api = makeApi(snap)
+    api.context = async () => ({ live: false, compactions: 0, watchdog: watchdogState })
+    api.annotateWatchdog = async (id, annotation) => {
+      watchdogState = {
+        ...watchdogState,
+        calibration: {
+          windowDays: 14,
+          total14d: 1,
+          reviewed14d: 1,
+          accurate14d: annotation === 'accurate' ? 1 : 0,
+          falsePositive14d: annotation === 'false-positive' ? 1 : 0,
+          falsePositiveRate: annotation === 'false-positive' ? 1 : 0,
+        },
+        hits: watchdogState.hits.map(hit => hit.id === id ? { ...hit, annotation, annotatedAt: 200 } : hit),
+      }
+      return watchdogState
+    }
+
+    const root = createRoot(document.getElementById('root')!)
+    await act(async () => { root.render(<ChatPanel locale="en" api={api} onOpenSession={() => {}} />) })
+    const row = document.querySelector<HTMLElement>('.dsh-dot-notice .dsh-stub-disclosure__row')!
+    await act(async () => { row.click() })
+    const entry = document.querySelector('.dsh-dot-notice-entry[data-kind="task-human"]')
+    expect(entry?.querySelector('.dsh-dot-card-subject')?.textContent).toBe('Watchdog circuit breaker: run-9')
+    expect(entry?.textContent).toContain('Stopped after repeated spinning.')
+
+    // Open drawer and navigate to Context tab.
+    await act(async () => { document.querySelector<HTMLButtonElement>('button[aria-label="Settings"]')!.click() })
+    await act(async () => { document.querySelector<HTMLButtonElement>('.dsh-dot-drawer-nav button[data-nav="context"]')!.click() })
+    await act(async () => { await Promise.resolve() })
+    expect(document.querySelector('section.dsh-dot-wd')).not.toBeNull()
+    expect(document.querySelector('[data-stat="fp-rate"] dd')?.textContent).toBe('No reviews yet')
+
+    const accurateBtn = document.querySelector<HTMLButtonElement>('[data-hit-id="wd-hit-1"] button[data-annotation="accurate"]')!
+    await act(async () => { accurateBtn.click() })
+    await act(async () => { await Promise.resolve() })
+    expect(document.querySelector('[data-stat="reviewed"] dd')?.textContent).toBe('1')
+    expect(document.querySelector('[data-stat="fp-rate"] dd')?.textContent).toBe('0.0%')
     await act(async () => root.unmount())
   })
 })

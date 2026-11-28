@@ -38,4 +38,24 @@ describe('idle checks', () => {
     c.arm(0); expect(callback).toBeUndefined()
     c.arm(1); callback!(); c.run(); expect(calls).toBe(1)
   })
+  it('excludes changes whose session is retrying and re-includes once retry clears', () => {
+    const changes = [
+      change('retrying', { status: 'rework', sessionIds: ['s-retry'] }),
+      change('idle-ready', { status: 'waiting', sessionIds: ['s-idle'] }),
+    ]
+    const tasks = [task('s-retry', 'idle'), task('s-idle', 'idle')]
+    const retrying = new Set(['s-retry'])
+    expect(idleCandidates(tasks, [], changes, retrying).map(row => row.id)).toEqual(['idle-ready'])
+    expect(idleCandidates(tasks, [], changes, new Set()).map(row => row.id)).toEqual(['retrying', 'idle-ready'])
+  })
+  it('excludes changes whose session has an active quiet wait or running background job and re-includes once settled', () => {
+    const changes = [
+      change('quiet-wait', { status: 'rework', sessionIds: ['s-quiet'] }),
+      change('idle-ready', { status: 'waiting', sessionIds: ['s-free'] }),
+    ]
+    const tasks = [task('s-quiet', 'idle'), task('s-free', 'idle')]
+    const backgroundBusy = new Set(['s-quiet'])
+    expect(idleCandidates(tasks, [], changes, undefined, backgroundBusy).map(row => row.id)).toEqual(['idle-ready'])
+    expect(idleCandidates(tasks, [], changes, undefined, new Set()).map(row => row.id)).toEqual(['quiet-wait', 'idle-ready'])
+  })
 })

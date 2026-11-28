@@ -1,5 +1,5 @@
 import { DotError, messageOf, type DotService } from './service.ts'
-import { SETTING_FIELDS, TOOL, type CapabilityGroupView, type DotSettings, type SettingField, type SettingProposal } from './contracts.ts'
+import { DEFAULT_SETTINGS, SETTING_FIELDS, TOOL, type CapabilityGroupView, type DotSettings, type SettingField, type SettingProposal } from './contracts.ts'
 import { type CopyLocale } from './i18n/index.ts'
 import { lockedField, patchSettings } from './settings.ts'
 import { defaultAddress, defaultPersona } from './persona.ts'
@@ -36,8 +36,10 @@ export function settingsSnapshotBlock(settings: DotSettings): string {
     `approvals: ${settings.approvals}`,
     `questions: ${settings.questions}`,
     `taskPermission: ${settings.taskPermission}`,
+    `defaultTaskPreset: ${settings.defaultTaskPreset ?? DEFAULT_SETTINGS.defaultTaskPreset}`,
     `reflection: ${settings.reflection}`,
     `idleCheckMinutes: ${settings.idleCheckMinutes}`,
+    `watchdogMode: ${settings.watchdogMode}`,
   ].join('\n')
 }
 

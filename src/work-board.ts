@@ -3,7 +3,7 @@
  * The buttons carry the versions the backend already requires. They do not
  * decide acceptance, release a review, or invent a user answer.
  */
-import type { DotContextUsage } from './contracts.ts'
+import type { DotContextUsage, WorkRunRetryStatus } from './contracts.ts'
 import type { TextKey } from './ui-copy.ts'
 export type WorkStatus = 'cancelled' | 'rework' | 'unverified' | 'done' | 'review' | 'settling' | 'running' | 'waiting'
 
@@ -46,6 +46,10 @@ export interface WorkRunView {
   /** createdAt, present only while the run is live so the panel can tick elapsed. */
   readonly startedAt?: number
   readonly deliveries?: readonly WorkDeliveryView[]
+  /** Active model-retry state for live runs, projected from RetryHealth. */
+  readonly retryStatus?: WorkRunRetryStatus
+  /** Number of running/stopping background jobs owned by this run's session (present only when > 0). */
+  readonly backgroundJobCount?: number
 }
 
 export interface WorkVerificationView {
@@ -319,4 +323,43 @@ export function parseWorkLook(row: PendingGlance): WorkLookRequest | undefined {
   } catch {
     return undefined
   }
+}
+
+/** Whether an active run retry should surface as a highlighted card-header fault badge. */
+export function isHighlightedRetry(status: WorkRunRetryStatus | undefined): status is WorkRunRetryStatus {
+  return status !== undefined && (status.kind === 'budget' || status.attempts >= 2)
+}
+
+/** Pick the highest-severity highlighted retry across a change's runs (`budget` over `transient`, then highest `attempts`). */
+export function highlightedRetry(runs: readonly WorkRunView[]): WorkRunRetryStatus | undefined {
+  let best: WorkRunRetryStatus | undefined
+  for (const run of runs) {
+    const status = run.retryStatus
+    if (!isHighlightedRetry(status)) continue
+    if (!best) {
+      best = status
+      continue
+    }
+    if (status.kind === 'budget' && best.kind !== 'budget') {
+      best = status
+    } else if (status.kind === best.kind && status.attempts > best.attempts) {
+      best = status
+    }
+  }
+  return best
+}
+
+const TERMINAL_RUN_PHASES = new Set(['completed', 'failed', 'stopped'])
+
+/** Sum live background job counts across non-terminal runs of a change. */
+export function backgroundJobCount(runs: readonly WorkRunView[]): number {
+  let total = 0
+  for (const run of runs) {
+    if (TERMINAL_RUN_PHASES.has(run.phase)) continue
+    const count = run.backgroundJobCount
+    if (typeof count === 'number' && Number.isFinite(count) && count > 0) {
+      total += Math.floor(count)
+    }
+  }
+  return total
 }

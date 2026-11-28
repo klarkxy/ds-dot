@@ -63,14 +63,14 @@ const SILENCE: Record<CopyLocale, string> = {
   ru: 'не принимай молчание за согласие',
 }
 const QUESTION_POLICY: Record<CopyLocale, { readonly label: string; readonly help: string }> = {
-  zh: { label: '桃乐丝定', help: '缺授权，或不可逆、外部、费用后果' },
-  en: { label: 'Dorothy', help: 'Missing authority, or an irreversible, external, or costly effect' },
-  ja: { label: 'ドロシー', help: 'ドロシーが目標内の可逆な既定を決めます' },
-  de: { label: 'Dorothy', help: 'Fehlende Befugnis oder eine unumkehrbare, externe oder teure Folge' },
-  es: { label: 'Dorothy', help: 'Si falta autorización, o el efecto es irreversible, externo o costoso' },
-  fr: { label: 'Dorothy', help: 'Sans autorisation, ou si l’effet est irréversible, externe ou coûteux' },
-  pt: { label: 'Dorothy', help: 'Sem autorização, ou se o efeito for irreversível, externo ou custoso' },
-  ru: { label: 'Дороти', help: 'Нет разрешения, или эффект необратим, внешний или платный' },
+  zh: { label: '她来答', help: '涉及授权、不可撤回、外部影响或费用' },
+  en: { label: 'She answers', help: 'authorization, irreversible or external effects, or cost' },
+  ja: { label: '彼女が回答', help: '認可が必要な場合や、不可逆・外部影響・費用' },
+  de: { label: 'Sie antwortet', help: 'Berechtigungen, unumkehrbare oder externe Folgen oder Kosten' },
+  es: { label: 'Ella responde', help: 'autorización, efectos irreversibles o externos, o coste' },
+  fr: { label: 'Elle répond', help: 'autorisation, un effet irréversible ou externe, ou un coût' },
+  pt: { label: 'Ela responde', help: 'autorização, efeitos irreversíveis ou externos, ou custo' },
+  ru: { label: 'Она отвечает', help: 'полномочия или последствия необратимы, внешни либо платны' },
 }
 
 const human = (text: string, time: number): RawEvent => ({
@@ -292,6 +292,17 @@ describe('i18n locale resolution and pack completeness', () => {
     }
   })
 
+  it('keeps context watchdog labels aligned with settings labels in every locale', () => {
+    for (const loc of SUPPORTED_LOCALES) {
+      const ui = localePack(loc).ui
+      for (const mode of ['off', 'observe', 'auto'] as const) {
+        expect(ui[`ctxWatchdogMode_${mode}`], `${loc} ctxWatchdogMode_${mode}`).toBe(ui[`sWatchdogMode_${mode}`])
+      }
+      expect(ui.ctxWatchdogModelLabel, `${loc} ctxWatchdogModelLabel`).toBe(ui.sWatchdogModel)
+      expect(ui.ctxWatchdogTitle, `${loc} ctxWatchdogTitle`).toBe(ui.sWatchdogMode)
+    }
+  })
+
   it('has identical keys, non-empty strings, and matching {placeholder} tokens across all 8 TypeScript packs', () => {
     const ref = localePack('en')
     const refSections = {
@@ -332,6 +343,94 @@ describe('i18n locale resolution and pack completeness', () => {
           expect(val.trim().length, `${loc}.${sectionName}.${key} non-empty`).toBeGreaterThan(0)
           expect(extractPlaceholders(val), `${loc}.${sectionName}.${key} placeholders`).toEqual(extractPlaceholders(refVal))
         }
+      }
+    }
+
+    // Ensure PR-5 GitHub Poll UI keys are genuinely localized (not left as English stubs) in non-English locales.
+    const localizedPr5SampleKeys = [
+      'resultNotice',
+      'sGhPollCardTitle',
+      'sGhEnabled',
+      'sGhTestBtn',
+      'sGhAdvAdmissionTitle',
+      'sGhAdvWebhookTitle',
+      'sSender_human',
+      'sAction_inbox',
+      'sAction_ignore',
+    ] as const
+    for (const loc of SUPPORTED_LOCALES) {
+      if (loc === 'en') continue
+      const pack = localePack(loc)
+      for (const key of localizedPr5SampleKeys) {
+        expect(pack.ui[key], `${loc}.ui.${key} should be localized`).not.toBe(ref.ui[key])
+      }
+    }
+
+    // Ensure PR-6 Run Watchdog UI keys are genuinely localized (not left as English stubs) in non-English locales.
+    const localizedPr6SampleKeys = [
+      'tool_dot_watchdog',
+      'field_watchdogMode',
+      'field_watchdogModel',
+      'sWatchdogMode',
+      'sWatchdogMode_off',
+      'sWatchdogMode_observe',
+      'sWatchdogMode_auto',
+      'sWatchdogModeDesc',
+      'sWatchdogModel',
+      'sWatchdogModelDesc',
+      'sWatchdogModelFollow',
+      'ctxWatchdogTitle',
+      'ctxWatchdogModeLabel',
+      'ctxWatchdogMode_off',
+      'ctxWatchdogMode_observe',
+      'ctxWatchdogMode_auto',
+      'ctxWatchdogModelLabel',
+      'ctxWatchdogModelDefault',
+      'ctxWatchdogStops',
+      'ctxWatchdogStopsCount',
+      'ctxWatchdogFallbackTitle',
+      'ctxWatchdogFallbackBody',
+      'ctxWatchdogFallbackReason_not-in-catalog',
+      'ctxWatchdogFallbackReason_invalid-format',
+      'ctxWatchdogFallbackReason_runtime-error',
+      'ctxWatchdogCalTitle',
+      'ctxWatchdogCalTargetHint',
+      'ctxWatchdogCalTotal',
+      'ctxWatchdogCalReviewed',
+      'ctxWatchdogCalAccurate',
+      'ctxWatchdogCalFalsePositive',
+      'ctxWatchdogCalFpRate',
+      'ctxWatchdogCalNoReviews',
+      'ctxWatchdogHitsTitle',
+      'ctxWatchdogHitsEmpty',
+      'ctxWatchdogAnnotateAccurate',
+      'ctxWatchdogAnnotateFalsePositive',
+      'ctxWatchdogAnnotateFailed',
+      'ctxWatchdogStoppedBadge',
+      'ctxWatchdogHardLimitBadge',
+      'ctxWatchdogJudgeBadge',
+      'ctxWatchdogVerdict_progressing',
+      'ctxWatchdogVerdict_spinning',
+      'ctxWatchdogVerdict_off-scope',
+      'ctxWatchdogConfidence_low',
+      'ctxWatchdogConfidence_medium',
+      'ctxWatchdogConfidence_high',
+      'ctxWatchdogSignal_repeat-tool-call',
+      'ctxWatchdogSignal_repeat-tool-error',
+      'ctxWatchdogSignal_no-progress',
+      'ctxWatchdogSignal_compaction-loop',
+      'ctxWatchdogSignal_budget-retry-stall',
+      'ctxWatchdogSignal_silent-stall',
+      'ctxWatchdogSignal_infra-failure',
+    ] as const
+    for (const loc of SUPPORTED_LOCALES) {
+      if (loc === 'en') continue
+      const pack = localePack(loc)
+      for (const key of localizedPr6SampleKeys) {
+        expect(pack.ui[key], `${loc}.ui.${key} should be localized`).not.toBe(ref.ui[key])
+      }
+      if (loc !== 'zh') {
+        expect(pack.ui.ctxWatchdogRunMeta, `${loc}.ui.ctxWatchdogRunMeta should be localized`).not.toBe(ref.ui.ctxWatchdogRunMeta)
       }
     }
   })

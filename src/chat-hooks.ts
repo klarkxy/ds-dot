@@ -7,6 +7,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import type React from 'react'
 import type { BoardView, ChatItem, ChatSnapshot, DotSettings, RecipeBoardRow } from './contracts.ts'
 import type { ChatImage } from './chat-images.ts'
+import type { ChatFileReceipt } from './chat-files.ts'
 import type { ChatApi } from './chat-panel.tsx'
 
 const BOARD_POLL_MS = 5_000
@@ -134,10 +135,10 @@ export function useContextUse(api: ChatApi, rev: number | undefined, running: bo
   return use
 }
 
-export type SettingsSection = 'proposals' | 'general' | 'takeover' | 'dispatch' | 'capabilities' | 'mcp'
+export type SettingsSection = 'proposals' | 'general' | 'takeover' | 'dispatch' | 'github' | 'capabilities' | 'advanced'
 export type DrawerTab = 'tasks' | SettingsSection | 'persona' | 'context' | 'trajectory'
 const CONFIG_TABS: ReadonlySet<DrawerTab> = new Set([
-  'proposals', 'general', 'takeover', 'dispatch', 'capabilities', 'mcp', 'persona', 'context', 'trajectory',
+  'proposals', 'general', 'takeover', 'dispatch', 'github', 'capabilities', 'advanced', 'persona', 'context', 'trajectory',
 ])
 
 /** A close or a tab switch; while the persona page holds unsaved edits the request waits for the human. */
@@ -148,6 +149,7 @@ export interface LocalEcho {
   readonly text: string
   readonly at: number
   readonly images: readonly ChatImage[]
+  readonly files: readonly ChatFileReceipt[]
 }
 
 /**
@@ -157,11 +159,11 @@ export interface LocalEcho {
  */
 export function useLocalEchoes(items: readonly ChatItem[]): {
   pendingEchoes: readonly LocalEcho[]
-  pushEcho: (text: string, images: readonly ChatImage[]) => LocalEcho
+  pushEcho: (text: string, images: readonly ChatImage[], files: readonly ChatFileReceipt[]) => LocalEcho
   removeEcho: (echo: LocalEcho) => void
 } {
   const [echoes, setEchoes] = useState<LocalEcho[]>([])
-  const delivered = useCallback((echo: LocalEcho) => items.some(item => item.kind === 'user' && item.text.trim() === echo.text && (item.images?.length ?? 0) === echo.images.length && item.at >= echo.at - 5_000), [items])
+  const delivered = useCallback((echo: LocalEcho) => items.some(item => item.kind === 'user' && item.text.trim() === echo.text && (item.images?.length ?? 0) === echo.images.length && (item.files?.length ?? 0) === echo.files.length && echo.files.every((file, index) => item.files?.[index]?.name === file.name && item.files[index].bytes === file.bytes) && item.at >= echo.at - 5_000), [items])
   const pendingEchoes = useMemo(() => echoes.filter(echo => !delivered(echo)), [echoes, delivered])
   useEffect(() => {
     if (echoes.length === 0) return
@@ -169,8 +171,8 @@ export function useLocalEchoes(items: readonly ChatItem[]): {
     const left = echoes.filter(echo => now - echo.at < ECHO_MS && !delivered(echo))
     if (left.length !== echoes.length) setEchoes(left)
   }, [echoes, delivered])
-  const pushEcho = useCallback((text: string, images: readonly ChatImage[]) => {
-    const echo: LocalEcho = { text, at: Date.now(), images }
+  const pushEcho = useCallback((text: string, images: readonly ChatImage[], files: readonly ChatFileReceipt[]) => {
+    const echo: LocalEcho = { text, at: Date.now(), images, files }
     setEchoes(list => [...list, echo])
     return echo
   }, [])
@@ -237,6 +239,7 @@ export function useScrollPin(activitySig: string, watch: readonly unknown[]): {
 export interface DrawerGuard {
   readonly drawerTab: DrawerTab | null
   readonly drawerWide: boolean
+  readonly drawerWidthPx: number | undefined
   readonly personaDirty: boolean
   readonly discardSignal: number
   readonly pendingDrawerAction: DrawerAction | undefined
@@ -246,6 +249,23 @@ export interface DrawerGuard {
   readonly cancelDrawerAction: () => void
   readonly setPersonaDirty: (dirty: boolean) => void
   readonly toggleDrawerWide: () => void
+  readonly setDrawerWidthPx: (px: number | undefined) => void
+}
+
+const DRAWER_WIDTH_KEY = 'dsh-dot:drawer-width'
+/** Narrowest dragged drawer. Shared with the resize handle so a stored value cannot reopen thinner than the drag floor. */
+export const DRAWER_MIN_PX = 340
+
+/** Dragged drawer widths survive reopens; a malformed or too-narrow entry falls back to the CSS presets. */
+function readDrawerWidth(): number | undefined {
+  try {
+    const raw = globalThis.localStorage?.getItem(DRAWER_WIDTH_KEY)
+    if (!raw) return undefined
+    const px = Number(raw)
+    return Number.isFinite(px) && px >= DRAWER_MIN_PX ? px : undefined
+  } catch {
+    return undefined
+  }
 }
 
 /**
@@ -256,6 +276,7 @@ export interface DrawerGuard {
 export function useDrawerGuard(): DrawerGuard {
   const [drawerTab, setDrawerTab] = useState<DrawerTab | null>(null)
   const [drawerWide, setDrawerWide] = useState(false)
+  const [drawerWidthPx, setWidthPx] = useState<number | undefined>(readDrawerWidth)
   const [personaDirty, setPersonaDirty] = useState(false)
   const [discardSignal, setDiscardSignal] = useState(0)
   const [pendingDrawerAction, setPendingDrawerAction] = useState<DrawerAction>()
@@ -275,13 +296,27 @@ export function useDrawerGuard(): DrawerGuard {
     if (action) applyDrawerAction(action)
   }, [pendingDrawerAction, applyDrawerAction])
   const cancelDrawerAction = useCallback(() => setPendingDrawerAction(undefined), [])
-  const toggleDrawerWide = useCallback(() => setDrawerWide(value => !value), [])
+  const setDrawerWidthPx = useCallback((px: number | undefined) => {
+    setWidthPx(px)
+    try {
+      if (px === undefined) globalThis.localStorage?.removeItem(DRAWER_WIDTH_KEY)
+      else globalThis.localStorage?.setItem(DRAWER_WIDTH_KEY, String(Math.round(px)))
+    } catch { /* a quota or privacy-mode failure must not break resizing */ }
+  }, [])
+  // The widen control follows the width actually on screen. A dragged width is not
+  // the wide preset, so the next click clears it and applies 90cqw instead of
+  // collapsing to the narrow preset.
+  const toggleDrawerWide = useCallback(() => {
+    const effective = drawerWide && drawerWidthPx === undefined
+    setDrawerWidthPx(undefined)
+    setDrawerWide(!effective)
+  }, [drawerWide, drawerWidthPx, setDrawerWidthPx])
   // Leaving the persona page settles the guard: a saved page has nothing left to hold.
   useEffect(() => {
     if (drawerTab !== 'persona') { setPersonaDirty(false); setPendingDrawerAction(undefined) }
   }, [drawerTab])
   useEffect(() => { if (!personaDirty) setPendingDrawerAction(undefined) }, [personaDirty])
-  return { drawerTab, drawerWide, personaDirty, discardSignal, pendingDrawerAction, configOpen: drawerTab !== null && CONFIG_TABS.has(drawerTab), requestDrawer, discardDrawerAction, cancelDrawerAction, setPersonaDirty, toggleDrawerWide }
+  return { drawerTab, drawerWide, drawerWidthPx, personaDirty, discardSignal, pendingDrawerAction, configOpen: drawerTab !== null && CONFIG_TABS.has(drawerTab), requestDrawer, discardDrawerAction, cancelDrawerAction, setPersonaDirty, toggleDrawerWide, setDrawerWidthPx }
 }
 
 export interface ReminderRemoval {

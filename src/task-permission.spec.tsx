@@ -288,16 +288,17 @@ describe('task model picker', () => {
     setSettings: async (patch: Partial<DotSettings>) => { saves.push(patch); return { ...settings, ...patch } as DotSettings },
   })
 
-  it('removes a chip and toggles a whole group in one save each', async () => {
+  it('removes a selected model and toggles a whole group in one save each', async () => {
     const saves: Array<Record<string, { list?: string[] }>> = []
     const settings: DotSettings = { ...DEFAULT_SETTINGS, taskModels: { mode: 'allow', list: ['p1/m1', 'p2/n1'] } }
     const Harness = panelHarness({ models: api(saves, settings).models }, settings, saves)
     const root = createRoot(document.getElementById('root')!)
     await act(async () => root.render(<Harness />))
     await act(async () => { await Promise.resolve() })
-    expect(document.querySelectorAll('.dsh-dot-model-chip')).toHaveLength(2)
-    // Chip remove: one save dropping p2/n1.
-    await act(async () => { document.querySelectorAll<HTMLButtonElement>('.dsh-dot-model-chip-remove')[1]!.click() })
+    expect(document.querySelector('.dsh-dot-model-chips')).toBeNull()
+    // Unchecking a selected row: one save dropping p2/n1.
+    const selectedRow = [...document.querySelectorAll<HTMLElement>('.dsh-dot-model-item')].find(row => row.getAttribute('title') === 'P2 / n1')!
+    await act(async () => selectedRow.click())
     expect(saves.at(-1)?.taskModels?.list).toEqual(['p1/m1'])
     // Group toggle: one save adding all of p1 (m1 still selected → adds m2).
     const list = saves.length
@@ -373,7 +374,7 @@ describe('capabilities page', () => {
     await act(async () => { await Promise.resolve() })
     expect(document.querySelector('.dsh-dot-skeleton')).not.toBeNull()
     await act(async () => { resolveView!(catalog); await Promise.resolve() })
-    expect(document.querySelector('.dsh-dot-cap-intro')?.textContent).toContain('宿主提供的额外工具')
+    expect(document.querySelector('.dsh-dot-cap-intro')?.textContent).toContain('接入服务，决定她能用哪些额外工具')
     expect(document.querySelectorAll('.dsh-dot-cap-group').length).toBeGreaterThanOrEqual(3)
     await search('wiki')
     expect(groupIds()).toContain('mcp:wiki')

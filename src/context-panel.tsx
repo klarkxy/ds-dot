@@ -4,9 +4,9 @@
  * as a fallback, and cumulative token usage across segments. The composition
  * and usage widgets come from dsh-context v0.82.2 (Apache-2.0).
  */
-import { Button } from '@deepseek-ai/dsh-client-ui-primitives'
+import { Button, Tag } from '@deepseek-ai/dsh-client-ui-primitives'
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { COMPACTION_POLICY, type DotContextSections, type DotContextView } from './contracts.ts'
+import { COMPACTION_POLICY, type DotContextSections, type DotContextView, type WatchdogAnnotation, type WatchdogDiagnosticsView, type WatchdogHitRecord } from './contracts.ts'
 import { makeCurrentComposition } from './context-current-composition.tsx'
 import { Donut } from './context-donut.tsx'
 import { IconDatabase } from './context-icons.ts'
@@ -15,7 +15,7 @@ import { makeLegend, makeStackedBar } from './context-stacked-bar.tsx'
 import { officialSurfaceParts } from './context-surface.ts'
 import { SurfaceBrowser, SURFACE_CATEGORIES, SURFACE_COLORS } from './context-surface-browser.tsx'
 import type { PartsPart, ViewKit } from './context-widget-types.ts'
-import { formatPercent, formatTokens, intlLocale, t, type CopyLocale, type TextKey } from './ui-copy.ts'
+import { formatPercent, formatTokens, formatWhen, intlLocale, t, type CopyLocale, type TextKey } from './ui-copy.ts'
 import { PaneSkeleton } from './settings-panel.tsx'
 
 const REFRESH_MS = 5_000
@@ -24,6 +24,8 @@ export interface ContextApi {
   context(signal: AbortSignal): Promise<DotContextView>
   newSegment(): Promise<string>
   clearUsage?(): Promise<DotContextView>
+  watchdogDiagnostics?(signal?: AbortSignal): Promise<WatchdogDiagnosticsView>
+  annotateWatchdog?(id: string, annotation: WatchdogAnnotation): Promise<WatchdogDiagnosticsView>
 }
 
 function useContext(api: ContextApi): {
@@ -132,6 +134,148 @@ function PromptSections({ locale, sections }: { locale: CopyLocale; sections: Do
   )
 }
 
+function WatchdogDiagnosticsSection({ locale, watchdog, canAnnotate, savingId, error, onAnnotate }: {
+  locale: CopyLocale
+  watchdog: WatchdogDiagnosticsView
+  canAnnotate: boolean
+  savingId?: string
+  error?: string
+  onAnnotate: (id: string, annotation: WatchdogAnnotation) => void
+}) {
+  const cal = watchdog.calibration
+  const fallback = watchdog.modelFallbackNotice
+  const modeTone = watchdog.mode === 'auto' ? 'info' : watchdog.mode === 'observe' ? 'outline' : 'quiet'
+  return (
+    <section className="dsh-dot-ctx-section dsh-dot-wd" aria-label={t(locale, 'ctxWatchdogTitle')}>
+      <div className="lc-card-title dsh-dot-wd-head">
+        <span className="lc-card-title-text">{t(locale, 'ctxWatchdogTitle')}</span>
+        <div className="dsh-dot-wd-badges">
+          <span className="dsh-dot-wd-mode" data-mode={watchdog.mode}>
+            <Tag tone={modeTone}>{t(locale, `ctxWatchdogMode_${watchdog.mode}`)}</Tag>
+          </span>
+          <span className="dsh-dot-wd-stops" data-watchdog-stops={watchdog.watchdogStops}>
+            <Tag tone={watchdog.watchdogStops > 0 ? 'warning' : 'neutral'}>
+              {t(locale, 'ctxWatchdogStops')}: {fill('ctxWatchdogStopsCount', { n: watchdog.watchdogStops }, locale)}
+            </Tag>
+          </span>
+        </div>
+      </div>
+
+      <dl className="dsh-dot-ctx-facts dsh-dot-wd-meta">
+        <Fact label={t(locale, 'ctxWatchdogModeLabel')} value={t(locale, `ctxWatchdogMode_${watchdog.mode}`)} />
+        <Fact label={t(locale, 'ctxWatchdogModelLabel')} value={watchdog.configuredModel ?? t(locale, 'ctxWatchdogModelDefault')} />
+      </dl>
+
+      {fallback ? (
+        <div className="dsh-dot-wd-fallback" role="alert">
+          <div className="dsh-dot-wd-fallback-title">{t(locale, 'ctxWatchdogFallbackTitle')}</div>
+          <div className="dsh-dot-wd-fallback-body">
+            {fill('ctxWatchdogFallbackBody', {
+              model: fallback.configuredModel,
+              reason: t(locale, `ctxWatchdogFallbackReason_${fallback.reason}` as TextKey),
+            }, locale)}
+          </div>
+          {fallback.detail ? <div className="dsh-dot-wd-fallback-detail">{fallback.detail}</div> : null}
+        </div>
+      ) : null}
+
+      <div className="dsh-dot-wd-calibration">
+        <div className="dsh-dot-wd-subhead">
+          <span>{fill('ctxWatchdogCalTitle', { days: cal.windowDays }, locale)}</span>
+          <span className="dsh-dot-wd-target">{t(locale, 'ctxWatchdogCalTargetHint')}</span>
+        </div>
+        <dl className="dsh-dot-wd-stats">
+          <div className="dsh-dot-wd-stat" data-stat="total"><dt>{t(locale, 'ctxWatchdogCalTotal')}</dt><dd>{cal.total14d}</dd></div>
+          <div className="dsh-dot-wd-stat" data-stat="reviewed"><dt>{t(locale, 'ctxWatchdogCalReviewed')}</dt><dd>{cal.reviewed14d}</dd></div>
+          <div className="dsh-dot-wd-stat" data-stat="accurate"><dt>{t(locale, 'ctxWatchdogCalAccurate')}</dt><dd>{cal.accurate14d}</dd></div>
+          <div className="dsh-dot-wd-stat" data-stat="false-positive"><dt>{t(locale, 'ctxWatchdogCalFalsePositive')}</dt><dd>{cal.falsePositive14d}</dd></div>
+          <div className="dsh-dot-wd-stat" data-stat="fp-rate">
+            <dt>{t(locale, 'ctxWatchdogCalFpRate')}</dt>
+            <dd>{cal.falsePositiveRate === null ? t(locale, 'ctxWatchdogCalNoReviews') : formatPercent(cal.falsePositiveRate)}</dd>
+          </div>
+        </dl>
+      </div>
+
+      <div className="dsh-dot-wd-hits">
+        <div className="dsh-dot-wd-subhead">
+          <span>{t(locale, 'ctxWatchdogHitsTitle')}</span>
+        </div>
+        {error ? <div className="dsh-ui-error dsh-dot-ctx-inline-error" role="alert">{t(locale, 'ctxWatchdogAnnotateFailed')}{error}</div> : null}
+        {watchdog.hits.length === 0 ? (
+          <div className="dsh-ui-hint dsh-dot-wd-empty">{t(locale, 'ctxWatchdogHitsEmpty')}</div>
+        ) : (
+          <ul className="dsh-dot-wd-hit-list">
+            {watchdog.hits.map((hit: WatchdogHitRecord) => {
+              const saving = savingId === hit.id
+              const accurateActive = hit.annotation === 'accurate'
+              const fpActive = hit.annotation === 'false-positive'
+              return (
+                <li key={hit.id} className="dsh-dot-wd-hit" data-hit-id={hit.id} data-signal={hit.signal}>
+                  <div className="dsh-dot-wd-hit-head">
+                    <span className="dsh-dot-wd-hit-signal">{t(locale, `ctxWatchdogSignal_${hit.signal}` as TextKey)}</span>
+                    <Tag tone="quiet">{hit.mode}</Tag>
+                    {hit.hardLimitReached ? <Tag tone="danger">{t(locale, 'ctxWatchdogHardLimitBadge')}</Tag> : null}
+                    {hit.stopped ? <Tag tone="warning">{t(locale, 'ctxWatchdogStoppedBadge')}</Tag> : null}
+                    <span className="dsh-dot-wd-hit-time">{formatWhen(hit.at)}</span>
+                  </div>
+                  <div className="dsh-dot-wd-hit-meta">
+                    {fill('ctxWatchdogRunMeta', {
+                      runId: hit.runId,
+                      phase: hit.runPhase,
+                      changeId: hit.changeId,
+                      rev: hit.inputRevision,
+                    }, locale)}
+                  </div>
+                  {hit.judge ? (
+                    <div className="dsh-dot-wd-hit-judge">
+                      <Tag tone={hit.judge.verdict === 'progressing' ? 'success' : 'warning'}>
+                        {fill('ctxWatchdogJudgeBadge', {
+                          verdict: t(locale, `ctxWatchdogVerdict_${hit.judge.verdict}` as TextKey),
+                          confidence: t(locale, `ctxWatchdogConfidence_${hit.judge.confidence}` as TextKey),
+                        }, locale)}
+                      </Tag>
+                      <span className="dsh-dot-wd-hit-judge-summary">{hit.judge.summary}</span>
+                    </div>
+                  ) : null}
+                  {hit.evidence.length > 0 ? (
+                    <ul className="dsh-dot-wd-evidence">
+                      {hit.evidence.map((line, index) => <li key={index}>{line}</li>)}
+                    </ul>
+                  ) : null}
+                  <div className="dsh-dot-wd-hit-actions">
+                    <Button
+                      variant={accurateActive ? 'primary' : 'outline'}
+                      size="sm"
+                      className={accurateActive ? 'dsh-dot-wd-btn dsh-dot-wd-btn--active' : 'dsh-dot-wd-btn'}
+                      aria-pressed={accurateActive}
+                      data-annotation="accurate"
+                      disabled={saving || !canAnnotate}
+                      onClick={() => onAnnotate(hit.id, 'accurate')}
+                    >
+                      {t(locale, 'ctxWatchdogAnnotateAccurate')}
+                    </Button>
+                    <Button
+                      variant={fpActive ? 'primary' : 'outline'}
+                      size="sm"
+                      className={fpActive ? 'dsh-dot-wd-btn dsh-dot-wd-btn--active' : 'dsh-dot-wd-btn'}
+                      aria-pressed={fpActive}
+                      data-annotation="false-positive"
+                      disabled={saving || !canAnnotate}
+                      onClick={() => onAnnotate(hit.id, 'false-positive')}
+                    >
+                      {t(locale, 'ctxWatchdogAnnotateFalsePositive')}
+                    </Button>
+                  </div>
+                </li>
+              )
+            })}
+          </ul>
+        )}
+      </div>
+    </section>
+  )
+}
+
 export function ContextPanel({ locale, api, running = false }: { locale: CopyLocale; api: ContextApi; running?: boolean }) {
   const { view, error, refresh, setView } = useContext(api)
   const [hoverKey, setHoverKey] = useState<string | null>(null)
@@ -140,6 +284,31 @@ export function ContextPanel({ locale, api, running = false }: { locale: CopyLoc
   const [moveStatus, setMoveStatus] = useState<{ ok: boolean; text: string }>()
   const [clearingUsage, setClearingUsage] = useState(false)
   const [clearError, setClearError] = useState<string>()
+  const [watchdogFallback, setWatchdogFallback] = useState<WatchdogDiagnosticsView>()
+  const [annotatingId, setAnnotatingId] = useState<string>()
+  const [annotateError, setAnnotateError] = useState<string>()
+  useEffect(() => {
+    if (!api.watchdogDiagnostics || view?.watchdog !== undefined) return
+    const life = new AbortController()
+    api.watchdogDiagnostics(life.signal).then(
+      next => { if (!life.signal.aborted) setWatchdogFallback(next) },
+      () => {},
+    )
+    return () => life.abort()
+  }, [api, view?.watchdog])
+  const watchdog = view?.watchdog ?? watchdogFallback
+  const annotateWatchdog = useCallback((id: string, annotation: WatchdogAnnotation) => {
+    if (!api.annotateWatchdog) return
+    setAnnotatingId(id)
+    setAnnotateError(undefined)
+    api.annotateWatchdog(id, annotation).then(
+      next => {
+        setWatchdogFallback(next)
+        if (view) setView({ ...view, watchdog: next })
+      },
+      failure => setAnnotateError(failure instanceof Error ? failure.message : String(failure)),
+    ).finally(() => setAnnotatingId(undefined))
+  }, [api, setView, view])
   const startSegment = () => {
     setMoving(true)
     setMoveStatus(undefined)
@@ -172,7 +341,21 @@ export function ContextPanel({ locale, api, running = false }: { locale: CopyLoc
       ? <div className="dsh-ui-error" role="alert">{t(locale, 'ctxFailed')}{error}</div>
       : <PaneSkeleton label={t(locale, 'ctxLoading')} rows={3} />
   }
-  if (!view.live) return <div className="dsh-ui-empty">{t(locale, 'ctxIdle')}</div>
+  if (!view.live) {
+    return watchdog ? (
+      <div className="dsh-dot-pane dsh-dot-context">
+        <div className="dsh-ui-empty">{t(locale, 'ctxIdle')}</div>
+        <WatchdogDiagnosticsSection
+          locale={locale}
+          watchdog={watchdog}
+          canAnnotate={typeof api.annotateWatchdog === 'function'}
+          {...annotatingId !== undefined ? { savingId: annotatingId } : {}}
+          {...annotateError !== undefined ? { error: annotateError } : {}}
+          onAnnotate={annotateWatchdog}
+        />
+      </div>
+    ) : <div className="dsh-ui-empty">{t(locale, 'ctxIdle')}</div>
+  }
 
   const { contextWindow: windowSize, usedTokens: used, compactAt, rolloverAt, breakdown } = view
   const detailed = view.surface ? officialSurfaceParts(view.surface.parts, breakdown) : undefined
@@ -303,6 +486,17 @@ export function ContextPanel({ locale, api, running = false }: { locale: CopyLoc
           />
         </dl>
       </section>
+
+      {watchdog ? (
+        <WatchdogDiagnosticsSection
+          locale={locale}
+          watchdog={watchdog}
+          canAnnotate={typeof api.annotateWatchdog === 'function'}
+          {...annotatingId !== undefined ? { savingId: annotatingId } : {}}
+          {...annotateError !== undefined ? { error: annotateError } : {}}
+          onAnnotate={annotateWatchdog}
+        />
+      ) : null}
     </div>
   )
 }
@@ -438,4 +632,30 @@ export const contextCss = `
 .dsh-dot-chat .dsh-dot-surface-node-content .dsh-ui-help { display: block; margin-top: 6px; }
 @media (max-width: 420px) { .dsh-dot-chat .dsh-dot-surface-node-preview { display: none; } .dsh-dot-chat .dsh-dot-surface-node-name { max-width: 70%; } }
 @container (max-width: 420px) { .dsh-dot-chat .dsh-dot-surface-node-preview { display: none; } .dsh-dot-chat .dsh-dot-surface-node-name { max-width: 70%; } }
+.dsh-dot-chat .dsh-dot-wd { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+.dsh-dot-chat .dsh-dot-wd-head { margin-bottom: 0; }
+.dsh-dot-chat .dsh-dot-wd-badges { margin-left: auto; display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.dsh-dot-chat .dsh-dot-wd-meta { gap: 8px 20px; }
+.dsh-dot-chat .dsh-dot-wd-fallback { display: flex; flex-direction: column; gap: 4px; padding: 10px 12px; border-radius: var(--dsw-radius-md); background: color-mix(in srgb, var(--dsw-alias-state-warn-primary) 12%, transparent); color: var(--dsw-alias-state-warn-primary); font-size: 12px; line-height: 18px; }
+.dsh-dot-chat .dsh-dot-wd-fallback-title { font-weight: 600; }
+.dsh-dot-chat .dsh-dot-wd-fallback-detail { color: var(--dsw-alias-label-secondary); overflow-wrap: anywhere; }
+.dsh-dot-chat .dsh-dot-wd-calibration,
+.dsh-dot-chat .dsh-dot-wd-hits { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.dsh-dot-chat .dsh-dot-wd-subhead { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; font-size: 12px; line-height: 18px; font-weight: 600; color: var(--dsw-alias-label-secondary); }
+.dsh-dot-chat .dsh-dot-wd-target { font-weight: 400; color: var(--dsw-alias-label-tertiary); }
+.dsh-dot-chat .dsh-dot-wd-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); gap: 8px; margin: 0; }
+.dsh-dot-chat .dsh-dot-wd-stat { display: flex; flex-direction: column; gap: 2px; padding: 8px 10px; border-radius: var(--dsw-radius-sm); background: var(--dsw-alias-bg-layer-1); box-shadow: var(--dsw-elevation-stroke); min-width: 0; }
+.dsh-dot-chat .dsh-dot-wd-stat dt { font-size: 11px; line-height: 16px; color: var(--dsw-alias-label-tertiary); }
+.dsh-dot-chat .dsh-dot-wd-stat dd { margin: 0; font-size: 14px; line-height: 20px; font-weight: 600; font-variant-numeric: tabular-nums; color: var(--dsw-alias-label-primary); }
+.dsh-dot-chat .dsh-dot-wd-empty { margin: 0; }
+.dsh-dot-chat .dsh-dot-wd-hit-list { display: flex; flex-direction: column; gap: 8px; list-style: none; margin: 0; padding: 0; }
+.dsh-dot-chat .dsh-dot-wd-hit { display: flex; flex-direction: column; gap: 6px; padding: 10px 12px; border-radius: var(--dsw-radius-md); background: var(--dsw-alias-bg-layer-1); box-shadow: var(--dsw-elevation-stroke); min-width: 0; }
+.dsh-dot-chat .dsh-dot-wd-hit-head { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; min-width: 0; }
+.dsh-dot-chat .dsh-dot-wd-hit-signal { font-size: 13px; line-height: 18px; font-weight: 600; color: var(--dsw-alias-label-primary); }
+.dsh-dot-chat .dsh-dot-wd-hit-time { margin-left: auto; font-size: 11px; line-height: 16px; color: var(--dsw-alias-label-tertiary); font-variant-numeric: tabular-nums; }
+.dsh-dot-chat .dsh-dot-wd-hit-meta { font-size: 12px; line-height: 16px; color: var(--dsw-alias-label-secondary); font-family: var(--ds-font-family-code); overflow-wrap: anywhere; }
+.dsh-dot-chat .dsh-dot-wd-hit-judge { display: flex; align-items: flex-start; flex-wrap: wrap; gap: 6px; font-size: 12px; line-height: 18px; color: var(--dsw-alias-label-primary); }
+.dsh-dot-chat .dsh-dot-wd-hit-judge-summary { flex: 1 1 200px; min-width: 0; overflow-wrap: anywhere; }
+.dsh-dot-chat .dsh-dot-wd-evidence { margin: 0; padding-left: 16px; display: flex; flex-direction: column; gap: 2px; font-size: 12px; line-height: 18px; color: var(--dsw-alias-label-secondary); overflow-wrap: anywhere; }
+.dsh-dot-chat .dsh-dot-wd-hit-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding-top: 2px; }
 `

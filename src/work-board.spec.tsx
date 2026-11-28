@@ -8,6 +8,7 @@ import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 import { DEFAULT_SETTINGS } from './contracts.ts'
 import { DotService } from './service.ts'
 import { DotStore } from './store.ts'
+import { boardCss } from './board.tsx'
 import { WorkBoard, WorkBoardPanel } from './work-board.tsx'
 import type { WorkBoardItem, WorkReadRequest } from './work-board.ts'
 
@@ -1111,5 +1112,261 @@ describe('WorkBoard link chips', () => {
     expect(document.body.textContent).toContain('closed')
     expect(document.querySelector('span.dsh-dot-work-link')).toBeTruthy()
     await act(async () => root.unmount())
+  })
+})
+
+describe('WorkBoard retry badge', () => {
+  const retryBase: WorkBoardItem = {
+    ...item, id: 'c-retry', title: 'Retry task', status: 'running',
+    verification: undefined, oversight: undefined, humanAction: undefined,
+  }
+  const renderBoard = async (root: ReturnType<typeof createRoot>, locale: 'en' | 'zh', row: WorkBoardItem) => {
+    await act(async () => root.render(
+      <WorkBoard locale={locale} items={[row]} pending={[]} onAccept={vi.fn()} onReject={vi.fn()} onAnswer={vi.fn()} onResume={vi.fn()} />,
+    ))
+  }
+
+  it('stays silent on the card header for transient first retry (attempts: 1)', async () => {
+    const row: WorkBoardItem = {
+      ...retryBase,
+      runs: [{
+        id: 'run-t1', kind: 'work', phase: 'active', cwd: 'H:/repo',
+        retryStatus: { kind: 'transient', attempts: 1, since: '2026-11-26T10:00:00.000Z', accumulatedMs: 0 },
+      }],
+    }
+    const root = createRoot(document.getElementById('root')!)
+    await renderBoard(root, 'en', row)
+    expect(document.querySelector('.dsh-dot-work-retry')).toBeNull()
+    expect(document.body.textContent).not.toContain('Model retrying')
+    await renderBoard(root, 'zh', row)
+    expect(document.querySelector('.dsh-dot-work-retry')).toBeNull()
+    expect(document.body.textContent).not.toContain('模型重试中')
+    await act(async () => root.unmount())
+  })
+
+  it('renders a warning fault badge when transient retries reach attempts >= 2 in zh and en', async () => {
+    const twice: WorkBoardItem = {
+      ...retryBase,
+      runs: [{
+        id: 'run-t2', kind: 'work', phase: 'active', cwd: 'H:/repo',
+        retryStatus: { kind: 'transient', attempts: 2, since: '2026-11-26T10:00:00.000Z', accumulatedMs: 1_500 },
+      }],
+    }
+    const root = createRoot(document.getElementById('root')!)
+    await renderBoard(root, 'zh', twice)
+    const zhBadge = document.querySelector<HTMLElement>('.dsh-dot-work-meta .dsh-dot-work-retry')
+    expect(zhBadge).toBeTruthy()
+    expect(zhBadge?.textContent).toBe('模型重试中 ×2')
+    expect(zhBadge?.getAttribute('data-tone')).toBe('warning')
+
+    await renderBoard(root, 'en', twice)
+    const enBadge = document.querySelector<HTMLElement>('.dsh-dot-work-meta .dsh-dot-work-retry')
+    expect(enBadge).toBeTruthy()
+    expect(enBadge?.textContent).toBe('Model retrying ×2')
+    expect(enBadge?.getAttribute('data-tone')).toBe('warning')
+
+    const thrice: WorkBoardItem = {
+      ...retryBase,
+      runs: [{
+        id: 'run-t3', kind: 'work', phase: 'active', cwd: 'H:/repo',
+        retryStatus: { kind: 'transient', attempts: 3, since: '2026-11-26T10:00:00.000Z', accumulatedMs: 4_500 },
+      }],
+    }
+    await renderBoard(root, 'en', thrice)
+    const badge3 = document.querySelector<HTMLElement>('.dsh-dot-work-meta .dsh-dot-work-retry')
+    expect(badge3?.textContent).toBe('Model retrying ×3')
+    expect(badge3?.getAttribute('data-tone')).toBe('warning')
+    await act(async () => root.unmount())
+  })
+
+  it('renders a danger fault badge immediately on first budget retry (attempts: 1)', async () => {
+    const budget: WorkBoardItem = {
+      ...retryBase,
+      runs: [{
+        id: 'run-b1', kind: 'work', phase: 'active', cwd: 'H:/repo',
+        retryStatus: { kind: 'budget', attempts: 1, since: '2026-11-26T10:00:00.000Z', accumulatedMs: 0 },
+      }],
+    }
+    const root = createRoot(document.getElementById('root')!)
+    await renderBoard(root, 'en', budget)
+    const badge = document.querySelector<HTMLElement>('.dsh-dot-work-meta .dsh-dot-work-retry')
+    expect(badge).toBeTruthy()
+    expect(badge?.textContent).toBe('Model retrying ×1')
+    expect(badge?.getAttribute('data-tone')).toBe('danger')
+
+    await renderBoard(root, 'zh', budget)
+    expect(document.querySelector('.dsh-dot-work-retry')?.textContent).toBe('模型重试中 ×1')
+    await act(async () => root.unmount())
+  })
+
+  it('removes the badge once retryStatus is cleared', async () => {
+    const retrying: WorkBoardItem = {
+      ...retryBase,
+      runs: [{
+        id: 'run-clear', kind: 'work', phase: 'active', cwd: 'H:/repo',
+        retryStatus: { kind: 'budget', attempts: 2, since: '2026-11-26T10:00:00.000Z', accumulatedMs: 2_000 },
+      }],
+    }
+    const cleared: WorkBoardItem = {
+      ...retryBase,
+      runs: [{ id: 'run-clear', kind: 'work', phase: 'active', cwd: 'H:/repo' }],
+    }
+    const root = createRoot(document.getElementById('root')!)
+    await renderBoard(root, 'en', retrying)
+    expect(document.querySelector('.dsh-dot-work-retry')).toBeTruthy()
+    await renderBoard(root, 'en', cleared)
+    expect(document.querySelector('.dsh-dot-work-retry')).toBeNull()
+    expect(document.body.textContent).not.toContain('Model retrying')
+    await act(async () => root.unmount())
+  })
+
+  it('selects the highest-severity highlighted retry across multiple runs (budget over transient, then highest attempts)', async () => {
+    const root = createRoot(document.getElementById('root')!)
+
+    // transient x1 + transient x3 -> transient x3 (warning)
+    await renderBoard(root, 'en', {
+      ...retryBase,
+      runs: [
+        { id: 'r-1', kind: 'work', phase: 'active', cwd: 'H:/repo', retryStatus: { kind: 'transient', attempts: 1, since: '2026-11-26T10:00:00.000Z', accumulatedMs: 0 } },
+        { id: 'r-2', kind: 'review', phase: 'active', cwd: 'H:/repo', retryStatus: { kind: 'transient', attempts: 3, since: '2026-11-26T10:01:00.000Z', accumulatedMs: 2_000 } },
+      ],
+    })
+    let badge = document.querySelector<HTMLElement>('.dsh-dot-work-retry')
+    expect(badge?.textContent).toBe('Model retrying ×3')
+    expect(badge?.getAttribute('data-tone')).toBe('warning')
+
+    // transient x4 + budget x1 -> budget x1 (danger)
+    await renderBoard(root, 'en', {
+      ...retryBase,
+      runs: [
+        { id: 'r-1', kind: 'work', phase: 'active', cwd: 'H:/repo', retryStatus: { kind: 'transient', attempts: 4, since: '2026-11-26T10:00:00.000Z', accumulatedMs: 5_000 } },
+        { id: 'r-2', kind: 'review', phase: 'active', cwd: 'H:/repo', retryStatus: { kind: 'budget', attempts: 1, since: '2026-11-26T10:02:00.000Z', accumulatedMs: 0 } },
+      ],
+    })
+    badge = document.querySelector<HTMLElement>('.dsh-dot-work-retry')
+    expect(badge?.textContent).toBe('Model retrying ×1')
+    expect(badge?.getAttribute('data-tone')).toBe('danger')
+
+    // budget x1 + budget x3 -> budget x3 (danger)
+    await renderBoard(root, 'en', {
+      ...retryBase,
+      runs: [
+        { id: 'r-1', kind: 'work', phase: 'active', cwd: 'H:/repo', retryStatus: { kind: 'budget', attempts: 1, since: '2026-11-26T10:00:00.000Z', accumulatedMs: 0 } },
+        { id: 'r-2', kind: 'review', phase: 'active', cwd: 'H:/repo', retryStatus: { kind: 'budget', attempts: 3, since: '2026-11-26T10:02:00.000Z', accumulatedMs: 3_000 } },
+      ],
+    })
+    badge = document.querySelector<HTMLElement>('.dsh-dot-work-retry')
+    expect(badge?.textContent).toBe('Model retrying ×3')
+    expect(badge?.getAttribute('data-tone')).toBe('danger')
+    await act(async () => root.unmount())
+  })
+
+  it('scopes the retry badge style strictly under .dsh-dot-board', () => {
+    const retryLines = boardCss.split('\n').filter(line => line.includes('dsh-dot-work-retry'))
+    expect(retryLines.length).toBeGreaterThan(0)
+    for (const line of retryLines) {
+      expect(line.trim().startsWith('.dsh-dot-board ')).toBe(true)
+    }
+  })
+})
+
+describe('WorkBoard background job badge', () => {
+  const jobsBase: WorkBoardItem = {
+    ...item, id: 'c-jobs', title: 'Background task', status: 'running',
+    verification: undefined, oversight: undefined, humanAction: undefined,
+  }
+  const renderBoard = async (root: ReturnType<typeof createRoot>, locale: 'en' | 'zh', row: WorkBoardItem) => {
+    await act(async () => root.render(
+      <WorkBoard locale={locale} items={[row]} pending={[]} onAccept={vi.fn()} onReject={vi.fn()} onAnswer={vi.fn()} onResume={vi.fn()} />,
+    ))
+  }
+
+  it('renders subtle quiet badge in zh and en when backgroundJobCount > 0 (1, 3, multi-run sum)', async () => {
+    const oneJob: WorkBoardItem = {
+      ...jobsBase,
+      runs: [{ id: 'run-j1', kind: 'work', phase: 'active', cwd: 'H:/repo', backgroundJobCount: 1 }],
+    }
+    const root = createRoot(document.getElementById('root')!)
+    await renderBoard(root, 'zh', oneJob)
+    const zhOne = document.querySelector<HTMLElement>('.dsh-dot-work-meta .dsh-dot-work-jobs')
+    expect(zhOne).toBeTruthy()
+    expect(zhOne?.textContent).toBe('后台 1 个 job')
+    expect(zhOne?.getAttribute('data-tone')).toBe('quiet')
+    expect(zhOne?.getAttribute('data-tone')).not.toBe('danger')
+    expect(zhOne?.getAttribute('data-tone')).not.toBe('warning')
+
+    await renderBoard(root, 'en', oneJob)
+    const enOne = document.querySelector<HTMLElement>('.dsh-dot-work-meta .dsh-dot-work-jobs')
+    expect(enOne).toBeTruthy()
+    expect(enOne?.textContent).toBe('1 background job(s)')
+    expect(enOne?.getAttribute('data-tone')).toBe('quiet')
+
+    const threeJobs: WorkBoardItem = {
+      ...jobsBase,
+      runs: [{ id: 'run-j3', kind: 'work', phase: 'active', cwd: 'H:/repo', backgroundJobCount: 3 }],
+    }
+    await renderBoard(root, 'zh', threeJobs)
+    expect(document.querySelector('.dsh-dot-work-meta .dsh-dot-work-jobs')?.textContent).toBe('后台 3 个 job')
+    await renderBoard(root, 'en', threeJobs)
+    expect(document.querySelector('.dsh-dot-work-meta .dsh-dot-work-jobs')?.textContent).toBe('3 background job(s)')
+
+    const multiRun: WorkBoardItem = {
+      ...jobsBase,
+      runs: [
+        { id: 'run-m1', kind: 'work', phase: 'active', cwd: 'H:/repo', backgroundJobCount: 1 },
+        { id: 'run-m2', kind: 'review', phase: 'settling', cwd: 'H:/repo', backgroundJobCount: 2 },
+        { id: 'run-m3', kind: 'work', phase: 'completed', cwd: 'H:/repo', backgroundJobCount: 5 },
+      ],
+    }
+    await renderBoard(root, 'en', multiRun)
+    const multiBadge = document.querySelector<HTMLElement>('.dsh-dot-work-meta .dsh-dot-work-jobs')
+    expect(multiBadge?.textContent).toBe('3 background job(s)')
+    expect(multiBadge?.getAttribute('data-tone')).toBe('quiet')
+    expect(document.querySelectorAll('.dsh-dot-work-jobs')).toHaveLength(1)
+    await act(async () => root.unmount())
+  })
+
+  it('silently hides the badge when backgroundJobCount is undefined or 0', async () => {
+    const root = createRoot(document.getElementById('root')!)
+    await renderBoard(root, 'zh', {
+      ...jobsBase,
+      runs: [{ id: 'run-none', kind: 'work', phase: 'active', cwd: 'H:/repo' }],
+    })
+    expect(document.querySelector('.dsh-dot-work-jobs')).toBeNull()
+    expect(document.body.textContent).not.toContain('个 job')
+
+    await renderBoard(root, 'en', {
+      ...jobsBase,
+      runs: [{ id: 'run-zero', kind: 'work', phase: 'active', cwd: 'H:/repo', backgroundJobCount: 0 }],
+    })
+    expect(document.querySelector('.dsh-dot-work-jobs')).toBeNull()
+    expect(document.body.textContent).not.toContain('background job')
+    await act(async () => root.unmount())
+  })
+
+  it('updates cleanly from 1 to 0 on rerender', async () => {
+    const active: WorkBoardItem = {
+      ...jobsBase,
+      runs: [{ id: 'run-live', kind: 'work', phase: 'active', cwd: 'H:/repo', backgroundJobCount: 1 }],
+    }
+    const settled: WorkBoardItem = {
+      ...jobsBase,
+      runs: [{ id: 'run-live', kind: 'work', phase: 'active', cwd: 'H:/repo', backgroundJobCount: 0 }],
+    }
+    const root = createRoot(document.getElementById('root')!)
+    await renderBoard(root, 'zh', active)
+    expect(document.querySelector('.dsh-dot-work-meta .dsh-dot-work-jobs')?.textContent).toBe('后台 1 个 job')
+    await renderBoard(root, 'zh', settled)
+    expect(document.querySelector('.dsh-dot-work-jobs')).toBeNull()
+    expect(document.body.textContent).not.toContain('后台')
+    await act(async () => root.unmount())
+  })
+
+  it('scopes the background jobs badge style strictly under .dsh-dot-board', () => {
+    const jobLines = boardCss.split('\n').filter(line => line.includes('dsh-dot-work-jobs'))
+    expect(jobLines.length).toBeGreaterThan(0)
+    for (const line of jobLines) {
+      expect(line.trim().startsWith('.dsh-dot-board ')).toBe(true)
+    }
   })
 })

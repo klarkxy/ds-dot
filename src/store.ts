@@ -15,7 +15,7 @@ import { ownedSessionIds, sessionIsOwned } from './peer.ts'
 import { WorkBook, isUnknownState, type ChangeRecord, type WorkPersist } from './work.ts'
 import { projectWorkIdle, projectWorkLedger } from './work-actions.ts'
 
-type TableName = 'state' | 'tasks' | 'schedules' | 'proposals' | 'changes' | 'inputs' | 'runs' | 'verifications' | 'peers' | 'inbox' | 'recipes' | 'links' | 'recipe_proposals'
+type TableName = 'state' | 'tasks' | 'schedules' | 'proposals' | 'changes' | 'inputs' | 'runs' | 'verifications' | 'peers' | 'inbox' | 'recipes' | 'links' | 'recipe_proposals' | 'github_poll' | 'watchdog'
 
 export interface DotTable {
   entries(): IterableIterator<[unknown, unknown]>
@@ -479,6 +479,16 @@ export class DotStore {
           const keys = [...table.entries()].map(([key]) => String(key))
           for (const key of keys) await this.durable(() => table.delete(key))
         }
+        const pollTable = this.githubPollTable()
+        if (pollTable) {
+          const keys = [...pollTable.entries()].map(([key]) => String(key))
+          for (const key of keys) await this.durable(() => pollTable.delete(key))
+        }
+        const wdTable = this.watchdogTable()
+        if (wdTable) {
+          const keys = [...wdTable.entries()].map(([key]) => String(key))
+          for (const key of keys) await this.durable(() => wdTable.delete(key))
+        }
       }
       this.tasks.clear()
       this.reminders.clear()
@@ -532,6 +542,23 @@ export class DotStore {
       ? { ...existing, goal: input.goal || existing.goal, status: existing.status === 'archived' ? 'idle' as const : existing.status, updatedAt: input.at }
       : createTask(input)
     return this.put(task).then(() => task)
+  }
+
+  /**
+   * Drop a watched session from the ledger. A session dot started is left
+   * alone, and nothing here archives or edits the host session.
+   */
+  untrack(sessionId: string): Promise<boolean> {
+    const task = this.tasks.get(sessionId)
+    if (!task || task.origin !== 'watched') return Promise.resolve(false)
+    this.tasks.delete(sessionId)
+    this.changed()
+    const domain = this.domain
+    const op = this.tail.then(async () => {
+      if (domain) await this.durable(() => domain.table('tasks').delete(sessionId))
+    })
+    this.tail = op.catch(() => undefined)
+    return op.then(() => true)
   }
 
   apply(event: LedgerEvent, pending: readonly PendingView[]): Promise<TaskRecord | undefined> {
@@ -753,6 +780,34 @@ export class DotStore {
 
   /** A work-row mutation that bypassed a DotStore write still needs the board signal. */
   workChanged(): void { this.changed() }
+
+  /** Safe accessor for the v11 `github_poll` KV table; returns undefined on legacy minimal mock domains. */
+  githubPollTable(): DotTable | undefined {
+    if (!this.domain) return undefined
+    try {
+      const table = this.domain.table('github_poll')
+      if (!table || typeof table.entries !== 'function' || typeof table.get !== 'function' || typeof table.put !== 'function') return undefined
+      const iter = table.entries()
+      if (!iter) return undefined
+      return table
+    } catch {
+      return undefined
+    }
+  }
+
+  /** Safe accessor for the v12 `watchdog` KV table; returns undefined on legacy minimal mock domains. */
+  watchdogTable(): DotTable | undefined {
+    if (!this.domain) return undefined
+    try {
+      const table = this.domain.table('watchdog')
+      if (!table || typeof table.entries !== 'function' || typeof table.get !== 'function' || typeof table.put !== 'function') return undefined
+      const iter = table.entries()
+      if (!iter) return undefined
+      return table
+    } catch {
+      return undefined
+    }
+  }
 
   /** Wait for queued writes; used on shutdown and in tests. */
   async flush(): Promise<void> { await this.tail.catch(() => undefined) }

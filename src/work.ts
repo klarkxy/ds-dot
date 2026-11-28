@@ -18,6 +18,21 @@ export type DeliveryStatus = 'intent' | 'accepted' | 'rejected' | 'unknown'
 export type CreationStatus = 'intent' | 'inflight' | 'confirmed' | 'rejected' | 'unknown'
 export type CheckVerdict = 'pass' | 'fail' | 'unverified' | 'not-applicable'
 export type VerificationVerdict = 'accept' | 'rework' | 'unverified'
+export type RunOriginStrength = 'explicit' | 'inferred'
+export type RunOriginSource = 'user' | 'inbox-github' | 'github-poll' | 'schedule' | 'speculative'
+
+export interface RunOrigin {
+  readonly strength: RunOriginStrength
+  readonly source: RunOriginSource
+  readonly sender?: string
+  readonly policyVersion?: string
+}
+
+export const DEFAULT_RUN_ORIGIN: RunOrigin = { strength: 'explicit', source: 'user' } as const
+
+export function effectiveRunOrigin(run: Pick<RunRecord, 'origin'>): RunOrigin {
+  return run.origin ?? DEFAULT_RUN_ORIGIN
+}
 
 const TERMINAL: ReadonlySet<RunPhase> = new Set(['completed', 'failed', 'stopped'])
 export const MAX_COMPLETED_CHANGES = 200
@@ -26,6 +41,18 @@ export const USAGE_PRUNE_GRACE_MS = 24 * 60 * 60_000
 
 /** Terminal run — usage and wall time can be recorded against it. */
 export function runIsTerminal(run: Pick<RunRecord, 'phase'>): boolean { return TERMINAL.has(run.phase) }
+
+/** Whether a run or its parent change was explicitly stopped/cancelled by the user. */
+export function runStoppedByUser(
+  run: Pick<RunRecord, 'phase' | 'closeIntent' | 'closeReason'>,
+  change?: Pick<ChangeRecord, 'control'>,
+): boolean {
+  if (change?.control === 'cancelled') return true
+  if (run.closeReason === 'watchdog') return false
+  if (run.closeIntent === 'stopped') return true
+  if (run.phase === 'stopped' && run.closeReason !== 'closeout' && run.closeReason !== 'rework') return true
+  return false
+}
 
 /**
  * Tokens and wall time summed over a change's finished runs. Only runs that
@@ -100,6 +127,8 @@ export interface ChangeRecord {
   readonly recipe?: { readonly id: string; readonly revision: number }
   /** A change whose runs wrote into a dot-managed git worktree instead of the checkout. */
   readonly isolation?: TaskIsolation
+  /** Recorded when a linked PR merges/closes so Dorothy knows to run closure acceptance checks. */
+  readonly closureReady?: { readonly ref: string; readonly outcome: 'merged' | 'closed'; readonly at: number }
   readonly createdAt: number
   readonly updatedAt: number
 }
@@ -183,6 +212,8 @@ export interface RunRecord {
   readonly usage?: DotContextUsage
   /** Wall time of the run's session — first to last event, else updatedAt − createdAt. */
   readonly wallMs?: number
+  /** Provenance of who/what initiated the run. Absent on legacy records; use {@link effectiveRunOrigin}. */
+  readonly origin?: RunOrigin
 }
 export interface CheckRecord {
   readonly requirementRef: string
@@ -287,6 +318,11 @@ export const changeSchema = z.object({
     state: z.enum(['active', 'committed', 'merged', 'discarded']),
     commitSha: z.string().min(1).optional(), mergedInto: z.string().min(1).optional(), at: z.number(),
   }).optional(),
+  closureReady: z.object({
+    ref: z.string().min(1),
+    outcome: z.enum(['merged', 'closed']),
+    at: z.number(),
+  }).optional(),
   createdAt: z.number(), updatedAt: z.number(),
 })
 export const inputSchema = z.object({
@@ -297,6 +333,13 @@ export const inputSchema = z.object({
   designNotes: z.string().optional(), supersedes: z.string().optional(),
   source: z.string(), createdAt: z.number(),
 })
+export const runOriginSchema = z.object({
+  strength: z.enum(['explicit', 'inferred']),
+  source: z.enum(['user', 'inbox-github', 'github-poll', 'schedule', 'speculative']),
+  sender: z.string().min(1).optional(),
+  policyVersion: z.string().min(1).optional(),
+})
+
 export const runSchema = z.object({
   id: z.string().min(1), changeId: z.string().min(1), kind: z.enum(['work', 'rework', 'review']),
   inputRevision: z.number().int(), inputRef: z.string().min(1), stepRefs: z.array(z.string()),
@@ -324,6 +367,7 @@ export const runSchema = z.object({
   createdAt: z.number(), updatedAt: z.number(),
   usage: z.object({ input: z.number(), cacheRead: z.number(), cacheWrite: z.number(), output: z.number() }).optional(),
   wallMs: z.number().optional(),
+  origin: runOriginSchema.optional(),
 })
 const subjectSchema = z.object({
   workspaceRoot: z.string().min(1), cwd: z.string().min(1),
@@ -698,6 +742,7 @@ export interface ReserveInput {
   readonly reworkOf?: string
   /** Writable permission to pin at reserve; ignored for read-only runs. */
   readonly taskPermission?: TaskPermission
+  readonly origin?: RunOrigin
 }
 
 export interface WorkPersist {
@@ -1210,6 +1255,7 @@ export class WorkBook {
         access: input.kind === 'review' ? 'read' : scopeWrites(input.writeScope) ? 'write' : 'read',
         deliveries: [delivery], phase: 'reserved', ...(input.reworkOf ? { reworkOf: input.reworkOf } : {}),
         ...input.kind !== 'review' && scopeWrites(input.writeScope) && input.taskPermission ? { taskPermission: input.taskPermission } : {},
+        origin: input.origin ?? DEFAULT_RUN_ORIGIN,
         createdAt: at, updatedAt: at,
       }
       await this.commit('runs', run.id, run)
@@ -2032,7 +2078,14 @@ export class WorkBook {
           ? { ...item, status: 'rejected' as const, evidence: 'superseded-by-verified-stop', updatedAt: at }
           : item)
         : run.deliveries
-      const next: RunRecord = { ...run, deliveries, phase, closureEvidence: evidence, closeReason: phase, updatedAt: at }
+      const next: RunRecord = {
+        ...run,
+        deliveries,
+        phase,
+        closureEvidence: evidence,
+        closeReason: phase === 'stopped' && run.closeReason ? run.closeReason : phase,
+        updatedAt: at,
+      }
       await this.commit('runs', next.id, next)
       this.runs.set(next.id, next)
       this.currentRevision += 1
@@ -2122,6 +2175,27 @@ export class WorkBook {
       this.changes.set(next.id, next)
       this.currentRevision += 1
       return { ok: true }
+    })
+  }
+
+  /** Flag a non-terminal change for closure acceptance check when a linked PR closes or merges (never bypasses verification). */
+  markClosureReady(changeId: string, detail: { readonly ref: string; readonly outcome: 'merged' | 'closed'; readonly at: number }): Promise<{ readonly ok: true; readonly updated: boolean } | WorkRefusal> {
+    return this.exclusive(async () => {
+      const refused = this.recoveryRefusal()
+      if (refused) return refused
+      const current = this.changes.get(changeId)
+      if (!current) return { ok: false, code: 'missing', message: `unknown change ${changeId}` }
+      if (current.control === 'cancelled' || current.closeout !== undefined) {
+        return { ok: true, updated: false }
+      }
+      if (current.closureReady?.ref === detail.ref && current.closureReady.outcome === detail.outcome) {
+        return { ok: true, updated: false }
+      }
+      const next: ChangeRecord = { ...current, closureReady: detail, updatedAt: detail.at }
+      await this.commit('changes', next.id, next)
+      this.changes.set(next.id, next)
+      this.currentRevision += 1
+      return { ok: true, updated: true }
     })
   }
 
@@ -2228,7 +2302,7 @@ export class WorkBook {
    * Close one run without cancelling its change. The stop itself happens outside
    * the lock; this only persists the settling gate.
    */
-  prepareFinish(runId: string, phase: 'completed' | 'failed', at = Date.now()): Promise<{ readonly ok: true; readonly updatedAt: number; readonly sessionId?: string; readonly requestedSessionId: string } | WorkRefusal> {
+  prepareFinish(runId: string, phase: 'completed' | 'failed' | 'stopped', at = Date.now(), closeReason?: string): Promise<{ readonly ok: true; readonly updatedAt: number; readonly sessionId?: string; readonly requestedSessionId: string } | WorkRefusal> {
     return this.exclusive(async () => {
       const refused = this.recoveryRefusal()
       if (refused) return refused
@@ -2237,13 +2311,13 @@ export class WorkBook {
       if (TERMINAL.has(run.phase)) return { ok: false, code: 'closed-run', message: `${runId} is ${run.phase}` }
       if (run.phase === 'settling') {
         if (run.closeIntent) return { ok: true, updatedAt: run.updatedAt, ...(run.sessionId ? { sessionId: run.sessionId } : {}), requestedSessionId: run.requestedSessionId }
-        const next: RunRecord = { ...run, closeIntent: phase, updatedAt: at }
+        const next: RunRecord = { ...run, closeIntent: phase, ...(closeReason ? { closeReason } : {}), updatedAt: at }
         await this.commit('runs', next.id, next)
         this.runs.set(next.id, next)
         this.currentRevision += 1
         return { ok: true, updatedAt: next.updatedAt, ...(next.sessionId ? { sessionId: next.sessionId } : {}), requestedSessionId: next.requestedSessionId }
       }
-      const next: RunRecord = { ...run, phase: 'settling', closeIntent: phase, updatedAt: at }
+      const next: RunRecord = { ...run, phase: 'settling', closeIntent: phase, ...(closeReason ? { closeReason } : {}), updatedAt: at }
       await this.commit('runs', next.id, next)
       this.runs.set(next.id, next)
       this.currentRevision += 1

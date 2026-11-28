@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { DOT_INSTRUCTIONS } from './prompt.ts'
+import { COORDINATOR_DISCIPLINES, DOT_INSTRUCTIONS } from './prompt.ts'
 import { TOOL } from './contracts.ts'
 import { TASK_ACTIONS } from './tools.ts'
 import { formatNotices } from './batcher.ts'
@@ -67,7 +67,8 @@ describe('coordinator prompt contract', () => {
   it('draws the line between her own session and a task run', () => {
     expect(DOT_INSTRUCTIONS).toContain('What you do yourself and what goes to a run:')
     expect(DOT_INSTRUCTIONS).toContain('You never edit files or run commands yourself, even if a tool for it appears; those tools belong to runs.')
-    expect(DOT_INSTRUCTIONS).toContain(`reading a delivered file or two with ${TOOL.workspace} action=read`)
+    expect(DOT_INSTRUCTIONS).toContain(`reading a delivered file or two with read or ${TOOL.workspace} action=read`)
+    expect(DOT_INSTRUCTIONS).toContain('Files attached in chat arrive as saved read-only paths')
     expect(DOT_INSTRUCTIONS).toContain('Choose task presets by fit: "ptc" for scripted batch work, "cordis" for DSH plugin development.')
   })
   it('carries no leftover vocabulary from the removed regimes', () => {
@@ -95,5 +96,17 @@ describe('coordinator prompt contract', () => {
     for (const phrase of ['dispatch work into', 'mention it to the human', 'do not register broad parent folders']) {
       expect(workspace).toContain(phrase)
     }
+  })
+  it('enforces the 4 coordinator communication disciplines within the 1,200-char budget', () => {
+    const added = Object.values(COORDINATOR_DISCIPLINES).join('\n')
+    expect(added.length).toBeLessThanOrEqual(1200)
+    expect(DOT_INSTRUCTIONS).toContain(COORDINATOR_DISCIPLINES.singleQuestion)
+    expect(DOT_INSTRUCTIONS).toContain(COORDINATOR_DISCIPLINES.prNotDelivery)
+    expect(DOT_INSTRUCTIONS).toContain(COORDINATOR_DISCIPLINES.quietProgress)
+    expect(DOT_INSTRUCTIONS).toContain(COORDINATOR_DISCIPLINES.channelOutput)
+    expect(DOT_INSTRUCTIONS).toMatch(/one focused, structured question/i)
+    expect(DOT_INSTRUCTIONS).toMatch(/opening a PR is not delivery/i)
+    expect(DOT_INSTRUCTIONS).toMatch(/intermediate steps, automatic retries, and internal sync silent/i)
+    expect(DOT_INSTRUCTIONS).toMatch(/no fixed word limit/i)
   })
 })

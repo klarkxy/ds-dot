@@ -24,11 +24,12 @@ import { BlockAssembler, createUserMessage, type MessageSource } from '@deepseek
 import type { Session, SessionId, SessionSeq } from '@deepseek-ai/dsh-session'
 import { extractSessionEventText } from '@deepseek-ai/dsh-session-query'
 import { checkChatImages, type ChatImage } from './chat-images.ts'
+import { checkChatFileData, checkChatFileRef, type ChatFileRef } from './chat-files.ts'
 import type { RawEvent } from './chat.ts'
 import type { ParsedNotice } from './chat-format.ts'
 import { contextView, EMPTY_SCAN, foldScan, type ContextScan, type PreTurnContext, type ProjectionValues } from './context.ts'
 import { assembledSurface, type AssembledPromptInput } from './context-surface.ts'
-import type { DotContextUsage, DotContextView, ModelChoice, TrajectoryView } from './contracts.ts'
+import { WATCHDOG_PRESET_ID, type DotContextUsage, type DotContextView, type ModelChoice, type TrajectoryView } from './contracts.ts'
 import type { CatalogModel, TaskModelCatalog } from './task-models.ts'
 import type { CatalogPreset, TaskPresetCatalog } from './task-presets.ts'
 import { REFLECTION_PRESET_ID, REFLECTION_ALLOW } from './reflection.ts'
@@ -120,7 +121,7 @@ export interface DotHost {
    * pass (the reflection run). It keeps the host's default permissions: such a
    * pass needs no file system access at all.
    */
-  createInternal(cwd: string, preset: string): Promise<string>
+  createInternal(cwd: string, preset: string, options?: { readonly allow?: readonly string[]; readonly model?: ModelChoice | null }): Promise<string>
   /** Deliver one prompt to an internal session and wake it. */
   promptInternal(sessionId: string, text: string): Promise<void>
   /** Wait for the internal turn, cancelling and rejecting on timeout or failure. */
@@ -156,8 +157,10 @@ export interface DotHost {
   sessionModel(sessionId: string): { provider: string; model: string } | undefined
   /** The model dot's next segment would run on, as `provider/model@effort`; undefined when none is known. */
   modelKey(): string | undefined
+  /** Save one verbatim uploaded file and return its durable attachment reference. */
+  attachFile(name: string, data: string): Promise<ChatFileRef>
   /** The human's message to dot, optionally carrying notices into the same turn; steers a running turn, starts one when idle. */
-  say(sessionId: string, text: string, carriedNotices?: string, answer?: import('@klarkxy/dsh-deep-view/contracts').ViewAnswer, images?: readonly ChatImage[], notice?: ParsedNotice): Promise<void>
+  say(sessionId: string, text: string, carriedNotices?: string, answer?: import('@klarkxy/dsh-deep-view/contracts').ViewAnswer, images?: readonly ChatImage[], notice?: ParsedNotice, files?: readonly ChatFileRef[]): Promise<void>
   /** Stop dot's current turn; queued messages stay. */
   stop(sessionId: string): Promise<void>
   /**
@@ -173,6 +176,8 @@ export interface DotHost {
   /** dot's session log grouped into turns and steps. */
   dotTrajectory(sessionId: string): TrajectoryView
   isRunning(sessionId: string): boolean
+  /** Live agents in the host registry with their current status and session events, for startup/restart backfill. */
+  listLiveAgents?(): readonly { readonly sessionId: string; readonly status: 'idle' | 'running'; readonly events: readonly RawEvent[] }[]
   /** Stop the agents this host created or resumed for dot. */
   dispose(): Promise<void>
 }
@@ -349,6 +354,16 @@ export function bindHost(get: Get, log?: (message: string) => void, modelOf?: ()
       },
     } as AgentOptions
   }
+  const explicitAgentOptions = (model: ModelChoice | null): AgentOptions => {
+    const defaults = need<DefaultModel>('agentDefaultModel')
+    return {
+      get provider() { return model?.provider ?? defaults.currentSelection().provider },
+      get model() { return model?.model ?? defaults.currentSelection().model },
+      get reasoningEffort() {
+        return model ? model.reasoningEffort : defaults.currentSelection().reasoningEffort
+      },
+    } as AgentOptions
+  }
   // Same composition the controller uses for its own sessions: model selection, then the preset.
   const setupFor = async (preset: string, allow: readonly string[]) => {
     const presets = need<PresetRegistry>('agentPresets')
@@ -483,8 +498,8 @@ export function bindHost(get: Get, log?: (message: string) => void, modelOf?: ()
       const presets: CatalogPreset[] = []
       for (const entry of await registry.list()) {
         if (typeof entry.id !== 'string' || !entry.id) continue
-        // The reflection preset is internal; dot must not pick it as a task preset.
-        if (entry.id === REFLECTION_PRESET_ID) continue
+        // The reflection and watchdog presets are internal; dot must not pick them as task presets.
+        if (entry.id === REFLECTION_PRESET_ID || entry.id === WATCHDOG_PRESET_ID) continue
         presets.push({
           id: entry.id,
           ...typeof entry.name === 'string' && entry.name ? { name: entry.name } : {},
@@ -737,13 +752,17 @@ export function bindHost(get: Get, log?: (message: string) => void, modelOf?: ()
       permit(handle.agent.session, FULL_ACCESS)
       return sessionId
     },
-    async createInternal(cwd, preset) {
+    async createInternal(cwd, preset, options) {
       await mkdir(cwd, { recursive: true })
-      const { id, setup } = await setupFor(preset, REFLECTION_ALLOW)
+      const allow = options?.allow ?? (preset === WATCHDOG_PRESET_ID ? [] : REFLECTION_ALLOW)
+      const { id, setup } = await setupFor(preset, allow)
       const sessionId = `session-${randomUUID()}` as SessionId
-      // A reflection pass needs no file system or shell access, so it keeps the
-      // host's default permissions instead of dot's full access.
-      const handle = await agents().create({ sessionId, agentOptions: agentOptions(), meta: { cwd, origin: 'subagent', agentPreset: id }, setup })
+      // Internal passes need no file system or shell access, so they keep the
+      // host's default permissions instead of dot's full access. When `options.model`
+      // is provided (`null` = host default, `ModelChoice` = explicit override),
+      // never inherit Dorothy's `store.settings.model`.
+      const resolvedOptions = options?.model !== undefined ? explicitAgentOptions(options.model) : agentOptions()
+      const handle = await agents().create({ sessionId, agentOptions: resolvedOptions, meta: { cwd, origin: 'subagent', agentPreset: id }, setup })
       handles.set(sessionId, handle)
       return sessionId
     },
@@ -798,25 +817,37 @@ export function bindHost(get: Get, log?: (message: string) => void, modelOf?: ()
         return false
       }
     },
-    async say(sessionId, text, carriedNotices, answer, images, notice) {
+    async attachFile(name, data) {
+      const attachments = get('attachments') as { saveFile?(input: { data: Uint8Array; name?: string }): Promise<ChatFileRef> } | undefined
+      if (typeof attachments?.saveFile !== 'function') throw new Error('file attachments are unavailable on this host')
+      const canonical = checkChatFileData(data)
+      const binary = Buffer.from(canonical, 'base64')
+      if (binary.toString('base64') !== canonical) throw new Error('file upload is not canonical base64')
+      return checkChatFileRef(await attachments.saveFile({ data: new Uint8Array(binary), ...(name ? { name } : {}) }))
+    },
+    async say(sessionId, text, carriedNotices, answer, images, notice, files) {
       const agent = await liveAgent(sessionId)
       const content = carriedNotices ? `${carriedNotices}\n\n${text}` : text
       // The character count lets the panel and history split the carried notices
       // back out without storing a second copy of their text in the source.
       const source = { kind: 'user', ...answer ? { deepView: { owner: 'dsh-deep-view', version: 1, answer } } : {}, ...carriedNotices || notice ? { dshDot: { ...carriedNotices ? { carriedChars: carriedNotices.length } : {}, ...notice ? { notices: notice } : {} } } : {} } as MessageSource
       const pictures = checkChatImages(images)
-      let blocks: Array<{ type: 'text'; text: string } | { type: 'image'; attachment: unknown }> = []
-      if (content.length > 0 || pictures.length === 0) blocks.push({ type: 'text', text: content })
-      if (pictures.length > 0) {
+      const documents = (files ?? []).map(checkChatFileRef)
+      let blocks: Array<{ type: 'text'; text: string } | { type: 'image'; attachment: unknown } | { type: 'file'; attachment: unknown }> = []
+      if (content.length > 0 || (pictures.length === 0 && documents.length === 0)) blocks.push({ type: 'text', text: content })
+      if (pictures.length > 0 || documents.length > 0) {
         const attachments = get('attachments') as { admitPromptContent?(content: readonly unknown[]): Promise<Array<{ type: string; text?: string; attachment?: unknown }>> } | undefined
-        if (typeof attachments?.admitPromptContent !== 'function') throw new Error('image input is unavailable on this host')
+        if (typeof attachments?.admitPromptContent !== 'function') throw new Error('file or image input is unavailable on this host')
         const admitted = await attachments.admitPromptContent([
           ...blocks,
           ...pictures.map(image => ({ type: 'image' as const, mediaType: image.mediaType, data: image.data, ...(image.name ? { name: image.name } : {}) })),
+          ...documents.map(file => ({ type: 'file' as const, attachment: file })),
         ])
-        blocks = admitted.filter(part => part.type === 'text' || part.type === 'image').map(part => part.type === 'text'
-          ? { type: 'text' as const, text: part.text ?? '' }
-          : { type: 'image' as const, attachment: part.attachment })
+        blocks = admitted.filter(part => part.type === 'text' || part.type === 'image' || part.type === 'file').map(part => {
+          if (part.type === 'text') return { type: 'text' as const, text: part.text ?? '' }
+          if (part.type === 'image') return { type: 'image' as const, attachment: part.attachment }
+          return { type: 'file' as const, attachment: part.attachment }
+        })
       }
       const message = createUserMessage({ content: blocks as [{ type: 'text'; text: string }], source })
       if (agent.status === 'idle') agent.followup(message)
@@ -979,6 +1010,42 @@ export function bindHost(get: Get, log?: (message: string) => void, modelOf?: ()
     isRunning(sessionId) {
       const status = registryAgent(sessionId)?.status
       return status !== undefined && status !== 'idle'
+    },
+    listLiveAgents() {
+      let reg: AgentRegistry | undefined
+      try { reg = get('agents') as AgentRegistry | undefined } catch { return [] }
+      if (!reg || typeof reg.list !== 'function') return []
+      let list: readonly Agent[]
+      try { list = reg.list() } catch { return [] }
+      const out: Array<{ readonly sessionId: string; readonly status: 'idle' | 'running'; readonly events: readonly RawEvent[] }> = []
+      for (const agent of list) {
+        const session = agent?.session as {
+          id?: unknown
+          seq?: unknown
+          snapshotEvents?: () => readonly RawEvent[]
+          eventAt?: (seq: SessionSeq) => RawEvent | undefined
+        } | undefined
+        const sessionId = typeof session?.id === 'string' ? session.id : typeof agent?.id === 'string' ? agent.id : undefined
+        if (!sessionId) continue
+        const status = agent.status === 'idle' ? 'idle' : 'running'
+        let events: readonly RawEvent[] = []
+        try {
+          if (typeof session?.snapshotEvents === 'function') {
+            events = session.snapshotEvents()
+          } else if (session && typeof session.seq === 'number' && typeof session.eventAt === 'function') {
+            const collected: RawEvent[] = []
+            for (let seq = 0; seq < session.seq; seq++) {
+              const event = session.eventAt(seq as SessionSeq)
+              if (event) collected.push(event)
+            }
+            events = collected
+          }
+        } catch {
+          events = []
+        }
+        out.push({ sessionId, status, events })
+      }
+      return out
     },
     async dispose() {
       capabilities?.releaseAll()

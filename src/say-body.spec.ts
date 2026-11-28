@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs'
 import { afterEach, expect, it } from 'vitest'
 import { registerHostRpc, type HostRpcContext } from '@klarkxy/dsh-plugin-kit/host-rpc'
 import { CHAT_SAY_BODY_BYTES, HOST_RPC_DEFAULT_BODY_BYTES, checkChatImages } from './chat-images.ts'
+import { CHAT_RPC_BODY_BYTES, checkChatFileData } from './chat-files.ts'
 
 const servers: Server[] = []
 afterEach(async () => {
@@ -34,6 +35,11 @@ async function host(maxBodyBytes?: number) {
   }, '/dsh-dot', async (endpoint, payload) => {
     seen.push(endpoint)
     try {
+      if (endpoint === 'attach') {
+        const data = checkChatFileData(payload !== null && typeof payload === 'object' ? (payload as { data?: unknown }).data : undefined)
+        seen.push(data.length)
+        return { ok: true, value: true }
+      }
       const images = checkChatImages(payload !== null && typeof payload === 'object' ? (payload as { images?: unknown }).images : undefined)
       seen.push(images.length)
       return { ok: true, value: true }
@@ -69,7 +75,7 @@ const SHOT = png(51_029).toString('base64')
 
 it('registers the raised say body limit', () => {
   const source = readFileSync(new URL('./index.ts', import.meta.url), 'utf8')
-  expect(source).toContain('maxBodyBytes: CHAT_SAY_BODY_BYTES')
+  expect(source).toContain('maxBodyBytes: CHAT_RPC_BODY_BYTES')
 })
 
 it('rejects a 51029-byte png at the kit default and accepts it at the say cap', async () => {
@@ -82,7 +88,7 @@ it('rejects a 51029-byte png at the kit default and accepts it at the say cap', 
   expect((await post(blocked.url, body)).status).toBe(413)
   expect(blocked.seen).toEqual([])
 
-  const allowed = await host(CHAT_SAY_BODY_BYTES)
+  const allowed = await host(CHAT_RPC_BODY_BYTES)
   const accepted = await post(allowed.url, body)
   expect(accepted.status).toBe(200)
   expect(accepted.text).toContain('"ok":true')
@@ -90,13 +96,34 @@ it('rejects a 51029-byte png at the kit default and accepts it at the say cap', 
 })
 
 it('reports an unsupported type instead of 413, and still rejects a body over the cap', async () => {
-  const { url, seen } = await host(CHAT_SAY_BODY_BYTES)
+  const { url, seen } = await host(CHAT_RPC_BODY_BYTES)
   const typed = await post(url, sayBody([{ mediaType: 'image/svg+xml', data: SHOT }]))
   expect(typed.status).toBe(200)
   expect(typed.text).toContain('Only PNG, JPEG, WebP and GIF')
   expect(seen).toEqual(['say'])
 
-  const over = await post(url, Buffer.alloc(CHAT_SAY_BODY_BYTES + 1, 0x20))
+  const over = await post(url, Buffer.alloc(CHAT_RPC_BODY_BYTES + 1, 0x20))
   expect(over.status).toBe(413)
   expect(seen).toEqual(['say'])
+})
+
+it('routes attach uploads and rejects malformed file data as an RPC error', async () => {
+  const { url, seen } = await host(CHAT_RPC_BODY_BYTES)
+  const attachUrl = url.replace(/\/say$/, '/attach')
+  const body = JSON.stringify({
+    type: 'client-request',
+    rpcId: '00000000-0000-4000-8000-000000000000',
+    method: 'attach',
+    payload: { name: 'notes.md', data: Buffer.from('hello').toString('base64'), uiLocale: 'zh-CN' },
+  })
+  const accepted = await post(attachUrl, body)
+  expect(accepted.status).toBe(200)
+  expect(accepted.text).toContain('"ok":true')
+  expect(seen).toEqual(['attach', 8])
+
+  const bad = await post(attachUrl, JSON.stringify({
+    type: 'client-request', rpcId: '00000000-0000-4000-8000-000000000000', method: 'attach', payload: { name: 'bad.bin' },
+  }))
+  expect(bad.status).toBe(200)
+  expect(bad.text).toContain('could not be uploaded')
 })

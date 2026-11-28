@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { approvalNotice, assessApprovalRisk, fenceUntrusted, mcpToolMayWrite } from './approval-risk.ts'
+import { approvalNotice, assessApprovalRisk, credentialLikePath, fenceUntrusted, mcpToolMayWrite } from './approval-risk.ts'
 
 describe('approval risk', () => {
   it('leaves a routine command to the model', () => {
@@ -114,11 +114,52 @@ describe('approval risk', () => {
     // Env templates ship no secrets.
     for (const name of ['.env.example', '.env.sample', '.env.template', '.env.dist']) {
       expect(assessApprovalRisk({ toolName: 'read', arguments: 'cat ' + name }).reasons).not.toContain('credential')
+      expect(credentialLikePath(name)).toBe(false)
+      expect(credentialLikePath(`/workspace/${name}`)).toBe(false)
     }
-    // Env templates ship no secrets.
-    for (const name of ['.env.example', '.env.sample', '.env.template', '.env.dist']) {
-      expect(assessApprovalRisk({ toolName: 'read', arguments: 'cat ' + name }).reasons).not.toContain('credential')
+    // Credential directories (with or without trailing slash), private keys, certs, and rc token files are caught.
+    for (const cred of [
+      '~/.ssh',
+      '/Users/alice/.aws',
+      '/home/u/.gnupg',
+      '~/.kube',
+      '/home/u/.kube/config',
+      '/home/u/.kube/cache/x',
+      'id_rsa',
+      'id_ed25519_work',
+      'id_ecdsa',
+      'id_dsa',
+      '**/id_rsa*',
+      'server.key',
+      '*.key',
+      '*.pem',
+      'cert.pem',
+      'bundle.p12',
+      'client.pfx',
+      '**/*.{pem,key}',
+      '.npmrc',
+      '~/.netrc',
+      '.pypirc',
+      'prod.env',
+      '*.env',
+      '/workspace/app.prod.env',
+      'docker.local.env',
+      '/tmp/my key.key',
+      'cert (1).pem',
+      '私钥.key',
+    ]) {
+      expect(credentialLikePath(cred), cred).toBe(true)
     }
+    expect(credentialLikePath('/tmp/id_ed25519.pub')).toBe(false)
+    expect(credentialLikePath('/home/u/.ssh/id_ed25519.pub')).toBe(true)
+    expect(credentialLikePath('src/hotkey.ts')).toBe(false)
+    expect(credentialLikePath('app.env.example')).toBe(false)
+    expect(credentialLikePath('id_rsa.pub')).toBe(false)
+    expect(credentialLikePath('src/main.ts')).toBe(false)
+    expect(credentialLikePath('/outside/secret.txt')).toBe(false)
+    expect(assessApprovalRisk({ toolName: 'bash', arguments: 'grep -R begin ~/.ssh' }).reasons).toContain('credential')
+    expect(assessApprovalRisk({ toolName: 'bash', arguments: 'ls /Users/alice/.aws' }).reasons).toContain('credential')
+    expect(assessApprovalRisk({ toolName: 'bash', arguments: 'node -e "console.log(process.env.PATH, row.key)"' }).reasons).not.toContain('credential')
     expect(assessApprovalRisk({ toolName: 'bash', arguments: 'cat README.md' }).reasons).not.toContain('credential')
     expect(assessApprovalRisk({ toolName: 'bash', arguments: 'printenv PATH' }).reasons).not.toContain('credential')
   })

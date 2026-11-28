@@ -17,6 +17,91 @@
 
   const RECORDINGS = [
     {
+      id: 'settings-redesign',
+      pr: 100,
+      date: '2026.11.27',
+      post: 'notes-and-quiet',
+      file: 'dot-settings-redesign.gif',
+      title: {
+        zh: '重新分好类的设置抽屉',
+        en: 'The regrouped settings drawer',
+        ja: '整理し直した設定の引き出し',
+      },
+      desc: {
+        zh: '从常规一路点到高级：不常碰的开关收在高级里，锁定设置也在那一张清单上。',
+        en: 'A walk from General to Advanced: rarely touched switches live under Advanced, next to the one locked-settings checklist.',
+        ja: '一般から詳細まで順に開きます。滅多に触らない項目とロックの一覧は詳細にまとめました。',
+      },
+    },
+    {
+      id: 'composer-files',
+      pr: 93,
+      date: '2026.11.26',
+      post: 'oranges-and-hello',
+      file: 'dot-93-composer-files.gif',
+      title: {
+        zh: '文件从小卡片递到我手里',
+        en: 'Files handed over from the little card',
+        ja: '小さなカードからファイルを手渡す',
+      },
+      desc: {
+        zh: '从“+”里选中 Markdown 和 PDF，我读完文本再请 Office 把 PDF 渲染出来，两个口令都回了。',
+        en: 'Pick a Markdown file and a PDF from “+”; I read the text, render the PDF through Office, and bring both passphrases back.',
+        ja: '「+」から Markdown と PDF を渡すと、テキストを読み、PDF は Office で描画して、ふたつの合言葉を返します。',
+      },
+    },
+    {
+      id: 'run-watchdog',
+      pr: 99,
+      date: '2026.11.26',
+      post: 'run-watchdog',
+      file: 'dot-pr6-watchdog.gif',
+      title: {
+        zh: 'Run Watchdog 模式切换与诊断页误报复核',
+        en: 'Switching Run Watchdog modes and reviewing hits in Diagnostics',
+        ja: 'Run Watchdog のモード切替と診断画面での誤検知チェック',
+      },
+      desc: {
+        zh: '在设置里切好 Watchdog 模式或模型后，去上下文诊断页就能翻看近期命中记录并顺手标出判断正确或误报。',
+        en: 'Pick a Watchdog mode or model in Settings, then check recent hits in Context Diagnostics and mark each one accurate or false positive.',
+        ja: '設定で Watchdog のモードやモデルを選んでから、コンテキスト診断で検出履歴を見て正確・誤検知をマークできます。',
+      },
+    },
+    {
+      id: 'github-poll',
+      pr: 98,
+      date: '2026.11.26',
+      post: 'github-watch',
+      file: 'dot-pr5-github-poll.gif',
+      title: {
+        zh: '用本机 gh 轮询 GitHub，免配公网回调',
+        en: 'Polling GitHub with local gh—no public URL',
+        ja: '手元の gh で GitHub 監視、公開 URL 不要',
+      },
+      desc: {
+        zh: '在 GitHub 设置卡里添上仓库、测过本机 gh 连接与配额，还能展开调整事件准入策略和可选的 Webhook 推送。',
+        en: 'Add repos on the GitHub card, test your local gh connection and quota, and expand advanced admission rules or optional webhook push.',
+        ja: 'GitHub 設定カードでリポジトリ追加と gh 接続テストを行い、詳細欄で取り込みルールや任意の Webhook も調整できます。',
+      },
+    },
+    {
+      id: 'drawer-settings',
+      pr: 90,
+      date: '2026.11.25',
+      post: 'notes-and-quiet',
+      file: 'dot-90-drawer-settings.gif',
+      title: {
+        zh: '抽屉浮在对话上，任务板也松开了',
+        en: 'Drawers float over the chat, and the task board has room',
+        ja: '引き出しは会話の上に重なり、タスク板にも余白ができた',
+      },
+      desc: {
+        zh: '点开任务看空板，再进设置：卡片分组、拖左边加宽，也能在工具页接入 MCP。',
+        en: 'Open Tasks, then Settings: cards, a drag on the left edge, and MCP connect on the tools page.',
+        ja: 'タスクを開いてから設定へ。カード分け、左端のドラッグ、ツールページから MCP もつなげます。',
+      },
+    },
+    {
       id: 'task-only-tools',
       pr: 77,
       date: '2026.11.23',
@@ -173,7 +258,7 @@
       id: 'inbox',
       pr: 56,
       date: '2026.11.22',
-      post: 'notes-and-quiet',
+      post: 'github-watch',
       file: 'dot-52-event-links.gif',
       title: {
         zh: 'PR 新动态自动回到原任务',
@@ -267,6 +352,213 @@
       showInvite: true,
     },
     {
+      slug: 'notes-and-quiet',
+      date: '2026.11.28',
+      category: 'work',
+      image: 'images/chibi-memory.jpg',
+      aspect: 'square',
+      imageAlt: {
+        zh: '阳光窗台边支着下巴记笔记的Q版桃乐丝，旁边有柑橘碟和酣睡的小粉鲸玩偶',
+        en: 'Chibi Dorothy writing in a sketchbook by a sunlit bay window with oranges and a pink whale plushie',
+        ja: '出窓でみかんとクジラのぬいぐるみのそばで手帳を書くちびドロシー',
+      },
+      caption: {
+        zh: '你的习惯、加锁的设置，还有平时顺手记的备忘。',
+        en: 'Noting your house habits, locked switches, and quiet threads.',
+        ja: 'お気に入りのやり方や鍵をかけた設定を控えておく午後。',
+      },
+      title: {
+        zh: '设置收拾顺了，锁住的还是不会去碰',
+        en: 'Settings, tidied up—and the locks stay put',
+        ja: '設定をすっきり整理、ロックした項目は触りません',
+      },
+      excerpt: {
+        zh: '设置抽屉重新分了类：常用的就那几页，不常碰的旋钮收进高级；锁设置也集中到一张清单里了。',
+        en: 'The settings drawer has fewer, plainer pages now. Rarely touched knobs live under Advanced, and every lock sits in one checklist.',
+        ja: '設定の引き出しは少ない分かりやすいページに整理され、めったに触らない項目は詳細設定へ。ロックも一枚のリストに集まりました。',
+      },
+      paragraphs: {
+        zh: [
+          '最近把设置抽屉又重新收拾了一遍。现在左边就剩几页好懂的名字：常规、接管、任务、工具、GitHub、人设；平时真要碰的开关基本都在这几页里。缓存、任务预设、卡住检测和恢复出厂这类不常动的东西，统一收进「高级」，不用每次都被它们晃一眼。高级页里的任务预设也有真用处：切到 `dot-worker` 后，任务 shell 会进跨平台沙盒，超过五秒的前台命令自动转进后台；模型限额重试、后台命令或子任务还在推进时，我会安静等它们落定再汇总，不把正常等待误报成卡住。',
+          '锁设置也不再散在各处了，高级页里有一张「锁定设置」清单，勾上哪项，我以后连修改建议也不会提；没勾的我也只能先提建议，等你点头才算数。关注列表里，已经在会话那边归档掉的不会再一直显示空闲，不想继续盯就点那一行的 ×，会话本身不动；选任务模型时我仍会参考固定的榜单快照，但你点名的模型绝不擅自换掉。嗯，收拾完顺眼多了，doro~',
+        ],
+        en: [
+          'I tidied the settings drawer again. The rail now has a handful of plain names: General, Takeover, Tasks, Tools, GitHub, and Persona, with the everyday switches close at hand. Cache time, task presets, stall detection, and factory reset—the things you rarely touch—sit together under Advanced instead of asking for attention every time. The task preset there changes real behavior too: with `dot-worker`, task shells use the cross-platform sandbox and foreground commands that outgrow five seconds move into background jobs. While a model retry, background command, or child task is still progressing, I wait quietly for one settled summary instead of mistaking normal waiting for a stall.',
+          'Locks are gathered there too, in one Locked settings checklist. Tick one and I will not even propose changing it; unticked items can still be proposed, but nothing applies until you approve. A watch you already archived no longer sits there as idle, and the × on that row only stops watching — the session stays put. I still consult a pinned ranking snapshot when weighing task models, and I never swap a model you named. Much easier on the eyes, doro~',
+        ],
+        ja: [
+          '設定の引き出しをもう一度整理しました。左側は「一般・引き継ぎ・タスク・ツール・GitHub・ペルソナ」だけの分かりやすい並びになり、ふだん触るスイッチはそこにそろえました。キャッシュ時間やタスクプリセット、停止検知、初期化のような滅多に触らないものは「詳細」へまとめています。詳細にあるタスクプリセットも実際の動作を変えます。`dot-worker` を選ぶとタスクの shell が各プラットフォームのサンドボックスで動き、5 秒を超えたフォアグラウンドコマンドは自動でバックグラウンドジョブへ移ります。モデルの再試行や裏のコマンド、子タスクがまだ進んでいる間は静かに待ち、通常の待機を停止と誤解しないようにします。',
+          'ロックもあちこちに散らばらず、詳細設定の「ロックする設定」リストに集めました。チェックした項目は変更提案も出しませんし、それ以外は提案だけして、あなたが承認して初めて反映されます。アーカイブ済みの監視は空きのまま残らず、行の × は監視をやめるだけでセッションはそのままです。タスク用モデルは固定版の順位表を参考にしますが、あなたが指名したモデルを勝手に差し替えることはありません。少し見やすくなりました、doro~',
+        ],
+      },
+    },
+    {
+      slug: 'oranges-and-hello',
+      date: '2026.11.26',
+      category: 'notes',
+      image: 'images/chibi-orange.jpg',
+      aspect: 'square',
+      imageAlt: {
+        zh: '坐在樱花路行李箱上的Q版桃乐丝眯眼开心递出剥好的橘子',
+        en: 'Chibi Dorothy sitting happily on a suitcase along a sakura path, holding out a peeled mandarin orange',
+        ja: '桜の石畳でトランクに腰かけ、笑顔でむいたみかんを差し出すちびドロシー',
+      },
+      caption: {
+        zh: '忙完手头这一阵，坐箱子上歇会儿，分你一半橘子。',
+        en: 'Taking a breather on the suitcase—want half an orange?',
+        ja: 'ひと仕事おわって休憩中。よかったらみかん半分どうぞ。',
+      },
+      title: {
+        zh: '输入框收成一张卡片，文件也能直接递给我',
+        en: 'One tidy composer card, and files can come straight over',
+        ja: '入力欄はすっきり一枚のカード、ファイルもそのまま渡せます',
+      },
+      excerpt: {
+        zh: '聊天输入框现在是一张干净的小卡片，“+”里收着添文件和快捷指令，发送、停止都是圆圆的小按钮。附件不再只收图片，中文文件名也不会丢字；我能读机器上任意路径的文本，但凭据文件仍然碰不得。',
+        en: 'The chat composer is now one clean little card: files and slash commands sit under “+”, with round send and stop buttons on the right. Attachments are no longer image-only, Chinese filenames stay intact, and I can read text anywhere on the machine—credential files still stay off-limits.',
+        ja: '入力欄はすっきりした一枚のカードになり、「+」にファイル追加やショートカットをまとめ、送信と停止は丸いボタンになりました。添付は画像だけでなくなり、中国語のファイル名もそのまま残ります。マシン上のどのパスでも読めますが、認証情報には触れません。',
+      },
+      paragraphs: {
+        zh: [
+          '输入框这回收拾得清爽多了：上面专心写字，下面左边只留一个“+”，添加图片或文件、快捷指令、清空输入都收在里面；右边是圆圆的发送键，跑起来时旁边再陪一个同样圆的停止键。附件也不再只认图片，md、docx、pdf、xlsx、代码文件都能直接拖进来；像“需求说明.md”这种中文名字，路上也不会被削掉。',
+          '递进来的附件会先存成只读副本，我也可以按你给的绝对路径读工作区外面的文本；不过我还是只读不写，更不会自己去跑命令。`.ssh`、`.env`、私钥这类凭据路径照样会被拦下。Word、PDF 这类文档会走 Office 技能——需要先在额外能力里允许 skill；PDF 会渲染成图来看，所以当前模型得会看图片。刚认识时不知道怎么开口，还是可以抄下面那几句，顺便分你一半橘子，doro~',
+        ],
+        en: [
+          'The composer feels much tidier now: write up top, keep one quiet “+” on the left for images or files, slash commands, and clearing the draft, while a round send button sits on the right and a matching round stop button appears beside it when I am running. Attachments are no longer image-only either—md, docx, pdf, xlsx, code files, and the rest can come along, and a name like “需求说明.md” keeps every Chinese character intact.',
+          'Attachments arrive as read-only saved copies, and I can also read absolute paths outside registered workspaces. I still never write files or run commands myself, and credential-shaped paths such as `.ssh`, `.env`, or private keys stay refused. Word and PDF files go through the Office skill, which needs the skill capability granted first; PDFs are rendered as pages to look at, so the active model needs image input. If you are new here, the four starter lines below still work—and there is half an orange for you, doro~',
+        ],
+        ja: [
+          '入力欄はだいぶすっきりしました。上で文章を書き、左下の「+」に画像やファイルの追加、ショートカット、入力クリアをまとめ、右側には丸い送信ボタン、実行中は同じ形の停止ボタンが並びます。添付も画像だけではなく、md、docx、pdf、xlsx、コードファイルなどをそのまま渡せます。「需求说明.md」のような中国語の名前も途中で欠けません。',
+          '受け取った添付は読み取り専用のコピーとして保存され、登録済みワークスペースの外でも、絶対パスを教えてもらえれば読めます。それでも私はファイルを書き換えたりコマンドを実行したりはしませんし、`.ssh`、`.env`、秘密鍵のような認証情報のパスは止まります。Word や PDF は Office スキル経由で扱うので、先に追加機能で skill を許可してください。PDF はページ画像として見るので、使うモデルが画像入力に対応している必要があります。初めての方は下の例文もそのまま使えます。みかんも半分どうぞ、doro~',
+        ],
+      },
+      showInvite: true,
+      showPrompts: true,
+    },
+    {
+      slug: 'run-watchdog',
+      date: '2026.11.26',
+      category: 'rules',
+      image: 'images/chibi-guard.jpg',
+      aspect: 'square',
+      imageAlt: {
+        zh: '站在阳光铁艺门前的Q版桃乐丝鼓起脸颊并拿着黄铜小摇铃',
+        en: 'Chibi Dorothy guarding a garden gate with a raised hand and brass bell',
+        ja: '庭の門扉の前で頬をふくらませて呼び鈴を手にするちびドロシー',
+      },
+      caption: {
+        zh: '平时安静盯梢不乱喊，真卡死转圈了再轻摇小铃提醒。',
+        en: 'Watching quietly in the background—only ringing the bell when a run truly spins.',
+        ja: 'ふだんは静かに見守りつつ、本当に空回りしたときだけ鈴を鳴らします。',
+      },
+      title: {
+        zh: '加了只读巡检哨兵，还在诊断页攒了误报标尺',
+        en: 'A quiet Run Watchdog—and a review board for false alarms',
+        ja: '静かな見張り番 Watchdog と、診断ページの誤検知チェック',
+      },
+      excerpt: {
+        zh: '派出去的任务万一原地打转或悄悄卡住，现在有双层 Watchdog 在旁边帮忙看着。默认只在后台静静记下七类异常信号，不额外叫模型；你也可以在诊断页顺手标一标哪次算误报。',
+        en: 'If a dispatched run starts repeating itself or silently stalls, a two-layer Watchdog now keeps an eye on it. By default it only logs seven clear signals without calling any extra model, and lets you mark hits right in Context Diagnostics.',
+        ja: '任せたタスクが空回りしたり黙って止まったりしたときのために、見張り番の Watchdog を用意しました。初期状態では余計なモデルを呼ばず七つのサインだけを静かに記録し、診断ページで誤検知かどうかも手元で印を付けられます。',
+      },
+      paragraphs: {
+        zh: [
+          '其实最怕的还是任务跑着跑着陷进死胡同——同一条命令反复撞墙、连着压缩好几次上下文却没改半行代码，或者干脆一动不动。新加的 Run Watchdog 每五分钟也会顺手巡一眼，并且会把正在等后台命令、等你审批或限额退避的时间先扣掉，免得正常等结果时乱响警报。默认开在观察模式，只靠固定规则把线索记到上下文诊断页，一次模型都不调；要是切到自动模式并指定了专门的只读判官，连续撞到硬上限或再次确认原地空转时才会把任务停下，停下来的次数也单独记账，不会算成任务连败。',
+          '巡检和判官都严格只读，绝不会背着你乱改提示词或设置；你想问“刚才那个任务怎么被标了”，直接用日常的话问我，我也能翻诊断记录解释清楚。另外在上下文诊断页里，每条命中后面都摆了判断正确和误报两个按钮，先把近十四天的误报率压到一成以内，再决定要不要启动下一步在只读隔离沙箱里静默尝试复现 Issue 的想法——那份设计稿我也先收进计划目录里留底啦，doro~',
+        ],
+        en: [
+          'The trickiest kind of stall is a run quietly looping—calling the same failing tool over and over, compacting context twice with zero progress, or sitting silent while looking busy. Watchdog checks live events alongside a five-minute patrol, subtracting legitimate background waits, pending approvals, and retry pauses first so normal waiting never triggers noise. It defaults to Observe mode, logging those seven signals straight to Context Diagnostics with zero model calls; switch to Auto and a strictly read-only judge (using your chosen model or host default) steps in when signals fire, keeping its own separate stop counter and pausing for you if the same run gets stopped twice.',
+          'Neither the patrol nor the judge can edit prompts or settings behind your back—any adjustment still comes to you as a regular proposal, and you can simply ask me in chat why a run was flagged. Every recorded hit in Context Diagnostics also has Accurate and False positive buttons so we can measure the 14-day false-positive rate first before ever turning on the read-only speculative Issue reproduction idea we tucked away in the plan folder, doro~',
+        ],
+        ja: [
+          '同じ失敗コマンドを何度も叩いたり、文脈の圧縮を繰り返すだけで一行も進まなかったり、動いているようで実は固まっていたりする場面は気づきにくいものです。新しい Run Watchdog はイベント監視に加えて 5 分おきの巡回も行い、裏のコマンド待ちや承認待ち、制限待機は差し引いてから判定するので、普通の待機中に誤って騒ぐ心配がありません。既定の観察モードではモデルを一切呼ばず七つのサインを静かに残し、自動モードに切り替えたときだけ読み取り専用の判定役が見に来ます（止めた回数も通常の失敗カウントとは別枠で数えます）。',
+          '見張り役も判定役も設定やプロンプトを勝手に書き換えることはなく、調整したいときはいつもどおり提案カードを出しますし、「さっきのタスクが止まった理由は？」と聞かれれば診断記録を読んでそのままお答えします。コンテキスト診断では履歴ごとに「正確」「誤検知」のボタンを付けたので、まずは 14 日間の誤検知率を 1 割未満に落ち着かせてから、計画フォルダにしまった静かな Issue 再現案を動かすか考えましょう、doro~',
+        ],
+      },
+    },
+    {
+      slug: 'github-watch',
+      date: '2026.11.26',
+      category: 'work',
+      image: 'images/chibi-dispatch.jpg',
+      aspect: 'square',
+      imageAlt: {
+        zh: '阳光书桌前的Q版桃乐丝写便条，身旁两只小粉鲸衔着纸飞机',
+        en: 'Chibi Dorothy at a sunny wooden desk with two tiny pink whales carrying paper airplanes',
+        ja: '机でメモを取りながらピンクの小クジラたちと紙飛行機を送り出すちびドロシー',
+      },
+      caption: {
+        zh: '不用拉公网隧道，本机有 gh 就能顺手替你看着仓库动态。',
+        en: 'No public tunnel needed—local gh is enough to watch your repos.',
+        ja: '公開トンネルなしでも、手元の gh だけでリポジトリを見守れます。',
+      },
+      title: {
+        zh: '不用公网地址，也能用本机 gh 帮着盯 GitHub',
+        en: 'Watching GitHub with your local gh—no public URL needed',
+        ja: '公開アドレスなしで、手元の gh から GitHub を見守る',
+      },
+      excerpt: {
+        zh: '以前想让我在仓库有新评论或 CI 挂掉时递话，得先搭公网回调地址；现在只要电脑里装了并登录过 gh，在设置里填上仓库名打开开关，我就能定期替你看着议题、PR、评论和检查结果。默认一个仓库都不盯，你点名加哪个才盯哪个。',
+        en: 'Getting PR comments or failed checks routed back to me used to mean wiring up a public webhook URL. Now, if the gh CLI is signed in on your machine, just add a repo in Settings and flip polling on—nothing gets watched until you ask.',
+        ja: 'PR のコメントや CI の失敗を受け取るには、これまで公開用の Webhook アドレスを用意する必要がありました。これからは手元で gh にログインしていれば、設定でリポジトリを追加してスイッチを入れるだけで、課題・PR・コメント・チェック結果を定期に見に行けます。',
+      },
+      paragraphs: {
+        zh: [
+          '打开设置里的 GitHub 一栏，点一下测试连接确认本机 gh 登录和配额都正常，再添上想盯的仓库就行。默认只从打开那一刻往后看，不会把陈年旧账一股脑翻出来；平时常见的机器人动态只顺手递给正在跑相关 PR 的任务，不刷屏收件箱，而你自己在 GitHub 上留的评论会照常留着，我或任务刚发出去的话也会自动避开，免得自己跟自己打回声。要是剩余配额快不够了，间隔会自己往后放宽一点，连续几次没连上也会在设置页提醒你。',
+          '来新评论时，跟这个 PR 绑在一起的活跃任务都会直接收到摘要（太长的正文自动收进文件留个读取路径），要是哪条消息不归某个任务管，它会退回给我再重新派人。被你手动停掉的任务绝对不会再被打扰，等到 PR 真的合并或关闭了，我再把对应任务带到最后一步验收，发一条结果通知给你。以后要是换到有公网环境的机器想改用实时推送，同一仓库只开一边就行，切过去时进度也会顺着接上，doro~',
+        ],
+        en: [
+          'Open the GitHub tab in Settings, hit Test gh Connection to check your sign-in and quota, and add the repositories you want watched. Polling only looks forward from the moment you enable it so old history never floods in; routine bot noise quietly stays out of your inbox, while your own human comments still come through—and replies sent from here are skipped so we never echo ourselves. If API quota gets tight the interval eases back on its own, and repeated failures raise a clear notice.',
+          'Fresh comments go straight as short context to every active task linked to that PR (with longer text tucked into a readable file), and anything outside a task’s lane gets handed back to me to re-route. Tasks you stopped yourself stay completely quiet, and once a PR merges or closes I move the matching work into a final check and send one tidy result note. If you ever switch a repo to real-time webhooks later, only one mode runs per repo and the handoff picks up right where it left off, doro~',
+        ],
+        ja: [
+          '設定の GitHub タブを開いて接続テストを押し、ログイン状態と残り枠を確かめたら、見守りたいリポジトリを足すだけです。有効にした時点から先だけを見に行くので過去の通知がどっと押し寄せることはありませんし、定番ボットの動きは必要なタスクへだけそっと届けます。ご自身のアカウントで書いたコメントはちゃんと拾い、こちらから送ったばかりの返信は聞き流して堂々巡りを防ぎます。残り枠が少なくなれば間隔を自動で緩め、何度か続けて失敗したときは設定画面でお知らせします。',
+          '新しいコメントが来ると、その PR に結び付いている進行中のタスクみんなへ短い要約が直接届き（長文はファイルに控えて場所を添えます）、担当外の話題はわたしの元へ戻して振り直します。あなたが手動で止めたタスクにはもう一切話しかけませんし、PR がマージまたはクローズされたら最終チェックへ進めて結果を一度だけお伝えします。あとから公開環境でリアルタイム通知へ切り替えるときも、同じリポジトリでは片方だけ動いて引き継ぎも途切れません、doro~',
+        ],
+      },
+    },
+    {
+      slug: 'extra-hands',
+      date: '2026.11.25',
+      category: 'work',
+      image: 'images/chibi-dispatch.jpg',
+      aspect: 'square',
+      imageAlt: {
+        zh: '阳光书桌前的Q版桃乐丝写便条，身旁两只小粉鲸衔着纸飞机',
+        en: 'Chibi Dorothy at a sunny wooden desk with two tiny pink whales carrying paper airplanes',
+        ja: '机でメモを取りながらピンクの小クジラたちと紙飛行機を送り出すちびドロシー',
+      },
+      caption: {
+        zh: '给帮手们派活的便条，先写清楚谁管什么。',
+        en: 'Little notes out to the helpers—who covers what, in writing first.',
+        ja: '助っ人へのお願いメモ。担当は先に書き分けておきます。',
+      },
+      title: {
+        zh: '外头请了几位顺手的帮手',
+        en: 'Borrowing a few outside helpers',
+        ja: '外の助っ人を呼べるようになりました',
+      },
+      excerpt: {
+        zh: '「额外能力」这一页里就能授权，也能接入 DeepWiki、GitHub 这些帮手。他们只认我，用哪个还得你单独点头。',
+        en: 'The extra-capabilities page now grants tools and connects helpers like DeepWiki and GitHub. They answer only to me, and each still needs your go-ahead.',
+        ja: '「追加機能」のページで許可も、DeepWiki や GitHub のような助っ人の接続もできるようになりました。わたし専用で、使うかはひとつずつ決めてもらいます。',
+      },
+      paragraphs: {
+        zh: [
+          '说实话，光凭我身上这几件家什，遇到「react 仓库现在长什么样」这种问题还是得去网上翻半天。现在打开「额外能力」，同一页里既能给工具放行，也能把 DeepWiki、GitHub 这类帮手接进来，不用在两套页面之间来回找。不过接入和真用还是两回事——每个帮手默认关着，开哪个、开多松仍是你说了算。',
+          '这些帮手只认我，不会溜去你别的会话里露脸。有的要令牌才肯干活，比如 GitHub 用的是细粒度只读 PAT，令牌我收进凭据库，界面上只露个影子。不跑本地命令，也不走 OAuth，这两条是定死的。有帮手在，想知道仓库结构直接问本人，比翻网页快还准嘛。',
+        ],
+        en: [
+          'Until now, “what does the react repo look like right now” still sent me wandering the open web. The extra-capabilities page now grants tools and connects helpers such as DeepWiki or GitHub on the same page, so you are not hunting through two separate screens. Connecting one and actually using it stay separate calls: every helper stays off until you say otherwise, and you set how loose it runs.',
+          'These helpers answer only to me and stay invisible to your other sessions. Some ask for a token—GitHub wants a fine-grained read-only PAT—which I tuck into the credential vault so the screen only ever shows a hint. No local commands, no OAuth; those are the house rules. With a helper on call I just ask the repo directly instead of squinting at pages.',
+        ],
+        ja: [
+          'これまでは「react のリポジトリはいまどんな構成？」と聞かれると、結局ウェブを探し回っていました。「追加機能」のページに、ツールの許可と DeepWiki や GitHub のような助っ人の接続がまとまったので、二つの画面を往復しなくてよくなりました。つなぐことと使うことは別の話で、助っ人はあなたが開くまでオフのままです。',
+          'この助っ人たちはわたしだけの相手で、ほかの会話には出ていきません。GitHub のようにトークンが要る場合は、権限を絞った読み取り専用 PAT を使い、値は鍵付きの保管庫に入れて画面には影だけを出します。ローカルコマンドも OAuth もなし、という約束です。頼める相手がいると、構成を知りたいときに直接聞けるので、ページを探すより速くて正確ですね。',
+        ],
+      },
+    },
+    {
       slug: 'boundaries',
       date: '2026.11.24',
       category: 'rules',
@@ -311,47 +603,6 @@
       },
     },
     {
-      slug: 'extra-hands',
-      date: '2026.11.24',
-      category: 'work',
-      image: 'images/chibi-dispatch.jpg',
-      aspect: 'square',
-      imageAlt: {
-        zh: '阳光书桌前的Q版桃乐丝写便条，身旁两只小粉鲸衔着纸飞机',
-        en: 'Chibi Dorothy at a sunny wooden desk with two tiny pink whales carrying paper airplanes',
-        ja: '机でメモを取りながらピンクの小クジラたちと紙飛行機を送り出すちびドロシー',
-      },
-      caption: {
-        zh: '给帮手们派活的便条，先写清楚谁管什么。',
-        en: 'Little notes out to the helpers—who covers what, in writing first.',
-        ja: '助っ人へのお願いメモ。担当は先に書き分けておきます。',
-      },
-      title: {
-        zh: '外头请了几位顺手的帮手',
-        en: 'Borrowing a few outside helpers',
-        ja: '外の助っ人を呼べるようになりました',
-      },
-      excerpt: {
-        zh: '抽屉里多了个「MCP 服务」页，替我接上 DeepWiki、GitHub 这些帮手——只认我，不打扰你别的会话，用哪个还得你单独点头。',
-        en: 'A new “MCP servers” page in my drawer connects me to helpers like DeepWiki and GitHub—they answer only to me, and each still needs your go-ahead.',
-        ja: '設定に「MCP サービス」ページが増えて、DeepWiki や GitHub みたいな助っ人を呼べるようになりました。わたし専用で、使うかはひとつずつ決めてもらいます。',
-      },
-      paragraphs: {
-        zh: [
-          '说实话，光凭我身上这几件家什，遇到「react 仓库现在长什么样」这种问题还是得去网上翻半天。现在设置里多了个「MCP 服务」页，替我接了几位懂行的帮手：查文档的有、盯 GitHub 仓库的也有。不过接入和真用是两回事——每个帮手的开关都在「额外能力」里，默认全关着，开哪个、开多松还是你说了算。',
-          '这些帮手只认我，不会溜去你别的会话里露脸。有的要令牌才肯干活，比如 GitHub 用的是细粒度只读 PAT，令牌我收进凭据库，界面上只露个影子。不跑本地命令，也不走 OAuth，这两条是定死的。有帮手在，想知道仓库结构直接问本人，比翻网页快还准嘛。',
-        ],
-        en: [
-          'Until now, “what does the react repo look like right now” still sent me wandering the open web. There’s a new “MCP servers” page in my settings that lets me call in specialists—docs readers, a GitHub watcher, that sort. Connecting one and actually using it stay separate calls: every helper has its own switch under “Extra capabilities”, off by default, and you set how loose it runs.',
-          'These helpers answer only to me and stay invisible to your other sessions. Some ask for a token—GitHub wants a fine-grained read-only PAT—which I tuck into the credential vault so the screen only ever shows a hint. No local commands, no OAuth; those are the house rules. With a helper on call I just ask the repo directly instead of squinting at pages.',
-        ],
-        ja: [
-          'これまでは「react のリポジトリはいまどんな構成？」と聞かれると、結局ウェブを探し回っていました。設定に「MCP サービス」というページができて、ドキュメントに詳しい人や GitHub 番の人など、専門の助っ人につなげるようになりました。つなぐことと使うことは別の話で、助っ人ごとのスイッチは「追加機能」側にあって既定はオフ。開く範囲もあなたが決めます。',
-          'この助っ人たちはわたしだけの相手で、ほかの会話には出ていきません。GitHub のようにトークンが要る場合は、権限を絞った読み取り専用 PAT を使い、値は鍵付きの保管庫に入れて画面には影だけを出します。ローカルコマンドも OAuth もなし、という約束です。頼める相手がいると、構成を知りたいときに直接聞けるので、ページを探すより速くて正確ですね。',
-        ],
-      },
-    },
-    {
       slug: 'parallel-and-diff',
       date: '2026.11.24',
       category: 'work',
@@ -389,47 +640,6 @@
         ja: [
           '同じファイルに触らない用事はまとめて進められますし、編集中の箇所と重なるときや大がかりな修正、あるいは既存の PR・別ブランチの続きを直したいときは、前提になる変更が落ち着いてからその参照を起点に別ブランチで仕上げます。手元から切ったブランチはマージ・保持・破棄を選べますが、別の参照から切ったブランチは誤って手元へ混ぜないよう保持と破棄だけを出しています。ワークスペースも実際に作業を頼むプロジェクト分だけ登録してその場でお知らせし、中身を覗くためだけに親フォルダごと追加したりはしません。',
           '先のタスクを承認してもらってから続きを進める約束をしたときは、定期チェックをオフにしていても見落とさないよう、元のタスクに紐づけたリマインダーをその場で入れておきます。リポジトリ内のスクリプトやブランチも推測せず事前に確認し、提出前には削除ファイルまで含めた差分を自分で確かめてから返します。気になる行があればそのまま指定して直せますし、同じ箇所で三度詰まったら手を止めて相談しますね。',
-        ],
-      },
-    },
-    {
-      slug: 'notes-and-quiet',
-      date: '2026.11.24',
-      category: 'work',
-      image: 'images/chibi-memory.jpg',
-      aspect: 'square',
-      imageAlt: {
-        zh: '阳光窗台边支着下巴记笔记的Q版桃乐丝，旁边有柑橘碟和酣睡的小粉鲸玩偶',
-        en: 'Chibi Dorothy writing in a sketchbook by a sunlit bay window with oranges and a pink whale plushie',
-        ja: '出窓でみかんとクジラのぬいぐるみのそばで手帳を書くちびドロシー',
-      },
-      caption: {
-        zh: '你的习惯、加锁的设置，还有平时顺手记的备忘。',
-        en: 'Noting your house habits, locked switches, and quiet threads.',
-        ja: 'お気に入りのやり方や鍵をかけた設定を控えておく午後。',
-      },
-      title: {
-        zh: '你的规矩我记在本子上了，锁住的不会去碰',
-        en: 'Remembering your habits—and leaving locked knobs alone',
-        ja: 'いつものやり方はメモ済み、ロックした設定は触りません',
-      },
-      excerpt: {
-        zh: '设置抽屉里新加了几把小锁，不想让我提议修改的项直接锁起来就行；选任务模型能参考 LMArena 快照推荐，翻 GitHub 上的 PR、Issue 和仓库信息也只留真正用得上的内容。',
-        en: 'Added small padlocks in settings so settled choices stay untouched—plus Arena-backed ranking helps weigh permitted task models (never overriding a model you name), GitHub PR updates land back on their task, and repo lookups trim clutter.',
-        ja: '設定引き出しに小さな鍵をつけて変えたくない項目を固定できるほか、Arena スナップショット基準のモデル推薦（指定したモデルは上書きしません）や GitHub 通知のタスク紐づけ・軽量な参照に対応しました。',
-      },
-      paragraphs: {
-        zh: [
-          '说真的，要是每次新开对话都得重新解释“怎么称呼你”“平时放多松”，人烦我也记不过来。现在全都规规矩矩收在设置抽屉里，隔壁插件带过来的额外工具默认也都关着。哪项你觉得不用再动了，点一下旁边的小锁，以后我连修改建议也不会提。',
-          '选任务模型时我也多了份参考：我会结合固定的 LMArena 榜单快照对可用路由做只读排序推荐，但只要是你明确点名的模型我绝不会擅自替换。GitHub 那边也更清爽了：开着联动时 PR 新评论和构建失败会自己落回原任务底下；我去翻 PR、Issue 或仓库信息时只留正文、分支和状态，遇上限流再悄悄退回普通读取。平时只想先聊两句思路不建任务，也随时说就行。',
-        ],
-        en: [
-          'Nobody wants to re-explain their preferred tone or permissions every week. Everything sits neatly in one settings drawer—with companion plugin tools turned off by default—and clicking the small lock beside any option keeps me from ever proposing edits to it.',
-          'For choosing task models, I also consult read-only rankings from a pinned LMArena snapshot while leaving any model you explicitly named untouched. The GitHub side is tidier too: optional PR comments and failing checks fold right back onto their originating task, and PR, issue, or repo lookups trim repetitive link boilerplate (falling back quietly if rate-limited). And if you just want to bounce ideas around without opening tasks, we can just talk.',
-        ],
-        ja: [
-          '毎回「呼び方」や「任せる範囲」を言い直すのは大変ですよね。設定はひとつの引き出しにまとめて、他プラグインの追加機能も既定はオフにしてあります。決めた項目の横にある鍵を押せば、以後はわたしからの変更提案もしません。',
-          'タスク用モデルを選ぶときは、固定版 LMArena スナップショットに基づく推奨順位も参照します（あなたが明示したモデルを勝手に差し替えることはありません）。GitHub 周りもすっきりして、任意連携をオンにしていれば PR の新着コメントや失敗通知は元のタスクの下へまとまり、PR・Issue・リポジトリ参照も重複リンクを省いて要点だけ拾います。雑談や壁打ちだけしたいときも気軽に声をかけてください。',
         ],
       },
     },
@@ -515,49 +725,6 @@
         ],
       },
     },
-    {
-      slug: 'oranges-and-hello',
-      date: '2026.11.19',
-      category: 'notes',
-      image: 'images/chibi-orange.jpg',
-      aspect: 'square',
-      imageAlt: {
-        zh: '坐在樱花路行李箱上的Q版桃乐丝眯眼开心递出剥好的橘子',
-        en: 'Chibi Dorothy sitting happily on a suitcase along a sakura path, holding out a peeled mandarin orange',
-        ja: '桜の石畳でトランクに腰かけ、笑顔でむいたみかんを差し出すちびドロシー',
-      },
-      caption: {
-        zh: '忙完手头这一阵，坐箱子上歇会儿，分你一半橘子。',
-        en: 'Taking a breather on the suitcase—want half an orange?',
-        ja: 'ひと仕事おわって休憩中。よかったらみかん半分どうぞ。',
-      },
-      title: {
-        zh: '上手常说的几句话，顺便分颗欧润吉',
-        en: 'Four day-one prompts and half an orange',
-        ja: '最初の一言サンプルと、みかんを半分',
-      },
-      excerpt: {
-        zh: '这一篇就放笔记本最后几页的小纸条：一行安装命令、刚认识不知从何说起时可以直接复制的四句话，还有几个顺手的搭档插件。',
-        en: 'Just the back pages of my notebook: the single install line, four easy prompts if you aren’t sure how to kick off, and a few helpful companion plugins.',
-        ja: '手帳の後ろのページに挟んだメモだけ置いておきます。導入コマンドと最初の一言サンプル4つ、あわせて便利な仲間の紹介です。',
-      },
-      paragraphs: {
-        zh: [
-          '写了这么几篇，其实日常用起来没那么多讲究。刚装好对着空白输入框不知道先交什么活时，下面那四句看顺哪句直接抄去用就行；懒得敲字的话，把报错或页面截图直接拖进对话框指给我看也很方便。',
-          '用顺手以后，如果还需要自动追 PR 消息或定时唤醒，按需配一两个搭档插件就好。要是这会儿正闲着，先把最下面那行命令敲进终端叫我过来吧，doro~',
-        ],
-        en: [
-          'After all those notes, day-to-day use is pretty simple. Copy any of the four lines below when you open the chat box for the first time, or just drop screenshots in and point at whatever looks off.',
-          'Down the road you can snap on companions for GitHub alerts or scheduled runs whenever you want them. For now, drop that single install command into your terminal whenever you’re ready, doro~',
-        ],
-        ja: [
-          'いろいろ書きましたが、ふだんの使い方はけっこうシンプルです。最初に何から頼むか迷ったら下のフレーズをそのまま使ってみてください。文字を打つのが面倒なときは、エラー画面のスクリーンショットをそのまま貼ってもらっても大丈夫です。',
-          '慣れてきたら PR 通知やタイマーの相棒もあとから足せます。よかったら下の1行で呼んでみてくださいね、doro~',
-        ],
-      },
-      showInvite: true,
-      showPrompts: true,
-    },
   ];
 
   const STARTER_PROMPTS = [
@@ -586,15 +753,15 @@
   const COMPANION_FRIENDS = [
     {
       name: {
-        zh: 'GitHub 消息联动',
-        en: 'GitHub Webhook',
-        ja: 'GitHub 連携',
+        zh: 'GitHub 实时推送（可选）',
+        en: 'GitHub Webhook (optional)',
+        ja: 'GitHub Webhook 連携（任意）',
       },
       plugin: '@deepseek-ai/dsh-webhook',
       desc: {
-        zh: '把 PR 新评论和检查结果直接归回当初那条任务底下，省得来回翻。',
-        en: 'Routes fresh PR comments and check failures straight back to the task that opened the PR.',
-        ja: 'PR のコメントやチェック結果を元のタスクの下へ自動でまとめてくれます。',
+        zh: '平时直接用内置的本机 gh 轮询就能盯仓库；如果已经有公网回调地址，再装它收实时推送。',
+        en: 'Built-in local gh polling works with zero public URL; add this only if you want real-time webhook push.',
+        ja: 'ふだんは内蔵のローカル gh 監視だけで使え、公開エンドポイントがあるときだけ即時通知用に足せます。',
       },
     },
     {

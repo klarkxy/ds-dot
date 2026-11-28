@@ -1,4 +1,5 @@
-import { readFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
@@ -34,6 +35,7 @@ const ids = (prefix: 'a' | 'c') => { let n = 0; return () => `${prefix}${++n}` }
 /** Load the preset row against a recording host: every definition must compile. */
 function load(settings: { current: DotSettings; segment?: Seg; notes?: string; cognition?: string } = { current: DEFAULT_SETTINGS }) {
   const registered: Array<Record<string, unknown>> = []
+  const listeners: Record<string, Array<(exec: { name: string; arguments?: unknown }, next: () => Promise<{ kind: string }>) => Promise<{ kind: string; reason?: string }>>> = {}
   const sections: Array<{ name: string; order: number; text: (context?: { agent?: { session?: { id?: string } } }) => string }> = []
   const store = new DotStore(undefined)
   const view = async () => ({
@@ -60,7 +62,7 @@ function load(settings: { current: DotSettings; segment?: Seg; notes?: string; c
       restrict: () => () => {},
       register(definition: Record<string, unknown>) { registered.push(definition); return () => {} },
     },
-    on: () => () => {},
+    on(event: string, listener: never) { (listeners[event] ??= []).push(listener); return () => {} },
     systemPrompt: { section(section: (typeof sections)[number]) { sections.push(section); return () => {} } },
     dot: {
       store: { get settings() { return settings.current }, get segment() { return settings.segment } },
@@ -92,7 +94,7 @@ function load(settings: { current: DotSettings; segment?: Seg; notes?: string; c
     effect(fn: () => unknown) { fn() },
   }
   apply(ctx as never)
-  return Object.assign(registered, { sections })
+  return Object.assign(registered, { sections, listeners })
 }
 
 /** The private preset gets the same schema guard as the public dot tools. */
@@ -117,11 +119,84 @@ describe('dot tools', () => {
   it('keeps the private reflection preset to history reads and one restricted submission', () => {
     expect(loadReflection().map(tool => tool.name).sort()).toEqual([TOOL.searchHistory, TOOL.readHistory, REFLECTION_SUBMIT_TOOL, REFLECTION_PROPOSE_TOOL].sort())
   })
-  it('compiles every dot tool definition through defineTool and keeps 19 dot_* plus show_view', () => {
+  it('compiles every dot tool definition through defineTool and keeps 20 dot_* plus show_view', () => {
     const names = load().map(tool => tool.name)
     expect([...names].sort()).toEqual([...Object.values(TOOL), 'show_view'].sort())
-    expect(names).toHaveLength(20)
-    expect(new Set(names).size).toBe(20)
+    expect(names).toHaveLength(21)
+    expect(new Set(names).size).toBe(21)
+  })
+
+  it('denies credential-like paths, symlinks, bare credential dirs, and malformed arguments on inherited exact-path file tools', async () => {
+    const gate = load().listeners['tools/pre-execute']?.[0]
+    expect(gate).toBeTypeOf('function')
+    const next = async () => ({ kind: 'next' })
+    // Directory search is not in Dorothy's locked set at all; an ungranted name falls through the capability layer and denies.
+    for (const name of ['glob', 'grep']) {
+      await expect(gate!({ name, arguments: { path: '.', pattern: '**/.env' } }, next)).resolves.toMatchObject({ kind: 'deny', reason: expect.any(String) })
+    }
+    await expect(gate!({ name: 'read', arguments: { file_path: '/home/u/.ssh/id_rsa' } }, next)).resolves.toMatchObject({ kind: 'deny', reason: expect.stringMatching(/credential/) })
+    await expect(gate!({ name: 'read_image', arguments: { file_path: '/home/u/.ssh/id_rsa' } }, next)).resolves.toMatchObject({ kind: 'deny' })
+    await expect(gate!({ name: 'office_render', arguments: { input: '/tmp/deck.pptx', output_dir: '/Users/alice/.aws' } }, next)).resolves.toMatchObject({ kind: 'deny' })
+    await expect(gate!({ name: 'office_convert', arguments: JSON.stringify({ input: '/tmp/.aws/credentials' }) }, next)).resolves.toMatchObject({ kind: 'deny' })
+    // Fail-closed when arguments are malformed, missing, array-shaped, or smuggle non-string path fields.
+    await expect(gate!({ name: 'read', arguments: '{malformed json' }, next)).resolves.toMatchObject({ kind: 'deny' })
+    await expect(gate!({ name: 'read', arguments: undefined }, next)).resolves.toMatchObject({ kind: 'deny' })
+    await expect(gate!({ name: 'read', arguments: ['not-an-object'] }, next)).resolves.toMatchObject({ kind: 'deny' })
+    await expect(gate!({ name: 'read', arguments: { file_path: { nested: '/home/u/.ssh/id_rsa' } } }, next)).resolves.toMatchObject({ kind: 'deny' })
+
+    // Workspace symlinks/junctions escaping to .ssh or .env are resolved and denied.
+    const sandbox = mkdtempSync(join(tmpdir(), 'dsh-dot-guard-'))
+    try {
+      const ws = join(sandbox, 'workspace')
+      const sshDir = join(sandbox, '.ssh')
+      mkdirSync(ws)
+      mkdirSync(sshDir)
+      writeFileSync(join(sshDir, 'id_rsa'), 'PRIVATE')
+      writeFileSync(join(ws, '.env.example'), 'KEY=')
+      symlinkSync(sshDir, join(ws, 'ssh-link'), 'junction')
+      await expect(gate!({ name: 'read', arguments: { file_path: join(ws, 'ssh-link', 'id_rsa') } }, next)).resolves.toMatchObject({ kind: 'deny' })
+      let fileLinksSupported = false
+      try {
+        symlinkSync(join(sshDir, 'id_rsa'), join(ws, 'leak.txt'))
+        symlinkSync('/nonexistent/home/.ssh/id_rsa', join(ws, 'dangling-leak.txt'))
+        fileLinksSupported = true
+      } catch { /* Windows without symlink privilege */ }
+      if (fileLinksSupported) {
+        await expect(gate!({ name: 'read', arguments: { file_path: join(ws, 'leak.txt') } }, next)).resolves.toMatchObject({ kind: 'deny' })
+        await expect(gate!({ name: 'read', arguments: { file_path: join(ws, 'dangling-leak.txt') } }, next)).resolves.toMatchObject({ kind: 'deny' })
+      }
+      await expect(gate!({ name: 'read', arguments: { file_path: join(ws, '.env.example') } }, next)).resolves.toEqual({ kind: 'next' })
+    } finally {
+      rmSync(sandbox, { recursive: true, force: true })
+    }
+    await expect(gate!({ name: 'read', arguments: { file_path: '/tmp/notes.md' } }, next)).resolves.toEqual({ kind: 'next' })
+    await expect(gate!({ name: 'read_image', arguments: { file_path: '/tmp/photo.png' } }, next)).resolves.toEqual({ kind: 'next' })
+    await expect(gate!({ name: 'office_render', arguments: { input: '/tmp/deck.pptx', output_dir: '/tmp/rendered' } }, next)).resolves.toEqual({ kind: 'next' })
+    await expect(gate!({ name: 'office_convert', arguments: { input: '/tmp/report.docx', output: '/tmp/report.txt' } }, next)).resolves.toEqual({ kind: 'next' })
+  })
+
+  it('matches widened credential names and symlinked exact paths without blocking safe files', async () => {
+    const gate = load().listeners['tools/pre-execute']?.[0]
+    const next = async () => ({ kind: 'next' })
+    for (const filePath of ['/workspace/app.prod.env', 'docker.local.env', '/tmp/my key.key', 'cert (1).pem', '私钥.key']) {
+      await expect(gate!({ name: 'read', arguments: { file_path: filePath } }, next)).resolves.toMatchObject({ kind: 'deny' })
+    }
+
+    const sandbox = mkdtempSync(join(tmpdir(), 'dsh-dot-exact-link-'))
+    try {
+      const sshDir = join(sandbox, '.ssh')
+      const otherRepo = join(sandbox, 'other-repo')
+      mkdirSync(sshDir)
+      mkdirSync(otherRepo)
+      symlinkSync(sshDir, join(otherRepo, 'ssh-link'), 'junction')
+      await expect(gate!({ name: 'read', arguments: { file_path: join(otherRepo, 'ssh-link', 'id_rsa') } }, next)).resolves.toMatchObject({ kind: 'deny' })
+    } finally {
+      rmSync(sandbox, { recursive: true, force: true })
+    }
+
+    for (const filePath of ['.env.example', 'app.env.example', 'id_rsa.pub']) {
+      await expect(gate!({ name: 'read', arguments: { file_path: filePath } }, next)).resolves.toEqual({ kind: 'next' })
+    }
   })
 
   it('marks only the reading tools read-only', () => {
@@ -131,7 +206,7 @@ describe('dot tools', () => {
     // dot_workspace is NOT read-only: create mutates state.
     // dot_agreement / dot_cognition are NOT read-only: they mutate knowledge.
     // show_view is read-only so the no-approval dot policy runs it directly.
-    expect(readOnly).toEqual([TOOL.listModels, TOOL.overview, TOOL.read, TOOL.readHistory, TOOL.searchHistory, 'show_view'].sort())
+    expect(readOnly).toEqual([TOOL.listModels, TOOL.overview, TOOL.read, TOOL.readHistory, TOOL.searchHistory, TOOL.watchdog, 'show_view'].sort())
   })
 
   it('registers the merged tools, not the old split ones', () => {
@@ -358,7 +433,7 @@ describe('dot tools', () => {
     expect(tool.parameters.properties.action.enum).toEqual(['create', 'revise', 'dispatch', 'check', 'read', 'list', 'supplement', 'finish', 'step', 'closeout', 'pause', 'resume', 'cancel', 'decide', 'reject', 'link', 'unlink'])
     expect(tool.parameters.properties.action.enum).toEqual([...TASK_ACTIONS])
     for (const action of ['reserve', 'baseline', 'subject', 'evidence', 'verify', 'hold', 'accept', 'move', 'note', 'delete', 'board', 'update', 'start']) await expect(tool.execute({ action })).rejects.toThrow()
-    for (const field of ['subject', 'subject_ref', 'evidence_ref', 'to', 'status', 'summary', 'session_id']) expect(tool.parameters.properties).not.toHaveProperty(field)
+    for (const field of ['subject', 'subject_ref', 'evidence_ref', 'to', 'status', 'summary', 'session_id', 'origin']) expect(tool.parameters.properties).not.toHaveProperty(field)
     expect(loadReflection().map(row => row.name)).not.toContain(TOOL.task)
   })
 
@@ -460,8 +535,23 @@ describe('settingsSnapshotBlock', () => {
   it('shows the fresh workspace-write default and reflection switch', () => {
     const snapshot = settingsSnapshotBlock(DEFAULT_SETTINGS)
     expect(snapshot).toContain('taskPermission: workspace-write')
+    expect(snapshot).toContain('defaultTaskPreset: standard')
     expect(snapshot).toContain('reflection: true')
     expect(settingsSnapshotBlock({ ...DEFAULT_SETTINGS, taskPermission: 'default', reflection: false })).toContain('taskPermission: default')
+    expect(settingsSnapshotBlock({ ...DEFAULT_SETTINGS, defaultTaskPreset: 'dot-worker' })).toContain('defaultTaskPreset: dot-worker')
     expect(settingsSnapshotBlock({ ...DEFAULT_SETTINGS, reflection: false })).toContain('reflection: false')
+  })
+
+  it('documents defaultTaskPreset, watchdogMode, watchdogModel and dot-worker in dot_settings and dot_task tool schemas', () => {
+    const tools = load()
+    const settingsTool = tools.find(row => row.name === TOOL.settings) as { description: string }
+    const taskTool = tools.find(row => row.name === TOOL.task) as { parameters: { properties: { preset: { description: string } } } }
+    const watchdogTool = tools.find(row => row.name === TOOL.watchdog) as { description: string; hostEffect?: string }
+    expect(settingsTool.description).toContain('defaultTaskPreset')
+    expect(settingsTool.description).toContain('watchdogMode')
+    expect(settingsTool.description).toContain('watchdogModel')
+    expect(taskTool.parameters.properties.preset.description).toContain('dot-worker')
+    expect(watchdogTool.hostEffect).toBe('read-only')
+    expect(watchdogTool.description).toContain('Read-only')
   })
 })

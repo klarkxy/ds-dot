@@ -21,7 +21,6 @@ import {
 } from './contracts.ts'
 import { DESKTOP_NOTIFY_KEY } from './attention-client.ts'
 import type { UpdateResult, UpdateStatus } from './auto-update.ts'
-import { cacheTtlModelOf } from './keepalive.ts'
 import { parseWatchdogModelChoice } from './settings.ts'
 import { factoryResetScope, formatWhen, t, type CopyLocale, type TextKey } from './ui-copy.ts'
 
@@ -1397,9 +1396,8 @@ export function SettingsPanel({ locale, api, settings, section = 'all', proposal
                     value={settings.cacheTtl?.[cacheKey] ?? keepalive.minutes}
                     onCommit={minutes => {
                       const next = { ...settings.cacheTtl }
-                      const aliased = Object.keys(next).some(key => key !== cacheKey && cacheTtlModelOf(key) === keepalive.model)
-                      if (minutes !== keepalive.defaultMinutes || aliased) next[cacheKey] = minutes
-                      else delete next[cacheKey]
+                      if (minutes === keepalive.defaultMinutes) delete next[cacheKey]
+                      else next[cacheKey] = minutes
                       save({ cacheTtl: next })
                     }}
                   />}

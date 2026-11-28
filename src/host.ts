@@ -495,6 +495,7 @@ export function bindHost(get: Get, log?: (message: string) => void, modelOf?: ()
     listWorkspaces: () => registry().list().map(toRow),
     createWorkspace: async (path, title) => toRow(await registry().create(path, title)),
     async listSessions(signal, options) {
+      signal.throwIfAborted()
       const cached = sessionListCache
       if (options?.fresh !== true && cached && Date.now() - cached.at < 3_000) return raceSignal(Promise.resolve(cached.rows), signal)
       const start = (generation: number) => (async () => {
@@ -521,6 +522,7 @@ export function bindHost(get: Get, log?: (message: string) => void, modelOf?: ()
         promise = promise.finally(() => {
           if (sessionListFlight?.promise === promise) sessionListFlight = undefined
         })
+        void promise.catch(() => {})
         sessionListFlight = { generation, promise }
       }
       return raceSignal(sessionListFlight.promise, signal)
@@ -784,8 +786,9 @@ export function bindHost(get: Get, log?: (message: string) => void, modelOf?: ()
     async watchSession(sessionId) {
       try {
         const state = await controller().state({ sessionId }, AbortSignal.timeout(10_000))
-        const queue = state.queue === null ? 'unknown' as const : state.queue.length === 0 ? 'empty' as const : 'pending' as const
-        return { queue, seq: state.cursor, running: state.running, idle: !state.running }
+        const coldIdle = state.active === false && state.running === false && state.queue === null
+        const queue = state.queue === null ? (coldIdle ? 'empty' as const : 'unknown' as const) : state.queue.length === 0 ? 'empty' as const : 'pending' as const
+        return { queue, seq: state.cursor, running: state.running, idle: coldIdle || !state.running }
       } catch { return { queue: 'unknown' as const } }
     },
     async jobsSettled(sessionId) {

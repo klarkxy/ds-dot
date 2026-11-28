@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { bindRunSession, cancelWork, countPromptReceipts, countRelayInserts, finishWork, launchReservedRun, observeRun, reconcileReserved, reconcileRun, supplementRun, type RunSessionHost } from './execution.ts'
+import { bindHost } from './host.ts'
 import { WorkBook, onDiskPath, type WorkPersist } from './work.ts'
 
 function openBook(): WorkBook {
@@ -958,11 +959,23 @@ describe('zombie run recovery', () => {
     const book = openBook()
     const held = await reserved(book)
     const { host, calls } = hostOf({ async findSession() { return undefined } })
+    expect(await reconcileRun(book, host, held.run.id, 3, { startup: true })).toMatchObject({ action: 'absent' })
+    expect(book.run(held.run.id)?.phase).toBe('reserved')
     const result = await reconcileRun(book, host, held.run.id, 2 + 24 * 60 * 60_000)
     expect(result).toMatchObject({ ok: true, action: 'absent', created: false, prompted: false })
     expect(book.run(held.run.id)?.phase).toBe('reserved')
     expect(book.run(held.run.id)?.launchAttemptedAt).toBeUndefined()
     expect(calls).toEqual([])
+  })
+
+  it('closes a young failed launch attempt during startup recovery', async () => {
+    const book = openBook()
+    const held = await reserved(book)
+    expect(await book.claimSession(held.run.id, undefined, 2)).toMatchObject({ ok: true, owned: true })
+    book.releaseLiveSessionClaim(held.run.id)
+    const { host } = hostOf({ async findSession() { return undefined } })
+    expect(await reconcileRun(book, host, held.run.id, 2 + 60_000, { startup: true })).toMatchObject({ action: 'closed' })
+    expect(book.run(held.run.id)).toMatchObject({ phase: 'stopped', closeReason: 'unsent', launchAttemptedAt: 2 })
   })
 
   it('closes a persisted session-claim launch attempt once its evidence is older than ten minutes', async () => {
@@ -998,7 +1011,7 @@ describe('zombie run recovery', () => {
     })
     await launchReservedRun(book, launchHost, held.run.id, 'go')
     expect(book.run(held.run.id)?.creation).toBe('rejected')
-    const prepared = await book.prepareFinish(held.run.id, 'stopped', 3)
+    const prepared = await book.prepareFinish(held.run.id, 'completed', 3)
     expect(prepared.ok).toBe(true)
 
     let stops = 0
@@ -1098,7 +1111,7 @@ describe('zombie run recovery', () => {
     const started = new Promise<void>(done => { jobsStarted = done })
     const gate = new Promise<boolean>(done => { releaseJobs = done })
     const moved = hostOf({
-      async findSession(id) { return id === 'session-other' ? { cwd: 'H:\repo' } : undefined },
+      async findSession(id) { return id === 'session-other' ? { cwd: 'H:\\repo' } : undefined },
       async watch() {
         watches++
         return watches === 1
@@ -1114,11 +1127,38 @@ describe('zombie run recovery', () => {
     expect(book.run(held.run.id)?.phase).toBe('settling')
 
     const quiet = hostOf({
-      async findSession(id) { return id === 'session-other' ? { cwd: 'H:\repo' } : undefined },
+      async findSession(id) { return id === 'session-other' ? { cwd: 'H:\\repo' } : undefined },
       async watch() { return { seq: 7, running: false, queue: 'empty' as const } },
       async jobsSettled() { return true as const },
     }).host
     expect(await reconcileRun(book, quiet, held.run.id, 5)).toMatchObject({ action: 'closed' })
+    expect(book.run(held.run.id)).toMatchObject({ phase: 'stopped', closeReason: 'identity-rejected' })
+  })
+
+  it('releases a rejected run whose present session is cold, unmounted, settled, and stable', async () => {
+    const book = openBook()
+    const held = await reserved(book)
+    const { host: launchHost } = hostOf({
+      async findSession() { return undefined },
+      async createSession(input) { return { sessionId: 'session-other', cwd: input.cwd } },
+    })
+    await launchReservedRun(book, launchHost, held.run.id, 'go')
+    await book.prepareFinish(held.run.id, 'stopped', 3)
+
+    const dotHost = bindHost(name => {
+      if (name === 'sessionPersistence') return {
+        stat: async (id: string) => id === 'session-other'
+          ? { header: { cwd: 'H:\\repo', agentPreset: 'standard' } }
+          : undefined,
+      }
+      if (name === 'sessionController') return {
+        state: async () => ({ active: false, running: false, queue: null, cursor: 11 }),
+      }
+      if (name === 'sessionQuery') return { readSession: async () => ({ events: [] }) }
+      if (name === 'jobs') return { list: () => [] }
+      return undefined
+    })
+    expect(await reconcileRun(book, bindRunSession(dotHost), held.run.id, 4)).toMatchObject({ action: 'closed' })
     expect(book.run(held.run.id)).toMatchObject({ phase: 'stopped', closeReason: 'identity-rejected' })
   })
 

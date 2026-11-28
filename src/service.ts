@@ -272,7 +272,7 @@ export class DotService {
         return dot !== undefined && !this.options.host.isRunning(dot)
       },
       recipeHints: () => this.reflectionRecipeHints(),
-      sessions: () => this.historySessions('all', options.store.lastReflectedAt).slice(0, 50),
+      sessions: () => this.reflectionSessions(options.store.lastReflectedAt),
       ...options.log ? { log: options.log } : {},
     })
     this.pending.onChange(() => {
@@ -1792,7 +1792,7 @@ export class DotService {
     for (const run of this.store.work.occupying()) {
       if (this.closing) return
       try {
-        const res = await reconcileRun(this.store.work, this.runHost(), run.id, this.now())
+        const res = await reconcileRun(this.store.work, this.runHost(), run.id, this.now(), { startup: true })
         if (res.ok) this.watchdog.noteReconcileSuccess(run)
         else this.watchdog.noteReconcileFailure(run, res.message)
       } catch (error) {
@@ -1813,6 +1813,7 @@ export class DotService {
     // events around, so one capture pass backfills their cost up front.
     await this.captureRunUsage()
   }
+
   /** The human removed a reminder in the board. */
   removeSchedule(id: string): Promise<boolean> { return this.track(() => this.reminders.remove(id)) }
 
@@ -2939,12 +2940,31 @@ export class DotService {
     }
     if (scope !== 'own') {
       for (const task of this.store.list()) {
-        if (since !== undefined && task.updatedAt < since && task.status !== 'running') continue
+        if (since !== undefined && task.updatedAt < since && task.status === 'idle') continue
         rest.push({ activity: task.updatedAt, row: { sessionId: task.sessionId, what: `Task "${task.title}"${task.status === 'archived' ? ' (archived)' : ''}`, own: false } })
       }
     }
     rest.sort((a, b) => b.activity - a.activity)
     return [...out, ...rest.map(item => item.row)]
+  }
+
+  /** Recent activity for reflection: stricter than search, so archived old tasks do not count as recent. */
+  private reflectionSessions(since?: number): { sessionId: string; what: string; own: boolean }[] {
+    const out: { sessionId: string; what: string; own: boolean }[] = []
+    const current = this.store.dotSessionId
+    if (current) out.push({ sessionId: current, what: 'Your conversation, current session', own: true })
+    const rest: { readonly activity: number; readonly row: { sessionId: string; what: string; own: boolean } }[] = []
+    for (const past of this.store.pastSegments) {
+      if (since !== undefined && past.endedAt < since) continue
+      const span = past.startedAt > 0 ? ` (${stamp(past.startedAt)} to ${stamp(past.endedAt)})` : ` (until ${stamp(past.endedAt)})`
+      rest.push({ activity: past.endedAt, row: { sessionId: past.sessionId, what: `Your conversation, earlier session${span}`, own: true } })
+    }
+    for (const task of this.store.list()) {
+      if (since !== undefined && task.updatedAt < since && task.status !== 'running') continue
+      rest.push({ activity: task.updatedAt, row: { sessionId: task.sessionId, what: `Task "${task.title}"${task.status === 'archived' ? ' (archived)' : ''}`, own: false } })
+    }
+    rest.sort((a, b) => b.activity - a.activity)
+    return [...out, ...rest.map(item => item.row)].slice(0, 50)
   }
 
   private describeSession(sessionId: string): { sessionId: string; what: string; own: boolean } {

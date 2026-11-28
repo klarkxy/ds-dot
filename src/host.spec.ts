@@ -326,6 +326,15 @@ describe('cold inactive session', () => {
     expect(released.reads()).toBe(1)
   })
 
+  it('reads the exact cold inactive triple as an empty watch queue', async () => {
+    const cold = coldHost()
+    expect(await cold.host.watchSession!('session-1')).toEqual({ queue: 'empty', seq: 1, running: false, idle: true })
+    const missingActive = coldHost({ state: () => ({ running: false, queue: null, cursor: 2 }) })
+    expect(await missingActive.host.watchSession!('session-1')).toEqual({ queue: 'unknown', seq: 2, running: false, idle: true })
+    const attached = coldHost({ state: () => ({ active: true, running: false, queue: null, cursor: 3 }) })
+    expect(await attached.host.watchSession!('session-1')).toEqual({ queue: 'unknown', seq: 3, running: false, idle: true })
+  })
+
   it('does not accept a missing or true active flag', async () => {
     const missing = coldHost({ state: () => ({ running: false, queue: null }) })
     expect(await missing.host.stopActivity!('session-1')).toMatchObject({ queueCleared: false, idle: false, jobsSettled: true })
@@ -706,6 +715,20 @@ describe('single-session lookup and session list caching', () => {
     await host.listSessions(AbortSignal.timeout(1_000))
     expect(lists).toBe(1)
     await expect(host.listSessions(AbortSignal.abort())).rejects.toMatchObject({ name: 'AbortError' })
+  })
+
+  it('rejects a pre-aborted cold-cache list without calling the controller', async () => {
+    let lists = 0
+    const host = bindHost(name => {
+      if (name === 'sessionController') return {
+        list: async () => { lists++; return { items: [] } },
+      }
+      if (name === 'workspaceRegistry') return { archivedSessionIds: [] }
+      return undefined
+    })
+    await expect(host.listSessions(AbortSignal.abort())).rejects.toMatchObject({ name: 'AbortError' })
+    await expect(host.listSessions(AbortSignal.abort(), { fresh: true })).rejects.toMatchObject({ name: 'AbortError' })
+    expect(lists).toBe(0)
   })
 
   it('reads archived ids after the corpus list and refreshes the cache after createSession', async () => {

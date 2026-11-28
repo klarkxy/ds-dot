@@ -30,13 +30,19 @@ describe('cacheTtlMinutes', () => {
     expect(cacheTtlMinutes(settings, 'p', 'big')).toBe(5)
   })
 
-  it('prefers the exact provider key, then a provider-renamed key with the same model suffix', () => {
+  it('uses only the exact provider key', () => {
     const renamed = { ...DEFAULT_SETTINGS, cacheTtl: { 'magpie/klarkxy/gemini-4-hydrogen': 0 } }
-    expect(cacheTtlMinutes(renamed, 'magpie-gemini', 'klarkxy/gemini-4-hydrogen')).toBe(0)
+    expect(cacheTtlMinutes(renamed, 'magpie-gemini', 'klarkxy/gemini-4-hydrogen')).toBe(5)
     const both = { ...DEFAULT_SETTINGS, cacheTtl: { 'magpie/klarkxy/gemini-4-hydrogen': 0, 'magpie-gemini/klarkxy/gemini-4-hydrogen': 12 } }
     expect(cacheTtlMinutes(both, 'magpie-gemini', 'klarkxy/gemini-4-hydrogen')).toBe(12)
     const nested = { ...DEFAULT_SETTINGS, cacheTtl: { 'openrouter/anthropic/claude-sonnet-4': 12 } }
     expect(cacheTtlMinutes(nested, 'openrouter', 'claude-sonnet-4')).toBe(5)
+  })
+
+  it('does not let one provider override another provider for the same model', () => {
+    const settings = { ...DEFAULT_SETTINGS, cacheTtl: { 'provider-a/model-x': 0 } }
+    expect(cacheTtlMinutes(settings, 'provider-a', 'model-x')).toBe(0)
+    expect(cacheTtlMinutes(settings, 'provider-b', 'model-x')).toBe(5)
   })
 })
 

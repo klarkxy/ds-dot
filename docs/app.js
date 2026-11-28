@@ -353,7 +353,7 @@
     },
     {
       slug: 'notes-and-quiet',
-      date: '2026.11.27',
+      date: '2026.11.28',
       category: 'work',
       image: 'images/chibi-memory.jpg',
       aspect: 'square',
@@ -379,15 +379,15 @@
       },
       paragraphs: {
         zh: [
-          '最近把设置抽屉又重新收拾了一遍。现在左边就剩几页好懂的名字：常规、接管、任务、工具、GitHub、人设；平时真要碰的开关基本都在这几页里。缓存、任务预设、卡住检测和恢复出厂这类不常动的东西，统一收进「高级」，不用每次都被它们晃一眼。',
+          '最近把设置抽屉又重新收拾了一遍。现在左边就剩几页好懂的名字：常规、接管、任务、工具、GitHub、人设；平时真要碰的开关基本都在这几页里。缓存、任务预设、卡住检测和恢复出厂这类不常动的东西，统一收进「高级」，不用每次都被它们晃一眼。高级页里的任务预设也有真用处：切到 `dot-worker` 后，任务 shell 会进跨平台沙盒，超过五秒的前台命令自动转进后台；模型限额重试、后台命令或子任务还在推进时，我会安静等它们落定再汇总，不把正常等待误报成卡住。',
           '锁设置也不再散在各处了，高级页里有一张「锁定设置」清单，勾上哪项，我以后连修改建议也不会提；没勾的我也只能先提建议，等你点头才算数。关注列表里，已经在会话那边归档掉的不会再一直显示空闲，不想继续盯就点那一行的 ×，会话本身不动；选任务模型时我仍会参考固定的榜单快照，但你点名的模型绝不擅自换掉。嗯，收拾完顺眼多了，doro~',
         ],
         en: [
-          'I tidied the settings drawer again. The rail now has a handful of plain names: General, Takeover, Tasks, Tools, GitHub, and Persona, with the everyday switches close at hand. Cache time, task presets, stall detection, and factory reset—the things you rarely touch—sit together under Advanced instead of asking for attention every time.',
+          'I tidied the settings drawer again. The rail now has a handful of plain names: General, Takeover, Tasks, Tools, GitHub, and Persona, with the everyday switches close at hand. Cache time, task presets, stall detection, and factory reset—the things you rarely touch—sit together under Advanced instead of asking for attention every time. The task preset there changes real behavior too: with `dot-worker`, task shells use the cross-platform sandbox and foreground commands that outgrow five seconds move into background jobs. While a model retry, background command, or child task is still progressing, I wait quietly for one settled summary instead of mistaking normal waiting for a stall.',
           'Locks are gathered there too, in one Locked settings checklist. Tick one and I will not even propose changing it; unticked items can still be proposed, but nothing applies until you approve. A watch you already archived no longer sits there as idle, and the × on that row only stops watching — the session stays put. I still consult a pinned ranking snapshot when weighing task models, and I never swap a model you named. Much easier on the eyes, doro~',
         ],
         ja: [
-          '設定の引き出しをもう一度整理しました。左側は「一般・引き継ぎ・タスク・ツール・GitHub・ペルソナ」だけの分かりやすい並びになり、ふだん触るスイッチはそこにそろえました。キャッシュ時間やタスクプリセット、停止検知、初期化のような滅多に触らないものは「詳細」へまとめています。',
+          '設定の引き出しをもう一度整理しました。左側は「一般・引き継ぎ・タスク・ツール・GitHub・ペルソナ」だけの分かりやすい並びになり、ふだん触るスイッチはそこにそろえました。キャッシュ時間やタスクプリセット、停止検知、初期化のような滅多に触らないものは「詳細」へまとめています。詳細にあるタスクプリセットも実際の動作を変えます。`dot-worker` を選ぶとタスクの shell が各プラットフォームのサンドボックスで動き、5 秒を超えたフォアグラウンドコマンドは自動でバックグラウンドジョブへ移ります。モデルの再試行や裏のコマンド、子タスクがまだ進んでいる間は静かに待ち、通常の待機を停止と誤解しないようにします。',
           'ロックもあちこちに散らばらず、詳細設定の「ロックする設定」リストに集めました。チェックした項目は変更提案も出しませんし、それ以外は提案だけして、あなたが承認して初めて反映されます。アーカイブ済みの監視は空きのまま残らず、行の × は監視をやめるだけでセッションはそのままです。タスク用モデルは固定版の順位表を参考にしますが、あなたが指名したモデルを勝手に差し替えることはありません。少し見やすくなりました、doro~',
         ],
       },

@@ -57,6 +57,9 @@ export class NoticeBatcher {
   some(predicate: (notice: Notice) => boolean): boolean {
     return this.items.some(entry => predicate(entry.notice))
   }
+  wakes(predicate: (notice: Notice) => boolean): boolean {
+    return this.items.some(entry => entry.wake && predicate(entry.notice))
+  }
   /** Called on idle; the entry timer also batches arrivals for 1.5 seconds. */
   wake(): void { if (this.items.length) this.schedule(0) }
   private schedule(delay: number): void {

@@ -1,7 +1,7 @@
 // Adapted from deepseek-ai/dsh-superagent-prototype@8c32a9d (MIT).
 import { createHash } from 'node:crypto'
 import { z } from 'zod'
-import type { InboxEventInput } from '../contracts.ts'
+import { GITHUB_AUTHOR_ASSOCIATIONS, type GithubAuthorAssociation, type InboxEventInput } from '../contracts.ts'
 import { normalizeGithubRepo } from '../settings.ts'
 
 export const GITHUB_TITLE_MAX = 200
@@ -16,6 +16,7 @@ export const CommentSchema = z.object({
   id: z.number().int().positive(),
   body: z.string().nullable().optional(),
   user: UserSchema,
+  author_association: z.string().nullable().optional(),
   html_url: z.string().nullable().optional(),
   issue_url: z.string().nullable().optional(),
   pull_request_url: z.string().nullable().optional(),
@@ -49,6 +50,12 @@ export type GhIssue = z.infer<typeof IssueSchema>
 export function sameName(left: string | undefined, right: string | undefined): boolean {
   if (!left || !right) return false
   return left.trim().toLowerCase() === right.trim().toLowerCase()
+}
+
+
+export function githubAuthorAssociation(value: string | null | undefined): GithubAuthorAssociation | undefined {
+  const upper = value?.trim().toUpperCase()
+  return GITHUB_AUTHOR_ASSOCIATIONS.includes(upper as GithubAuthorAssociation) ? upper as GithubAuthorAssociation : undefined
 }
 
 export function flattenText(text: string): string {
@@ -175,6 +182,7 @@ export function buildIssueInboxInput(params: {
     subject: `${repo}#${params.issue.number}`,
     title: clipText(params.issue.title || `issue ${params.action}`, GITHUB_TITLE_MAX),
     actor: params.issue.user.login,
+    ...(githubAuthorAssociation(params.issue.author_association) ? { actorRole: githubAuthorAssociation(params.issue.author_association) } : {}),
     ...(params.issue.html_url ? { url: params.issue.html_url } : {}),
     summary: clipText(body, GITHUB_SUMMARY_MAX),
     receivedAt: at,
@@ -220,6 +228,7 @@ export function buildCommentInboxInput(params: {
       GITHUB_TITLE_MAX,
     ),
     actor: params.comment.user.login,
+    ...(githubAuthorAssociation(params.comment.author_association) ? { actorRole: githubAuthorAssociation(params.comment.author_association) } : {}),
     ...(params.comment.html_url ? { url: params.comment.html_url } : {}),
     summary: clipText(summaryRaw, GITHUB_SUMMARY_MAX),
     receivedAt: at,

@@ -77,6 +77,24 @@ describe('normalizeGithub', () => {
     }))!.headRepo).toBeUndefined()
   })
 
+
+  it('carries trusted author association only for the actor it describes', () => {
+    const opened = pullRequestPayload()
+    ;(opened.pull_request as Record<string, unknown>).author_association = 'member'
+    expect(normalizeGithub(delivery('pull_request', opened))!.actorRole).toBe('MEMBER')
+
+    const closed = pullRequestPayload({ action: 'closed', sender: { login: 'closer' } })
+    ;(closed.pull_request as Record<string, unknown>).author_association = 'OWNER'
+    expect(normalizeGithub(delivery('pull_request', closed))!.actorRole).toBeUndefined()
+
+    const comment = {
+      action: 'created', repository: REPO, sender: { login: 'alice' },
+      issue: { number: 12, title: 'Add feature', pull_request: {} },
+      comment: { user: { login: 'alice' }, body: 'looks good', html_url: 'https://gh/c1', author_association: 'contributor' },
+    }
+    expect(normalizeGithub(delivery('issue_comment', comment))!.actorRole).toBe('CONTRIBUTOR')
+  })
+
   it('drops pull_request synchronize', () => {
     expect(normalizeGithub(delivery('pull_request', pullRequestPayload({ action: 'synchronize' })))).toBeUndefined()
   })

@@ -4,7 +4,7 @@ import type { InboxEventInput, InboxRecord, TaskLink } from '../contracts.ts'
 import { applyLinkEvent, linkMatchesSubject, makeTaskLink, threadClosed as updateClosedLinks } from '../links.ts'
 import { normalizeGithubRepo } from '../settings.ts'
 import { changeIsTerminal, type ChangeRecord, type RunRecord } from '../work.ts'
-import { GITHUB_SUMMARY_MAX, GITHUB_TITLE_MAX, UserSchema, clipText, deterministicKey, sameName, timestampMs } from './triggers.ts'
+import { GITHUB_SUMMARY_MAX, GITHUB_TITLE_MAX, UserSchema, clipText, deterministicKey, githubAuthorAssociation, sameName, timestampMs } from './triggers.ts'
 
 export const PullSchema = z.object({
   number: z.number().int().positive(),
@@ -12,6 +12,7 @@ export const PullSchema = z.object({
   state: z.string(),
   html_url: z.string(),
   user: UserSchema,
+  author_association: z.string().nullable().optional(),
   body: z.string().nullable().optional(),
   created_at: z.string().nullable().optional(),
   updated_at: z.string().nullable().optional(),
@@ -56,6 +57,7 @@ export function buildPullInboxInput(params: {
     subject: `${repo}#${params.pr.number}`,
     title: clipText(params.pr.title || `pull request ${eventAction}`, GITHUB_TITLE_MAX),
     actor: params.pr.user.login,
+    ...(githubAuthorAssociation(params.pr.author_association) ? { actorRole: githubAuthorAssociation(params.pr.author_association) } : {}),
     url: params.pr.html_url,
     summary: clipText(parts.join(' · '), GITHUB_SUMMARY_MAX),
     receivedAt: at,

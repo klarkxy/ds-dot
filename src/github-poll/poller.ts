@@ -717,7 +717,7 @@ export class GithubPoller {
           rawBody: pr.body ?? '',
           senderType: pr.user.type,
         })
-        if (outcome.inboxResult === 'stored' || outcome.inboxResult === 'merged' || outcome.directRunIds.length > 0 || outcome.closureNotifiedChanges.length > 0) {
+        if (outcome.inboxResult === 'stored' || outcome.inboxResult === 'merged' || outcome.closureNotifiedChanges.length > 0) {
           emitted += 1
         }
       } else {
@@ -739,7 +739,7 @@ export class GithubPoller {
           rawBody: item.body ?? '',
           senderType: item.user.type,
         })
-        if (outcome.inboxResult === 'stored' || outcome.inboxResult === 'merged' || outcome.directRunIds.length > 0) {
+        if (outcome.inboxResult === 'stored' || outcome.inboxResult === 'merged') {
           emitted += 1
         }
       }
@@ -875,7 +875,7 @@ export class GithubPoller {
         ...(directContext ? { directContext } : {}),
         senderType: comment.user.type,
       })
-      if (outcome.inboxResult === 'stored' || outcome.inboxResult === 'merged' || outcome.directRunIds.length > 0) {
+      if (outcome.inboxResult === 'stored' || outcome.inboxResult === 'merged') {
         emitted += 1
       }
     }
@@ -991,7 +991,7 @@ export class GithubPoller {
           rawBody: review.body ?? '',
           senderType: review.user.type,
         })
-        if (outcome.inboxResult === 'stored' || outcome.inboxResult === 'merged' || outcome.directRunIds.length > 0) {
+        if (outcome.inboxResult === 'stored' || outcome.inboxResult === 'merged') {
           emitted += 1
         }
       }

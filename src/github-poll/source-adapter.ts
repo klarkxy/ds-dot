@@ -20,7 +20,6 @@ export interface SourceAdapterDeps {
   readonly emitResultNotice: (change: ChangeRecord, detail: { readonly ref: string; readonly outcome: 'merged' | 'closed'; readonly title?: string; readonly url?: string; readonly at: number }) => void
   readonly inboxList: () => readonly InboxRecord[]
   readonly submitInbox: (event: InboxEventInput) => Promise<InboxSubmitResult>
-  readonly supplementWorkRun: (runId: string, text: string, senderId: string, expected: { readonly inputRef: string; readonly inputRevision: number }) => Promise<{ readonly ok: boolean }>
   readonly dotSessionId: () => string | undefined
   readonly trace?: (event: string, message: string, data?: Record<string, string | number | boolean>) => void
   readonly now: () => number
@@ -37,7 +36,6 @@ export interface AdmitEventContext {
 export interface AdmitEventOutcome {
   readonly action: 'inbox' | 'context-only' | 'ignore' | 'deduped-handoff'
   readonly inboxResult?: InboxSubmitResult
-  readonly directRunIds: readonly string[]
   readonly skippedStoppedRunIds: readonly string[]
   readonly closureNotifiedChanges: readonly string[]
 }
@@ -47,8 +45,8 @@ const PR_SUBJECT_RE = /^([^#\s]+)#(\d+)$/
 
 /**
  * Bridges polled GitHub events into ds-dot's Fast-Path admission matrix,
- * many-to-many active-run `supplementWorkRun` delivery, stopped/finished guards,
- * `submitInbox` audit/intake, Webhook<->Poll handoff dedupe, and PR closure.
+ * stopped/finished guards, quiet/inbox submission, Webhook<->Poll handoff
+ * dedupe, and PR closure. External events never enter a running task directly.
  */
 export class GithubPollSourceAdapter {
   constructor(private readonly deps: SourceAdapterDeps) {}
@@ -84,11 +82,11 @@ export class GithubPollSourceAdapter {
 
     // Single-repo mutual exclusion runtime guard: webhook repos are never admitted via poll.
     if (settings.webhookRepos.includes(repo)) {
-      return { action: 'ignore', directRunIds: [], skippedStoppedRunIds: [], closureNotifiedChanges: [] }
+      return { action: 'ignore', skippedStoppedRunIds: [], closureNotifiedChanges: [] }
     }
 
     if (this.alreadyDeliveredDuringHandoff(repo, event)) {
-      return { action: 'deduped-handoff', directRunIds: [], skippedStoppedRunIds: [], closureNotifiedChanges: [] }
+      return { action: 'deduped-handoff', skippedStoppedRunIds: [], closureNotifiedChanges: [] }
     }
 
     const eventType = toGithubEventType(event.type) ?? 'issue'
@@ -102,7 +100,7 @@ export class GithubPollSourceAdapter {
     })
 
     if (admission === 'ignore') {
-      return { action: 'ignore', directRunIds: [], skippedStoppedRunIds: [], closureNotifiedChanges: [] }
+      return { action: 'ignore', skippedStoppedRunIds: [], closureNotifiedChanges: [] }
     }
 
     const matchedLinks = this.deps.links().filter(link => linkMatchesSubject(link, event))
@@ -132,39 +130,14 @@ export class GithubPollSourceAdapter {
       }
     }
 
-    // Bots and CI never wake finished runs; user-stopped runs receive ZERO subsequent messages.
-    const isBotOrCi = senderClass !== 'human' || eventType === 'ci'
-    const allowDirectToActive = (eventType === 'comment' || eventType === 'review') && (senderClass === 'human' || admission === 'context-only')
-    const directTargets = allowDirectToActive ? activeTargets : []
-
+    // User-stopped runs receive ZERO subsequent messages; finished/active classification
+    // still decides whether a thread follow-up is worth inboxing at all.
     const inlineSpill = formatInlineAndSpill({
       event,
       ...(ctx.rawBody !== undefined ? { rawBody: ctx.rawBody } : {}),
       ...(ctx.directContext !== undefined ? { directContext: ctx.directContext } : {}),
-      linkedChangeIds,
-      linkedRunIds: directTargets.map(item => item.run.id),
       homeDir: this.deps.homeDir,
     })
-
-    const directRunIds: string[] = []
-    const senderId = this.deps.dotSessionId() ?? 'github-poll'
-    for (const { run } of directTargets) {
-      if (runStoppedByUser(run)) continue
-      const res = await this.deps.supplementWorkRun(run.id, inlineSpill.supplementText, senderId, {
-        inputRef: run.inputRef,
-        inputRevision: run.inputRevision,
-      }).catch(() => ({ ok: false }))
-      if (res.ok) {
-        directRunIds.push(run.id)
-      }
-    }
-    if (directRunIds.length > 0) {
-      this.deps.trace?.('github-poll.direct-delivered', `Supplemented ${directRunIds.length} active run(s).`, {
-        repo,
-        subject: event.subject,
-        count: directRunIds.length,
-      })
-    }
 
     // PR merged/closed settlement (from poll)
     let closureNotifiedChanges: readonly string[] = []
@@ -196,23 +169,17 @@ export class GithubPollSourceAdapter {
     // If all linked runs on this thread were user-stopped and there are no active or finished-non-stopped runs,
     // do not wake or deliver follow-ups for the stopped runs.
     const threadOnlyHasUserStoppedRuns = linkedChangeIds.length > 0 && hasUserStoppedRun && activeTargets.length === 0 && !hasNonStoppedFinishedRun
-    const shouldSubmitInbox = admission === 'inbox' && (!threadOnlyHasUserStoppedRuns || Boolean(closureMatch))
+    const contextOnlySubmits = admission === 'context-only' && (activeTargets.length > 0 || Boolean(closureMatch))
+    const shouldSubmitInbox = (admission === 'inbox' || contextOnlySubmits) && (!threadOnlyHasUserStoppedRuns || Boolean(closureMatch))
 
     if (shouldSubmitInbox) {
-      const auditTag = directRunIds.length > 0 ? ` [direct-delivered to ${directRunIds.join(', ')}]` : ''
       const readTag = inlineSpill.spillRelPath ? ` [read: ${inlineSpill.spillRelPath}]` : ''
-      const tags = `${auditTag}${readTag}`
+      const tags = readTag
       let summary: string
       if (!tags) {
         summary = inlineSpill.inboxSummary
       } else if (tags.length >= GITHUB_SUMMARY_MAX) {
-        if (readTag && readTag.length < GITHUB_SUMMARY_MAX && auditTag) {
-          const auditBudget = GITHUB_SUMMARY_MAX - readTag.length
-          const clippedAudit = auditBudget >= 2 ? clipText(auditTag.trimStart(), auditBudget) : ''
-          summary = clippedAudit ? `${clippedAudit}${readTag}` : readTag.trimStart()
-        } else {
-          summary = clipText(tags, GITHUB_SUMMARY_MAX)
-        }
+        summary = clipText(tags, GITHUB_SUMMARY_MAX)
       } else {
         const bodyBudget = GITHUB_SUMMARY_MAX - tags.length
         const bodyPart = bodyBudget >= 2 ? clipText(inlineSpill.inboxSummary, bodyBudget) : ''
@@ -221,19 +188,15 @@ export class GithubPollSourceAdapter {
       inboxResult = await this.deps.submitInbox({
         ...event,
         summary,
+        ...(admission === 'context-only' ? { quiet: true as const } : {}),
         originSource: 'github-poll',
       })
       await this.deps.cursorStore.recordDelivery(repo, 'poll', event.receivedAt || now, event.deliveryId, now)
-    } else if (directRunIds.length > 0) {
-      await this.deps.cursorStore.recordDelivery(repo, 'poll', event.receivedAt || now, event.deliveryId, now)
-    } else if (isBotOrCi && !hasNonStoppedFinishedRun && linkedChangeIds.length > 0 && admission === 'context-only') {
-      // Context-only bot/CI event on finished runs has no active run to receive it -> dropped quietly.
     }
 
     return {
       action: admission,
       ...(inboxResult ? { inboxResult } : {}),
-      directRunIds,
       skippedStoppedRunIds,
       closureNotifiedChanges,
     }

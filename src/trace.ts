@@ -33,7 +33,6 @@ export const DOT_TRACE = {
   githubPollFailed: 'github-poll.failed',
   githubPollRateLimited: 'github-poll.rate-limited',
   githubPollAdmitted: 'github-poll.admitted',
-  githubPollDirectDelivered: 'github-poll.direct-delivered',
   githubPollBounced: 'github-poll.bounced',
   githubPollClosure: 'github-poll.closure',
   watchdogHit: 'watchdog.hit',

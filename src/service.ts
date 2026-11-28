@@ -28,6 +28,7 @@ import {
 } from './work-actions.ts'
 import { absoluteScopePath, canonicalPath, onDiskPath, changeIsTerminal, DEFAULT_RUN_ORIGIN, MAX_COMPLETED_CHANGES, InputShapeError, inputContractError, isSameOrChildPath, occupantsConflict, runCostTotals, runIsTerminal, scopeWithinRoot, scopeWrites, type ChangeRecord, type Constraint, type Occupant, type Requirement, type RootHint, type RunOrigin, type RunRecord, type TaskIsolation, type WorkRefusal, type WriteScope } from './work.ts'
 import type { ShownView, ViewAnswer } from '@klarkxy/dsh-deep-view/contracts'
+import { GITHUB_AUTHOR_ASSOCIATIONS } from './contracts.ts'
 import { DotCards, cardAnswerText, type DotCardRecord } from './card-state.ts'
 import { checkChatImages, type ChatImage } from './chat-images.ts'
 import { CHAT_FILE_RECEIPT_LIMIT, CHAT_FILE_RECEIPT_TTL_MS, checkChatFileData, checkChatFileIds, checkChatFileRef, fileName, type ChatFileReceipt, type ChatFileRef } from './chat-files.ts'
@@ -181,6 +182,17 @@ export type RelayOutcome =
   | { readonly decided: 'pending'; readonly id: string; readonly settled: Promise<PendingAnswer | undefined>; readonly withdraw: () => void }
   | { readonly decided: 'deny' }
   | { readonly decided: 'skip' }
+
+const GITHUB_ACTOR_RE = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})(?:\[bot\])?$/
+
+function githubSenderLine(record: InboxRecord): string {
+  const actor = record.actor ?? ''
+  if (!GITHUB_ACTOR_RE.test(actor)) return 'From: unverified sender'
+  const role = record.actorRole
+  if (!role || !GITHUB_AUTHOR_ASSOCIATIONS.includes(role)) return `From: ${actor} · GitHub role unknown`
+  const gloss = actor.endsWith('[bot]') ? 'bot account' : ['OWNER', 'MEMBER', 'COLLABORATOR'].includes(role) ? 'maintainer' : 'not a maintainer'
+  return `From: ${actor} · GitHub role ${role} (${gloss})`
+}
 
 export class DotService {
   readonly pending: PendingHub
@@ -341,7 +353,6 @@ export class DotService {
       emitResultNotice: (change, detail) => this.emitClosureResultNotice(change, detail),
       inboxList: () => this.inbox.list(),
       submitInbox: event => this.submitInbox(event),
-      supplementWorkRun: (runId, text, senderId, expected) => this.supplementWorkRun(runId, text, senderId, expected),
       dotSessionId: () => this.store.dotSessionId,
       trace: (event, message, data) => this.emit({ event, message, ...(data ? { data } : {}) }),
       now: this.now,
@@ -3686,9 +3697,10 @@ export class DotService {
 
   private inboxNoticeFor(record: InboxRecord): { readonly text: string; readonly display: string } {
     const notice = inboxNotice(record)
-    const linked = this.linkedTaskLines(record)
-    if (linked.length === 0) return notice
-    const extra = linked.join('\n')
+    const trusted = record.source === 'github' ? [githubSenderLine(record)] : []
+    const extraLines = [...trusted, ...this.linkedTaskLines(record)]
+    if (extraLines.length === 0) return notice
+    const extra = extraLines.map(line => `  ${line}`).join('\n')
     return { text: `${notice.text}\n${extra}`, display: `${notice.display}\n${extra}` }
   }
 
@@ -5308,17 +5320,25 @@ export class DotService {
   }
 
   private queueInboxNotice(record: InboxRecord): void {
-    if (this.batcher.some(item => item.kind === 'inbox' && item.wakeKey === record.id)) return
+    const matches = (item: Notice) => item.kind === 'inbox' && item.wakeKey === record.id
+    if (record.quiet === true) {
+      if (this.batcher.some(matches)) return
+    } else if (this.batcher.some(matches)) {
+      if (this.batcher.wakes(matches)) return
+      this.batcher.dropWhere(matches)
+    }
     const sessionId = this.store.dotSessionId ?? ''
     const notice = this.inboxNoticeFor(record)
-    this.notify({
+    const item: Notice = {
       sessionId,
       kind: 'inbox',
       wakeKey: record.id,
       at: this.now(),
       text: notice.text,
       display: { kind: 'inbox', sessionId, summary: notice.display },
-    })
+    }
+    if (record.quiet === true) this.batcher.hold(item)
+    else this.notify(item)
   }
 
   /** Inbox rows the delivered batch carried become delivered; a failed relay leaves them pending. */

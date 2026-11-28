@@ -7,6 +7,7 @@
 import { defineDomain, domainTable } from '@deepseek-ai/dsh-storage-domain'
 import { z } from 'zod'
 import type { ViewNode } from '@klarkxy/dsh-deep-view/contracts'
+import { GITHUB_AUTHOR_ASSOCIATIONS } from './contracts.ts'
 import { SETTING_FIELDS, WATCHDOG_MODES, WATCHDOG_SIGNALS, type AgreementEntry, type CognitionEntry, type CognitionVersion, type DotContextUsage, type DotUsageOffset, type InboxRecord, type RecipeProposal, type RecipeRecord, type TaskLink, type ReflectionRun, type ScheduleRecord, type SettingProposal, type TaskRecord } from './contracts.ts'
 import { maxEntrySuffix, migrateAgreementEntries, migrateCognitionEntries } from './memory.ts'
 import { migrateTaskPermissionBaseline, TASK_PERMISSIONS } from './settings.ts'
@@ -308,6 +309,7 @@ const inboxRecordSchema = z.object({
   subject: z.string(),
   title: z.string(),
   actor: z.string().optional(),
+  actorRole: z.enum(GITHUB_AUTHOR_ASSOCIATIONS).optional(),
   url: z.string().optional(),
   summary: z.string(),
   count: z.number().int().positive(),
@@ -318,6 +320,7 @@ const inboxRecordSchema = z.object({
   originSource: z.enum(['github-poll', 'inbox-github']).optional(),
   updatedAt: z.number(),
   deliveredAt: z.number().optional(),
+  quiet: z.literal(true).optional(),
 })
 
 export function parseInboxRecord(value: unknown): InboxRecord | undefined {

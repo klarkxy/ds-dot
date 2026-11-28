@@ -6,7 +6,7 @@
  * retry then reject so a failed write is not treated as an acknowledgement.
  */
 import type { Context } from '@deepseek-ai/cordis'
-import type { InboxEventInput } from './contracts.ts'
+import { GITHUB_AUTHOR_ASSOCIATIONS, type GithubAuthorAssociation, type InboxEventInput } from './contracts.ts'
 
 export interface VerifiedWebhookDelivery {
   readonly kind: string
@@ -141,6 +141,10 @@ type EventView = Omit<InboxEventInput, keyof Base>
 interface EventCtx { readonly repo: string; readonly sender?: string }
 
 const actor = (primary: string | undefined, fallback?: string) => (primary || fallback) ? { actor: primary || fallback } : {}
+const authorRole = (value: unknown): { readonly actorRole: GithubAuthorAssociation } | Record<string, never> => {
+  const upper = str(value).trim().toUpperCase()
+  return GITHUB_AUTHOR_ASSOCIATIONS.includes(upper as GithubAuthorAssociation) ? { actorRole: upper as GithubAuthorAssociation } : {}
+}
 const link = (value: unknown) => str(value) ? { url: str(value) } : {}
 
 const NOISY_CONCLUSIONS = ['success', 'skipped', 'neutral']
@@ -227,6 +231,7 @@ function pullRequest(p: Record<string, unknown>, ctx: EventCtx): EventView | und
     ...actor(undefined, ctx.sender),
     ...link(pr.html_url),
     summary: clip(parts.join(' · '), SUMMARY_MAX),
+    ...(ctx.sender && ctx.sender === str(rec(pr.user)?.login) ? authorRole(pr.author_association) : {}),
     ...(headRef ? { headRef } : {}),
     ...(headRepo ? { headRepo } : {}),
   }
@@ -251,6 +256,7 @@ function issue(p: Record<string, unknown>, ctx: EventCtx): EventView | undefined
     ...actor(undefined, ctx.sender),
     ...link(row.html_url),
     summary: clip(parts.join(' · '), SUMMARY_MAX),
+    ...(ctx.sender && ctx.sender === str(rec(row.user)?.login) ? authorRole(row.author_association) : {}),
   }
 }
 
@@ -266,6 +272,7 @@ function issueComment(p: Record<string, unknown>, ctx: EventCtx): EventView | un
     subject: number !== undefined ? `${ctx.repo}#${number}` : ctx.repo,
     title: clip(str(row.title) || `${onPr ? 'pull request' : 'issue'} comment`, TITLE_MAX),
     ...actor(str(rec(comment.user)?.login), ctx.sender),
+    ...authorRole(comment.author_association),
     ...link(comment.html_url),
     summary: clip(str(comment.body), SUMMARY_MAX),
   }
@@ -287,6 +294,7 @@ function reviewComment(p: Record<string, unknown>, ctx: EventCtx): EventView | u
     subject: number !== undefined ? `${ctx.repo}#${number}` : ctx.repo,
     title: clip(str(pr.title) || 'review comment', TITLE_MAX),
     ...actor(str(rec(comment.user)?.login), ctx.sender),
+    ...authorRole(comment.author_association),
     ...link(comment.html_url),
     summary: clip(`${where}${str(comment.body)}`, SUMMARY_MAX),
     ...(headRef ? { headRef } : {}),
@@ -308,6 +316,7 @@ function pullRequestReview(p: Record<string, unknown>, ctx: EventCtx): EventView
     subject: number !== undefined ? `${ctx.repo}#${number}` : ctx.repo,
     title: clip(str(pr.title) || `review ${state}`, TITLE_MAX),
     ...actor(str(rec(review.user)?.login), ctx.sender),
+    ...authorRole(review.author_association),
     ...link(review.html_url),
     summary: clip(`state ${state}${str(review.body) ? ` — ${str(review.body)}` : ''}`, SUMMARY_MAX),
     ...(headRef ? { headRef } : {}),
@@ -326,6 +335,7 @@ function discussionComment(p: Record<string, unknown>, ctx: EventCtx): EventView
     subject: `${ctx.repo}:discussion#${number ?? ''}`,
     title: clip(str(discussion.title) || 'discussion comment', TITLE_MAX),
     ...actor(str(rec(comment.user)?.login), ctx.sender),
+    ...authorRole(comment.author_association),
     ...link(comment.html_url),
     summary: clip(str(comment.body), SUMMARY_MAX),
   }

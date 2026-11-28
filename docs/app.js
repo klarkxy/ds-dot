@@ -352,6 +352,47 @@
       showInvite: true,
     },
     {
+      slug: 'github-watch',
+      date: '2026.11.29',
+      category: 'work',
+      image: 'images/chibi-dispatch.jpg',
+      aspect: 'square',
+      imageAlt: {
+        zh: '阳光书桌前的Q版桃乐丝写便条，身旁两只小粉鲸衔着纸飞机',
+        en: 'Chibi Dorothy at a sunny wooden desk with two tiny pink whales carrying paper airplanes',
+        ja: '机でメモを取りながらピンクの小クジラたちと紙飛行機を送り出すちびドロシー',
+      },
+      caption: {
+        zh: '不用拉公网隧道，本机有 gh 就能顺手替你看着仓库动态。',
+        en: 'No public tunnel needed—local gh is enough to watch your repos.',
+        ja: '公開トンネルなしでも、手元の gh だけでリポジトリを見守れます。',
+      },
+      title: {
+        zh: '不用公网地址，也能用本机 gh 帮着盯 GitHub',
+        en: 'Watching GitHub with your local gh—no public URL needed',
+        ja: '公開アドレスなしで、手元の gh から GitHub を見守る',
+      },
+      excerpt: {
+        zh: '以前想让我在仓库有新评论或 CI 挂掉时递话，得先搭公网回调地址；现在只要电脑里装了并登录过 gh，在设置里填上仓库名打开开关，我就能定期替你看着议题、PR、评论和检查结果。默认一个仓库都不盯，你点名加哪个才盯哪个。',
+        en: 'Getting PR comments or failed checks routed back to me used to mean wiring up a public webhook URL. Now, if the gh CLI is signed in on your machine, just add a repo in Settings and flip polling on—nothing gets watched until you ask.',
+        ja: 'PR のコメントや CI の失敗を受け取るには、これまで公開用の Webhook アドレスを用意する必要がありました。これからは手元で gh にログインしていれば、設定でリポジトリを追加してスイッチを入れるだけで、課題・PR・コメント・チェック結果を定期に見に行けます。',
+      },
+      paragraphs: {
+        zh: [
+          '打开设置里的 GitHub 一栏，点一下测试连接确认本机 gh 登录和配额都正常，再添上想盯的仓库就行。默认只从打开那一刻往后看，不会把陈年旧账一股脑翻出来；平时常见的机器人动态只会悄悄落到我的收件箱，不把我吵醒，而你自己在 GitHub 上留的评论会照常留着，我或任务刚发出去的话也会自动避开，免得自己跟自己打回声。要是剩余配额快不够了，间隔会自己往后放宽一点，连续几次没连上也会在设置页提醒你。',
+          '不管是评论、检查还是 PR 状态，新动态都先到我这里。我会看到是谁说的，也能分清对方是不是仓库维护者；真和活跃任务有关的部分，由我挑出来、说清作者和身份后再亲自递过去（太长的正文自动收进文件留个读取路径）。被你手动停掉的任务绝对不会再被打扰，等到 PR 真的合并或关闭了，我再把对应任务带到最后一步验收，发一条结果通知给你。以后要是换到有公网环境的机器想改用实时推送，同一仓库只开一边就行，切过去时进度也会顺着接上，doro~',
+        ],
+        en: [
+          'Open the GitHub tab in Settings, hit Test gh Connection to check your sign-in and quota, and add the repositories you want watched. Polling only looks forward from the moment you enable it so old history never floods in; routine bot noise reaches me quietly without waking me, while your own human comments still come through—and replies sent from here are skipped so we never echo ourselves. If API quota gets tight the interval eases back on its own, and repeated failures raise a clear notice.',
+          'Every comment, check, and PR update comes to me first. I can see who said it and whether they are a maintainer; when part of it really concerns an active task, I pass that part along myself with the author and role named (with longer text tucked into a readable file). Tasks you stopped yourself stay completely quiet, and once a PR merges or closes I move the matching work into a final check and send one tidy result note. If you ever switch a repo to real-time webhooks later, only one mode runs per repo and the handoff picks up right where it left off, doro~',
+        ],
+        ja: [
+          '設定の GitHub タブを開いて接続テストを押し、ログイン状態と残り枠を確かめたら、見守りたいリポジトリを足すだけです。有効にした時点から先だけを見に行くので過去の通知がどっと押し寄せることはありませんし、定番ボットの動きはわたしの受信箱へそっと届くだけで、わたしを起こしません。ご自身のアカウントで書いたコメントはちゃんと拾い、こちらから送ったばかりの返信は聞き流して堂々巡りを防ぎます。残り枠が少なくなれば間隔を自動で緩め、何度か続けて失敗したときは設定画面でお知らせします。',
+          'コメント、チェック、PR の更新はどれもまずわたしに届きます。誰が言ったのか、リポジトリのメンテナーかどうかも見分けられるので、進行中のタスクに本当に関係する部分だけを、誰のどの立場の言葉か添えて自分で渡します（長文はファイルに控えて場所を添えます）。あなたが手動で止めたタスクにはもう一切話しかけませんし、PR がマージまたはクローズされたら最終チェックへ進めて結果を一度だけお伝えします。あとから公開環境でリアルタイム通知へ切り替えるときも、同じリポジトリでは片方だけ動いて引き継ぎも途切れません、doro~',
+        ],
+      },
+    },
+    {
       slug: 'notes-and-quiet',
       date: '2026.11.28',
       category: 'work',
@@ -473,47 +514,6 @@
         ja: [
           '同じ失敗コマンドを何度も叩いたり、文脈の圧縮を繰り返すだけで一行も進まなかったり、動いているようで実は固まっていたりする場面は気づきにくいものです。新しい Run Watchdog はイベント監視に加えて 5 分おきの巡回も行い、裏のコマンド待ちや承認待ち、制限待機は差し引いてから判定するので、普通の待機中に誤って騒ぐ心配がありません。既定の観察モードではモデルを一切呼ばず七つのサインを静かに残し、自動モードに切り替えたときだけ読み取り専用の判定役が見に来ます（止めた回数も通常の失敗カウントとは別枠で数えます）。',
           '見張り役も判定役も設定やプロンプトを勝手に書き換えることはなく、調整したいときはいつもどおり提案カードを出しますし、「さっきのタスクが止まった理由は？」と聞かれれば診断記録を読んでそのままお答えします。コンテキスト診断では履歴ごとに「正確」「誤検知」のボタンを付けたので、まずは 14 日間の誤検知率を 1 割未満に落ち着かせてから、計画フォルダにしまった静かな Issue 再現案を動かすか考えましょう、doro~',
-        ],
-      },
-    },
-    {
-      slug: 'github-watch',
-      date: '2026.11.26',
-      category: 'work',
-      image: 'images/chibi-dispatch.jpg',
-      aspect: 'square',
-      imageAlt: {
-        zh: '阳光书桌前的Q版桃乐丝写便条，身旁两只小粉鲸衔着纸飞机',
-        en: 'Chibi Dorothy at a sunny wooden desk with two tiny pink whales carrying paper airplanes',
-        ja: '机でメモを取りながらピンクの小クジラたちと紙飛行機を送り出すちびドロシー',
-      },
-      caption: {
-        zh: '不用拉公网隧道，本机有 gh 就能顺手替你看着仓库动态。',
-        en: 'No public tunnel needed—local gh is enough to watch your repos.',
-        ja: '公開トンネルなしでも、手元の gh だけでリポジトリを見守れます。',
-      },
-      title: {
-        zh: '不用公网地址，也能用本机 gh 帮着盯 GitHub',
-        en: 'Watching GitHub with your local gh—no public URL needed',
-        ja: '公開アドレスなしで、手元の gh から GitHub を見守る',
-      },
-      excerpt: {
-        zh: '以前想让我在仓库有新评论或 CI 挂掉时递话，得先搭公网回调地址；现在只要电脑里装了并登录过 gh，在设置里填上仓库名打开开关，我就能定期替你看着议题、PR、评论和检查结果。默认一个仓库都不盯，你点名加哪个才盯哪个。',
-        en: 'Getting PR comments or failed checks routed back to me used to mean wiring up a public webhook URL. Now, if the gh CLI is signed in on your machine, just add a repo in Settings and flip polling on—nothing gets watched until you ask.',
-        ja: 'PR のコメントや CI の失敗を受け取るには、これまで公開用の Webhook アドレスを用意する必要がありました。これからは手元で gh にログインしていれば、設定でリポジトリを追加してスイッチを入れるだけで、課題・PR・コメント・チェック結果を定期に見に行けます。',
-      },
-      paragraphs: {
-        zh: [
-          '打开设置里的 GitHub 一栏，点一下测试连接确认本机 gh 登录和配额都正常，再添上想盯的仓库就行。默认只从打开那一刻往后看，不会把陈年旧账一股脑翻出来；平时常见的机器人动态只顺手递给正在跑相关 PR 的任务，不刷屏收件箱，而你自己在 GitHub 上留的评论会照常留着，我或任务刚发出去的话也会自动避开，免得自己跟自己打回声。要是剩余配额快不够了，间隔会自己往后放宽一点，连续几次没连上也会在设置页提醒你。',
-          '来新评论时，跟这个 PR 绑在一起的活跃任务都会直接收到摘要（太长的正文自动收进文件留个读取路径），要是哪条消息不归某个任务管，它会退回给我再重新派人。被你手动停掉的任务绝对不会再被打扰，等到 PR 真的合并或关闭了，我再把对应任务带到最后一步验收，发一条结果通知给你。以后要是换到有公网环境的机器想改用实时推送，同一仓库只开一边就行，切过去时进度也会顺着接上，doro~',
-        ],
-        en: [
-          'Open the GitHub tab in Settings, hit Test gh Connection to check your sign-in and quota, and add the repositories you want watched. Polling only looks forward from the moment you enable it so old history never floods in; routine bot noise quietly stays out of your inbox, while your own human comments still come through—and replies sent from here are skipped so we never echo ourselves. If API quota gets tight the interval eases back on its own, and repeated failures raise a clear notice.',
-          'Fresh comments go straight as short context to every active task linked to that PR (with longer text tucked into a readable file), and anything outside a task’s lane gets handed back to me to re-route. Tasks you stopped yourself stay completely quiet, and once a PR merges or closes I move the matching work into a final check and send one tidy result note. If you ever switch a repo to real-time webhooks later, only one mode runs per repo and the handoff picks up right where it left off, doro~',
-        ],
-        ja: [
-          '設定の GitHub タブを開いて接続テストを押し、ログイン状態と残り枠を確かめたら、見守りたいリポジトリを足すだけです。有効にした時点から先だけを見に行くので過去の通知がどっと押し寄せることはありませんし、定番ボットの動きは必要なタスクへだけそっと届けます。ご自身のアカウントで書いたコメントはちゃんと拾い、こちらから送ったばかりの返信は聞き流して堂々巡りを防ぎます。残り枠が少なくなれば間隔を自動で緩め、何度か続けて失敗したときは設定画面でお知らせします。',
-          '新しいコメントが来ると、その PR に結び付いている進行中のタスクみんなへ短い要約が直接届き（長文はファイルに控えて場所を添えます）、担当外の話題はわたしの元へ戻して振り直します。あなたが手動で止めたタスクにはもう一切話しかけませんし、PR がマージまたはクローズされたら最終チェックへ進めて結果を一度だけお伝えします。あとから公開環境でリアルタイム通知へ切り替えるときも、同じリポジトリでは片方だけ動いて引き継ぎも途切れません、doro~',
         ],
       },
     },

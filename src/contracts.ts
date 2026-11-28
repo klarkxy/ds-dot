@@ -1022,6 +1022,9 @@ export interface TrajectoryView {
 
 // ---- external events (inbox) ---------------------------------------------
 
+export const GITHUB_AUTHOR_ASSOCIATIONS = ['OWNER','MEMBER','COLLABORATOR','CONTRIBUTOR','FIRST_TIME_CONTRIBUTOR','FIRST_TIMER','MANNEQUIN','NONE'] as const
+export type GithubAuthorAssociation = typeof GITHUB_AUTHOR_ASSOCIATIONS[number]
+
 /** One external event normalized for dot's inbox, independent of the ingress. */
 export interface InboxEventInput {
   /** Provider kind, e.g. 'github'. */
@@ -1036,6 +1039,8 @@ export interface InboxEventInput {
   /** One line, clipped. */
   readonly title: string
   readonly actor?: string
+  /** GitHub author_association for actor when the ingress supplies it. */
+  readonly actorRole?: GithubAuthorAssociation
   readonly url?: string
   /** Short detail, whitespace collapsed. */
   readonly summary: string
@@ -1046,6 +1051,8 @@ export interface InboxEventInput {
   readonly headRepo?: string
   /** Optional origin provenance when triggered by poll vs webhook. */
   readonly originSource?: 'github-poll' | 'inbox-github'
+  /** Quiet rows reach Dorothy with the next wake instead of waking her themselves. */
+  readonly quiet?: true
 }
 
 /** A stored inbox row: one pending record per source+sourceId+subject, merged deliveries folded in. */

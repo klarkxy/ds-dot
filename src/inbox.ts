@@ -70,6 +70,16 @@ export function fenceUntrusted(value: string): string {
   return `<${token}>${safe}</${token}>`
 }
 
+
+/** Multi-line variant for spill files: the body keeps its line structure. */
+export function fenceUntrustedBlock(value: string): string {
+  const token = `${INBOX_FENCE_PREFIX}${randomUUID()}`
+  const safe = value.split(token).join(`${token} `)
+  return `<${token}>
+${safe}
+</${token}>`
+}
+
 export type InboxSubmit = { readonly result: InboxSubmitResult; readonly record?: InboxRecord }
 
 export class InboxLedger {
@@ -113,6 +123,7 @@ export class InboxLedger {
         type: input.type,
         title: input.title,
         actor: input.actor,
+        actorRole: input.actorRole,
         url: input.url,
         summary: input.summary,
         receivedAt: input.receivedAt,
@@ -120,6 +131,7 @@ export class InboxLedger {
         ...(input.headRepo !== undefined ? { headRepo: input.headRepo } : {}),
         deliveryIds: [...pending.deliveryIds.slice(-(INBOX_DELIVERY_IDS_MAX - 1)), input.deliveryId],
         count: pending.count + 1,
+        quiet: pending.quiet === true && input.quiet === true ? true : undefined,
         updatedAt: now,
       }
       return { result: 'merged', record }

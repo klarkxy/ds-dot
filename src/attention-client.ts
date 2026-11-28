@@ -25,13 +25,15 @@ export interface AttentionWatcher {
 
 const EMPTY_SNAPSHOT: AttentionSnapshot = { count: 0, items: [] }
 
-export function createAttentionWatcher({ fetch, intervalMs = 15_000, isAttended, notify, log }: {
+export function createAttentionWatcher({ fetch, intervalMs = 15_000, isAttended, notify, log, isFatal }: {
   fetch: (signal: AbortSignal) => Promise<AttentionView>
   intervalMs?: number
   isAttended: () => boolean
   notify: (item: AttentionItem) => void
   /** Called at most once per consecutive failure streak. */
   log?: (error: unknown) => void
+  /** Version-skew shape: stop polling instead of retrying forever. */
+  isFatal?: (error: unknown) => boolean
 }): AttentionWatcher {
   const listeners = new Set<() => void>()
   const seen = new Set<string>()
@@ -39,6 +41,7 @@ export function createAttentionWatcher({ fetch, intervalMs = 15_000, isAttended,
   let seeded = false
   let running = false
   let streakLogged = false
+  let failures = 0
   let timer: ReturnType<typeof setTimeout> | undefined
   let flight: AbortController | undefined
 
@@ -55,6 +58,7 @@ export function createAttentionWatcher({ fetch, intervalMs = 15_000, isAttended,
     try {
       const view = await fetch(controller.signal)
       streakLogged = false
+      failures = 0
       const items = view.items
       if (!seeded) {
         for (const item of items) seen.add(item.id)
@@ -74,15 +78,23 @@ export function createAttentionWatcher({ fetch, intervalMs = 15_000, isAttended,
         for (const listener of listeners) listener()
       }
     } catch (error) {
-      if (!controller.signal.aborted && !streakLogged) {
-        streakLogged = true
-        log?.(error)
+      if (!controller.signal.aborted) {
+        failures++
+        if (!streakLogged) {
+          streakLogged = true
+          log?.(error)
+        }
+        if (isFatal?.(error)) {
+          running = false
+          if (typeof document !== 'undefined') document.removeEventListener('visibilitychange', onVisibility)
+        }
       }
     } finally {
       if (flight === controller) flight = undefined
       if (running) {
         if (timer !== undefined) clearTimeout(timer)
-        timer = setTimeout(() => { timer = undefined; void poll() }, intervalMs)
+        const delay = failures === 0 ? intervalMs : Math.min(intervalMs * 2 ** failures, 300_000)
+        timer = setTimeout(() => { timer = undefined; void poll() }, delay)
       }
     }
   }

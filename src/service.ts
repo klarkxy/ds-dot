@@ -190,6 +190,7 @@ export class DotService {
   private readonly reminders: ReminderClock
   private readonly inbox: InboxLedger
   private ensuring: Promise<string> | undefined
+  private ensureDotFailure?: { readonly at: number; readonly error: unknown }
   private homeRegistered = false
   private lane: Promise<unknown> = Promise.resolve()
   private closing = false
@@ -271,6 +272,7 @@ export class DotService {
         return dot !== undefined && !this.options.host.isRunning(dot)
       },
       recipeHints: () => this.reflectionRecipeHints(),
+      sessions: () => this.historySessions('all', options.store.lastReflectedAt),
       ...options.log ? { log: options.log } : {},
     })
     this.pending.onChange(() => {
@@ -671,9 +673,19 @@ export class DotService {
       }
     }
     const prepare = this.host.prepareOwnedSession
-    if (!prepare) return
+    const sealIfLive = this.host.sealIfLive
+    const active = new Set<string>()
+    for (const run of this.store.work.listRuns()) {
+      if (runIsTerminal(run) || run.creation !== 'confirmed' || !run.sessionId) continue
+      active.add(run.sessionId)
+    }
+    for (const task of this.store.list()) if (task.status === 'running') active.add(task.sessionId)
     for (const sessionId of this.store.ownedSessionIds()) {
-      try { await prepare.call(this.host, sessionId) } catch { /* the next status event seals a live agent */ }
+      if (active.has(sessionId) && prepare) {
+        try { await prepare.call(this.host, sessionId) } catch { /* the next status event seals a live agent */ }
+      } else if (sealIfLive) {
+        try { sealIfLive.call(this.host, sessionId) } catch { /* the next status event seals a live agent */ }
+      }
     }
   }
 
@@ -753,8 +765,10 @@ export class DotService {
    */
   ensureDot(): Promise<string> {
     if (this.closing) return Promise.reject(new DotError('dot/disposed', 'dot is shutting down'))
-    this.ensuring ??= (async () => {
-      try {
+    const failed = this.ensureDotFailure
+    if (failed && this.now() - failed.at < 30_000) return Promise.reject(failed.error)
+    if (!this.ensuring) {
+      const attempt = (async () => {
         // Registered once per run, so the workspace is in the sidebar from dot's first use on.
         if (!this.homeRegistered) {
           await this.homeWorkspace().then(() => { this.homeRegistered = true }, error => { this.options.log?.(`dsh-dot: dot's own workspace was not registered: ${messageOf(error)}`) })
@@ -773,10 +787,13 @@ export class DotService {
         }
         await mkdir(this.options.homeDir, { recursive: true })
         return this.openedDot(await this.rollover(existing, 'lost'))
-      } finally {
-        this.ensuring = undefined
-      }
-    })()
+      })()
+      const tracked = attempt.then(
+        sessionId => { this.ensureDotFailure = undefined; return sessionId },
+        error => { this.ensureDotFailure = { at: this.now(), error }; throw error },
+      ).finally(() => { if (this.ensuring === tracked) this.ensuring = undefined })
+      this.ensuring = tracked
+    }
     return this.ensuring
   }
 
@@ -1493,6 +1510,7 @@ export class DotService {
       this.watchdog.onSettingsChanged()
       this.homeRegistered = false
       this.ensuring = undefined
+      this.ensureDotFailure = undefined
       this.requestedSegment = undefined
       if (activeLocale) await this.store.setUiLocale(activeLocale)
       let sessionId: string
@@ -1681,10 +1699,14 @@ export class DotService {
    * running tasks pings its own session prefix to keep the cache warm. Every
    * finished turn re-arms from scratch; each tick re-checks the conditions.
    */
+  private hasLiveRunningTask(): boolean {
+    return this.store.list().some(task => task.status === 'running' && this.host.isRunning(task.sessionId))
+  }
+
   private armKeepalive(dot: string, replied: boolean): void {
     this.cancelKeepalive()
     if (this.closing || !replied || this.host.isRunning(dot)) return
-    if (!this.store.list().some(task => task.status === 'running')) return
+    if (!this.hasLiveRunningTask()) return
     if (!this.host.sessionModel?.(dot)) return
     const armed: NonNullable<DotService['keepalive']> = { sessionId: dot, pings: 0, lastAt: this.now() }
     this.keepalive = armed
@@ -1716,7 +1738,7 @@ export class DotService {
     void this.serial(async () => {
       if (this.keepalive !== armed) return
       const holds = this.store.dotSessionId === armed.sessionId && this.store.segment?.sessionId === armed.sessionId
-        && !this.host.isRunning(armed.sessionId) && this.store.list().some(task => task.status === 'running')
+        && !this.host.isRunning(armed.sessionId) && this.hasLiveRunningTask()
       if (!holds) { this.cancelKeepalive(); return }
       const model = this.host.sessionModel?.(armed.sessionId)
       const intervalMs = model ? keepaliveIntervalMs(cacheTtlMinutes(this.store.settings, model.provider, model.model)) : undefined
@@ -1760,6 +1782,11 @@ export class DotService {
       if (card.keepAlive !== true || card.answer || card.expired) continue
       if (card.approvalId !== undefined && live.has(card.approvalId)) continue
       await this.store.expireCard(card.id).catch(error => this.options.log?.(`dsh-dot: stale approval card expiry was not saved: ${messageOf(error)}`))
+    }
+    for (const task of this.store.list()) {
+      if (task.status === 'running' && !this.host.isRunning(task.sessionId)) {
+        await this.store.apply({ type: 'status', sessionId: task.sessionId, status: 'idle', at: this.now() }, this.pending.list())
+      }
     }
     for (const run of this.store.work.occupying()) {
       if (this.closing) return
@@ -2878,18 +2905,20 @@ export class DotService {
   // ---- history: the record dot looks things up in ----------------------
 
   /** The sessions a search covers, newest first: dot's own segments, then the sessions on its ledger. */
-  private historySessions(scope: 'all' | 'own' | 'tasks'): { sessionId: string; what: string; own: boolean }[] {
+  private historySessions(scope: 'all' | 'own' | 'tasks', since?: number): { sessionId: string; what: string; own: boolean }[] {
     const out: { sessionId: string; what: string; own: boolean }[] = []
     if (scope !== 'tasks') {
       const current = this.store.dotSessionId
       if (current) out.push({ sessionId: current, what: 'Your conversation, current session', own: true })
       for (const past of [...this.store.pastSegments].reverse()) {
+        if (since !== undefined && past.endedAt < since) continue
         const span = past.startedAt > 0 ? ` (${stamp(past.startedAt)} to ${stamp(past.endedAt)})` : ` (until ${stamp(past.endedAt)})`
         out.push({ sessionId: past.sessionId, what: `Your conversation, earlier session${span}`, own: true })
       }
     }
     if (scope !== 'own') {
       for (const task of [...this.store.list()].sort((a, b) => b.updatedAt - a.updatedAt)) {
+        if (since !== undefined && task.updatedAt < since) continue
         out.push({ sessionId: task.sessionId, what: `Task "${task.title}"${task.status === 'archived' ? ' (archived)' : ''}`, own: false })
       }
     }
@@ -2904,18 +2933,23 @@ export class DotService {
    * Find earlier messages. Every word of the query has to occur in one message;
    * the search reads the session logs themselves, so nothing has to be kept in step.
    */
-  async searchHistory(input: { query: string; sessionId?: string; scope?: string; tools?: boolean; limit?: number }): Promise<string> {
+  async searchHistory(input: { query: string; sessionId?: string; scope?: string; tools?: boolean; limit?: number; since?: string; signal?: AbortSignal }): Promise<string> {
     const terms = queryTerms(input.query)
     if (terms.length === 0) throw new DotError('dot/invalid', 'query must hold at least one word')
+    const sinceAt = input.since === undefined ? undefined : Date.parse(input.since)
+    if (input.since !== undefined && (!/^\d{4}-\d{2}-\d{2}/.test(input.since) || Number.isNaN(sinceAt))) {
+      throw new DotError('dot/invalid', 'since must be an ISO 8601 date or date-time')
+    }
     const scope = input.scope === 'own' || input.scope === 'tasks' ? input.scope : 'all'
     const only = input.sessionId?.trim()
-    const candidates = only ? [this.describeSession(only)] : this.historySessions(scope)
+    const candidates = only ? [this.describeSession(only)] : this.historySessions(scope, sinceAt)
     const targets = candidates.slice(0, SEARCH_SESSIONS_MAX)
     const limit = Math.max(1, Math.min(Math.trunc(input.limit ?? SEARCH_LIMIT_DEFAULT), SEARCH_LIMIT_MAX))
     const groups: SessionHits[] = []
     let failed = 0
     const batchSize = 8
     for (let start = 0; start < targets.length; start += batchSize) {
+      input.signal?.throwIfAborted()
       const batch = targets.slice(start, start + batchSize)
       const results = await Promise.all(batch.map(async target => {
         try {
@@ -2931,7 +2965,8 @@ export class DotService {
           failed++
           continue
         }
-        const hits = searchRows(historyRows(item.events, input.tools === true, LOOKUP_TOOLS), terms).reverse()
+        const rows = historyRows(item.events, input.tools === true, LOOKUP_TOOLS)
+        const hits = searchRows(sinceAt === undefined ? rows : rows.filter(row => row.at >= sinceAt), terms).reverse()
         if (hits.length > 0) groups.push({ ...item.target, hits })
       }
     }
@@ -5452,7 +5487,7 @@ export class DotService {
   /** Other changes block only where their write scope actually overlaps. This change's runs are not a lock on themselves. */
   private async scopeReport(cwd: string, exceptChangeId: string, candidate?: Occupant): Promise<{ readonly text: string; readonly blocked: boolean }> {
     let rows: Awaited<ReturnType<DotHost['listSessions']>> | undefined
-    try { rows = await this.host.listSessions(new AbortController().signal) } catch { rows = undefined }
+    try { rows = await this.host.listSessions(AbortSignal.timeout(20_000)) } catch { rows = undefined }
     const others = this.store.work.occupying().filter(run => run.changeId !== exceptChangeId)
     const conflicting = candidate
       ? others.filter(run => occupantsConflict(candidate, occupantOf(run)))

@@ -951,3 +951,115 @@ describe('session cwd junction and short-path launch', () => {
     expect(book.run(held.run.id)?.creation).toBe('confirmed')
   })
 })
+
+describe('zombie run recovery', () => {
+  it('closes a stale reserved run that never reached the host as stopped/unsent', async () => {
+    const book = openBook()
+    const held = await reserved(book)
+    const { host, calls } = hostOf({ async findSession() { return undefined } })
+    const result = await reconcileReserved(book, host, held.run.id, 2 + 10 * 60_000 + 1)
+    expect(result).toMatchObject({ ok: true, action: 'closed', created: false, prompted: false })
+    expect(book.run(held.run.id)).toMatchObject({ phase: 'stopped', closeReason: 'unsent' })
+    expect(calls).toEqual([])
+  })
+
+  it('closes a rejected settling run once the absent identity is confirmed, without stopping the session', async () => {
+    const book = openBook()
+    const held = await reserved(book)
+    const { host: launchHost } = hostOf({
+      async findSession() { return undefined },
+      async createSession(input) { return { sessionId: 'session-other', cwd: input.cwd } },
+    })
+    await launchReservedRun(book, launchHost, held.run.id, 'go')
+    expect(book.run(held.run.id)?.creation).toBe('rejected')
+    const prepared = await book.prepareFinish(held.run.id, 'stopped', 3)
+    expect(prepared.ok).toBe(true)
+
+    let stops = 0
+    const { host } = hostOf({
+      async findSession() { return undefined },
+      async stop() { stops += 1; return { cancelAccepted: true, queueCleared: true, idle: true, jobsSettled: true } },
+    })
+    const result = await reconcileRun(book, host, held.run.id, 4)
+    expect(result).toMatchObject({ ok: true, action: 'closed', created: false, prompted: false })
+    expect(book.run(held.run.id)).toMatchObject({ phase: 'stopped', closeReason: 'identity-rejected' })
+    expect(stops).toBe(0)
+  })
+
+  it('releases a rejected settling run only when the present identity is read-only idle', async () => {
+    const book = openBook()
+    const held = await reserved(book)
+    const { host: launchHost } = hostOf({
+      async findSession() { return undefined },
+      async createSession(input) { return { sessionId: 'session-other', cwd: input.cwd } },
+    })
+    await launchReservedRun(book, launchHost, held.run.id, 'go')
+    await book.prepareFinish(held.run.id, 'stopped', 3)
+
+    let stops = 0
+    const busy = hostOf({
+      async findSession() { return { cwd: 'H:\\repo' } },
+      async watch() { return { running: true, queue: 'empty' as const } },
+      async stop() { stops += 1; return { cancelAccepted: true, queueCleared: true, idle: true, jobsSettled: true } },
+    }).host
+    expect(await reconcileRun(book, busy, held.run.id, 4)).toMatchObject({ action: 'held' })
+    expect(book.run(held.run.id)?.phase).toBe('settling')
+
+    const idle = hostOf({
+      async findSession() { return { cwd: 'H:\\repo' } },
+      async watch() { return { running: false, queue: 'empty' as const } },
+      async stop() { stops += 1; return { cancelAccepted: true, queueCleared: true, idle: true, jobsSettled: true } },
+    }).host
+    expect(await reconcileRun(book, idle, held.run.id, 5)).toMatchObject({ action: 'closed' })
+    expect(book.run(held.run.id)).toMatchObject({ phase: 'stopped', closeReason: 'identity-rejected' })
+    expect(stops).toBe(0)
+  })
+
+  it('closes an unknown settling run whose close intent is stopped when the requested session is absent', async () => {
+    const book = openBook()
+    const held = await reserved(book)
+    const marked = await book.markCreation(held.run.id, 'unknown')
+    expect('id' in marked).toBe(true)
+    const prepared = await book.prepareFinish(held.run.id, 'stopped', 3)
+    expect(prepared.ok).toBe(true)
+    const { host } = hostOf({ async findSession() { return undefined } })
+    expect(await reconcileRun(book, host, held.run.id, 4)).toMatchObject({ ok: true, action: 'closed', created: false, prompted: false })
+    expect(book.run(held.run.id)).toMatchObject({ phase: 'stopped', closeReason: 'unsent' })
+  })
+})
+
+describe('session failure causes', () => {
+  it('includes the real lookup and create causes in refusal messages', async () => {
+    const lookupBook = openBook()
+    const lookupHeld = await reserved(lookupBook)
+    const lookup = hostOf({ async findSession() { throw new Error('persistence timeout') } }).host
+    await expect(launchReservedRun(lookupBook, lookup, lookupHeld.run.id, 'go')).resolves.toMatchObject({
+      ok: false,
+      message: `${lookupHeld.run.id} session lookup failed (persistence timeout); no second session was created`,
+    })
+
+    const createBook = openBook()
+    const createHeld = await reserved(createBook)
+    const create = hostOf({
+      async findSession() { return undefined },
+      async createSession() { throw new Error('agent service offline') },
+    }).host
+    await expect(launchReservedRun(createBook, create, createHeld.run.id, 'go')).resolves.toMatchObject({
+      ok: false,
+      message: `${createHeld.run.id} session create failed (agent service offline); it was not retried with a new id`,
+    })
+  })
+})
+
+describe('reserved zombie compatibility', () => {
+  it('closes the real reserved unknown zombie shape after the absent id is confirmed and the run is old', async () => {
+    const book = openBook()
+    const held = await reserved(book)
+    expect('id' in await book.markCreation(held.run.id, 'unknown')).toBe(true)
+    const { host, calls } = hostOf({ async findSession() { return undefined } })
+    const result = await reconcileReserved(book, host, held.run.id, 2 + 10 * 60_000 + 1)
+    expect(result).toMatchObject({ ok: true, action: 'closed', created: false, prompted: false })
+    expect(book.run(held.run.id)).toMatchObject({ phase: 'stopped', closeReason: 'unsent' })
+    expect(calls).toEqual([])
+  })
+})

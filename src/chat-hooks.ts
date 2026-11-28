@@ -36,16 +36,19 @@ export function useChatFeed(api: ChatApi): { state: ChatState; error?: string; r
   useEffect(() => {
     const lifetime = new AbortController()
     let current: ChatState = { items: [], answers: {} }
+    let retryMs = RETRY_MS
     const apply = (next: ChatSnapshot | undefined) => { current = merge(current, next); setState(current); setError(undefined) }
     void (async () => {
       while (!lifetime.signal.aborted) {
         try {
           const known = current.snapshot
           apply(known ? await api.wait(known.rev, known.itemsRev, lifetime.signal) : await api.chat(0, lifetime.signal))
+          retryMs = RETRY_MS
         } catch (failure) {
           if (lifetime.signal.aborted) return
           setError(failure instanceof Error ? failure.message : String(failure))
-          await new Promise(resolve => setTimeout(resolve, RETRY_MS))
+          await new Promise(resolve => setTimeout(resolve, retryMs))
+          retryMs = Math.min(retryMs * 2, 60_000)
         }
       }
     })()

@@ -7,6 +7,7 @@ import type { TaskPermission } from './contracts.ts'
 import { onDiskPath, scopeWrites, type RunCursor, type RunPhase, type RunRecord, type WorkBook, type WorkRefusal } from './work.ts'
 
 export interface FoundSession { readonly cwd?: string; readonly preset?: string }
+const RESERVED_UNSENT_RELEASE_MS = 10 * 60_000
 export interface CreatedSession { readonly sessionId: string; readonly cwd?: string; readonly preset?: string }
 export interface StopReport {
   readonly cancelAccepted: boolean
@@ -51,9 +52,10 @@ export async function launchReservedRun(book: WorkBook, host: RunSessionHost, ru
     let located: FoundSession | undefined
     try {
       located = await host.findSession(run.requestedSessionId)
-    } catch {
+    } catch (error) {
       await book.markCreation(runId, 'unknown')
-      return { ok: false, code: 'unknown', message: `${runId} session lookup failed; no second session was created` }
+      const cause = error instanceof Error ? error.message : String(error)
+      return { ok: false, code: 'unknown', message: `${runId} session lookup failed (${cause}); no second session was created` }
     }
     const afterLookup = book.dispatchAllowed(runId)
     if (!afterLookup.ok) {
@@ -75,9 +77,10 @@ export async function launchReservedRun(book: WorkBook, host: RunSessionHost, ru
         actualId = created.sessionId
         cwd = created.cwd
         seenPreset = created.preset
-      } catch {
+      } catch (error) {
         await book.markCreation(runId, 'unknown')
-        return { ok: false, code: 'unknown', message: `${runId} session create failed; it was not retried with a new id` }
+        const cause = error instanceof Error ? error.message : String(error)
+        return { ok: false, code: 'unknown', message: `${runId} session create failed (${cause}); it was not retried with a new id` }
       }
       const afterCreate = book.dispatchAllowed(runId)
       if (!afterCreate.ok) {
@@ -277,20 +280,29 @@ export async function observeRun(book: WorkBook, host: RunSessionHost, runId: st
  * Recovery reads the reserved id. It never creates another session and never
  * sends the first prompt.
  */
-export async function reconcileReserved(book: WorkBook, host: RunSessionHost, runId: string): Promise<{ readonly ok: true; readonly action: 'absent' | 'confirmed' | 'held' | 'left'; readonly created: false; readonly prompted: false } | WorkRefusal> {
+export async function reconcileReserved(book: WorkBook, host: RunSessionHost, runId: string, at = Date.now()): Promise<{ readonly ok: true; readonly action: 'absent' | 'confirmed' | 'held' | 'left' | 'closed'; readonly created: false; readonly prompted: false } | WorkRefusal> {
   const run = book.run(runId)
   if (!run) return { ok: false, code: 'missing', message: `unknown run ${runId}` }
   if (run.phase !== 'reserved') return { ok: true, action: 'left', created: false, prompted: false }
   let located: FoundSession | undefined
-  try { located = await host.findSession(run.requestedSessionId) } catch {
+  try { located = await host.findSession(run.requestedSessionId) } catch (error) {
     const marked = await book.markCreation(runId, 'unknown')
     if (!('id' in marked)) return marked
-    return { ok: false, code: 'unknown', message: `${runId} session lookup failed; no second session was created` }
+    const cause = error instanceof Error ? error.message : String(error)
+    return { ok: false, code: 'unknown', message: `${runId} session lookup failed (${cause}); no second session was created` }
   }
   if (!located) {
     if (run.creation === 'unknown' && run.sessionId === undefined) {
-      const reset = await book.abandonUnknownCreation(runId)
+      const reset = await book.abandonUnknownCreation(runId, at)
       if (!reset.ok) return reset
+    }
+    const current = book.run(runId) ?? run
+    const neverStarted = current.creation === 'intent' && current.actionClaim === undefined
+      && !current.deliveries.some(item => item.status === 'accepted' || item.status === 'unknown' || item.hostRequestId !== undefined)
+    if (neverStarted && at - current.createdAt > RESERVED_UNSENT_RELEASE_MS) {
+      const released = await book.releaseUnsent(runId, current.updatedAt, at)
+      if (!released.ok) return released
+      return { ok: true, action: 'closed', created: false, prompted: false }
     }
     return { ok: true, action: 'absent', created: false, prompted: false }
   }
@@ -316,7 +328,7 @@ export async function reconcileRun(book: WorkBook, host: RunSessionHost, runId: 
   if (!current) return { ok: false, code: 'missing', message: `unknown run ${runId}` }
   if (current.phase === 'settling') return continueClose(book, host, runId, at)
   if (current.phase === 'reserved') {
-    const session = await reconcileReserved(book, host, runId)
+    const session = await reconcileReserved(book, host, runId, at)
     if (!session.ok) return session
     return session
   }
@@ -389,6 +401,22 @@ async function continueClose(book: WorkBook, host: RunSessionHost, runId: string
     }
   }
   if (current.creation === 'rejected') {
+    if (current.closeIntent) {
+      let lookupFailed = false
+      let present = false
+      try { present = await host.findSession(current.requestedSessionId) !== undefined } catch { lookupFailed = true }
+      let quiet = !lookupFailed && !present
+      if (!lookupFailed && present && host.watch) {
+        try {
+          const seen = await host.watch(current.requestedSessionId)
+          quiet = seen.running === false && seen.queue === 'empty'
+        } catch { quiet = false }
+      } else if (!lookupFailed && present) quiet = false
+      if (quiet) {
+        const released = await book.releaseRejected(runId, current.updatedAt, at)
+        if (released.ok) return { ok: true, action: 'closed', created: false, prompted: false }
+      }
+    }
     return { ok: true, action: 'held', created: false, prompted: false }
   }
   if (current.creation === 'unknown') {

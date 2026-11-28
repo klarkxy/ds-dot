@@ -116,8 +116,41 @@ export function jsonArray(value: unknown): unknown[] | undefined {
     const parsed = JSON.parse(value) as unknown
     return Array.isArray(parsed) ? parsed : undefined
   } catch {
-    return undefined
+    const prefix = arrayPrefix(value)
+    if (prefix === undefined) return undefined
+    try {
+      const parsed = JSON.parse(prefix) as unknown
+      return Array.isArray(parsed) ? parsed : undefined
+    } catch { return undefined }
   }
+}
+
+function arrayPrefix(value: string): string | undefined {
+  const start = value.search(/\S/)
+  if (start < 0 || value[start] !== '[') return undefined
+  let depth = 0
+  let quoted = false
+  let escaped = false
+  for (let index = start; index < value.length; index++) {
+    const char = value[index]!
+    if (quoted) {
+      if (escaped) escaped = false
+      else if (char === '\\') escaped = true
+      else if (char === '"') quoted = false
+      continue
+    }
+    if (char === '"') { quoted = true; continue }
+    if (char === '[') depth++
+    else if (char === ']') {
+      depth--
+      if (depth === 0) {
+        const end = index + 1
+        return /^[\s\]}]*$/.test(value.slice(end)) ? value.slice(0, end) : undefined
+      }
+      if (depth < 0) return undefined
+    }
+  }
+  return undefined
 }
 
 export function occupantOf(run: RunRecord): Occupant {

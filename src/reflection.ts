@@ -90,7 +90,7 @@ export function reflectionDue(input: ReflectionGate): boolean {
 }
 
 /** The private instruction the runner hands the reflection session. */
-export function buildReflectionInstruction(input: { readonly agreements: readonly AgreementEntry[]; readonly cognition: readonly CognitionEntry[]; readonly limit: number; readonly lastReflectedAt?: number; readonly now: number; readonly recipes?: string }): string {
+export function buildReflectionInstruction(input: { readonly agreements: readonly AgreementEntry[]; readonly cognition: readonly CognitionEntry[]; readonly limit: number; readonly lastReflectedAt?: number; readonly now: number; readonly recipes?: string; readonly sessions?: readonly { readonly sessionId: string; readonly what: string }[] }): string {
   const since = input.lastReflectedAt !== undefined ? new Date(input.lastReflectedAt).toISOString() : 'the beginning'
   const agreements = input.agreements.length > 0 ? input.agreements.map(entry => `- ${entry.text}`).join('\n') : '(none yet)'
   const cognition = input.cognition.length > 0
@@ -99,6 +99,13 @@ export function buildReflectionInstruction(input: { readonly agreements: readonl
   return [
     "Run dot's private background reflection pass now. The human is not present; do not write a chat reply.",
     `Review collaboration between the human and dot since ${since} using ${TOOL.searchHistory} and ${TOOL.readHistory} (including dot's own conversation segments), then bring [cognition] up to date.`,
+    ...(input.sessions ? [
+      '',
+      `Sessions with activity since ${since}:`,
+      ...(input.sessions.length > 0 ? input.sessions.map(row => `- ${row.sessionId} · ${row.what}`) : ['(none recorded)']),
+      '',
+      `Start with ${TOOL.readHistory} on these sessions.${input.lastReflectedAt !== undefined ? ` When you use ${TOOL.searchHistory}, pass since="${since}" and search only for specific facts you still need; do not enumerate history with broad one-word searches.` : ''}`,
+    ] : []),
     '',
     "[agreements] (the human's standing rules — strictly read-only; never change these):",
     agreements,
@@ -131,6 +138,8 @@ export interface ReflectionRunnerOptions {
   readonly isDotIdle: () => boolean
   /** Pre-formatted [recipes] section for the instruction; empty when nothing qualifies. */
   readonly recipeHints?: () => string
+  /** Sessions with activity since the last successful pass. */
+  readonly sessions?: () => readonly { readonly sessionId: string; readonly what: string }[]
   readonly timeoutMs?: number
   readonly log?: (message: string) => void
 }
@@ -251,6 +260,7 @@ export class ReflectionRunner {
         ...store.lastReflectedAt !== undefined ? { lastReflectedAt: store.lastReflectedAt } : {},
         now,
         ...(this.options.recipeHints ? { recipes: this.options.recipeHints() } : {}),
+        ...(this.options.sessions ? { sessions: this.options.sessions() } : {}),
       })
       sessionId = await this.options.host.createInternal(this.options.homeDir, REFLECTION_PRESET_ID)
       const run: ReflectionRun = { sessionId, startedAt: now, ok: false }
@@ -279,7 +289,7 @@ export class ReflectionRunner {
 
 /** The parts of the root dot service the reflection tools use. */
 interface ReflectionDotService {
-  searchHistory(input: { query: string; sessionId?: string; scope?: string; tools?: boolean; limit?: number }): Promise<string>
+  searchHistory(input: { query: string; sessionId?: string; scope?: string; tools?: boolean; limit?: number; since?: string; signal?: AbortSignal }): Promise<string>
   readHistory(input: { sessionId: string; seq?: number; before?: number; after?: number; tools?: boolean }): Promise<string>
   reflectionSubmit(ops: string, agreementNotes: string | undefined, sessionId: string): Promise<string>
 }
@@ -356,10 +366,11 @@ export function apply(ctx: Context): void {
       session_id: { type: 'string', description: 'Restrict search to one session id.' },
       tools: { type: 'boolean', description: 'Include tool calls and results; default false.' },
       limit: { type: 'integer', description: 'Maximum hits to return (default 12, max 40).' },
+      since: { type: 'string', description: 'Only sessions and messages at or after this time.' },
     },
     output: TEXT_OUTPUT,
     isConcurrencySafe: () => false,
-    execute: (args: unknown) => run(() => {
+    execute: (args: unknown, exec: { signal?: AbortSignal }) => run(() => {
       const limit = num(args, 'limit')
       return dot().searchHistory({
         query: str(args, 'query') ?? '',
@@ -367,6 +378,8 @@ export function apply(ctx: Context): void {
         ...str(args, 'session_id') ? { sessionId: str(args, 'session_id')! } : {},
         tools: bool(args, 'tools'),
         ...limit === undefined ? {} : { limit },
+        ...str(args, 'since') ? { since: str(args, 'since')! } : {},
+        ...exec.signal ? { signal: exec.signal } : {},
       })
     }),
     presentCall: () => ({ card: 'generic', title: 'Search history', kind: 'other' }),

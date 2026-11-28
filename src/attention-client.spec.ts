@@ -93,8 +93,10 @@ describe('createAttentionWatcher', () => {
     expect(log).toHaveBeenCalledTimes(1)
     expect(watcher.getSnapshot()).toBe(seeded)
 
+    // The second consecutive failure backs the next poll off to two intervals.
     fail = false
-    await vi.advanceTimersByTimeAsync(1000)
+    await vi.advanceTimersByTimeAsync(2000)
+    expect(log).toHaveBeenCalledTimes(1)
     fail = true
     await vi.advanceTimersByTimeAsync(1000)
     expect(log).toHaveBeenCalledTimes(2)
@@ -181,6 +183,48 @@ describe('createAttentionWatcher', () => {
     resolveFetch(view(item('a')))
     await flush()
     await vi.advanceTimersByTimeAsync(5000)
+    expect(fetch).toHaveBeenCalledTimes(1)
+  })
+
+  it('backs off consecutive failures exponentially and resets after a success', async () => {
+    let fail = true
+    const fetch = vi.fn(async () => { if (fail) throw new Error('down'); return view(item('a')) })
+    const watcher = createAttentionWatcher({ fetch, intervalMs: 1000, isAttended: () => false, notify: vi.fn() })
+    watcher.start()
+    await flush()
+    expect(fetch).toHaveBeenCalledTimes(1)
+
+    await vi.advanceTimersByTimeAsync(1_999)
+    expect(fetch).toHaveBeenCalledTimes(1)
+    await vi.advanceTimersByTimeAsync(1)
+    expect(fetch).toHaveBeenCalledTimes(2)
+    await vi.advanceTimersByTimeAsync(3_999)
+    expect(fetch).toHaveBeenCalledTimes(2)
+    await vi.advanceTimersByTimeAsync(1)
+    expect(fetch).toHaveBeenCalledTimes(3)
+
+    fail = false
+    await vi.advanceTimersByTimeAsync(8000)
+    expect(fetch).toHaveBeenCalledTimes(4)
+    fail = true
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(fetch).toHaveBeenCalledTimes(5)
+    watcher.stop()
+  })
+
+  it('stops polling on a fatal version-skew error', async () => {
+    const error = Object.assign(new Error('unknown endpoint: attention'), { code: 'not-found' })
+    const fetch = vi.fn(async () => { throw error })
+    const watcher = createAttentionWatcher({
+      fetch,
+      intervalMs: 1000,
+      isAttended: () => false,
+      notify: vi.fn(),
+      isFatal: value => value === error,
+    })
+    watcher.start()
+    await flush()
+    await vi.advanceTimersByTimeAsync(10_000)
     expect(fetch).toHaveBeenCalledTimes(1)
   })
 })

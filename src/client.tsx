@@ -46,7 +46,7 @@ type Client = Context & {
   remote?: { session?: { modelCatalog?: () => Promise<unknown> } }
 }
 
-type RpcReply<T> = { ok: true; value: T } | { ok: false; error: { message: string } }
+type RpcReply<T> = { ok: true; value: T } | { ok: false; error: { message: string; code?: string } }
 
 export function apply(ctx: Context): void {
   const client = ctx as Client
@@ -141,7 +141,14 @@ export function apply(ctx: Context): void {
       const rpc = client.connection?.rpc
       if (!rpc) throw new Error('connection unavailable')
       const reply = await rpc.call(RPC_CHANNEL, 'attention', {}, signal) as RpcReply<AttentionView>
-      if (!reply || reply.ok !== true) throw new Error(reply?.ok === false ? reply.error.message : 'rpc failed')
+      if (!reply || reply.ok !== true) {
+        const code = reply?.ok === false ? reply.error.code : undefined
+        const message = reply?.ok === false ? reply.error.message : 'rpc failed'
+        noteBackendError(code, message)
+        const error = new Error(message) as Error & { code?: string }
+        if (code !== undefined) error.code = code
+        throw error
+      }
       return reply.value
     },
     isAttended: () => document.visibilityState === 'visible' && document.hasFocus(),
@@ -166,6 +173,9 @@ export function apply(ctx: Context): void {
       }
     },
     log: error => logger.warn('attention.poll-failed', 'Dot attention poll failed.', error),
+    isFatal: error => (error as { code?: unknown; message?: unknown })?.code === 'not-found'
+      && typeof (error as { message?: unknown }).message === 'string'
+      && ((error as { message: string }).message).startsWith('unknown endpoint:'),
   })
   // Reuse the renderer, but keep every pending/reply request on dot's durable
   // asynchronous channel. The adapter runs once, so feed updates do not remount inputs.

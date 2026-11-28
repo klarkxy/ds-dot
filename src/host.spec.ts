@@ -649,3 +649,76 @@ describe('live agent backfill and unified managed session event stream', () => {
     expect(opts2.model).toBe('wd-model')
   })
 })
+
+describe('single-session lookup and session list caching', () => {
+  it('uses a live session header before persistence or the corpus list', async () => {
+    const host = bindHost(name => name === 'sessions'
+      ? { get: (id: string) => id === 's-live' ? { header: { cwd: 'H:\\repo', agentPreset: 'standard' } } : undefined }
+      : undefined)
+    await expect(host.findSession('s-live')).resolves.toEqual({ cwd: 'H:\\repo', preset: 'standard' })
+  })
+
+  it('uses persistence stat for one stored session and treats undefined as absent', async () => {
+    const stats: string[] = []
+    const persistence = {
+      stat: async (id: string, options?: { signal?: AbortSignal }) => {
+        stats.push(`${id}:${options?.signal instanceof AbortSignal}`)
+        return id === 's-old' ? { header: { cwd: 'H:\\old', agentPreset: 'standard' } } : undefined
+      },
+    }
+    const host = bindHost(name => name === 'sessionPersistence' ? persistence : undefined)
+    await expect(host.findSession('s-old')).resolves.toEqual({ cwd: 'H:\\old', preset: 'standard' })
+    await expect(host.findSession('s-missing')).resolves.toBeUndefined()
+    expect(stats).toEqual(['s-old:true', 's-missing:true'])
+  })
+
+  it('uses the corpus list fallback when the live registry misses and persistence is unavailable', async () => {
+    let lists = 0
+    const host = bindHost(name => {
+      if (name === 'sessions') return { get: () => undefined }
+      if (name === 'sessionController') return { list: async () => { lists++; return { items: [{ sessionId: 's-list', cwd: 'H:\\list', agentPreset: 'standard' }] } } }
+      return undefined
+    })
+    await expect(host.findSession('s-list')).resolves.toEqual({ cwd: 'H:\\list', preset: 'standard' })
+    await expect(host.findSession('s-absent')).resolves.toBeUndefined()
+    expect(lists).toBe(2)
+  })
+
+  it('shares an in-flight corpus list and caches mapped rows briefly', async () => {
+    let lists = 0
+    const host = bindHost(name => {
+      if (name === 'sessionController') return {
+        list: async () => {
+          lists++
+          await new Promise(resolve => setTimeout(resolve, 5))
+          return { items: [{ sessionId: 's', cwd: 'H:\\repo', running: false, updatedAt: 1 }] }
+        },
+      }
+      if (name === 'workspaceRegistry') return { archivedSessionIds: [] }
+      return undefined
+    })
+    const [a, b] = await Promise.all([
+      host.listSessions(AbortSignal.timeout(1_000)),
+      host.listSessions(AbortSignal.timeout(1_000)),
+    ])
+    expect(a).toHaveLength(1)
+    expect(b).toBe(a)
+    await host.listSessions(AbortSignal.timeout(1_000))
+    expect(lists).toBe(1)
+    await expect(host.listSessions(AbortSignal.abort())).rejects.toMatchObject({ name: 'AbortError' })
+  })
+
+  it('archives a half-created dot session when agent creation fails', async () => {
+    const archived: string[] = []
+    const host = bindHost(name => {
+      if (name === 'agents') return { create: async () => { throw new Error('mcp failed') } }
+      if (name === 'workspaceRegistry') return { archiveSession: async (id: string, options: { stopActivity?: boolean }) => { archived.push(`${id}:${options.stopActivity}`) } }
+      if (name === 'agentPresets') return { resolve: async (id: string) => ({ id }), mount: async () => {} }
+      if (name === 'agentDefaultModel') return { currentSelection: () => ({ provider: 'p', model: 'm' }) }
+      return undefined
+    })
+    await expect(host.createDot(join(tmpdir(), `dot-create-fail-${Date.now()}`), 'standard')).rejects.toThrow('mcp failed')
+    expect(archived).toHaveLength(1)
+    expect(archived[0]).toMatch(/^session-.*:true$/)
+  })
+})

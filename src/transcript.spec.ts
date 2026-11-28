@@ -26,6 +26,19 @@ describe('transcriptRows', () => {
     ])
   })
 
+  it('drops empty dot filler rows from the handoff', () => {
+    expect(transcriptRows([
+      human(1, 'continue'),
+      reply(2, '...'),
+      reply(3, '…'),
+      reply(4, 'No text.'),
+      reply(5, 'actual answer'),
+    ])).toEqual([
+      { role: 'human', text: 'continue', at: 1 },
+      { role: 'dot', text: 'actual answer', at: 5 },
+    ])
+  })
+
   it('hands a carried notice and the human words to the next segment separately', () => {
     const carried = '[dot notice] watched task finished'
     expect(transcriptRows([human(1, `${carried}\n\nplease check it`, { dshDot: { carriedChars: carried.length } })])).toEqual([

@@ -315,12 +315,12 @@ describe('4. Unknown creation/delivery recovery and human forceReleaseChange', (
     expect(book.run(res.run.id)?.creation).toBe('unknown')
 
     // Reconcile observes session is absent on host -> resets creation back to 'intent'
-    await reconcileReserved(book, minimalHost({ findSession: async () => undefined }), res.run.id)
+    await reconcileReserved(book, minimalHost({ findSession: async () => undefined }), res.run.id, 3)
     expect(book.run(res.run.id)?.creation).toBe('intent')
 
     // Even if cancelled while creation='unknown' and absent on host, cancelWork releases it!
-    await book.markCreation(res.run.id, 'unknown', 3)
-    const cancelled = await cancelWork(book, minimalHost({ findSession: async () => undefined }), change.id, 4)
+    await book.markCreation(res.run.id, 'unknown', 4)
+    const cancelled = await cancelWork(book, minimalHost({ findSession: async () => undefined }), change.id, 5)
     expect(cancelled).toMatchObject({ ok: true, runs: [{ id: res.run.id, released: true }] })
     expect(book.occupying()).toEqual([])
   })

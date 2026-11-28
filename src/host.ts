@@ -66,6 +66,8 @@ export interface DotHost {
   createSession(place: { workspaceId?: string; cwd?: string; preset?: string; sessionId?: string }): Promise<string>
   /** Seal one already-open session dot owns, once its agent is live. */
   prepareOwnedSession?(sessionId: string): Promise<void>
+  /** Seal one owned session only when its agent is already live; never resumes it. */
+  sealIfLive?(sessionId: string): void
   /** Read one ordinary session back. Undefined means it is not there. */
   findSession?(sessionId: string): Promise<{ cwd?: string; preset?: string } | undefined>
   /** Agent presets a session can run on, with the one a new session gets by default. */
@@ -333,6 +335,19 @@ export function bindHost(get: Get, log?: (message: string) => void, modelOf?: ()
   /** Incremental log scans of dot's sessions, so the context page reads only new events. */
   const scans = new Map<string, ContextScan>()
   const windows = new Map<string, number>()
+  let sessionListCache: { readonly at: number; readonly rows: SessionRow[] } | undefined
+  let sessionListFlight: Promise<SessionRow[]> | undefined
+  const raceSignal = <T,>(work: Promise<T>, signal: AbortSignal): Promise<T> => {
+    if (signal.aborted) return Promise.reject(signal.reason)
+    return new Promise<T>((resolve, reject) => {
+      const abort = () => reject(signal.reason)
+      signal.addEventListener('abort', abort, { once: true })
+      work.then(
+        value => { signal.removeEventListener('abort', abort); resolve(value) },
+        error => { signal.removeEventListener('abort', abort); reject(error) },
+      )
+    })
+  }
 
   const registryAgent = (sessionId: string): Agent | undefined => agents().get(sessionId as SessionId)
   /** Live agent of any session: dot's is read straight from the registry, since the controller refuses subagent-origin sessions. */
@@ -455,17 +470,28 @@ export function bindHost(get: Get, log?: (message: string) => void, modelOf?: ()
     listWorkspaces: () => registry().list().map(toRow),
     createWorkspace: async (path, title) => toRow(await registry().create(path, title)),
     async listSessions(signal) {
-      const archived = new Set(registry().archivedSessionIds ?? [])
-      const { items } = await controller().list({}, signal)
-      return items.map(item => ({
-        sessionId: String(item.sessionId),
-        ...typeof item.cwd === 'string' ? { cwd: item.cwd } : {},
-        running: item.running === true,
-        updatedAt: typeof item.updatedAt === 'number' ? item.updatedAt : 0,
-        blank: item.blank === true,
-        subagent: item.origin === 'subagent' || typeof item.parentSessionId === 'string',
-        archived: archived.has(String(item.sessionId)),
-      }))
+      const cached = sessionListCache
+      if (cached && Date.now() - cached.at < 3_000) return raceSignal(Promise.resolve(cached.rows), signal)
+      sessionListFlight ??= (async () => {
+        try {
+          const archived = new Set(registry().archivedSessionIds ?? [])
+          const { items } = await controller().list({}, AbortSignal.timeout(30_000))
+          const rows = items.map(item => ({
+            sessionId: String(item.sessionId),
+            ...typeof item.cwd === 'string' ? { cwd: item.cwd } : {},
+            running: item.running === true,
+            updatedAt: typeof item.updatedAt === 'number' ? item.updatedAt : 0,
+            blank: item.blank === true,
+            subagent: item.origin === 'subagent' || typeof item.parentSessionId === 'string',
+            archived: archived.has(String(item.sessionId)),
+          }))
+          sessionListCache = { at: Date.now(), rows }
+          return rows
+        } finally {
+          sessionListFlight = undefined
+        }
+      })()
+      return raceSignal(sessionListFlight, signal)
     },
     async titles(sessionIds, signal) {
       const out = new Map<string, string>()
@@ -491,6 +517,10 @@ export function bindHost(get: Get, log?: (message: string) => void, modelOf?: ()
     async prepareOwnedSession(sessionId) {
       if (!seal) return
       seal(await liveAgent(sessionId))
+    },
+    sealIfLive(sessionId) {
+      const agent = registryAgent(sessionId)
+      if (agent && seal) seal(agent)
     },
     async listPresets() {
       const registry = need<PresetRegistry>('agentPresets')
@@ -621,6 +651,20 @@ export function bindHost(get: Get, log?: (message: string) => void, modelOf?: ()
       }
     },
     async findSession(sessionId) {
+      const shaped = (header: { cwd?: unknown; agentPreset?: unknown } | undefined) => header === undefined ? undefined : {
+        ...(typeof header.cwd === 'string' ? { cwd: header.cwd } : {}),
+        ...(typeof header.agentPreset === 'string' ? { preset: header.agentPreset } : {}),
+      }
+      const liveSessions = get('sessions') as { get?(id: string): { header?: { cwd?: unknown; agentPreset?: unknown } } | undefined } | undefined
+      const live = typeof liveSessions?.get === 'function' ? liveSessions.get(sessionId) : undefined
+      const agentRegistry = get('agents') as AgentRegistry | undefined
+      const liveHeader = live?.header ?? agentRegistry?.get(sessionId as SessionId)?.session.header as { cwd?: unknown; agentPreset?: unknown } | undefined
+      if (liveHeader !== undefined) return shaped(liveHeader)
+      const persistence = get('sessionPersistence') as { stat?(id: string, options?: { signal?: AbortSignal }): Promise<{ header: { cwd?: unknown; agentPreset?: unknown } } | undefined> } | undefined
+      if (typeof persistence?.stat === 'function') {
+        const stored = await persistence.stat(sessionId, { signal: AbortSignal.timeout(10_000) })
+        return stored === undefined ? undefined : shaped(stored.header)
+      }
       const { items } = await controller().list({}, AbortSignal.timeout(10_000))
       const found = items.find(item => String(item.sessionId) === sessionId)
       if (!found) return undefined
@@ -746,7 +790,13 @@ export function bindHost(get: Get, log?: (message: string) => void, modelOf?: ()
       await mkdir(cwd, { recursive: true })
       const { id, setup } = await setupFor(preset, preset === REFLECTION_PRESET_ID ? REFLECTION_ALLOW : DOT_INHERITED_ALLOW)
       const sessionId = `session-${randomUUID()}` as SessionId
-      const handle = await agents().create({ sessionId, agentOptions: agentOptions(), meta: { cwd, origin: 'subagent', agentPreset: id }, setup })
+      let handle: AgentHandle
+      try {
+        handle = await agents().create({ sessionId, agentOptions: agentOptions(), meta: { cwd, origin: 'subagent', agentPreset: id }, setup })
+      } catch (error) {
+        try { await registry().archiveSession(sessionId, { stopActivity: true }).catch(() => {}) } catch { /* best effort */ }
+        throw error
+      }
       handles.set(sessionId, handle)
       // dot has no file or shell tools; its own calls never need a human approval.
       permit(handle.agent.session, FULL_ACCESS)
@@ -762,7 +812,13 @@ export function bindHost(get: Get, log?: (message: string) => void, modelOf?: ()
       // is provided (`null` = host default, `ModelChoice` = explicit override),
       // never inherit Dorothy's `store.settings.model`.
       const resolvedOptions = options?.model !== undefined ? explicitAgentOptions(options.model) : agentOptions()
-      const handle = await agents().create({ sessionId, agentOptions: resolvedOptions, meta: { cwd, origin: 'subagent', agentPreset: id }, setup })
+      let handle: AgentHandle
+      try {
+        handle = await agents().create({ sessionId, agentOptions: resolvedOptions, meta: { cwd, origin: 'subagent', agentPreset: id }, setup })
+      } catch (error) {
+        try { await registry().archiveSession(sessionId, { stopActivity: true }).catch(() => {}) } catch { /* best effort */ }
+        throw error
+      }
       handles.set(sessionId, handle)
       return sessionId
     },

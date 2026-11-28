@@ -34,6 +34,8 @@ export function clipTokens(text: string, budget: number): string {
   return text.slice(0, Math.max(1, Math.floor(text.length * budget / tokens))) + '…'
 }
 
+const DOT_NOISE = /^(?:No text\.|[\p{P}\p{S}\s]+)$/u
+
 /** Conversation rows of a session log, oldest first. */
 export function transcriptRows(events: Iterable<RawEvent>): TranscriptRow[] {
   const rows: TranscriptRow[] = []
@@ -52,7 +54,7 @@ export function transcriptRows(events: Iterable<RawEvent>): TranscriptRow[] {
       }
     } else if (event.type === 'assistant/message') {
       const text = textOf(rec(data.message)?.content).trim()
-      if (text) rows.push({ role: 'dot', text, at })
+      if (text && !DOT_NOISE.test(text)) rows.push({ role: 'dot', text, at })
     } else if (event.type === 'tool/result') {
       // A valid show_view card is dot speaking; a failed one contributes nothing.
       const text = cardText(data.meta)

@@ -32,7 +32,13 @@ export function defaultCacheTtl(provider: string, model: string): number {
 
 /** The human's per-model override wins; 0 disables keepalive for that model. */
 export function cacheTtlMinutes(settings: DotSettings, provider: string, model: string): number {
-  return settings.cacheTtl?.[cacheTtlKey(provider, model)] ?? defaultCacheTtl(provider, model)
+  const exact = settings.cacheTtl?.[cacheTtlKey(provider, model)]
+  if (exact !== undefined) return exact
+  const suffix = `/${model}`
+  for (const [key, minutes] of Object.entries(settings.cacheTtl ?? {})) {
+    if (key.endsWith(suffix)) return minutes
+  }
+  return defaultCacheTtl(provider, model)
 }
 
 /** Ping at 80% of the cache lifetime so the next request still lands inside it. */

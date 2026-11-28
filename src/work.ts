@@ -2104,10 +2104,28 @@ export class WorkBook {
       const run = this.runs.get(runId)
       if (!run) return { ok: false, code: 'missing', message: `unknown run ${runId}` }
       if (run.updatedAt !== seenUpdatedAt) return { ok: false, code: 'stale', message: `${runId} changed while it was stopping` }
-      if (run.phase !== 'settling') return { ok: false, code: 'closed-run', message: `${runId} is ${run.phase}` }
+      if (run.phase !== 'settling' && run.phase !== 'reserved') return { ok: false, code: 'closed-run', message: `${runId} is ${run.phase}` }
       const sent = run.actionClaim !== undefined || run.creation === 'confirmed' || run.creation === 'unknown' || run.creation === 'rejected' || run.creation === 'inflight' || run.deliveries.some(item => item.status === 'accepted' || item.status === 'unknown' || item.hostRequestId !== undefined)
       if (sent) return { ok: false, code: 'unknown', message: `${runId} may already have reached the host` }
       const next: RunRecord = { ...run, phase: 'stopped', closeReason: 'unsent', updatedAt: at }
+      await this.commit('runs', next.id, next)
+      this.runs.set(next.id, next)
+      this.currentRevision += 1
+      return { ok: true, phase: next.phase }
+    })
+  }
+
+  /** Release a rejected-identity settling run once the requested session is absent or read-only idle. */
+  releaseRejected(runId: string, seenUpdatedAt: number, at = Date.now()): Promise<{ readonly ok: true; readonly phase: RunPhase } | WorkRefusal> {
+    return this.exclusive(async () => {
+      const refused = this.recoveryRefusal()
+      if (refused) return refused
+      const run = this.runs.get(runId)
+      if (!run) return { ok: false, code: 'missing', message: `unknown run ${runId}` }
+      if (run.updatedAt !== seenUpdatedAt) return { ok: false, code: 'stale', message: `${runId} changed while it was stopping` }
+      if (run.phase !== 'settling' || run.creation !== 'rejected' || !run.closeIntent) return { ok: false, code: 'closed-run', message: `${runId} is ${run.phase}` }
+      if (this.liveSessionClaims.has(runId)) return { ok: false, code: 'unknown', message: `${runId} creation is still bound` }
+      const next: RunRecord = dropClaim({ ...run, phase: run.closeIntent, closeReason: 'identity-rejected', updatedAt: at })
       await this.commit('runs', next.id, next)
       this.runs.set(next.id, next)
       this.currentRevision += 1

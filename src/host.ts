@@ -322,6 +322,8 @@ async function settleOwnedJobs(get: Get, sessionId: string, factsOf: () => Promi
   } catch { return 'unknown' }
 }
 
+let sessionListSeq = 0
+
 /** @param modelOf - dot's chosen model, read on every model call; undefined follows the host default. */
 export function bindHost(get: Get, log?: (message: string) => void, modelOf?: () => ModelChoice | undefined, seal?: (agent: Agent) => void, capabilities?: DotCapabilities): DotHost {
   const need = <T,>(name: string): T => {
@@ -337,7 +339,7 @@ export function bindHost(get: Get, log?: (message: string) => void, modelOf?: ()
   /** Incremental log scans of dot's sessions, so the context page reads only new events. */
   const scans = new Map<string, ContextScan>()
   const windows = new Map<string, number>()
-  let sessionListCache: { readonly at: number; readonly rows: SessionRow[] } | undefined
+  let sessionListCache: { readonly at: number; readonly seq: number; readonly rows: SessionRow[] } | undefined
   let sessionListFlight: { readonly generation: number; readonly promise: Promise<SessionRow[]> } | undefined
   let sessionListGeneration = 0
   const invalidateSessionList = () => { sessionListGeneration++; sessionListCache = undefined; sessionListFlight = undefined }
@@ -496,7 +498,7 @@ export function bindHost(get: Get, log?: (message: string) => void, modelOf?: ()
       const cached = sessionListCache
       if (options?.fresh !== true && cached && Date.now() - cached.at < 3_000) return raceSignal(Promise.resolve(cached.rows), signal)
       const start = (generation: number) => (async () => {
-        const startedAt = Date.now()
+        const seq = ++sessionListSeq
         const { items } = await controller().list({}, AbortSignal.timeout(30_000))
         const archived = new Set(registry().archivedSessionIds ?? [])
         const rows = items.map(item => ({
@@ -508,7 +510,7 @@ export function bindHost(get: Get, log?: (message: string) => void, modelOf?: ()
           subagent: item.origin === 'subagent' || typeof item.parentSessionId === 'string',
           archived: archived.has(String(item.sessionId)),
         }))
-        if (sessionListGeneration === generation && (!sessionListCache || startedAt >= sessionListCache.at)) sessionListCache = { at: startedAt, rows }
+        if (sessionListGeneration === generation && (!sessionListCache || seq >= sessionListCache.seq)) sessionListCache = { at: Date.now(), seq, rows }
         return rows
       })()
       if (options?.fresh === true) return raceSignal(start(sessionListGeneration), signal)

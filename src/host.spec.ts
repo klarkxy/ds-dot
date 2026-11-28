@@ -790,7 +790,6 @@ describe('single-session lookup and session list caching', () => {
       return undefined
     })
     const oldList = host.listSessions(AbortSignal.timeout(1_000))
-    await new Promise(done => setTimeout(done, 5))
     const freshList = host.listSessions(AbortSignal.timeout(1_000), { fresh: true })
     releaseFresh()
     expect((await freshList)[0]?.sessionId).toBe('new')
@@ -798,6 +797,32 @@ describe('single-session lookup and session list caching', () => {
     expect((await oldList)[0]?.sessionId).toBe('old')
     expect((await host.listSessions(AbortSignal.timeout(1_000)))[0]?.sessionId).toBe('new')
     expect(lists).toBe(2)
+  })
+
+  it('starts the cache TTL when a slow list resolves, not when it starts', async () => {
+    vi.useFakeTimers()
+    try {
+      let lists = 0
+      const host = bindHost(name => {
+        if (name === 'sessionController') return {
+          list: async () => {
+            lists++
+            await new Promise(done => setTimeout(done, 5_000))
+            return { items: [{ sessionId: 'slow', cwd: 'H:\repo', running: true, updatedAt: 1 }] }
+          },
+        }
+        if (name === 'workspaceRegistry') return { archivedSessionIds: [] }
+        return undefined
+      })
+      const first = host.listSessions(new AbortController().signal)
+      await vi.advanceTimersByTimeAsync(5_000)
+      expect((await first)[0]?.sessionId).toBe('slow')
+      await vi.advanceTimersByTimeAsync(1_000)
+      expect((await host.listSessions(new AbortController().signal))[0]?.sessionId).toBe('slow')
+      expect(lists).toBe(1)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('archives a half-created dot session when agent creation fails', async () => {

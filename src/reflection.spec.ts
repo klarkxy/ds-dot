@@ -302,6 +302,20 @@ describe('buildReflectionInstruction', () => {
     expect(withRecipes).toContain('rcp-1 "weekly"')
     expect(withRecipes).toContain('dot_reflection_recipe_propose')
   })
+
+  it('lists active sessions and points history searches at the since cutoff', () => {
+    const at = Date.UTC(2026, 10, 28, 12)
+    const text = buildReflectionInstruction({
+      agreements: [], cognition: [], limit: 30, lastReflectedAt: at, now: at + 1,
+      sessions: [{ sessionId: 'session-run-8', what: 'Task "release"' }, { sessionId: 'dot-old', what: 'Your conversation, earlier session' }],
+    })
+    const since = new Date(at).toISOString()
+    expect(text).toContain(`Sessions with activity since ${since}`)
+    expect(text).toContain('- session-run-8 · Task "release"')
+    expect(text).toContain('Start with dot_read_history on these sessions.')
+    expect(text).toContain(`pass since="${since}"`)
+    expect(text).toContain('do not enumerate history with broad one-word searches')
+  })
 })
 
 describe('reflection preset tool row', () => {

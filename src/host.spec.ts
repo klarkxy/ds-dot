@@ -649,3 +649,193 @@ describe('live agent backfill and unified managed session event stream', () => {
     expect(opts2.model).toBe('wd-model')
   })
 })
+
+describe('single-session lookup and session list caching', () => {
+  it('uses a live session header before persistence or the corpus list', async () => {
+    const host = bindHost(name => name === 'sessions'
+      ? { get: (id: string) => id === 's-live' ? { header: { cwd: 'H:\\repo', agentPreset: 'standard' } } : undefined }
+      : undefined)
+    await expect(host.findSession('s-live')).resolves.toEqual({ cwd: 'H:\\repo', preset: 'standard' })
+  })
+
+  it('uses persistence stat for one stored session and treats undefined as absent', async () => {
+    const stats: string[] = []
+    const persistence = {
+      stat: async (id: string, options?: { signal?: AbortSignal }) => {
+        stats.push(`${id}:${options?.signal instanceof AbortSignal}`)
+        return id === 's-old' ? { header: { cwd: 'H:\\old', agentPreset: 'standard' } } : undefined
+      },
+    }
+    const host = bindHost(name => name === 'sessionPersistence' ? persistence : undefined)
+    await expect(host.findSession('s-old')).resolves.toEqual({ cwd: 'H:\\old', preset: 'standard' })
+    await expect(host.findSession('s-missing')).resolves.toBeUndefined()
+    expect(stats).toEqual(['s-old:true', 's-missing:true'])
+  })
+
+  it('uses the corpus list fallback when the live registry misses and persistence is unavailable', async () => {
+    let lists = 0
+    const host = bindHost(name => {
+      if (name === 'sessions') return { get: () => undefined }
+      if (name === 'sessionController') return { list: async () => { lists++; return { items: [{ sessionId: 's-list', cwd: 'H:\\list', agentPreset: 'standard' }] } } }
+      return undefined
+    })
+    await expect(host.findSession('s-list')).resolves.toEqual({ cwd: 'H:\\list', preset: 'standard' })
+    await expect(host.findSession('s-absent')).resolves.toBeUndefined()
+    expect(lists).toBe(2)
+  })
+
+  it('shares an in-flight corpus list and caches mapped rows briefly', async () => {
+    let lists = 0
+    const host = bindHost(name => {
+      if (name === 'sessionController') return {
+        list: async () => {
+          lists++
+          await new Promise(resolve => setTimeout(resolve, 5))
+          return { items: [{ sessionId: 's', cwd: 'H:\\repo', running: false, updatedAt: 1 }] }
+        },
+      }
+      if (name === 'workspaceRegistry') return { archivedSessionIds: [] }
+      return undefined
+    })
+    const [a, b] = await Promise.all([
+      host.listSessions(AbortSignal.timeout(1_000)),
+      host.listSessions(AbortSignal.timeout(1_000)),
+    ])
+    expect(a).toHaveLength(1)
+    expect(b).toBe(a)
+    await host.listSessions(AbortSignal.timeout(1_000))
+    expect(lists).toBe(1)
+    await expect(host.listSessions(AbortSignal.abort())).rejects.toMatchObject({ name: 'AbortError' })
+  })
+
+  it('reads archived ids after the corpus list and refreshes the cache after createSession', async () => {
+    const events: string[] = []
+    let lists = 0
+    const host = bindHost(name => {
+      if (name === 'sessionController') return {
+        list: async () => { events.push('list'); lists++; return { items: [{ sessionId: 's', cwd: 'H:\\repo', running: false, updatedAt: 1 }] } },
+        create: async () => ({ sessionId: 'created' }),
+      }
+      if (name === 'workspaceRegistry') return {
+        get archivedSessionIds() { events.push('archived'); return [] },
+      }
+      return undefined
+    })
+    await host.listSessions(AbortSignal.timeout(1_000))
+    await host.listSessions(AbortSignal.timeout(1_000))
+    expect(lists).toBe(1)
+    expect(events.slice(0, 2)).toEqual(['list', 'archived'])
+    await host.createSession({ cwd: 'H:\\repo' })
+    await host.listSessions(AbortSignal.timeout(1_000))
+    expect(lists).toBe(2)
+  })
+
+
+  it('fresh listings bypass the cache and an invalidated flight cannot rewrite it', async () => {
+    let lists = 0
+    let running = false
+    const host = bindHost(name => {
+      if (name === 'sessionController') return {
+        list: async () => { lists++; return { items: [{ sessionId: 's', cwd: 'H:\repo', running, updatedAt: 1 }] } },
+        create: async () => ({ sessionId: 'created' }),
+      }
+      if (name === 'workspaceRegistry') return { archivedSessionIds: [] }
+      return undefined
+    })
+    expect((await host.listSessions(AbortSignal.timeout(1_000)))[0]?.running).toBe(false)
+    running = true
+    expect((await host.listSessions(AbortSignal.timeout(1_000)))[0]?.running).toBe(false)
+    expect((await host.listSessions(AbortSignal.timeout(1_000), { fresh: true }))[0]?.running).toBe(true)
+    expect(lists).toBe(2)
+
+    let release!: () => void
+    const gate = new Promise<void>(done => { release = done })
+    let slowLists = 0
+    const slow = bindHost(name => {
+      if (name === 'sessionController') return {
+        list: async () => { slowLists++; if (slowLists === 1) await gate; return { items: [] } },
+        create: async () => ({ sessionId: 'created' }),
+      }
+      if (name === 'workspaceRegistry') return { archivedSessionIds: [] }
+      return undefined
+    })
+    const first = slow.listSessions(AbortSignal.timeout(1_000))
+    await new Promise(done => setTimeout(done, 0))
+    await slow.createSession({ cwd: 'H:\repo' })
+    release()
+    await first
+    await slow.listSessions(AbortSignal.timeout(1_000))
+    expect(slowLists).toBe(2)
+  })
+
+  it('does not let an older list overwrite a newer fresh result', async () => {
+    let lists = 0
+    let releaseOld!: () => void
+    let releaseFresh!: () => void
+    const oldGate = new Promise<void>(done => { releaseOld = done })
+    const freshGate = new Promise<void>(done => { releaseFresh = done })
+    const host = bindHost(name => {
+      if (name === 'sessionController') return {
+        list: async () => {
+          lists++
+          if (lists === 1) {
+            await oldGate
+            return { items: [{ sessionId: 'old', cwd: 'H:\repo', running: false, updatedAt: 1 }] }
+          }
+          await freshGate
+          return { items: [{ sessionId: 'new', cwd: 'H:\repo', running: true, updatedAt: 2 }] }
+        },
+      }
+      if (name === 'workspaceRegistry') return { archivedSessionIds: [] }
+      return undefined
+    })
+    const oldList = host.listSessions(AbortSignal.timeout(1_000))
+    const freshList = host.listSessions(AbortSignal.timeout(1_000), { fresh: true })
+    releaseFresh()
+    expect((await freshList)[0]?.sessionId).toBe('new')
+    releaseOld()
+    expect((await oldList)[0]?.sessionId).toBe('old')
+    expect((await host.listSessions(AbortSignal.timeout(1_000)))[0]?.sessionId).toBe('new')
+    expect(lists).toBe(2)
+  })
+
+  it('starts the cache TTL when a slow list resolves, not when it starts', async () => {
+    vi.useFakeTimers()
+    try {
+      let lists = 0
+      const host = bindHost(name => {
+        if (name === 'sessionController') return {
+          list: async () => {
+            lists++
+            await new Promise(done => setTimeout(done, 5_000))
+            return { items: [{ sessionId: 'slow', cwd: 'H:\repo', running: true, updatedAt: 1 }] }
+          },
+        }
+        if (name === 'workspaceRegistry') return { archivedSessionIds: [] }
+        return undefined
+      })
+      const first = host.listSessions(new AbortController().signal)
+      await vi.advanceTimersByTimeAsync(5_000)
+      expect((await first)[0]?.sessionId).toBe('slow')
+      await vi.advanceTimersByTimeAsync(1_000)
+      expect((await host.listSessions(new AbortController().signal))[0]?.sessionId).toBe('slow')
+      expect(lists).toBe(1)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('archives a half-created dot session when agent creation fails', async () => {
+    const archived: string[] = []
+    const host = bindHost(name => {
+      if (name === 'agents') return { create: async () => { throw new Error('mcp failed') } }
+      if (name === 'workspaceRegistry') return { archiveSession: async (id: string, options: { stopActivity?: boolean }) => { archived.push(`${id}:${options.stopActivity}`) } }
+      if (name === 'agentPresets') return { resolve: async (id: string) => ({ id }), mount: async () => {} }
+      if (name === 'agentDefaultModel') return { currentSelection: () => ({ provider: 'p', model: 'm' }) }
+      return undefined
+    })
+    await expect(host.createDot(join(tmpdir(), `dot-create-fail-${Date.now()}`), 'standard')).rejects.toThrow('mcp failed')
+    expect(archived).toHaveLength(1)
+    expect(archived[0]).toMatch(/^session-.*:true$/)
+  })
+})

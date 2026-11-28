@@ -242,6 +242,39 @@ describe('DotService asynchronous card replies', () => {
   })
 })
 
+describe('watched session retirement', () => {
+  const row = (sessionId: string) => ({ sessionId, running: false, updatedAt: 1, blank: false, subagent: false, archived: false })
+
+  it('rechecks fresh rows before retiring a watch missing from a stale list', async () => {
+    const h = setup()
+    const calls: Array<boolean | undefined> = []
+    let includeWatch = false
+    h.host.listSessions = async (_signal, options) => {
+      calls.push(options?.fresh)
+      return options?.fresh === true && includeWatch ? [row('session-b')] : []
+    }
+    await h.service.watch('session-b', 'keep an eye')
+    includeWatch = true
+    await h.service.syncWatched()
+    expect(h.store.task('session-b')).toMatchObject({ origin: 'watched' })
+    expect(h.store.task('session-b')?.status).not.toBe('archived')
+    expect(calls).toEqual([undefined, true])
+  })
+
+  it('still retires a genuinely missing watch after the fresh recheck', async () => {
+    const h = setup()
+    const calls: Array<boolean | undefined> = []
+    h.host.listSessions = async (_signal, options) => {
+      calls.push(options?.fresh)
+      return []
+    }
+    await h.service.watch('missing-watch', 'keep an eye')
+    await h.service.syncWatched()
+    expect(h.store.task('missing-watch')?.status).toBe('archived')
+    expect(calls).toEqual([undefined, true])
+  })
+})
+
 describe('DotService.ensureDot', () => {
   it('creates dot once under its own preset and resumes it afterwards', async () => {
     const h = setup()
@@ -258,6 +291,33 @@ describe('DotService.ensureDot', () => {
     const second = await h.service.ensureDot()
     expect(second).not.toBe(first)
     expect(h.store.dotSessionId).toBe(second)
+  })
+
+  it('backs off a failed create for 30 seconds instead of leaking one session per retry', async () => {
+    const h = setup()
+    h.failCreate(true)
+    await expect(h.service.ensureDot()).rejects.toThrow('no session for you')
+    const creates = h.calls.filter(call => call.startsWith('create-dot')).length
+    await expect(h.service.ensureDot()).rejects.toThrow('no session for you')
+    expect(h.calls.filter(call => call.startsWith('create-dot'))).toHaveLength(creates)
+    h.advance(29_999)
+    await expect(h.service.ensureDot()).rejects.toThrow('no session for you')
+    expect(h.calls.filter(call => call.startsWith('create-dot'))).toHaveLength(creates)
+    h.advance(1)
+    h.failCreate(false)
+    await expect(h.service.ensureDot()).resolves.toMatch(/^dot/)
+    expect(h.calls.filter(call => call.startsWith('create-dot'))).toHaveLength(creates + 1)
+  })
+
+  it('drops a cached create failure when settings change', async () => {
+    const h = setup()
+    h.failCreate(true)
+    await expect(h.service.ensureDot()).rejects.toThrow('no session for you')
+    const creates = h.calls.filter(call => call.startsWith('create-dot')).length
+    h.failCreate(false)
+    await h.service.settingsChanged()
+    await expect(h.service.ensureDot()).resolves.toMatch(/^dot/)
+    expect(h.calls.filter(call => call.startsWith('create-dot'))).toHaveLength(creates + 1)
   })
 
   it("delivers the human's chat message to dot", async () => {
@@ -288,6 +348,51 @@ describe('DotService.ensureDot', () => {
     h.advance(CHAT_FILE_RECEIPT_TTL_MS + 1)
     await expect(h.service.say('expired', undefined, [], [receipt.id])).rejects.toMatchObject({ code: 'dot/file-expired' })
     await expect(h.service.say('duplicate', undefined, [], [receipt.id, receipt.id])).rejects.toMatchObject({ code: 'invalid' })
+  })
+})
+
+describe('DotService startup sealing', () => {
+  it('resumes only sessions that still need dot and only seals terminal sessions that are already live', async () => {
+    const h = setup()
+    const activeChange = await h.store.work.createChange({ title: 'active', cwd: '/proj', goal: 'go', at: 1 })
+    const activeReserved = await h.store.work.reserveRun({ changeId: activeChange.id, cwd: '/proj', writeScope: { kind: 'paths', paths: [] }, at: 2 })
+    if (!activeReserved.ok) throw new Error(activeReserved.message)
+    const activeConfirmed = await h.store.work.confirmSession(activeReserved.run.id, { sessionId: activeReserved.run.requestedSessionId, cwd: '/proj' }, 3)
+    expect(activeConfirmed.ok).toBe(true)
+
+    const rejectedChange = await h.store.work.createChange({ title: 'rejected', cwd: '/proj', goal: 'go', at: 4 })
+    const rejectedReserved = await h.store.work.reserveRun({ changeId: rejectedChange.id, cwd: '/proj', writeScope: { kind: 'paths', paths: [] }, at: 5 })
+    if (!rejectedReserved.ok) throw new Error(rejectedReserved.message)
+    const rejected = await h.store.work.confirmSession(rejectedReserved.run.id, { sessionId: rejectedReserved.run.requestedSessionId, cwd: '/elsewhere' }, 6)
+    expect(rejected.ok).toBe(true)
+    expect('run' in rejected && rejected.run.sessionId).toBe(rejectedReserved.run.requestedSessionId)
+    const rejectedClose = await h.store.work.prepareFinish(rejectedReserved.run.id, 'stopped', 7)
+    expect(rejectedClose.ok).toBe(true)
+
+    const doneChange = await h.store.work.createChange({ title: 'done', cwd: '/proj', goal: 'go', at: 8 })
+    const doneReserved = await h.store.work.reserveRun({ changeId: doneChange.id, cwd: '/proj', writeScope: { kind: 'paths', paths: [] }, at: 9 })
+    if (!doneReserved.ok) throw new Error(doneReserved.message)
+    const confirmed = await h.store.work.confirmSession(doneReserved.run.id, { sessionId: doneReserved.run.requestedSessionId, cwd: '/proj' }, 10)
+    expect(confirmed.ok).toBe(true)
+    const prepared = await h.store.work.prepareFinish(doneReserved.run.id, 'stopped', 11)
+    expect(prepared.ok).toBe(true)
+    const finished = await h.store.work.finishSettled(doneReserved.run.id, 11, 'stopped', { queueCleared: true, agentIdle: true, jobsSettled: true }, 12)
+    expect(finished.ok).toBe(true)
+
+    await h.store.track({ sessionId: 'task-running', origin: 'started', title: 'started', goal: 'g', cwd: '/w', at: 13 })
+    await h.store.apply({ type: 'status', sessionId: 'task-running', status: 'running', at: 14 }, [])
+
+    const preparedIds: string[] = []
+    const liveOnly: string[] = []
+    h.host.prepareOwnedSession = async sessionId => { preparedIds.push(sessionId) }
+    h.host.sealIfLive = sessionId => { liveOnly.push(sessionId) }
+    await h.service.sealExisting()
+    expect(preparedIds).toEqual(expect.arrayContaining([activeReserved.run.requestedSessionId, 'task-running']))
+    expect(preparedIds).not.toContain(doneReserved.run.requestedSessionId)
+    expect(preparedIds).not.toContain(rejectedReserved.run.requestedSessionId)
+    expect(liveOnly).toContain(doneReserved.run.requestedSessionId)
+    expect(liveOnly).toContain(rejectedReserved.run.requestedSessionId)
+    expect(liveOnly).not.toContain(activeReserved.run.requestedSessionId)
   })
 })
 
@@ -568,6 +673,7 @@ describe('DotService cache keepalive', () => {
     const dot = await h.service.ensureDot()
     h.events.set(dot, [human('a', 10), reply('b', 20)])
     await h.store.track({ sessionId: 'task1', origin: 'watched', title: 'watched', goal: 'g', cwd: '/w', at: 1 })
+    h.running.add('task1')
     await h.store.apply({ type: 'status', sessionId: 'task1', status: 'running', at: 2 }, [])
     await h.service.onDotIdle(dot)
     return dot
@@ -708,6 +814,29 @@ describe('DotService cache keepalive', () => {
     expect(h.pings).toEqual([])
   })
 
+  it('does not arm on a stale running status when the host says the task is not running', async () => {
+    const h = setup()
+    const dot = await h.service.ensureDot()
+    h.events.set(dot, [human('a', 10), reply('b', 20)])
+    await h.store.track({ sessionId: 'task1', origin: 'watched', title: 'watched', goal: 'g', cwd: '/w', at: 1 })
+    await h.store.apply({ type: 'status', sessionId: 'task1', status: 'running', at: 2 }, [])
+    await h.service.onDotIdle(dot)
+    expect(h.delays()).not.toContain(240_000)
+    await tick(h)
+    expect(h.pings).toEqual([])
+  })
+
+  it('reconciles a stale running task back to idle when its session is not running', async () => {
+    const h = setup()
+    await h.store.track({ sessionId: 'task1', origin: 'started', title: 'started', goal: 'g', cwd: '/w', at: 1 })
+    h.running.add('task1')
+    await h.store.apply({ type: 'status', sessionId: 'task1', status: 'running', at: 2 }, [])
+    expect(h.store.list()[0]?.status).toBe('running')
+    h.running.delete('task1')
+    await h.service.reconcileNow()
+    expect(h.store.list()[0]?.status).toBe('idle')
+  })
+
   it('stops when dot is running at the tick', async () => {
     const h = setup()
     const dot = await arm(h)
@@ -846,6 +975,46 @@ describe('DotService history', () => {
     expect(all).toContain(first)
     await expect(h.service.searchHistory({ query: 'friday', sessionId: task })).rejects.toMatchObject({ code: 'dot/unknown-session' })
     await expect(h.service.readHistory({ sessionId: task })).rejects.toMatchObject({ code: 'dot/unknown-session' })
+  })
+
+  it('filters history hits and sessions with since, and rejects a malformed since', async () => {
+    const { h, first, task } = await threeSessions()
+    const since = new Date(35).toISOString()
+    const all = await h.service.searchHistory({ query: 'friday', since })
+    expect(all).toContain('Assistant: the friday build is green')
+    expect(all).not.toContain('Human: ship v2 on friday')
+    expect(all).toContain(`· ${task}`)
+    expect(all).not.toContain(`· ${first}`)
+    const explicit = await h.service.searchHistory({ query: 'friday', sessionId: first, since })
+    expect(explicit).toContain('Nothing found for "friday" (1 session(s) searched)')
+    await h.store.track({ sessionId: 'running-old', origin: 'started', title: 'running old', goal: 'g', cwd: '/w', at: 1 })
+    await h.store.apply({ type: 'status', sessionId: 'running-old', status: 'running', at: 2 }, [])
+    h.events.set('running-old', [human('friday still running', 40)])
+    expect(await h.service.searchHistory({ query: 'friday', since })).toContain('· running-old')
+    await expect(h.service.searchHistory({ query: 'friday', since: 'yesterday' })).rejects.toMatchObject({ code: 'dot/invalid' })
+  })
+
+  it('honours an abort signal before reading another batch', async () => {
+    const { h } = await threeSessions()
+    const controller = new AbortController()
+    controller.abort()
+    await expect(h.service.searchHistory({ query: 'friday', signal: controller.signal })).rejects.toMatchObject({ name: 'AbortError' })
+  })
+
+  it('honours an abort that lands while the final batch is being read', async () => {
+    const h = setup()
+    for (let index = 0; index < 9; index++) {
+      const sessionId = `s-${index}`
+      await h.store.track({ sessionId, origin: 'started', title: sessionId, goal: 'g', cwd: '/w', at: index + 1 })
+      h.events.set(sessionId, [human('friday', 40)])
+    }
+    const readEvents = h.host.readEvents.bind(h.host)
+    const controller = new AbortController()
+    h.host.readEvents = async sessionId => {
+      if (sessionId === 's-8') controller.abort()
+      return readEvents(sessionId)
+    }
+    await expect(h.service.searchHistory({ query: 'friday', signal: controller.signal })).rejects.toMatchObject({ name: 'AbortError' })
   })
 
   it('reads an earlier segment back word for word', async () => {
@@ -1246,6 +1415,29 @@ describe('DotService knowledge', () => {
   })
 })
 
+
+describe('reflection session guidance', () => {
+  it('caps the sessions listed to the newest 50', async () => {
+    const h = setup({ reflection: true })
+    await h.service.ensureDot()
+    await h.store.beginSegment({ ...h.store.segment!, sessionId: 'dot-current', startedAt: 1020 }, { reason: 'segmented' })
+    await h.store.noteConversation(1000)
+    for (let index = 0; index < 60; index++) {
+      await h.store.track({ sessionId: `task-${index}`, origin: 'started', title: `t${index}`, goal: 'g', cwd: '/w', at: 1021 + index })
+    }
+    h.advance(24 * 60 * 60_000)
+    let instruction = ''
+    h.reflectionHooks.promptHook = async (_sessionId, text) => { instruction = text }
+    expect(await h.service.reflection.tick()).toBe(true)
+    await vi.waitFor(() => expect(instruction).not.toBe(''))
+    const listed = instruction.split('\n').filter(line => /^- \S+ · /.test(line))
+    expect(listed).toHaveLength(50)
+    expect(instruction).toContain('- task-59 · Task "t59"')
+    expect(instruction).not.toContain('- task-10 · Task "t10"')
+    expect(instruction).not.toContain('Your conversation, earlier session')
+    await h.service.reflection.dispose()
+  })
+})
 
 describe('DotService background reflection delivery', () => {
   it('carries a pending agreement note once with the next human message and clears it', async () => {
@@ -2309,6 +2501,24 @@ describe('DotService work dispatch', () => {
     expect(loop.store.work.latestVerification(changeId)).toBeUndefined()
     rmSync(dir, { recursive: true, force: true })
     rmSync(home, { recursive: true, force: true })
+  })
+
+  it('uses a fresh session list when a running human session blocks the write scope', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'dot-fresh-scope-home-'))
+    const h = setup(undefined, undefined, home)
+    const dir = mkdtempSync(join(tmpdir(), 'dot-fresh-scope-'))
+    const calls: Array<boolean | undefined> = []
+    h.host.listSessions = async (_signal, options) => {
+      calls.push(options?.fresh)
+      return options?.fresh === true
+        ? [{ sessionId: 'human', cwd: dir, running: true, updatedAt: 1, blank: false, subagent: false, archived: false }]
+        : [{ sessionId: 'human', cwd: dir, running: false, updatedAt: 1, blank: false, subagent: false, archived: false }]
+    }
+    try {
+      const created = JSON.parse(await h.service.manageTask({ action: 'create', title: 'Ship', goal: 'land', dir })) as { id: string }
+      await expect(h.service.manageTask({ action: 'dispatch', task_id: created.id, message: 'go', access: 'write' })).rejects.toThrow(/RUNNING|locked|blocked/)
+      expect(calls).toContain(true)
+    } finally { await h.service.dispose(); rmSync(dir, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }) }
   })
 
   it('stops work dispatches after three failed rounds on one input revision', async () => {

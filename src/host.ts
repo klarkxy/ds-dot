@@ -60,12 +60,14 @@ export interface SessionRow {
 export interface DotHost {
   listWorkspaces(): WorkspaceRow[]
   createWorkspace(path: string, title?: string): Promise<WorkspaceRow>
-  listSessions(signal: AbortSignal): Promise<SessionRow[]>
+  listSessions(signal: AbortSignal, options?: { fresh?: boolean }): Promise<SessionRow[]>
   titles(sessionIds: readonly string[], signal: AbortSignal): Promise<Map<string, string>>
   /** Open a top-level session. `sessionId` is the id reserved before the call. */
   createSession(place: { workspaceId?: string; cwd?: string; preset?: string; sessionId?: string }): Promise<string>
   /** Seal one already-open session dot owns, once its agent is live. */
   prepareOwnedSession?(sessionId: string): Promise<void>
+  /** Seal one owned session only when its agent is already live; never resumes it. */
+  sealIfLive?(sessionId: string): void
   /** Read one ordinary session back. Undefined means it is not there. */
   findSession?(sessionId: string): Promise<{ cwd?: string; preset?: string } | undefined>
   /** Agent presets a session can run on, with the one a new session gets by default. */
@@ -109,6 +111,8 @@ export interface DotHost {
   stopActivity?(sessionId: string): Promise<{ cancelAccepted: boolean; queueCleared: boolean; idle: boolean; jobsSettled: boolean | 'unknown' }>
   /** One passive state read. A null queue stays `unknown`; it is not an empty queue. */
   watchSession?(sessionId: string): Promise<{ seq?: number; running?: boolean; queue?: 'empty' | 'pending' | 'unknown'; idle?: boolean }>
+  /** Read-only background-job settlement fact; never kills or waits a job. */
+  jobsSettled?(sessionId: string): Promise<boolean | 'unknown'>
   /** Text of the latest assistant output, or undefined when none is readable. */
   latestReply(sessionId: string, maxChars: number): Promise<string | undefined>
   cwdOf(sessionId: string): Promise<string | undefined>
@@ -318,6 +322,8 @@ async function settleOwnedJobs(get: Get, sessionId: string, factsOf: () => Promi
   } catch { return 'unknown' }
 }
 
+let sessionListSeq = 0
+
 /** @param modelOf - dot's chosen model, read on every model call; undefined follows the host default. */
 export function bindHost(get: Get, log?: (message: string) => void, modelOf?: () => ModelChoice | undefined, seal?: (agent: Agent) => void, capabilities?: DotCapabilities): DotHost {
   const need = <T,>(name: string): T => {
@@ -333,6 +339,21 @@ export function bindHost(get: Get, log?: (message: string) => void, modelOf?: ()
   /** Incremental log scans of dot's sessions, so the context page reads only new events. */
   const scans = new Map<string, ContextScan>()
   const windows = new Map<string, number>()
+  let sessionListCache: { readonly at: number; readonly seq: number; readonly rows: SessionRow[] } | undefined
+  let sessionListFlight: { readonly generation: number; readonly promise: Promise<SessionRow[]> } | undefined
+  let sessionListGeneration = 0
+  const invalidateSessionList = () => { sessionListGeneration++; sessionListCache = undefined; sessionListFlight = undefined }
+  const raceSignal = <T,>(work: Promise<T>, signal: AbortSignal): Promise<T> => {
+    if (signal.aborted) return Promise.reject(signal.reason)
+    return new Promise<T>((resolve, reject) => {
+      const abort = () => reject(signal.reason)
+      signal.addEventListener('abort', abort, { once: true })
+      work.then(
+        value => { signal.removeEventListener('abort', abort); resolve(value) },
+        error => { signal.removeEventListener('abort', abort); reject(error) },
+      )
+    })
+  }
 
   const registryAgent = (sessionId: string): Agent | undefined => agents().get(sessionId as SessionId)
   /** Live agent of any session: dot's is read straight from the registry, since the controller refuses subagent-origin sessions. */
@@ -451,21 +472,58 @@ export function bindHost(get: Get, log?: (message: string) => void, modelOf?: ()
     return assembler.blocks().map(block => { const row = block as { type?: string; text?: unknown }; return row.type === 'text' && typeof row.text === 'string' ? row.text : '' }).join('')
   }
 
+  const jobFactsOf = async (sessionId: string) => {
+    const facts = new Map<string, JobFact>()
+    try {
+      const stored = await query().readSession(sessionId) as { events?: readonly { type?: string; data?: { jobId?: string; owner?: string; producerReported?: boolean } }[] }
+      for (const event of stored.events ?? []) {
+        const jobId = event.data?.jobId
+        const owner = event.data?.owner
+        if (typeof jobId !== 'string' || owner !== sessionId) continue
+        if (event.type === 'job/registered') {
+          const previous = facts.get(jobId)
+          facts.set(jobId, { owner, settled: previous?.settled ?? false, ...(previous?.producerReported !== undefined ? { producerReported: previous.producerReported } : {}) })
+        } else if (event.type === 'job/settled' && typeof event.data?.producerReported === 'boolean') {
+          facts.set(jobId, { owner, settled: true, producerReported: event.data.producerReported })
+        }
+      }
+    } catch { return undefined }
+    return facts
+  }
+
   return {
     listWorkspaces: () => registry().list().map(toRow),
     createWorkspace: async (path, title) => toRow(await registry().create(path, title)),
-    async listSessions(signal) {
-      const archived = new Set(registry().archivedSessionIds ?? [])
-      const { items } = await controller().list({}, signal)
-      return items.map(item => ({
-        sessionId: String(item.sessionId),
-        ...typeof item.cwd === 'string' ? { cwd: item.cwd } : {},
-        running: item.running === true,
-        updatedAt: typeof item.updatedAt === 'number' ? item.updatedAt : 0,
-        blank: item.blank === true,
-        subagent: item.origin === 'subagent' || typeof item.parentSessionId === 'string',
-        archived: archived.has(String(item.sessionId)),
-      }))
+    async listSessions(signal, options) {
+      const cached = sessionListCache
+      if (options?.fresh !== true && cached && Date.now() - cached.at < 3_000) return raceSignal(Promise.resolve(cached.rows), signal)
+      const start = (generation: number) => (async () => {
+        const seq = ++sessionListSeq
+        const { items } = await controller().list({}, AbortSignal.timeout(30_000))
+        const archived = new Set(registry().archivedSessionIds ?? [])
+        const rows = items.map(item => ({
+          sessionId: String(item.sessionId),
+          ...typeof item.cwd === 'string' ? { cwd: item.cwd } : {},
+          running: item.running === true,
+          updatedAt: typeof item.updatedAt === 'number' ? item.updatedAt : 0,
+          blank: item.blank === true,
+          subagent: item.origin === 'subagent' || typeof item.parentSessionId === 'string',
+          archived: archived.has(String(item.sessionId)),
+        }))
+        if (sessionListGeneration === generation && (!sessionListCache || seq >= sessionListCache.seq)) sessionListCache = { at: Date.now(), seq, rows }
+        return rows
+      })()
+      if (options?.fresh === true) return raceSignal(start(sessionListGeneration), signal)
+      if (!sessionListFlight) {
+        const generation = sessionListGeneration
+        let promise!: Promise<SessionRow[]>
+        promise = start(generation)
+        promise = promise.finally(() => {
+          if (sessionListFlight?.promise === promise) sessionListFlight = undefined
+        })
+        sessionListFlight = { generation, promise }
+      }
+      return raceSignal(sessionListFlight.promise, signal)
     },
     async titles(sessionIds, signal) {
       const out = new Map<string, string>()
@@ -484,6 +542,7 @@ export function bindHost(get: Get, log?: (message: string) => void, modelOf?: ()
         ...(place.workspaceId ? { workspaceId: place.workspaceId } : { cwd: place.cwd }),
         ...(place.preset ? { agentPreset: place.preset } : {}),
       })
+      invalidateSessionList()
       // Seal before the caller prompts. A session with no live agent is not returned as ready.
       if (seal) seal(await liveAgent(created.sessionId))
       return created.sessionId
@@ -491,6 +550,10 @@ export function bindHost(get: Get, log?: (message: string) => void, modelOf?: ()
     async prepareOwnedSession(sessionId) {
       if (!seal) return
       seal(await liveAgent(sessionId))
+    },
+    sealIfLive(sessionId) {
+      const agent = registryAgent(sessionId)
+      if (agent && seal) seal(agent)
     },
     async listPresets() {
       const registry = need<PresetRegistry>('agentPresets')
@@ -621,6 +684,20 @@ export function bindHost(get: Get, log?: (message: string) => void, modelOf?: ()
       }
     },
     async findSession(sessionId) {
+      const shaped = (header: { cwd?: unknown; agentPreset?: unknown } | undefined) => header === undefined ? undefined : {
+        ...(typeof header.cwd === 'string' ? { cwd: header.cwd } : {}),
+        ...(typeof header.agentPreset === 'string' ? { preset: header.agentPreset } : {}),
+      }
+      const liveSessions = get('sessions') as { get?(id: string): { header?: { cwd?: unknown; agentPreset?: unknown } } | undefined } | undefined
+      const live = typeof liveSessions?.get === 'function' ? liveSessions.get(sessionId) : undefined
+      const agentRegistry = get('agents') as AgentRegistry | undefined
+      const liveHeader = live?.header ?? agentRegistry?.get(sessionId as SessionId)?.session?.header as { cwd?: unknown; agentPreset?: unknown } | undefined
+      if (liveHeader !== undefined) return shaped(liveHeader)
+      const persistence = get('sessionPersistence') as { stat?(id: string, options?: { signal?: AbortSignal }): Promise<{ header: { cwd?: unknown; agentPreset?: unknown } } | undefined> } | undefined
+      if (typeof persistence?.stat === 'function') {
+        const stored = await persistence.stat(sessionId, { signal: AbortSignal.timeout(10_000) })
+        return stored === undefined ? undefined : shaped(stored.header)
+      }
       const { items } = await controller().list({}, AbortSignal.timeout(10_000))
       const found = items.find(item => String(item.sessionId) === sessionId)
       if (!found) return undefined
@@ -684,24 +761,7 @@ export function bindHost(get: Get, log?: (message: string) => void, modelOf?: ()
           } finally { if (timer !== undefined) clearTimeout(timer) }
         }
       } catch { /* failed lookup, cancellation, or wait cannot prove idle */ }
-      const jobsSettled = await settleOwnedJobs(get, sessionId, async () => {
-        const facts = new Map<string, JobFact>()
-        try {
-          const stored = await query().readSession(sessionId) as { events?: readonly { type?: string; data?: { jobId?: string; owner?: string; producerReported?: boolean } }[] }
-          for (const event of stored.events ?? []) {
-            const jobId = event.data?.jobId
-            const owner = event.data?.owner
-            if (typeof jobId !== 'string' || owner !== sessionId) continue
-            if (event.type === 'job/registered') {
-              const previous = facts.get(jobId)
-              facts.set(jobId, { owner, settled: previous?.settled ?? false, ...(previous?.producerReported !== undefined ? { producerReported: previous.producerReported } : {}) })
-            } else if (event.type === 'job/settled' && typeof event.data?.producerReported === 'boolean') {
-              facts.set(jobId, { owner, settled: true, producerReported: event.data.producerReported })
-            }
-          }
-        } catch { return undefined }
-        return facts
-      })
+      const jobsSettled = await settleOwnedJobs(get, sessionId, () => jobFactsOf(sessionId))
       // Only a post-settlement sample and the same registry entry prove this stop.
       let queueCleared = false
       let idle = false
@@ -728,6 +788,23 @@ export function bindHost(get: Get, log?: (message: string) => void, modelOf?: ()
         return { queue, seq: state.cursor, running: state.running, idle: !state.running }
       } catch { return { queue: 'unknown' as const } }
     },
+    async jobsSettled(sessionId) {
+      const jobs = get('jobs') as JobsApi | undefined
+      if (typeof jobs?.list !== 'function') return 'unknown'
+      const terminal = (status?: string) => status === 'completed' || status === 'killed' || status === 'failed'
+      try {
+        const rows = jobs.list(sessionId).filter(row => row.owner === sessionId)
+        if (rows.some(row => !row.id || !terminal(row.status))) return false
+        const facts = await jobFactsOf(sessionId)
+        if (!facts) return 'unknown'
+        const ids = new Set<string>([...rows.map(row => row.id ?? ''), ...facts.keys()].filter(id => id.length > 0))
+        for (const id of ids) {
+          const fact = facts.get(id)
+          if (!fact?.settled || fact.producerReported !== true) return false
+        }
+        return true
+      } catch { return 'unknown' }
+    },
     async latestReply(sessionId, maxChars) {
       const log = await query().readSession(sessionId)
       for (let index = log.events.length - 1; index >= 0; index--) {
@@ -746,7 +823,14 @@ export function bindHost(get: Get, log?: (message: string) => void, modelOf?: ()
       await mkdir(cwd, { recursive: true })
       const { id, setup } = await setupFor(preset, preset === REFLECTION_PRESET_ID ? REFLECTION_ALLOW : DOT_INHERITED_ALLOW)
       const sessionId = `session-${randomUUID()}` as SessionId
-      const handle = await agents().create({ sessionId, agentOptions: agentOptions(), meta: { cwd, origin: 'subagent', agentPreset: id }, setup })
+      let handle: AgentHandle
+      try {
+        handle = await agents().create({ sessionId, agentOptions: agentOptions(), meta: { cwd, origin: 'subagent', agentPreset: id }, setup })
+      } catch (error) {
+        try { await registry().archiveSession(sessionId, { stopActivity: true }).catch(() => {}) } catch { /* best effort */ }
+        throw error
+      }
+      invalidateSessionList()
       handles.set(sessionId, handle)
       // dot has no file or shell tools; its own calls never need a human approval.
       permit(handle.agent.session, FULL_ACCESS)
@@ -762,7 +846,14 @@ export function bindHost(get: Get, log?: (message: string) => void, modelOf?: ()
       // is provided (`null` = host default, `ModelChoice` = explicit override),
       // never inherit Dorothy's `store.settings.model`.
       const resolvedOptions = options?.model !== undefined ? explicitAgentOptions(options.model) : agentOptions()
-      const handle = await agents().create({ sessionId, agentOptions: resolvedOptions, meta: { cwd, origin: 'subagent', agentPreset: id }, setup })
+      let handle: AgentHandle
+      try {
+        handle = await agents().create({ sessionId, agentOptions: resolvedOptions, meta: { cwd, origin: 'subagent', agentPreset: id }, setup })
+      } catch (error) {
+        try { await registry().archiveSession(sessionId, { stopActivity: true }).catch(() => {}) } catch { /* best effort */ }
+        throw error
+      }
+      invalidateSessionList()
       handles.set(sessionId, handle)
       return sessionId
     },
@@ -792,6 +883,7 @@ export function bindHost(get: Get, log?: (message: string) => void, modelOf?: ()
       scans.delete(sessionId)
       try {
         await registry().archiveSession(sessionId, { stopActivity: true })
+        invalidateSessionList()
       } catch (error) {
         log?.(`dsh-dot: internal session ${sessionId} was not archived: ${error instanceof Error ? error.message : String(error)}`)
       }

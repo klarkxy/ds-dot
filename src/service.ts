@@ -272,7 +272,7 @@ export class DotService {
         return dot !== undefined && !this.options.host.isRunning(dot)
       },
       recipeHints: () => this.reflectionRecipeHints(),
-      sessions: () => this.historySessions('all', options.store.lastReflectedAt),
+      sessions: () => this.historySessions('all', options.store.lastReflectedAt).slice(0, 50),
       ...options.log ? { log: options.log } : {},
     })
     this.pending.onChange(() => {
@@ -1245,6 +1245,7 @@ export class DotService {
    * left before the next delivery.
    */
   settingsChanged(): Promise<void> {
+    this.ensureDotFailure = undefined
     this.armIdleCheck()
     this.updates.settingsChanged()
     this.githubPoller.settingsChanged()
@@ -3672,6 +3673,7 @@ export class DotService {
     this.backgroundJobsListeners.clear()
     this.retryHealth.clearAll()
     this.sessionEventListeners.clear()
+    this.ensureDotFailure = undefined
     this.selfDeployAbort.abort()
     this.batcher.dispose()
     this.idleChecker.cancel()
@@ -5571,7 +5573,10 @@ export class DotService {
   /** A segment keeps the model it started with; one that still waits to be left is not switched under it. */
   private applyModel(dot: string): void {
     const frozen = this.store.segment?.model
-    if (frozen === undefined || frozen === this.host.modelKey()) this.host.syncModel(dot)
+    if (frozen === undefined || frozen === this.host.modelKey()) {
+      this.ensureDotFailure = undefined
+      this.host.syncModel(dot)
+    }
   }
 
   /** Persona, model, agreements, cognition and capability grants as a segment starting now would freeze them. */

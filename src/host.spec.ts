@@ -708,6 +708,28 @@ describe('single-session lookup and session list caching', () => {
     await expect(host.listSessions(AbortSignal.abort())).rejects.toMatchObject({ name: 'AbortError' })
   })
 
+  it('reads archived ids after the corpus list and refreshes the cache after createSession', async () => {
+    const events: string[] = []
+    let lists = 0
+    const host = bindHost(name => {
+      if (name === 'sessionController') return {
+        list: async () => { events.push('list'); lists++; return { items: [{ sessionId: 's', cwd: 'H:\\repo', running: false, updatedAt: 1 }] } },
+        create: async () => ({ sessionId: 'created' }),
+      }
+      if (name === 'workspaceRegistry') return {
+        get archivedSessionIds() { events.push('archived'); return [] },
+      }
+      return undefined
+    })
+    await host.listSessions(AbortSignal.timeout(1_000))
+    await host.listSessions(AbortSignal.timeout(1_000))
+    expect(lists).toBe(1)
+    expect(events.slice(0, 2)).toEqual(['list', 'archived'])
+    await host.createSession({ cwd: 'H:\\repo' })
+    await host.listSessions(AbortSignal.timeout(1_000))
+    expect(lists).toBe(2)
+  })
+
   it('archives a half-created dot session when agent creation fails', async () => {
     const archived: string[] = []
     const host = bindHost(name => {

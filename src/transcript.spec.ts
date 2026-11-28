@@ -33,9 +33,15 @@ describe('transcriptRows', () => {
       reply(3, '…'),
       reply(4, 'No text.'),
       reply(5, 'actual answer'),
+      reply(6, '✅'),
+      reply(7, '👍'),
+      reply(8, '+'),
     ])).toEqual([
       { role: 'human', text: 'continue', at: 1 },
       { role: 'dot', text: 'actual answer', at: 5 },
+      { role: 'dot', text: '✅', at: 6 },
+      { role: 'dot', text: '👍', at: 7 },
+      { role: 'dot', text: '+', at: 8 },
     ])
   })
 

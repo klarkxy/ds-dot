@@ -402,16 +402,18 @@ async function continueClose(book: WorkBook, host: RunSessionHost, runId: string
   }
   if (current.creation === 'rejected') {
     if (current.closeIntent) {
-      let lookupFailed = false
-      let present = false
-      try { present = await host.findSession(current.requestedSessionId) !== undefined } catch { lookupFailed = true }
-      let quiet = !lookupFailed && !present
-      if (!lookupFailed && present && host.watch) {
+      const ids = [...new Set([current.requestedSessionId, ...(current.sessionId ? [current.sessionId] : [])])]
+      let quiet = true
+      for (const id of ids) {
+        let found: FoundSession | undefined
+        try { found = await host.findSession(id) } catch { quiet = false; break }
+        if (found === undefined) continue
+        if (!host.watch) { quiet = false; break }
         try {
-          const seen = await host.watch(current.requestedSessionId)
-          quiet = seen.running === false && seen.queue === 'empty'
-        } catch { quiet = false }
-      } else if (!lookupFailed && present) quiet = false
+          const seen = await host.watch(id)
+          if (!(seen.running === false && seen.queue === 'empty')) { quiet = false; break }
+        } catch { quiet = false; break }
+      }
       if (quiet) {
         const released = await book.releaseRejected(runId, current.updatedAt, at)
         if (released.ok) return { ok: true, action: 'closed', created: false, prompted: false }

@@ -34,9 +34,9 @@ export function defaultCacheTtl(provider: string, model: string): number {
 export function cacheTtlMinutes(settings: DotSettings, provider: string, model: string): number {
   const exact = settings.cacheTtl?.[cacheTtlKey(provider, model)]
   if (exact !== undefined) return exact
-  const suffix = `/${model}`
   for (const [key, minutes] of Object.entries(settings.cacheTtl ?? {})) {
-    if (key.endsWith(suffix)) return minutes
+    const slash = key.indexOf('/')
+    if (slash >= 0 && key.slice(slash + 1) === model) return minutes
   }
   return defaultCacheTtl(provider, model)
 }

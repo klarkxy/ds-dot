@@ -276,6 +276,17 @@ describe('DotService.ensureDot', () => {
     expect(h.calls.filter(call => call.startsWith('create-dot'))).toHaveLength(creates + 1)
   })
 
+  it('drops a cached create failure when settings change', async () => {
+    const h = setup()
+    h.failCreate(true)
+    await expect(h.service.ensureDot()).rejects.toThrow('no session for you')
+    const creates = h.calls.filter(call => call.startsWith('create-dot')).length
+    h.failCreate(false)
+    await h.service.settingsChanged()
+    await expect(h.service.ensureDot()).resolves.toMatch(/^dot/)
+    expect(h.calls.filter(call => call.startsWith('create-dot'))).toHaveLength(creates + 1)
+  })
+
   it("delivers the human's chat message to dot", async () => {
     const h = setup()
     await h.service.say('  plan the release  ')
@@ -1351,6 +1362,27 @@ describe('DotService knowledge', () => {
   })
 })
 
+
+describe('reflection session guidance', () => {
+  it('caps the sessions listed to the newest 50', async () => {
+    const h = setup({ reflection: true })
+    await h.service.ensureDot()
+    await h.store.noteConversation(1000)
+    for (let index = 0; index < 60; index++) {
+      await h.store.track({ sessionId: `task-${index}`, origin: 'started', title: `t${index}`, goal: 'g', cwd: '/w', at: 1000 + index })
+    }
+    h.advance(24 * 60 * 60_000)
+    let instruction = ''
+    h.reflectionHooks.promptHook = async (_sessionId, text) => { instruction = text }
+    expect(await h.service.reflection.tick()).toBe(true)
+    await vi.waitFor(() => expect(instruction).not.toBe(''))
+    const listed = instruction.split('\n').filter(line => /^- \S+ · /.test(line))
+    expect(listed).toHaveLength(50)
+    expect(instruction).toContain('- task-59 · Task "t59"')
+    expect(instruction).not.toContain('- task-10 · Task "t10"')
+    await h.service.reflection.dispose()
+  })
+})
 
 describe('DotService background reflection delivery', () => {
   it('carries a pending agreement note once with the next human message and clears it', async () => {

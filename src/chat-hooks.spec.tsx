@@ -43,4 +43,19 @@ describe('useChatFeed retry backoff', () => {
     expect(chat).toHaveBeenCalledTimes(before + 1)
     await act(async () => { root.unmount() })
   })
+
+  it('clears the backoff timer when the feed unmounts', async () => {
+    const chat = vi.fn(async () => { throw new Error('backend down') })
+    const api = { chat, wait: chat } as unknown as ChatApi
+    function Probe() {
+      useChatFeed(api)
+      return null
+    }
+    const root = createRoot(document.getElementById('root')!)
+    await act(async () => { root.render(<Probe />) })
+    expect(chat).toHaveBeenCalledTimes(1)
+    expect(vi.getTimerCount()).toBe(1)
+    await act(async () => { root.unmount() })
+    expect(vi.getTimerCount()).toBe(0)
+  })
 })

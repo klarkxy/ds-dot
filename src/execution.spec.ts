@@ -976,8 +976,9 @@ describe('zombie run recovery', () => {
     expect(prepared.ok).toBe(true)
 
     let stops = 0
+    const sessions = new Map<string, { cwd: string }>()
     const { host } = hostOf({
-      async findSession() { return undefined },
+      async findSession(id) { return sessions.get(id) },
       async stop() { stops += 1; return { cancelAccepted: true, queueCleared: true, idle: true, jobsSettled: true } },
     })
     const result = await reconcileRun(book, host, held.run.id, 4)
@@ -997,22 +998,56 @@ describe('zombie run recovery', () => {
     await book.prepareFinish(held.run.id, 'stopped', 3)
 
     let stops = 0
+    const present = new Map([
+      [held.run.requestedSessionId, { cwd: 'H:\\repo' }],
+      ['session-other', { cwd: 'H:\\repo' }],
+    ])
+    const states = new Map([
+      [held.run.requestedSessionId, { running: true, queue: 'empty' as const }],
+      ['session-other', { running: true, queue: 'empty' as const }],
+    ])
     const busy = hostOf({
-      async findSession() { return { cwd: 'H:\\repo' } },
-      async watch() { return { running: true, queue: 'empty' as const } },
+      async findSession(id) { return present.get(id) },
+      async watch(id) { return states.get(id) ?? { running: true, queue: 'unknown' as const } },
       async stop() { stops += 1; return { cancelAccepted: true, queueCleared: true, idle: true, jobsSettled: true } },
     }).host
     expect(await reconcileRun(book, busy, held.run.id, 4)).toMatchObject({ action: 'held' })
     expect(book.run(held.run.id)?.phase).toBe('settling')
 
+    states.set(held.run.requestedSessionId, { running: false, queue: 'empty' })
+    states.set('session-other', { running: false, queue: 'empty' })
     const idle = hostOf({
-      async findSession() { return { cwd: 'H:\\repo' } },
-      async watch() { return { running: false, queue: 'empty' as const } },
+      async findSession(id) { return present.get(id) },
+      async watch(id) { return states.get(id) ?? { running: true, queue: 'unknown' as const } },
       async stop() { stops += 1; return { cancelAccepted: true, queueCleared: true, idle: true, jobsSettled: true } },
     }).host
     expect(await reconcileRun(book, idle, held.run.id, 5)).toMatchObject({ action: 'closed' })
     expect(book.run(held.run.id)).toMatchObject({ phase: 'stopped', closeReason: 'identity-rejected' })
     expect(stops).toBe(0)
+  })
+
+  it('checks both the requested id and the host session id before releasing a rejected run', async () => {
+    const book = openBook()
+    const held = await reserved(book)
+    const { host: launchHost } = hostOf({
+      async findSession() { return undefined },
+      async createSession(input) { return { sessionId: 'session-other', cwd: input.cwd } },
+    })
+    await launchReservedRun(book, launchHost, held.run.id, 'go')
+    await book.prepareFinish(held.run.id, 'stopped', 3)
+
+    const sessions = new Map([['session-other', { cwd: 'H:\\repo' }]])
+    const states = new Map([['session-other', { running: true, queue: 'empty' as const }]])
+    const makeHost = () => hostOf({
+      async findSession(id) { return sessions.get(id) },
+      async watch(id) { return states.get(id) ?? { running: true, queue: 'unknown' as const } },
+    }).host
+    expect(await reconcileRun(book, makeHost(), held.run.id, 4)).toMatchObject({ action: 'held' })
+    expect(book.run(held.run.id)?.phase).toBe('settling')
+
+    states.set('session-other', { running: false, queue: 'empty' })
+    expect(await reconcileRun(book, makeHost(), held.run.id, 5)).toMatchObject({ action: 'closed' })
+    expect(book.run(held.run.id)).toMatchObject({ phase: 'stopped', closeReason: 'identity-rejected' })
   })
 
   it('closes an unknown settling run whose close intent is stopped when the requested session is absent', async () => {

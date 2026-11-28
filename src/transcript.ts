@@ -34,7 +34,7 @@ export function clipTokens(text: string, budget: number): string {
   return text.slice(0, Math.max(1, Math.floor(text.length * budget / tokens))) + '…'
 }
 
-const DOT_NOISE = /^(?:No text\.|[\p{P}\p{S}\s]+)$/u
+const DOT_NOISE = /^(?:No text\.|[.…·•\-—_\s]+)$/iu
 
 /** Conversation rows of a session log, oldest first. */
 export function transcriptRows(events: Iterable<RawEvent>): TranscriptRow[] {

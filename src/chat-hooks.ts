@@ -47,7 +47,14 @@ export function useChatFeed(api: ChatApi): { state: ChatState; error?: string; r
         } catch (failure) {
           if (lifetime.signal.aborted) return
           setError(failure instanceof Error ? failure.message : String(failure))
-          await new Promise(resolve => setTimeout(resolve, retryMs))
+          await new Promise<void>(resolve => {
+            const timer = setTimeout(() => {
+              lifetime.signal.removeEventListener('abort', interrupted)
+              resolve()
+            }, retryMs)
+            const interrupted = () => { clearTimeout(timer); resolve() }
+            lifetime.signal.addEventListener('abort', interrupted, { once: true })
+          })
           retryMs = Math.min(retryMs * 2, 60_000)
         }
       }

@@ -474,8 +474,8 @@ export function bindHost(get: Get, log?: (message: string) => void, modelOf?: ()
       if (cached && Date.now() - cached.at < 3_000) return raceSignal(Promise.resolve(cached.rows), signal)
       sessionListFlight ??= (async () => {
         try {
-          const archived = new Set(registry().archivedSessionIds ?? [])
           const { items } = await controller().list({}, AbortSignal.timeout(30_000))
+          const archived = new Set(registry().archivedSessionIds ?? [])
           const rows = items.map(item => ({
             sessionId: String(item.sessionId),
             ...typeof item.cwd === 'string' ? { cwd: item.cwd } : {},
@@ -510,6 +510,7 @@ export function bindHost(get: Get, log?: (message: string) => void, modelOf?: ()
         ...(place.workspaceId ? { workspaceId: place.workspaceId } : { cwd: place.cwd }),
         ...(place.preset ? { agentPreset: place.preset } : {}),
       })
+      sessionListCache = undefined
       // Seal before the caller prompts. A session with no live agent is not returned as ready.
       if (seal) seal(await liveAgent(created.sessionId))
       return created.sessionId
@@ -658,7 +659,7 @@ export function bindHost(get: Get, log?: (message: string) => void, modelOf?: ()
       const liveSessions = get('sessions') as { get?(id: string): { header?: { cwd?: unknown; agentPreset?: unknown } } | undefined } | undefined
       const live = typeof liveSessions?.get === 'function' ? liveSessions.get(sessionId) : undefined
       const agentRegistry = get('agents') as AgentRegistry | undefined
-      const liveHeader = live?.header ?? agentRegistry?.get(sessionId as SessionId)?.session.header as { cwd?: unknown; agentPreset?: unknown } | undefined
+      const liveHeader = live?.header ?? agentRegistry?.get(sessionId as SessionId)?.session?.header as { cwd?: unknown; agentPreset?: unknown } | undefined
       if (liveHeader !== undefined) return shaped(liveHeader)
       const persistence = get('sessionPersistence') as { stat?(id: string, options?: { signal?: AbortSignal }): Promise<{ header: { cwd?: unknown; agentPreset?: unknown } } | undefined> } | undefined
       if (typeof persistence?.stat === 'function') {
@@ -797,6 +798,7 @@ export function bindHost(get: Get, log?: (message: string) => void, modelOf?: ()
         try { await registry().archiveSession(sessionId, { stopActivity: true }).catch(() => {}) } catch { /* best effort */ }
         throw error
       }
+      sessionListCache = undefined
       handles.set(sessionId, handle)
       // dot has no file or shell tools; its own calls never need a human approval.
       permit(handle.agent.session, FULL_ACCESS)
@@ -819,6 +821,7 @@ export function bindHost(get: Get, log?: (message: string) => void, modelOf?: ()
         try { await registry().archiveSession(sessionId, { stopActivity: true }).catch(() => {}) } catch { /* best effort */ }
         throw error
       }
+      sessionListCache = undefined
       handles.set(sessionId, handle)
       return sessionId
     },
@@ -848,6 +851,7 @@ export function bindHost(get: Get, log?: (message: string) => void, modelOf?: ()
       scans.delete(sessionId)
       try {
         await registry().archiveSession(sessionId, { stopActivity: true })
+        sessionListCache = undefined
       } catch (error) {
         log?.(`dsh-dot: internal session ${sessionId} was not archived: ${error instanceof Error ? error.message : String(error)}`)
       }

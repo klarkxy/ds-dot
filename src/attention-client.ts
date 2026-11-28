@@ -7,9 +7,21 @@
  * notifies again.
  */
 import type { AttentionItem, AttentionView } from './contracts.ts'
+import { noteBackendError } from './backend-state.ts'
 
 /** localStorage switch for desktop notifications; '1' means on, anything else off. */
 export const DESKTOP_NOTIFY_KEY = 'dsh-dot:desktop-notify'
+
+/** Unwrap one attention RPC reply, recording backend version skew before throwing. */
+export function attentionValue(reply: { readonly ok: true; readonly value: AttentionView } | { readonly ok: false; readonly error: { readonly message: string; readonly code?: string } } | undefined): AttentionView {
+  if (reply?.ok === true) return reply.value
+  const code = reply?.ok === false ? reply.error.code : undefined
+  const message = reply?.ok === false ? reply.error.message : 'rpc failed'
+  noteBackendError(code, message)
+  const error = new Error(message) as Error & { code?: string }
+  if (code !== undefined) error.code = code
+  throw error
+}
 
 export interface AttentionSnapshot {
   readonly count: number

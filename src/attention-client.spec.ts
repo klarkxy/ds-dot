@@ -1,6 +1,7 @@
 import { JSDOM } from 'jsdom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { createAttentionWatcher } from './attention-client.ts'
+import { attentionValue, createAttentionWatcher } from './attention-client.ts'
+import { backendOutdatedStore, resetBackendOutdated } from './backend-state.ts'
 import type { AttentionItem, AttentionView } from './contracts.ts'
 
 const dom = new JSDOM('', { url: 'https://local.test' })
@@ -10,6 +11,16 @@ const item = (id: string, since?: number): AttentionItem => ({ id, kind: 'card',
 const view = (...items: AttentionItem[]): AttentionView => ({ items })
 const flush = () => vi.advanceTimersByTimeAsync(0)
 const visible = (state: string) => Object.defineProperty(dom.window.document, 'visibilityState', { value: state, configurable: true })
+
+
+describe('attentionValue', () => {
+  it('records an unknown-endpoint reply as backend version skew', () => {
+    resetBackendOutdated()
+    expect(() => attentionValue({ ok: false, error: { code: 'not-found', message: 'unknown endpoint: attention' } })).toThrow('unknown endpoint: attention')
+    expect(backendOutdatedStore.getSnapshot()).toBe(true)
+    resetBackendOutdated()
+  })
+})
 
 describe('createAttentionWatcher', () => {
   beforeEach(() => { vi.useFakeTimers(); visible('visible') })

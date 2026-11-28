@@ -954,6 +954,10 @@ describe('DotService history', () => {
     expect(all).not.toContain(`· ${first}`)
     const explicit = await h.service.searchHistory({ query: 'friday', sessionId: first, since })
     expect(explicit).toContain('Nothing found for "friday" (1 session(s) searched)')
+    await h.store.track({ sessionId: 'running-old', origin: 'started', title: 'running old', goal: 'g', cwd: '/w', at: 1 })
+    await h.store.apply({ type: 'status', sessionId: 'running-old', status: 'running', at: 2 }, [])
+    h.events.set('running-old', [human('friday still running', 40)])
+    expect(await h.service.searchHistory({ query: 'friday', since })).toContain('· running-old')
     await expect(h.service.searchHistory({ query: 'friday', since: 'yesterday' })).rejects.toMatchObject({ code: 'dot/invalid' })
   })
 
@@ -961,6 +965,22 @@ describe('DotService history', () => {
     const { h } = await threeSessions()
     const controller = new AbortController()
     controller.abort()
+    await expect(h.service.searchHistory({ query: 'friday', signal: controller.signal })).rejects.toMatchObject({ name: 'AbortError' })
+  })
+
+  it('honours an abort that lands while the final batch is being read', async () => {
+    const h = setup()
+    for (let index = 0; index < 9; index++) {
+      const sessionId = `s-${index}`
+      await h.store.track({ sessionId, origin: 'started', title: sessionId, goal: 'g', cwd: '/w', at: index + 1 })
+      h.events.set(sessionId, [human('friday', 40)])
+    }
+    const readEvents = h.host.readEvents.bind(h.host)
+    const controller = new AbortController()
+    h.host.readEvents = async sessionId => {
+      if (sessionId === 's-8') controller.abort()
+      return readEvents(sessionId)
+    }
     await expect(h.service.searchHistory({ query: 'friday', signal: controller.signal })).rejects.toMatchObject({ name: 'AbortError' })
   })
 
@@ -1367,9 +1387,10 @@ describe('reflection session guidance', () => {
   it('caps the sessions listed to the newest 50', async () => {
     const h = setup({ reflection: true })
     await h.service.ensureDot()
+    await h.store.beginSegment({ ...h.store.segment!, sessionId: 'dot-current', startedAt: 1020 }, { reason: 'segmented' })
     await h.store.noteConversation(1000)
     for (let index = 0; index < 60; index++) {
-      await h.store.track({ sessionId: `task-${index}`, origin: 'started', title: `t${index}`, goal: 'g', cwd: '/w', at: 1000 + index })
+      await h.store.track({ sessionId: `task-${index}`, origin: 'started', title: `t${index}`, goal: 'g', cwd: '/w', at: 1021 + index })
     }
     h.advance(24 * 60 * 60_000)
     let instruction = ''
@@ -1380,6 +1401,7 @@ describe('reflection session guidance', () => {
     expect(listed).toHaveLength(50)
     expect(instruction).toContain('- task-59 · Task "t59"')
     expect(instruction).not.toContain('- task-10 · Task "t10"')
+    expect(instruction).not.toContain('Your conversation, earlier session')
     await h.service.reflection.dispose()
   })
 })
@@ -2446,6 +2468,24 @@ describe('DotService work dispatch', () => {
     expect(loop.store.work.latestVerification(changeId)).toBeUndefined()
     rmSync(dir, { recursive: true, force: true })
     rmSync(home, { recursive: true, force: true })
+  })
+
+  it('uses a fresh session list when a running human session blocks the write scope', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'dot-fresh-scope-home-'))
+    const h = setup(undefined, undefined, home)
+    const dir = mkdtempSync(join(tmpdir(), 'dot-fresh-scope-'))
+    const calls: Array<boolean | undefined> = []
+    h.host.listSessions = async (_signal, options) => {
+      calls.push(options?.fresh)
+      return options?.fresh === true
+        ? [{ sessionId: 'human', cwd: dir, running: true, updatedAt: 1, blank: false, subagent: false, archived: false }]
+        : [{ sessionId: 'human', cwd: dir, running: false, updatedAt: 1, blank: false, subagent: false, archived: false }]
+    }
+    try {
+      const created = JSON.parse(await h.service.manageTask({ action: 'create', title: 'Ship', goal: 'land', dir })) as { id: string }
+      await expect(h.service.manageTask({ action: 'dispatch', task_id: created.id, message: 'go', access: 'write' })).rejects.toThrow(/RUNNING|locked|blocked/)
+      expect(calls).toContain(true)
+    } finally { await h.service.dispose(); rmSync(dir, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }) }
   })
 
   it('stops work dispatches after three failed rounds on one input revision', async () => {

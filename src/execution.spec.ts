@@ -58,6 +58,7 @@ function hostOf(partial: Partial<RunSessionHost> & Pick<RunSessionHost, 'findSes
       return { cancelAccepted: true, queueCleared: false, idle: false, jobsSettled: 'unknown' as const }
     },
     ...partial.watch ? { watch: partial.watch } : {},
+    ...partial.jobsSettled ? { jobsSettled: partial.jobsSettled } : {},
   }
   return { host, calls }
 }
@@ -953,13 +954,13 @@ describe('session cwd junction and short-path launch', () => {
 })
 
 describe('zombie run recovery', () => {
-  it('closes a stale reserved run that never reached the host as stopped/unsent', async () => {
+  it('keeps a deliberately reserved intent run reserved even when it is old', async () => {
     const book = openBook()
     const held = await reserved(book)
     const { host, calls } = hostOf({ async findSession() { return undefined } })
     const result = await reconcileReserved(book, host, held.run.id, 2 + 10 * 60_000 + 1)
-    expect(result).toMatchObject({ ok: true, action: 'closed', created: false, prompted: false })
-    expect(book.run(held.run.id)).toMatchObject({ phase: 'stopped', closeReason: 'unsent' })
+    expect(result).toMatchObject({ ok: true, action: 'absent', created: false, prompted: false })
+    expect(book.run(held.run.id)).toMatchObject({ phase: 'reserved' })
     expect(calls).toEqual([])
   })
 
@@ -1009,6 +1010,7 @@ describe('zombie run recovery', () => {
     const busy = hostOf({
       async findSession(id) { return present.get(id) },
       async watch(id) { return states.get(id) ?? { running: true, queue: 'unknown' as const } },
+      async jobsSettled() { return true as const },
       async stop() { stops += 1; return { cancelAccepted: true, queueCleared: true, idle: true, jobsSettled: true } },
     }).host
     expect(await reconcileRun(book, busy, held.run.id, 4)).toMatchObject({ action: 'held' })
@@ -1019,6 +1021,7 @@ describe('zombie run recovery', () => {
     const idle = hostOf({
       async findSession(id) { return present.get(id) },
       async watch(id) { return states.get(id) ?? { running: true, queue: 'unknown' as const } },
+      async jobsSettled() { return true as const },
       async stop() { stops += 1; return { cancelAccepted: true, queueCleared: true, idle: true, jobsSettled: true } },
     }).host
     expect(await reconcileRun(book, idle, held.run.id, 5)).toMatchObject({ action: 'closed' })
@@ -1038,15 +1041,19 @@ describe('zombie run recovery', () => {
 
     const sessions = new Map([['session-other', { cwd: 'H:\\repo' }]])
     const states = new Map([['session-other', { running: true, queue: 'empty' as const }]])
+    let jobs: boolean | 'unknown' = false
     const makeHost = () => hostOf({
       async findSession(id) { return sessions.get(id) },
       async watch(id) { return states.get(id) ?? { running: true, queue: 'unknown' as const } },
+      async jobsSettled() { return jobs },
     }).host
     expect(await reconcileRun(book, makeHost(), held.run.id, 4)).toMatchObject({ action: 'held' })
     expect(book.run(held.run.id)?.phase).toBe('settling')
 
     states.set('session-other', { running: false, queue: 'empty' })
-    expect(await reconcileRun(book, makeHost(), held.run.id, 5)).toMatchObject({ action: 'closed' })
+    expect(await reconcileRun(book, makeHost(), held.run.id, 5)).toMatchObject({ action: 'held' })
+    jobs = true
+    expect(await reconcileRun(book, makeHost(), held.run.id, 6)).toMatchObject({ action: 'closed' })
     expect(book.run(held.run.id)).toMatchObject({ phase: 'stopped', closeReason: 'identity-rejected' })
   })
 

@@ -32,6 +32,7 @@ export interface RunSessionHost {
   selectModel?(sessionId: string, choice: { readonly provider: string; readonly model: string }): Promise<void>
   stop(sessionId: string): Promise<StopReport>
   watch?(sessionId: string): Promise<RunCursor>
+  jobsSettled?(sessionId: string): Promise<boolean | 'unknown'>
 }
 
 export async function launchReservedRun(book: WorkBook, host: RunSessionHost, runId: string, text: string, preset?: string, model?: { readonly provider: string; readonly model: string }, onReady?: (runId: string) => Promise<void>): Promise<{ readonly ok: true; readonly phase: RunRecord['phase']; readonly requestId?: string } | WorkRefusal> {
@@ -292,14 +293,16 @@ export async function reconcileReserved(book: WorkBook, host: RunSessionHost, ru
     return { ok: false, code: 'unknown', message: `${runId} session lookup failed (${cause}); no second session was created` }
   }
   if (!located) {
+    let resetUnknown = false
     if (run.creation === 'unknown' && run.sessionId === undefined) {
       const reset = await book.abandonUnknownCreation(runId, at)
       if (!reset.ok) return reset
+      resetUnknown = true
     }
     const current = book.run(runId) ?? run
     const neverStarted = current.creation === 'intent' && current.actionClaim === undefined
       && !current.deliveries.some(item => item.status === 'accepted' || item.status === 'unknown' || item.hostRequestId !== undefined)
-    if (neverStarted && at - current.createdAt > RESERVED_UNSENT_RELEASE_MS) {
+    if (resetUnknown && neverStarted && at - current.createdAt > RESERVED_UNSENT_RELEASE_MS) {
       const released = await book.releaseUnsent(runId, current.updatedAt, at)
       if (!released.ok) return released
       return { ok: true, action: 'closed', created: false, prompted: false }
@@ -412,6 +415,7 @@ async function continueClose(book: WorkBook, host: RunSessionHost, runId: string
         try {
           const seen = await host.watch(id)
           if (!(seen.running === false && seen.queue === 'empty')) { quiet = false; break }
+          if (!host.jobsSettled || await host.jobsSettled(id) !== true) { quiet = false; break }
         } catch { quiet = false; break }
       }
       if (quiet) {
@@ -553,6 +557,10 @@ export function bindRunSession(host: DotHost, writablePreset: TaskPermission = '
     async watch(sessionId) {
       if (!host.watchSession) return { queue: 'unknown' }
       return host.watchSession(sessionId)
+    },
+    async jobsSettled(sessionId) {
+      if (!host.jobsSettled) return 'unknown'
+      return host.jobsSettled(sessionId)
     },
   }
 }

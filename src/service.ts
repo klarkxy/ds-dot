@@ -2911,19 +2911,23 @@ export class DotService {
     if (scope !== 'tasks') {
       const current = this.store.dotSessionId
       if (current) out.push({ sessionId: current, what: 'Your conversation, current session', own: true })
-      for (const past of [...this.store.pastSegments].reverse()) {
+    }
+    const rest: { readonly activity: number; readonly row: { sessionId: string; what: string; own: boolean } }[] = []
+    if (scope !== 'tasks') {
+      for (const past of this.store.pastSegments) {
         if (since !== undefined && past.endedAt < since) continue
         const span = past.startedAt > 0 ? ` (${stamp(past.startedAt)} to ${stamp(past.endedAt)})` : ` (until ${stamp(past.endedAt)})`
-        out.push({ sessionId: past.sessionId, what: `Your conversation, earlier session${span}`, own: true })
+        rest.push({ activity: past.endedAt, row: { sessionId: past.sessionId, what: `Your conversation, earlier session${span}`, own: true } })
       }
     }
     if (scope !== 'own') {
-      for (const task of [...this.store.list()].sort((a, b) => b.updatedAt - a.updatedAt)) {
-        if (since !== undefined && task.updatedAt < since) continue
-        out.push({ sessionId: task.sessionId, what: `Task "${task.title}"${task.status === 'archived' ? ' (archived)' : ''}`, own: false })
+      for (const task of this.store.list()) {
+        if (since !== undefined && task.updatedAt < since && task.status !== 'running') continue
+        rest.push({ activity: task.updatedAt, row: { sessionId: task.sessionId, what: `Task "${task.title}"${task.status === 'archived' ? ' (archived)' : ''}`, own: false } })
       }
     }
-    return out
+    rest.sort((a, b) => b.activity - a.activity)
+    return [...out, ...rest.map(item => item.row)]
   }
 
   private describeSession(sessionId: string): { sessionId: string; what: string; own: boolean } {
@@ -2960,6 +2964,7 @@ export class DotService {
           return { ok: false as const, target, error }
         }
       }))
+      input.signal?.throwIfAborted()
       for (const item of results) {
         if (!item.ok) {
           if (only) throw new DotError('dot/unknown-session', `session ${only} could not be read: ${messageOf(item.error)}`)
@@ -5489,7 +5494,7 @@ export class DotService {
   /** Other changes block only where their write scope actually overlaps. This change's runs are not a lock on themselves. */
   private async scopeReport(cwd: string, exceptChangeId: string, candidate?: Occupant): Promise<{ readonly text: string; readonly blocked: boolean }> {
     let rows: Awaited<ReturnType<DotHost['listSessions']>> | undefined
-    try { rows = await this.host.listSessions(AbortSignal.timeout(20_000)) } catch { rows = undefined }
+    try { rows = await this.host.listSessions(AbortSignal.timeout(20_000), { fresh: true }) } catch { rows = undefined }
     const others = this.store.work.occupying().filter(run => run.changeId !== exceptChangeId)
     const conflicting = candidate
       ? others.filter(run => occupantsConflict(candidate, occupantOf(run)))

@@ -730,6 +730,44 @@ describe('single-session lookup and session list caching', () => {
     expect(lists).toBe(2)
   })
 
+
+  it('fresh listings bypass the cache and an invalidated flight cannot rewrite it', async () => {
+    let lists = 0
+    let running = false
+    const host = bindHost(name => {
+      if (name === 'sessionController') return {
+        list: async () => { lists++; return { items: [{ sessionId: 's', cwd: 'H:\repo', running, updatedAt: 1 }] } },
+        create: async () => ({ sessionId: 'created' }),
+      }
+      if (name === 'workspaceRegistry') return { archivedSessionIds: [] }
+      return undefined
+    })
+    expect((await host.listSessions(AbortSignal.timeout(1_000)))[0]?.running).toBe(false)
+    running = true
+    expect((await host.listSessions(AbortSignal.timeout(1_000)))[0]?.running).toBe(false)
+    expect((await host.listSessions(AbortSignal.timeout(1_000), { fresh: true }))[0]?.running).toBe(true)
+    expect(lists).toBe(2)
+
+    let release!: () => void
+    const gate = new Promise<void>(done => { release = done })
+    let slowLists = 0
+    const slow = bindHost(name => {
+      if (name === 'sessionController') return {
+        list: async () => { slowLists++; if (slowLists === 1) await gate; return { items: [] } },
+        create: async () => ({ sessionId: 'created' }),
+      }
+      if (name === 'workspaceRegistry') return { archivedSessionIds: [] }
+      return undefined
+    })
+    const first = slow.listSessions(AbortSignal.timeout(1_000))
+    await new Promise(done => setTimeout(done, 0))
+    await slow.createSession({ cwd: 'H:\repo' })
+    release()
+    await first
+    await slow.listSessions(AbortSignal.timeout(1_000))
+    expect(slowLists).toBe(2)
+  })
+
   it('archives a half-created dot session when agent creation fails', async () => {
     const archived: string[] = []
     const host = bindHost(name => {

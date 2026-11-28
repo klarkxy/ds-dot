@@ -60,7 +60,7 @@ export interface SessionRow {
 export interface DotHost {
   listWorkspaces(): WorkspaceRow[]
   createWorkspace(path: string, title?: string): Promise<WorkspaceRow>
-  listSessions(signal: AbortSignal): Promise<SessionRow[]>
+  listSessions(signal: AbortSignal, options?: { fresh?: boolean }): Promise<SessionRow[]>
   titles(sessionIds: readonly string[], signal: AbortSignal): Promise<Map<string, string>>
   /** Open a top-level session. `sessionId` is the id reserved before the call. */
   createSession(place: { workspaceId?: string; cwd?: string; preset?: string; sessionId?: string }): Promise<string>
@@ -111,6 +111,8 @@ export interface DotHost {
   stopActivity?(sessionId: string): Promise<{ cancelAccepted: boolean; queueCleared: boolean; idle: boolean; jobsSettled: boolean | 'unknown' }>
   /** One passive state read. A null queue stays `unknown`; it is not an empty queue. */
   watchSession?(sessionId: string): Promise<{ seq?: number; running?: boolean; queue?: 'empty' | 'pending' | 'unknown'; idle?: boolean }>
+  /** Read-only background-job settlement fact; never kills or waits a job. */
+  jobsSettled?(sessionId: string): Promise<boolean | 'unknown'>
   /** Text of the latest assistant output, or undefined when none is readable. */
   latestReply(sessionId: string, maxChars: number): Promise<string | undefined>
   cwdOf(sessionId: string): Promise<string | undefined>
@@ -336,7 +338,9 @@ export function bindHost(get: Get, log?: (message: string) => void, modelOf?: ()
   const scans = new Map<string, ContextScan>()
   const windows = new Map<string, number>()
   let sessionListCache: { readonly at: number; readonly rows: SessionRow[] } | undefined
-  let sessionListFlight: Promise<SessionRow[]> | undefined
+  let sessionListFlight: { readonly generation: number; readonly promise: Promise<SessionRow[]> } | undefined
+  let sessionListGeneration = 0
+  const invalidateSessionList = () => { sessionListGeneration++; sessionListCache = undefined; sessionListFlight = undefined }
   const raceSignal = <T,>(work: Promise<T>, signal: AbortSignal): Promise<T> => {
     if (signal.aborted) return Promise.reject(signal.reason)
     return new Promise<T>((resolve, reject) => {
@@ -466,32 +470,57 @@ export function bindHost(get: Get, log?: (message: string) => void, modelOf?: ()
     return assembler.blocks().map(block => { const row = block as { type?: string; text?: unknown }; return row.type === 'text' && typeof row.text === 'string' ? row.text : '' }).join('')
   }
 
+  const jobFactsOf = async (sessionId: string) => {
+    const facts = new Map<string, JobFact>()
+    try {
+      const stored = await query().readSession(sessionId) as { events?: readonly { type?: string; data?: { jobId?: string; owner?: string; producerReported?: boolean } }[] }
+      for (const event of stored.events ?? []) {
+        const jobId = event.data?.jobId
+        const owner = event.data?.owner
+        if (typeof jobId !== 'string' || owner !== sessionId) continue
+        if (event.type === 'job/registered') {
+          const previous = facts.get(jobId)
+          facts.set(jobId, { owner, settled: previous?.settled ?? false, ...(previous?.producerReported !== undefined ? { producerReported: previous.producerReported } : {}) })
+        } else if (event.type === 'job/settled' && typeof event.data?.producerReported === 'boolean') {
+          facts.set(jobId, { owner, settled: true, producerReported: event.data.producerReported })
+        }
+      }
+    } catch { return undefined }
+    return facts
+  }
+
   return {
     listWorkspaces: () => registry().list().map(toRow),
     createWorkspace: async (path, title) => toRow(await registry().create(path, title)),
-    async listSessions(signal) {
+    async listSessions(signal, options) {
       const cached = sessionListCache
-      if (cached && Date.now() - cached.at < 3_000) return raceSignal(Promise.resolve(cached.rows), signal)
-      sessionListFlight ??= (async () => {
-        try {
-          const { items } = await controller().list({}, AbortSignal.timeout(30_000))
-          const archived = new Set(registry().archivedSessionIds ?? [])
-          const rows = items.map(item => ({
-            sessionId: String(item.sessionId),
-            ...typeof item.cwd === 'string' ? { cwd: item.cwd } : {},
-            running: item.running === true,
-            updatedAt: typeof item.updatedAt === 'number' ? item.updatedAt : 0,
-            blank: item.blank === true,
-            subagent: item.origin === 'subagent' || typeof item.parentSessionId === 'string',
-            archived: archived.has(String(item.sessionId)),
-          }))
-          sessionListCache = { at: Date.now(), rows }
-          return rows
-        } finally {
-          sessionListFlight = undefined
-        }
+      if (options?.fresh !== true && cached && Date.now() - cached.at < 3_000) return raceSignal(Promise.resolve(cached.rows), signal)
+      const start = (generation: number) => (async () => {
+        const { items } = await controller().list({}, AbortSignal.timeout(30_000))
+        const archived = new Set(registry().archivedSessionIds ?? [])
+        const rows = items.map(item => ({
+          sessionId: String(item.sessionId),
+          ...typeof item.cwd === 'string' ? { cwd: item.cwd } : {},
+          running: item.running === true,
+          updatedAt: typeof item.updatedAt === 'number' ? item.updatedAt : 0,
+          blank: item.blank === true,
+          subagent: item.origin === 'subagent' || typeof item.parentSessionId === 'string',
+          archived: archived.has(String(item.sessionId)),
+        }))
+        if (sessionListGeneration === generation) sessionListCache = { at: Date.now(), rows }
+        return rows
       })()
-      return raceSignal(sessionListFlight, signal)
+      if (options?.fresh === true) return raceSignal(start(sessionListGeneration), signal)
+      if (!sessionListFlight) {
+        const generation = sessionListGeneration
+        let promise!: Promise<SessionRow[]>
+        promise = start(generation)
+        promise = promise.finally(() => {
+          if (sessionListFlight?.promise === promise) sessionListFlight = undefined
+        })
+        sessionListFlight = { generation, promise }
+      }
+      return raceSignal(sessionListFlight.promise, signal)
     },
     async titles(sessionIds, signal) {
       const out = new Map<string, string>()
@@ -510,7 +539,7 @@ export function bindHost(get: Get, log?: (message: string) => void, modelOf?: ()
         ...(place.workspaceId ? { workspaceId: place.workspaceId } : { cwd: place.cwd }),
         ...(place.preset ? { agentPreset: place.preset } : {}),
       })
-      sessionListCache = undefined
+      invalidateSessionList()
       // Seal before the caller prompts. A session with no live agent is not returned as ready.
       if (seal) seal(await liveAgent(created.sessionId))
       return created.sessionId
@@ -729,24 +758,7 @@ export function bindHost(get: Get, log?: (message: string) => void, modelOf?: ()
           } finally { if (timer !== undefined) clearTimeout(timer) }
         }
       } catch { /* failed lookup, cancellation, or wait cannot prove idle */ }
-      const jobsSettled = await settleOwnedJobs(get, sessionId, async () => {
-        const facts = new Map<string, JobFact>()
-        try {
-          const stored = await query().readSession(sessionId) as { events?: readonly { type?: string; data?: { jobId?: string; owner?: string; producerReported?: boolean } }[] }
-          for (const event of stored.events ?? []) {
-            const jobId = event.data?.jobId
-            const owner = event.data?.owner
-            if (typeof jobId !== 'string' || owner !== sessionId) continue
-            if (event.type === 'job/registered') {
-              const previous = facts.get(jobId)
-              facts.set(jobId, { owner, settled: previous?.settled ?? false, ...(previous?.producerReported !== undefined ? { producerReported: previous.producerReported } : {}) })
-            } else if (event.type === 'job/settled' && typeof event.data?.producerReported === 'boolean') {
-              facts.set(jobId, { owner, settled: true, producerReported: event.data.producerReported })
-            }
-          }
-        } catch { return undefined }
-        return facts
-      })
+      const jobsSettled = await settleOwnedJobs(get, sessionId, () => jobFactsOf(sessionId))
       // Only a post-settlement sample and the same registry entry prove this stop.
       let queueCleared = false
       let idle = false
@@ -773,6 +785,23 @@ export function bindHost(get: Get, log?: (message: string) => void, modelOf?: ()
         return { queue, seq: state.cursor, running: state.running, idle: !state.running }
       } catch { return { queue: 'unknown' as const } }
     },
+    async jobsSettled(sessionId) {
+      const jobs = get('jobs') as JobsApi | undefined
+      if (typeof jobs?.list !== 'function') return 'unknown'
+      const terminal = (status?: string) => status === 'completed' || status === 'killed' || status === 'failed'
+      try {
+        const rows = jobs.list(sessionId).filter(row => row.owner === sessionId)
+        if (rows.some(row => !row.id || !terminal(row.status))) return false
+        const facts = await jobFactsOf(sessionId)
+        if (!facts) return 'unknown'
+        const ids = new Set<string>([...rows.map(row => row.id ?? ''), ...facts.keys()].filter(id => id.length > 0))
+        for (const id of ids) {
+          const fact = facts.get(id)
+          if (!fact?.settled || fact.producerReported !== true) return false
+        }
+        return true
+      } catch { return 'unknown' }
+    },
     async latestReply(sessionId, maxChars) {
       const log = await query().readSession(sessionId)
       for (let index = log.events.length - 1; index >= 0; index--) {
@@ -798,7 +827,7 @@ export function bindHost(get: Get, log?: (message: string) => void, modelOf?: ()
         try { await registry().archiveSession(sessionId, { stopActivity: true }).catch(() => {}) } catch { /* best effort */ }
         throw error
       }
-      sessionListCache = undefined
+      invalidateSessionList()
       handles.set(sessionId, handle)
       // dot has no file or shell tools; its own calls never need a human approval.
       permit(handle.agent.session, FULL_ACCESS)
@@ -821,7 +850,7 @@ export function bindHost(get: Get, log?: (message: string) => void, modelOf?: ()
         try { await registry().archiveSession(sessionId, { stopActivity: true }).catch(() => {}) } catch { /* best effort */ }
         throw error
       }
-      sessionListCache = undefined
+      invalidateSessionList()
       handles.set(sessionId, handle)
       return sessionId
     },
@@ -851,7 +880,7 @@ export function bindHost(get: Get, log?: (message: string) => void, modelOf?: ()
       scans.delete(sessionId)
       try {
         await registry().archiveSession(sessionId, { stopActivity: true })
-        sessionListCache = undefined
+        invalidateSessionList()
       } catch (error) {
         log?.(`dsh-dot: internal session ${sessionId} was not archived: ${error instanceof Error ? error.message : String(error)}`)
       }

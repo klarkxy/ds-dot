@@ -164,15 +164,19 @@ describe('archived watched sessions leave the active ledger', () => {
     const pending = new Promise<SessionRow[]>(resolve => { release = resolve })
     let sharedCalls = 0
     let freshCalls = 0
+    let storeRef!: DotStore
     const { service, store } = harness(async (_signal, options) => {
       if (options?.fresh === true) {
         freshCalls += 1
-        return [row('session-new', false)]
+        await storeRef.track({ sessionId: 'session-race', origin: 'watched', title: 'race', goal: 'rewritten', cwd: '/w', at: 1_001 })
+        return []
       }
       sharedCalls += 1
       return pending
     })
+    storeRef = store
     await service.watch('session-old', 'old')
+    await service.watch('session-race', 'race')
     const first = service.syncWatched()
     const second = service.syncWatched()
     await Promise.resolve()
@@ -184,6 +188,8 @@ describe('archived watched sessions leave the active ledger', () => {
     expect(store.task('session-old')?.status).toBe('archived')
     expect(store.task('session-new')?.status).toBe('idle')
     expect(store.task('session-new')?.origin).toBe('watched')
+    expect(store.task('session-race')?.status).toBe('idle')
+    expect(store.task('session-race')?.updatedAt).toBe(1_001)
   })
 
   it('keeps reconciling after one caller aborts, and does not notify a turn that ends during archive', async () => {

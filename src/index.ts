@@ -364,7 +364,6 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
             ],
           },
           { id: 'tool-fs', name: '@deepseek-ai/dsh-tool-fs', config: { write: false, edit: false, applyPatch: false } },
-          { id: 'tool-fs-search', name: '@deepseek-ai/dsh-tool-fs-search', config: { sampleOverCapGlobResults: false } },
           { id: 'tool-office', name: '@deepseek-ai/dsh-tool-office' },
           { id: 'dot-tools', name: 'ds-dot/tools' },
           // Dot-local MCP servers, mounted on the preset scope from settings.

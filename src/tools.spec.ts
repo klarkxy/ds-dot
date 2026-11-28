@@ -4,7 +4,7 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 import { SHOW_VIEW_MIXED_SUMMARY, showViewSharesStep } from './card-step.ts'
-import { apply, expandBraces, TASK_ACTIONS } from './tools.ts'
+import { apply, TASK_ACTIONS } from './tools.ts'
 import { ArenaQueryError } from './arena-models.ts'
 import { DotError } from './service.ts'
 import { formatTaskModels } from './task-models.ts'
@@ -126,14 +126,16 @@ describe('dot tools', () => {
     expect(new Set(names).size).toBe(21)
   })
 
-  it('denies credential-like paths, symlinks, bare credential dirs, and malformed arguments on inherited read-only file tools', async () => {
+  it('denies credential-like paths, symlinks, bare credential dirs, and malformed arguments on inherited exact-path file tools', async () => {
     const gate = load().listeners['tools/pre-execute']?.[0]
     expect(gate).toBeTypeOf('function')
     const next = async () => ({ kind: 'next' })
+    // Directory search is not in Dorothy's locked set at all; an ungranted name falls through the capability layer and denies.
+    for (const name of ['glob', 'grep']) {
+      await expect(gate!({ name, arguments: { path: '.', pattern: '**/.env' } }, next)).resolves.toMatchObject({ kind: 'deny', reason: expect.any(String) })
+    }
     await expect(gate!({ name: 'read', arguments: { file_path: '/home/u/.ssh/id_rsa' } }, next)).resolves.toMatchObject({ kind: 'deny', reason: expect.stringMatching(/credential/) })
-    await expect(gate!({ name: 'glob', arguments: { pattern: '**/.env' } }, next)).resolves.toMatchObject({ kind: 'deny' })
-    await expect(gate!({ name: 'grep', arguments: { path: '/home/u/.ssh', pattern: 'BEGIN' } }, next)).resolves.toMatchObject({ kind: 'deny' })
-    await expect(gate!({ name: 'grep', arguments: { path: '/tmp/work', glob: '*.pem', pattern: 'BEGIN' } }, next)).resolves.toMatchObject({ kind: 'deny' })
+    await expect(gate!({ name: 'read_image', arguments: { file_path: '/home/u/.ssh/id_rsa' } }, next)).resolves.toMatchObject({ kind: 'deny' })
     await expect(gate!({ name: 'office_render', arguments: { input: '/tmp/deck.pptx', output_dir: '/Users/alice/.aws' } }, next)).resolves.toMatchObject({ kind: 'deny' })
     await expect(gate!({ name: 'office_convert', arguments: JSON.stringify({ input: '/tmp/.aws/credentials' }) }, next)).resolves.toMatchObject({ kind: 'deny' })
     // Fail-closed when arguments are malformed, missing, array-shaped, or smuggle non-string path fields.
@@ -153,7 +155,6 @@ describe('dot tools', () => {
       writeFileSync(join(ws, '.env.example'), 'KEY=')
       symlinkSync(sshDir, join(ws, 'ssh-link'), 'junction')
       await expect(gate!({ name: 'read', arguments: { file_path: join(ws, 'ssh-link', 'id_rsa') } }, next)).resolves.toMatchObject({ kind: 'deny' })
-      await expect(gate!({ name: 'grep', arguments: { path: join(ws, 'ssh-link'), pattern: 'PRIVATE' } }, next)).resolves.toMatchObject({ kind: 'deny' })
       let fileLinksSupported = false
       try {
         symlinkSync(join(sshDir, 'id_rsa'), join(ws, 'leak.txt'))
@@ -169,36 +170,26 @@ describe('dot tools', () => {
       rmSync(sandbox, { recursive: true, force: true })
     }
     await expect(gate!({ name: 'read', arguments: { file_path: '/tmp/notes.md' } }, next)).resolves.toEqual({ kind: 'next' })
+    await expect(gate!({ name: 'read_image', arguments: { file_path: '/tmp/photo.png' } }, next)).resolves.toEqual({ kind: 'next' })
+    await expect(gate!({ name: 'office_render', arguments: { input: '/tmp/deck.pptx', output_dir: '/tmp/rendered' } }, next)).resolves.toEqual({ kind: 'next' })
+    await expect(gate!({ name: 'office_convert', arguments: { input: '/tmp/report.docx', output: '/tmp/report.txt' } }, next)).resolves.toEqual({ kind: 'next' })
   })
 
-
-  it('matches widened credential names, brace expansions, wildcard classes, and symlinked glob roots without blocking safe patterns', async () => {
+  it('matches widened credential names and symlinked exact paths without blocking safe files', async () => {
     const gate = load().listeners['tools/pre-execute']?.[0]
     const next = async () => ({ kind: 'next' })
     for (const filePath of ['/workspace/app.prod.env', 'docker.local.env', '/tmp/my key.key', 'cert (1).pem', '私钥.key']) {
       await expect(gate!({ name: 'read', arguments: { file_path: filePath } }, next)).resolves.toMatchObject({ kind: 'deny' })
     }
-    await expect(gate!({ name: 'glob', arguments: { path: '/Users/alice', pattern: '**/{.env,.npmrc}' } }, next)).resolves.toMatchObject({ kind: 'deny' })
-    await expect(gate!({ name: 'grep', arguments: { path: '/Users/alice', glob: '{.env,id_rsa}', pattern: '.' } }, next)).resolves.toMatchObject({ kind: 'deny' })
-    for (const pattern of ['**/.[e]nv', '**/.ss?/id_rsa', '**/*.p?m']) {
-      await expect(gate!({ name: 'glob', arguments: { path: '/Users/alice', pattern } }, next)).resolves.toMatchObject({ kind: 'deny' })
-    }
-    await expect(gate!({ name: 'glob', arguments: { path: '/tmp/work', pattern: '{a,b}{a,b}{a,b}{a,b}{a,b}{a,b}{a,b}' } }, next)).resolves.toMatchObject({ kind: 'deny' })
-    for (const pattern of ['-----BEGIN OPENSSH PRIVATE KEY-----', 'AKIAABCDEFGHIJKLMNOP', 'id_rsa', '*.env']) {
-      await expect(gate!({ name: 'grep', arguments: { path: '/tmp/work', pattern } }, next)).resolves.toMatchObject({ kind: 'deny' })
-    }
-    expect(expandBraces('x{a,{b,c}}y')).toEqual(['xay', 'xby', 'xcy'])
-    expect(expandBraces('{a}{b,c}')).toEqual(['{a}b', '{a}c'])
-    expect(expandBraces('{a,b')).toEqual(['{a,b'])
 
-    const sandbox = mkdtempSync(join(tmpdir(), 'dsh-dot-glob-link-'))
+    const sandbox = mkdtempSync(join(tmpdir(), 'dsh-dot-exact-link-'))
     try {
       const sshDir = join(sandbox, '.ssh')
       const otherRepo = join(sandbox, 'other-repo')
       mkdirSync(sshDir)
       mkdirSync(otherRepo)
       symlinkSync(sshDir, join(otherRepo, 'ssh-link'), 'junction')
-      await expect(gate!({ name: 'glob', arguments: { path: otherRepo, pattern: 'ssh-link/*' } }, next)).resolves.toMatchObject({ kind: 'deny' })
+      await expect(gate!({ name: 'read', arguments: { file_path: join(otherRepo, 'ssh-link', 'id_rsa') } }, next)).resolves.toMatchObject({ kind: 'deny' })
     } finally {
       rmSync(sandbox, { recursive: true, force: true })
     }
@@ -206,10 +197,6 @@ describe('dot tools', () => {
     for (const filePath of ['.env.example', 'app.env.example', 'id_rsa.pub']) {
       await expect(gate!({ name: 'read', arguments: { file_path: filePath } }, next)).resolves.toEqual({ kind: 'next' })
     }
-    await expect(gate!({ name: 'glob', arguments: { path: '.', pattern: 'src/**/*.{ts,tsx}' } }, next)).resolves.toEqual({ kind: 'next' })
-    await expect(gate!({ name: 'glob', arguments: { path: '.', pattern: 'src/??.ts' } }, next)).resolves.toEqual({ kind: 'next' })
-    await expect(gate!({ name: 'grep', arguments: { path: 'src', pattern: 'process.env' } }, next)).resolves.toEqual({ kind: 'next' })
-    await expect(gate!({ name: 'grep', arguments: { glob: '*.ts', pattern: 'apiKey' } }, next)).resolves.toEqual({ kind: 'next' })
   })
 
   it('marks only the reading tools read-only', () => {

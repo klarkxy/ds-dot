@@ -63,14 +63,14 @@ const SILENCE: Record<CopyLocale, string> = {
   ru: 'не принимай молчание за согласие',
 }
 const QUESTION_POLICY: Record<CopyLocale, { readonly label: string; readonly help: string }> = {
-  zh: { label: '桃乐丝定', help: '缺授权，或不可逆、外部、费用后果' },
-  en: { label: 'Dorothy', help: 'Missing authority, or an irreversible, external, or costly effect' },
-  ja: { label: 'ドロシー', help: 'ドロシーが目標内の可逆な既定を決めます' },
-  de: { label: 'Dorothy', help: 'Fehlende Befugnis oder eine unumkehrbare, externe oder teure Folge' },
-  es: { label: 'Dorothy', help: 'Si falta autorización, o el efecto es irreversible, externo o costoso' },
-  fr: { label: 'Dorothy', help: 'Sans autorisation, ou si l’effet est irréversible, externe ou coûteux' },
-  pt: { label: 'Dorothy', help: 'Sem autorização, ou se o efeito for irreversível, externo ou custoso' },
-  ru: { label: 'Дороти', help: 'Нет разрешения, или эффект необратим, внешний или платный' },
+  zh: { label: '她来答', help: '涉及授权、不可撤回、外部影响或费用' },
+  en: { label: 'She answers', help: 'authorization, irreversible or external effects, or cost' },
+  ja: { label: '彼女が回答', help: '認可が必要な場合や、不可逆・外部影響・費用' },
+  de: { label: 'Sie antwortet', help: 'Berechtigungen, unumkehrbare oder externe Folgen oder Kosten' },
+  es: { label: 'Ella responde', help: 'autorización, efectos irreversibles o externos, o coste' },
+  fr: { label: 'Elle répond', help: 'autorisation, un effet irréversible ou externe, ou un coût' },
+  pt: { label: 'Ela responde', help: 'autorização, efeitos irreversíveis ou externos, ou custo' },
+  ru: { label: 'Она отвечает', help: 'полномочия или последствия необратимы, внешни либо платны' },
 }
 
 const human = (text: string, time: number): RawEvent => ({
@@ -292,6 +292,17 @@ describe('i18n locale resolution and pack completeness', () => {
     }
   })
 
+  it('keeps context watchdog labels aligned with settings labels in every locale', () => {
+    for (const loc of SUPPORTED_LOCALES) {
+      const ui = localePack(loc).ui
+      for (const mode of ['off', 'observe', 'auto'] as const) {
+        expect(ui[`ctxWatchdogMode_${mode}`], `${loc} ctxWatchdogMode_${mode}`).toBe(ui[`sWatchdogMode_${mode}`])
+      }
+      expect(ui.ctxWatchdogModelLabel, `${loc} ctxWatchdogModelLabel`).toBe(ui.sWatchdogModel)
+      expect(ui.ctxWatchdogTitle, `${loc} ctxWatchdogTitle`).toBe(ui.sWatchdogMode)
+    }
+  })
+
   it('has identical keys, non-empty strings, and matching {placeholder} tokens across all 8 TypeScript packs', () => {
     const ref = localePack('en')
     const refSections = {
@@ -338,7 +349,6 @@ describe('i18n locale resolution and pack completeness', () => {
     // Ensure PR-5 GitHub Poll UI keys are genuinely localized (not left as English stubs) in non-English locales.
     const localizedPr5SampleKeys = [
       'resultNotice',
-      'sGithubTitle',
       'sGhPollCardTitle',
       'sGhEnabled',
       'sGhTestBtn',
@@ -361,7 +371,6 @@ describe('i18n locale resolution and pack completeness', () => {
       'tool_dot_watchdog',
       'field_watchdogMode',
       'field_watchdogModel',
-      'sWatchdogDesc',
       'sWatchdogMode',
       'sWatchdogMode_off',
       'sWatchdogMode_observe',
@@ -421,7 +430,6 @@ describe('i18n locale resolution and pack completeness', () => {
         expect(pack.ui[key], `${loc}.ui.${key} should be localized`).not.toBe(ref.ui[key])
       }
       if (loc !== 'zh') {
-        expect(pack.ui.sGroupWatchdog, `${loc}.ui.sGroupWatchdog should be localized`).not.toBe(ref.ui.sGroupWatchdog)
         expect(pack.ui.ctxWatchdogRunMeta, `${loc}.ui.ctxWatchdogRunMeta should be localized`).not.toBe(ref.ui.ctxWatchdogRunMeta)
       }
     }

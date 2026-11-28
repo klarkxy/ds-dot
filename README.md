@@ -6,7 +6,7 @@
 
 **Dorothy (`dot`)** is your sidebar partner inside **DeepSeek Harness (DSH)**. Hand off tasks in plain words, review clean before/after diffs, let routine checks pass quietly while pausing on big decisions, and keep scheduled recipes organized.
 
-> **Read more & watch real recordings:** Visit **[Dorothy’s Notebook](https://klarkxy.github.io/ds-dot/)** for illustrated guides, all [16 live DSH screen recordings](https://klarkxy.github.io/ds-dot/#clips), and [day-one starter prompts](https://klarkxy.github.io/ds-dot/#about).
+> **Read more & watch real recordings:** Visit **[Dorothy’s Notebook](https://klarkxy.github.io/ds-dot/)** for illustrated guides, all [17 live DSH screen recordings](https://klarkxy.github.io/ds-dot/#clips), and [day-one starter prompts](https://klarkxy.github.io/ds-dot/#about).
 
 ## Install
 
@@ -30,8 +30,8 @@ Remind me every weekday at 9:00 AM to check overnight builds.
 - **Composer & file handoff:** The chat input is a single rounded card with a compact “+” menu and circular send/stop controls. Attach any file type (not just images) with non-ASCII filenames preserved; Dorothy can read attachments and absolute paths with read-only file tools, while credential-like paths stay refused and Office/PDF reading goes through the optional Office skill.
 - **Clear safety boundaries:** Routine reversible checks run quietly; deletions, pushes, credentials, and gray areas pause with clear confirmation cards and sidebar/desktop alerts. File-editing, command, and plugin-manager tools stay with dispatched tasks—Dorothy never uses them herself. Linked self-edits run on a spare worktree and rebuild only after you merge (previous `lib/` kept under `~/.dsh/dot/self-upgrade`); an installed package is never rewritten.
 - **Recipes & reminders:** Save repeatable workflows once, run them directly from plain-language schedules, and review restore suggestions if a tweaked recipe slips.
-- **Settings & optional companions:** Lock settings you want untouched, follow GitHub issues/PRs/comments/CI via local `gh` polling with zero public URL (off until you add repos), monitor spinning or stalled runs with **Run Watchdog** (defaults to `observe` with zero LLM calls, plus **Context Diagnostics** 14-day hit review), and optionally pair with `@klarkxy/dsh-dev-index`, `@klarkxy/dsh-model-picker`, or `@deepseek-ai/dsh-webhook` for real-time webhooks.
-- **Dorothy-only MCP servers:** Connect remote MCP servers (DeepWiki, GitHub, Context7 and more, or your own) from the MCP page — they are mounted for Dorothy alone, and their tools still need an explicit grant before she calls them.
+- **Settings & optional companions:** Lock settings you want untouched from one checklist on the Advanced page, follow GitHub issues/PRs/comments/CI via local `gh` polling with zero public URL (off until you add repos), monitor spinning or stalled runs with **Run Watchdog** (defaults to `observe` with zero LLM calls, plus **Context Diagnostics** 14-day hit review), and optionally pair with `@klarkxy/dsh-dev-index`, `@klarkxy/dsh-model-picker`, or `@deepseek-ai/dsh-webhook` for real-time webhooks.
+- **Dorothy-only MCP servers:** Connect remote MCP servers (DeepWiki, GitHub, Context7 and more, or your own) from the Tools page — they are mounted for Dorothy alone, and their tools still need an explicit grant there before she calls them.
 
 ## More
 

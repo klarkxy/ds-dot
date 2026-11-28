@@ -222,21 +222,21 @@ export const chatCss = settingsCss + `
 .dsh-dot-chat .dsh-dot-filters button { padding: 3px 9px; font-size: 12px; line-height: 18px; }
 @container (max-width: 560px) { .dsh-dot-chat .dsh-dot-drawer-widen { display: none; } }
 @media (prefers-reduced-motion: reduce) { .dsh-dot-chat .dsh-dot-drawer, .dsh-dot-chat .dsh-dot-drawer-backdrop { transition: none; animation: none; } }
-.dsh-dot-chat .dsh-dot-settings-pane { gap: 0; }
+
 .dsh-dot-chat .dsh-dot-settings-pane > .dsh-ui-notice,
 .dsh-dot-chat .dsh-dot-settings-pane > .dsh-ui-error { margin-bottom: 16px; }
-/* Each settings topic is one quiet card on the drawer's base surface. */
+/* Each settings topic is one quiet layer-1 card on the drawer's base surface. */
 .dsh-dot-chat .dsh-dot-pane-section {
-  margin: 0 0 14px; padding: 14px 16px 4px;
-  border-radius: var(--dsw-radius-md); background: var(--dsw-alias-bg-base);
+  margin: 0; padding: 4px 14px;
+  border-radius: var(--dsw-radius-md); background: var(--dsw-alias-bg-layer-1);
   box-shadow: var(--dsw-elevation-stroke);
 }
-.dsh-dot-chat .dsh-dot-pane-section:last-child { margin-bottom: 0; }
 .dsh-dot-chat .dsh-dot-pane-section[data-tone='danger'] {
   box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--dsw-alias-state-error-primary) 30%, transparent);
 }
-.dsh-dot-chat .dsh-dot-pane-section .dsh-ui-form > .dsh-ui-field:first-child { padding-top: 4px; }
-.dsh-dot-chat .dsh-dot-pane-section .dsh-ui-form > .dsh-ui-field:last-child { padding-bottom: 12px; }
+/* Settings are rows inside the card, separated only by hairlines. */
+.dsh-dot-chat .dsh-dot-settings-pane .dsh-ui-form > .dsh-ui-field { padding: 10px 0; }
+.dsh-dot-chat .dsh-dot-settings-pane .dsh-ui-form > .dsh-ui-field + .dsh-ui-field { border-top: 0.5px solid var(--dsw-alias-border-l2); }
 .dsh-dot-chat .dsh-dot-pane-section-title {
   margin: 0 0 8px; font-size: 12px; line-height: 18px; font-weight: 600;
   color: var(--dsw-alias-label-secondary);

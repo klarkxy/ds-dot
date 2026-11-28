@@ -42,7 +42,7 @@ function apiStub(over: Record<string, unknown> = {}) {
   }
 }
 
-async function renderPanel(root: ReturnType<typeof createRoot>, api: unknown, section: 'capabilities' | 'mcp', settings: DotSettings = DEFAULT_SETTINGS) {
+async function renderPanel(root: ReturnType<typeof createRoot>, api: unknown, section: 'capabilities', settings: DotSettings = DEFAULT_SETTINGS) {
   await act(async () => root.render(<SettingsPanel locale="en" section={section} api={api as never} settings={settings} onSaved={() => {}} />))
   await act(async () => { await Promise.resolve() })
 }
@@ -62,22 +62,22 @@ describe('unified capabilities & MCP panel', () => {
     expect(text()).toContain('Recommended')
     expect(text()).toContain('Library documentation and code examples')
     expect(document.querySelector('.dsh-dot-mcp-custom-body input')).not.toBeNull()
-    expect(document.querySelector('.dsh-dot-capmcp')?.getAttribute('data-zone')).toBe('capabilities')
+    expect(document.querySelector('.dsh-dot-capmcp')?.hasAttribute('data-zone')).toBe(false)
     // The managed server renders as one card, not duplicated in the MCP capability section.
     const cards = [...document.querySelectorAll('.dsh-dot-mcp-row')].filter(row => row.querySelector('.dsh-dot-mcp-name')?.textContent === 'deepwiki')
     expect(cards).toHaveLength(1)
 
-    // The MCP tab shows the same unified halves, led by server management.
-    await renderPanel(root, api, 'mcp')
-    expect(document.querySelector('.dsh-dot-capmcp')?.getAttribute('data-zone')).toBe('mcp')
+    // The single tools page leads with the shared intro, then MCP management, then authorization.
     expect(text()).toContain('Plugins')
     expect(document.querySelector('.dsh-dot-caps')).not.toBeNull()
-    const mcpFirst = document.querySelector('.dsh-dot-capmcp')?.firstElementChild
-    expect(mcpFirst?.classList.contains('dsh-dot-mcp')).toBe(true)
+    const children = [...(document.querySelector('.dsh-dot-capmcp')?.children ?? [])]
+    expect(children[0]?.classList.contains('dsh-dot-cap-intro')).toBe(true)
+    expect(children[1]?.classList.contains('dsh-dot-mcp')).toBe(true)
+    expect(children[2]?.classList.contains('dsh-dot-caps')).toBe(true)
     await act(async () => root.unmount())
   })
 
-  it('keeps ungranted groups collapsed by default and granted ones open', async () => {
+  it('keeps capability groups collapsed by default even when granted', async () => {
     const api = apiStub({
       capabilities: async () => capabilitiesView(),
       mcpList: async () => mcpListView(),
@@ -89,7 +89,7 @@ describe('unified capabilities & MCP panel', () => {
     const groups = [...document.querySelectorAll<HTMLDetailsElement>('.dsh-dot-cap-group')]
     // The locked always-on group is a plain details header; skip it by content.
     const plugin = groups.find(group => group.querySelector(':scope > summary')?.textContent?.includes('p'))!
-    expect(plugin.open).toBe(true)
+    expect(plugin.open).toBe(false)
     const exa = groups.find(group => group.querySelector(':scope > summary')?.textContent?.includes('exa'))!
     expect(exa.open).toBe(false)
     // Collapsed rows still render compact tool rows inside (never truncated by CSS).
@@ -128,6 +128,8 @@ describe('unified capabilities & MCP panel', () => {
     await renderPanel(root, api, 'capabilities', settings)
     const plugin = [...document.querySelectorAll<HTMLDetailsElement>('.dsh-dot-cap-group')]
       .find(group => group.querySelector(':scope > summary')?.textContent?.includes('p'))!
+    expect(plugin.open).toBe(false)
+    await act(async () => plugin.querySelector(':scope > summary')!.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })))
     expect(plugin.open).toBe(true)
     await act(async () => plugin.querySelector(':scope > summary')!.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })))
     expect(plugin.open).toBe(false)
@@ -152,7 +154,7 @@ describe('unified capabilities & MCP panel', () => {
     })
     const Harness = () => {
       const [settings, setSettings] = useState<DotSettings>(current)
-      return <SettingsPanel locale="en" section="mcp" api={api as never} settings={settings} onSaved={next => { current = next; setSettings(next) }} />
+      return <SettingsPanel locale="en" section="capabilities" api={api as never} settings={settings} onSaved={next => { current = next; setSettings(next) }} />
     }
     const root = createRoot(document.getElementById('root')!)
     await act(async () => root.render(<Harness />))
@@ -161,7 +163,7 @@ describe('unified capabilities & MCP panel', () => {
     const card = [...document.querySelectorAll('.dsh-dot-mcp-row')].find(row => row.querySelector('.dsh-dot-mcp-name')?.textContent === 'deepwiki')!
     // The override reset is an explicit text button; no bare × sits next to the segmented control.
     const reset = card.querySelector<HTMLButtonElement>('.dsh-dot-cap-clear')!
-    expect(reset.textContent).toBe('Reset to inherited')
+    expect(reset.textContent).toBe('Reset')
     const grantZone = card.querySelector('.dsh-dot-mcp-grant')!
     expect(grantZone.querySelector('svg')).toBeNull()
     // Removal is a separate, differently-labelled destructive action outside the grant row.
@@ -186,7 +188,7 @@ describe('unified capabilities & MCP panel', () => {
     })
     const Harness = () => {
       const [settings, setSettings] = useState<DotSettings>(current)
-      return <SettingsPanel locale="en" section="mcp" api={api as never} settings={settings} onSaved={next => { current = next; setSettings(next) }} />
+      return <SettingsPanel locale="en" section="capabilities" api={api as never} settings={settings} onSaved={next => { current = next; setSettings(next) }} />
     }
     const root = createRoot(document.getElementById('root')!)
     await act(async () => root.render(<Harness />))
@@ -220,7 +222,7 @@ describe('unified capabilities & MCP panel', () => {
   it('still works when the capabilities API is absent, mcp-only', async () => {
     const api = apiStub({ mcpList: async () => mcpListView() })
     const root = createRoot(document.getElementById('root')!)
-    await renderPanel(root, api, 'mcp')
+    await renderPanel(root, api, 'capabilities')
     expect(document.querySelector('.dsh-dot-mcp')).not.toBeNull()
     expect(document.querySelector('.dsh-dot-caps')).toBeNull()
     expect(document.body.textContent).toContain('Connected')
@@ -246,7 +248,7 @@ describe('unified capabilities & MCP panel', () => {
       setSettings: async (patch: Record<string, unknown>) => { saved.push(patch); return DEFAULT_SETTINGS },
     })
     const root = createRoot(document.getElementById('root')!)
-    await renderPanel(root, api, 'mcp')
+    await renderPanel(root, api, 'capabilities')
     const [nameIn, urlIn] = [...document.querySelectorAll<HTMLInputElement>('.dsh-dot-mcp-custom-body input')]
     await act(async () => { type(nameIn!, 'bad__name'); type(urlIn!, 'https://a.example/mcp') })
     const add = [...document.querySelectorAll('button')].find(button => button.textContent === 'Add')!

@@ -462,13 +462,13 @@ describe('UI locale wiring & client RPC sync', () => {
       </>,
     ))
     await act(async () => { await Promise.resolve() })
-    const addrInput = document.querySelector<HTMLInputElement>('input[aria-label="How she addresses you"]')!
+    const addrInput = document.querySelector<HTMLInputElement>('input[aria-label="What she calls you"]')!
     expect(addrInput.value).toBe('you')
     expect(addrInput.placeholder).toBe('you')
     const personaBox = [...document.querySelectorAll('textarea')].find(el => el.getAttribute('aria-label') === 'Voice & personality')!
     expect(personaBox).toBeDefined()
     expect(personaBox.value).toBe(defaultPersona('en'))
-    expect(document.body.textContent).toContain('Allow selected: DeepSeek / DeepSeek Chat')
+    expect(document.body.textContent).toContain('Selected only: DeepSeek / DeepSeek Chat')
     expect(document.body.textContent).toContain(uiZh.invalid)
     await act(async () => root.unmount())
   })

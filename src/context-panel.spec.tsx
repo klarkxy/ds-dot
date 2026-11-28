@@ -77,7 +77,7 @@ describe('ContextPanel Watchdog Diagnostics', () => {
     expect(document.querySelector('.dsh-ui-empty')?.textContent).toContain('first message')
     const section = document.querySelector('section.dsh-dot-wd')
     expect(section).not.toBeNull()
-    expect(section?.querySelector('.dsh-dot-wd-mode')?.textContent).toBe('Observe')
+    expect(section?.querySelector('.dsh-dot-wd-mode')?.textContent).toBe('Record only')
     expect(section?.querySelector('[data-watchdog-stops="2"]')?.textContent).toContain('2')
     expect(section?.querySelector('[data-stat="total"] dd')?.textContent).toBe('3')
     expect(section?.querySelector('[data-stat="fp-rate"] dd')?.textContent).toBe('No reviews yet')

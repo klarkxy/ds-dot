@@ -488,15 +488,15 @@ describe('ChatPanel activity and notice cards', () => {
       const settingsOption = [...document.querySelectorAll<HTMLButtonElement>('.dsh-dot-slash-item')].find(b => b.textContent?.includes('/settings'))!
       await act(async () => { settingsOption.click(); await Promise.resolve() })
       expect(document.querySelector('.dsh-dot-unsaved-bar')?.textContent).toContain('当前页有未保存的修改')
-      expect(document.querySelector('aside.dsh-dot-drawer [role="region"]')?.getAttribute('aria-label')).toBe('人设与约定')
+      expect(document.querySelector('aside.dsh-dot-drawer [role="region"]')?.getAttribute('aria-label')).toBe('人设')
 
       await act(async () => { nav('context').click() })
       expect(document.querySelector('.dsh-dot-unsaved-bar')?.textContent).toContain('当前页有未保存的修改')
-      expect(document.querySelector('aside.dsh-dot-drawer [role="region"]')?.getAttribute('aria-label')).toBe('人设与约定')
+      expect(document.querySelector('aside.dsh-dot-drawer [role="region"]')?.getAttribute('aria-label')).toBe('人设')
 
       const discard = [...document.querySelectorAll<HTMLButtonElement>('.dsh-dot-unsaved-bar button')].find(b => b.textContent === '放弃改动')!
       await act(async () => { discard.click() })
-      expect(document.querySelector('aside.dsh-dot-drawer [role="region"]')?.getAttribute('aria-label')).toBe('上下文用量')
+      expect(document.querySelector('aside.dsh-dot-drawer [role="region"]')?.getAttribute('aria-label')).toBe('上下文')
 
       const tasksBtn = [...document.querySelectorAll<HTMLButtonElement>('.dsh-dot-head button')].find(b => b.textContent?.startsWith('任务'))!
       await act(async () => { tasksBtn.click() })
@@ -540,7 +540,7 @@ describe('ChatPanel activity and notice cards', () => {
     await act(async () => { personaTab().click() })
     await act(async () => { await Promise.resolve(); await Promise.resolve() })
 
-    const address = () => document.querySelector<HTMLInputElement>('input[aria-label="对你的称呼"]')!
+    const address = () => document.querySelector<HTMLInputElement>('input[aria-label="怎么称呼你"]')!
     await act(async () => { Simulate.change(address(), { target: { value: '朋友' } } as never) })
     expect(document.querySelector('.dsh-dot-dirty-dot')).not.toBeNull()
     // Blur commits the address before the click that leaves, so the guard must not
@@ -549,7 +549,7 @@ describe('ChatPanel activity and notice cards', () => {
     const contextTab = document.querySelector<HTMLButtonElement>('.dsh-dot-drawer-nav button[data-nav="context"]')!
     await act(async () => { contextTab.click() })
     expect(document.querySelector('.dsh-dot-unsaved-bar')).toBeNull()
-    expect(document.querySelector('aside.dsh-dot-drawer [role="region"]')?.getAttribute('aria-label')).toBe('上下文用量')
+    expect(document.querySelector('aside.dsh-dot-drawer [role="region"]')?.getAttribute('aria-label')).toBe('上下文')
     expect(saved).toEqual([{ address: '朋友' }])
 
     await act(async () => { personaTab().click() })
@@ -559,7 +559,7 @@ describe('ChatPanel activity and notice cards', () => {
       document.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
     })
     expect(document.querySelector('.dsh-dot-unsaved-bar')?.textContent).toContain('当前页有未保存的修改')
-    expect(document.querySelector('aside.dsh-dot-drawer [role="region"]')?.getAttribute('aria-label')).toBe('人设与约定')
+    expect(document.querySelector('aside.dsh-dot-drawer [role="region"]')?.getAttribute('aria-label')).toBe('人设')
     expect(saved).toEqual([{ address: '朋友' }])
     const discard = [...document.querySelectorAll<HTMLButtonElement>('.dsh-dot-unsaved-bar button')].find(b => b.textContent === '放弃改动')!
     await act(async () => { discard.click() })
@@ -774,7 +774,7 @@ describe('ChatPanel activity and notice cards', () => {
     const navButtons = () => [...drawer.querySelectorAll<HTMLButtonElement>('.dsh-dot-drawer-nav button')]
     const navBy = (key: string) => drawer.querySelector<HTMLButtonElement>(`.dsh-dot-drawer-nav button[data-nav="${key}"]`)!
     expect(navButtons().map(node => node.querySelector('.dsh-dot-nav-label')?.textContent)).toEqual([
-      '待确认', '常规', '会话接管', '派发任务', 'GitHub', '额外能力', 'MCP 服务', '人设', '上下文', '轨迹',
+      '待确认', '常规', '接管', '任务', '工具', 'GitHub', '人设', '高级', '上下文', '轨迹',
     ])
     expect(navBy('proposals').querySelector('.dsh-dot-nav-badge')?.textContent).toBe('1')
     expect(region()).toBe('常规')
@@ -782,32 +782,32 @@ describe('ChatPanel activity and notice cards', () => {
 
     // Switch to Takeover, trigger a save and confirm the non-jumping header status appears.
     await act(async () => { navBy('takeover').click() })
-    expect(region()).toBe('会话接管')
-    expect(headerTitle()).toBe('会话接管')
+    expect(region()).toBe('接管')
+    expect(headerTitle()).toBe('接管')
     const trackedTab = [...drawer.querySelectorAll<HTMLButtonElement>('[role="tab"]')].find(node => node.textContent === '所有会话')!
     await act(async () => { trackedTab.click() })
     await act(async () => { await Promise.resolve() })
     expect(drawer.querySelector('.dsh-dot-settings-status')?.textContent).toContain('已保存')
 
     await act(async () => { navBy('dispatch').click() })
-    expect(region()).toBe('派发任务')
+    expect(region()).toBe('任务')
     expect(drawer.querySelector('.dsh-dot-settings-status')).toBeNull()
     await act(async () => { navBy('github').click() })
-    expect(region()).toBe('GitHub 事件')
+    expect(region()).toBe('GitHub')
     expect(drawer.querySelector('[data-gh-card="poll"]')).not.toBeNull()
     await act(async () => { navBy('capabilities').click() })
-    expect(region()).toBe('额外能力')
+    expect(region()).toBe('工具')
     await act(async () => { navBy('persona').click() })
-    expect(region()).toBe('人设与约定')
+    expect(region()).toBe('人设')
     await act(async () => { navBy('context').click() })
-    expect(region()).toBe('上下文用量')
+    expect(region()).toBe('上下文')
     await act(async () => { navBy('trajectory').click() })
-    expect(region()).toBe('运行轨迹')
+    expect(region()).toBe('轨迹')
 
     // Resolving the last proposal removes the Proposals nav item and returns to General.
     await act(async () => { navBy('proposals').click() })
     await act(async () => { await Promise.resolve() })
-    expect(region()).toBe('待确认的修改')
+    expect(region()).toBe('待确认')
     const approveBtn = drawer.querySelector<HTMLButtonElement>('.dsh-dot-proposal button')!
     await act(async () => { approveBtn.click() })
     await act(async () => { await Promise.resolve(); await Promise.resolve() })
@@ -925,8 +925,10 @@ describe('ChatPanel activity and notice cards', () => {
       await act(flush)
       expect(keepaliveCalls).toBeGreaterThan(callsBeforeApprove)
       expect(document.querySelector('aside.dsh-dot-drawer [role="region"]')?.getAttribute('aria-label')).toBe('General')
+      await act(async () => { document.querySelector<HTMLButtonElement>('.dsh-dot-drawer-nav button[data-nav="advanced"]')!.click() })
+      await act(flush)
       expect(document.body.textContent).toContain(expectedKey)
-      const ttlInput = document.querySelector<HTMLInputElement>('input[aria-label="Cache lifetime"]')!
+      const ttlInput = document.querySelector<HTMLInputElement>('input[aria-label="Cache duration"]')!
       await act(async () => { setInputValue(ttlInput, String(nextMinutes)) })
       await act(async () => { ttlInput.dispatchEvent(new dom.window.FocusEvent('focusout', { bubbles: true })) })
       expect(saved.at(-1)).toEqual({ cacheTtl: { [expectedKey]: nextMinutes } })

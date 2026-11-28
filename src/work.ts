@@ -49,6 +49,7 @@ export function runStoppedByUser(
 ): boolean {
   if (change?.control === 'cancelled') return true
   if (run.closeReason === 'watchdog' || run.closeReason === 'identity-rejected') return false
+  if (run.closeReason === 'unsent' && run.closeIntent !== 'stopped') return false
   if (run.closeIntent === 'stopped') return true
   if (run.phase === 'stopped' && run.closeReason !== 'closeout' && run.closeReason !== 'rework') return true
   return false

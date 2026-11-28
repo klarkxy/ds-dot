@@ -701,10 +701,34 @@ describe('PR-5 mandatory 17+ polling, admission, routing & security scenarios', 
       expect(await h.store.work.releaseRejected(rj.run.id, rejectedClose.updatedAt, now)).toMatchObject({ ok: true, phase: 'stopped' })
       expect(h.store.work.run(rj.run.id)).toMatchObject({ phase: 'stopped', closeReason: 'identity-rejected' })
 
+      // A startup-released failed launch is unsent, not user-stopped; explicit change cancellation still wins.
+      const unsentChange = await h.store.work.createChange({
+        title: 'Unsent task', cwd: h.home, goal: 'Unsent',
+        requirements: [{ requirementRef: 'R1', text: 'Unsent', required: true }], at: now,
+      })
+      const ru = await h.store.work.reserveRun({ changeId: unsentChange.id, kind: 'work', cwd: h.home, writeScope: { kind: 'paths', paths: [] }, at: now })
+      if (!ru.ok) throw new Error('reserve unsent failed')
+      expect(await h.store.work.releaseUnsent(ru.run.id, ru.run.updatedAt, now)).toMatchObject({ ok: true, phase: 'stopped' })
+      expect(h.store.work.run(ru.run.id)).toMatchObject({ phase: 'stopped', closeReason: 'unsent' })
+      expect(h.store.work.run(ru.run.id)?.closeIntent).toBeUndefined()
+
+      const cancelledUnsentChange = await h.store.work.createChange({
+        title: 'Cancelled unsent task', cwd: h.home, goal: 'Cancelled unsent',
+        requirements: [{ requirementRef: 'R1', text: 'Cancelled unsent', required: true }], at: now,
+      })
+      const ruc = await h.store.work.reserveRun({ changeId: cancelledUnsentChange.id, kind: 'work', cwd: h.home, writeScope: { kind: 'paths', paths: [] }, at: now })
+      if (!ruc.ok) throw new Error('reserve cancelled unsent failed')
+      expect(await h.store.work.releaseUnsent(ruc.run.id, ruc.run.updatedAt, now)).toMatchObject({ ok: true, phase: 'stopped' })
+      expect((await h.store.work.prepareCancel(cancelledUnsentChange.id, now)).ok).toBe(true)
+      expect(h.store.work.run(ruc.run.id)).toMatchObject({ phase: 'stopped', closeReason: 'unsent' })
+      expect(h.store.work.run(ruc.run.id)?.closeIntent).toBeUndefined()
+
       await h.store.putLink(makeTaskLink(change.id, { repo: 'acme/widgets', number: 42 }, 'dot', now))
       await h.store.putLink(makeTaskLink(stoppedChange.id, { repo: 'acme/widgets', number: 99 }, 'dot', now))
       await h.store.putLink(makeTaskLink(doneChange.id, { repo: 'acme/widgets', number: 77 }, 'dot', now))
       await h.store.putLink(makeTaskLink(rejectedChange.id, { repo: 'acme/widgets', number: 98 }, 'dot', now))
+      await h.store.putLink(makeTaskLink(unsentChange.id, { repo: 'acme/widgets', number: 96 }, 'dot', now))
+      await h.store.putLink(makeTaskLink(cancelledUnsentChange.id, { repo: 'acme/widgets', number: 97 }, 'dot', now))
 
       const settings: DotSettings = patchSettings(DEFAULT_SETTINGS, {
         reflection: false,
@@ -872,6 +896,29 @@ describe('PR-5 mandatory 17+ polling, admission, routing & security scenarios', 
       expect(resRejected.skippedStoppedRunIds).toEqual([])
       expect(resRejected.inboxResult).toBe('stored')
       expect(h.inbox.list()).toHaveLength(inboxCountBeforeRejected + 1)
+
+      // A stopped/unsent failed launch is not a user stop, unless its change was explicitly cancelled.
+      const inboxCountBeforeUnsent = h.inbox.list().length
+      const resUnsent = await adapter.receive({
+        source: 'github', sourceId: 'primary-github', deliveryId: 'gh-poll:unsent-1',
+        type: 'issue_comment.created', subject: 'acme/widgets#96', title: 'Ping unsent',
+        actor: 'alice', summary: 'Can you start this again?', receivedAt: now, originSource: 'github-poll',
+      }, { repo: 'acme/widgets', rawBody: 'Can you start this again?' })
+      expect(resUnsent.directRunIds).toEqual([])
+      expect(resUnsent.skippedStoppedRunIds).toEqual([])
+      expect(resUnsent.inboxResult).toBe('stored')
+      expect(h.inbox.list()).toHaveLength(inboxCountBeforeUnsent + 1)
+
+      const inboxCountBeforeCancelledUnsent = h.inbox.list().length
+      const resCancelledUnsent = await adapter.receive({
+        source: 'github', sourceId: 'primary-github', deliveryId: 'gh-poll:cancelled-unsent-1',
+        type: 'issue_comment.created', subject: 'acme/widgets#97', title: 'Ping cancelled unsent',
+        actor: 'alice', summary: 'Are you still there?', receivedAt: now, originSource: 'github-poll',
+      }, { repo: 'acme/widgets', rawBody: 'Are you still there?' })
+      expect(resCancelledUnsent.directRunIds).toEqual([])
+      expect(resCancelledUnsent.skippedStoppedRunIds).toEqual([ruc.run.id])
+      expect(resCancelledUnsent.inboxResult).toBeUndefined()
+      expect(h.inbox.list()).toHaveLength(inboxCountBeforeCancelledUnsent)
 
       // 16: PR opened never triggers closure; PR merged updates links.ts, flags Change closureReady, emits 1 result notice!
       await adapter.receive({

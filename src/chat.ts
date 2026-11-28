@@ -61,6 +61,20 @@ function imageNotes(content: unknown): { readonly mediaType: string; readonly na
   return notes
 }
 
+function fileNotes(content: unknown): { readonly name: string; readonly bytes: number }[] {
+  if (!Array.isArray(content)) return []
+  const notes: { readonly name: string; readonly bytes: number }[] = []
+  for (const block of content) {
+    const row = rec(block)
+    if (row?.type !== 'file') continue
+    const attachment = rec(row.attachment)
+    const name = typeof attachment?.name === 'string' ? attachment.name : 'file'
+    const bytes = typeof attachment?.bytes === 'number' && Number.isFinite(attachment.bytes) ? attachment.bytes : 0
+    notes.push({ name, bytes })
+  }
+  return notes
+}
+
 /**
  * A human message can carry held notices into the same model turn. The source
  * stores only their character count; readers split the log text back into the
@@ -151,15 +165,16 @@ export class ChatFold {
         const parts = splitCarriedNotice(source, data.content)
         const text = parts.text.trim()
         const images = source?.kind === 'user' ? imageNotes(data.content) : []
+        const files = source?.kind === 'user' ? fileNotes(data.content) : []
         const notice = rec(rec(source?.dshDot)?.notices) as unknown as ParsedNotice | undefined
         if (parts.notice) this.push({ kind: 'notice', key: `${key}:notice`, text: parts.notice, ...notice ? { notice } : {}, at })
-        if (!text && images.length === 0) return parts.notice !== undefined
+        if (!text && images.length === 0 && files.length === 0) return parts.notice !== undefined
         if (source?.kind === 'user') {
           const answer = viewAnswerOf(source)
           if (answer) {
             this.answers[answer.id] = { action: answer.action, values: answer.values }
             this.push({ kind: 'answer', key, text, at })
-          } else this.push({ kind: 'user', key, text, at, ...(images.length > 0 ? { images } : {}) })
+          } else this.push({ kind: 'user', key, text, at, ...(images.length > 0 ? { images } : {}), ...(files.length > 0 ? { files } : {}) })
           return true
         }
         if (source?.kind === 'agent-message') { this.push({ kind: 'notice', key, text, ...notice ? { notice } : {}, at }); return true }

@@ -42,12 +42,12 @@ export function sayRequestBytes(textBytes: number, images: readonly { readonly d
 /**
  * What `registerHostRpc` must accept. The kit default is 64 KiB, and a 51 KB
  * PNG is already 68,040 bytes of base64, so it never reached `say`. Four
- * images at the advertised cap, with 80-character names and a 20,000-character
- * text escaped at six bytes each, still fit.
+ * images at the advertised cap, with 80-character names budgeted at four UTF-8
+ * bytes per character and a 20,000-character text escaped at six bytes each, still fit.
  */
 export const CHAT_SAY_BODY_BYTES = sayRequestBytes(
   SAY_TEXT_CHARS * 6,
-  Array.from({ length: CHAT_IMAGE_LIMIT }, () => ({ dataBytes: base64Length(CHAT_IMAGE_BYTES), nameBytes: SAY_NAME_CHARS })),
+  Array.from({ length: CHAT_IMAGE_LIMIT }, () => ({ dataBytes: base64Length(CHAT_IMAGE_BYTES), nameBytes: SAY_NAME_CHARS * 4 })),
 )
 
 export interface ChatImage {
@@ -110,10 +110,22 @@ function decodeBase64(data: string): Uint8Array | undefined {
   }
 }
 
-export function imageName(name: unknown): string | undefined {
+/** Sanitize a display filename without letting a long stem swallow its extension. */
+export function attachmentName(name: unknown, maxChars = 120): string | undefined {
   if (typeof name !== 'string') return undefined
-  const base = name.split(/[/\\]/).pop()?.replace(/[^\w.\- ()[\]]+/g, '').slice(0, 80)
-  return base || undefined
+  const base = name.replaceAll('\\', '/').split('/').pop()?.replace(/[^\p{L}\p{M}\p{N}_.\- ()[\]]+/gu, '').trim()
+  if (!base || /^\.+$/.test(base)) return undefined
+  if (base.length <= maxChars) return base
+  const dot = base.lastIndexOf('.')
+  const ext = dot > 0 ? base.slice(dot) : ''
+  const keepExt = ext.length > 1 && ext.length <= 20 && !/\s/.test(ext)
+  const suffix = keepExt ? ext : ''
+  const stem = (keepExt ? base.slice(0, -suffix.length) : base).trim() || 'file'
+  return `${stem.slice(0, Math.max(1, maxChars - suffix.length))}${suffix}`
+}
+
+export function imageName(name: unknown): string | undefined {
+  return attachmentName(name, 80)
 }
 
 /** Validate a `say` payload. Undefined means no images. A bad entry throws. */

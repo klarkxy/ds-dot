@@ -8,7 +8,11 @@
  * because bridge channels (e.g. Gemini function calling) silently drop tools
  * that contain non-compliant schemas.
  */
+import { existsSync, lstatSync, readlinkSync, realpathSync } from 'node:fs'
+import { homedir } from 'node:os'
+import { dirname, isAbsolute, join, resolve } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
+import { credentialLikePath } from './approval-risk.ts'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { checkShownView } from '@klarkxy/dsh-deep-view/core'
 import type { ShownView } from '@klarkxy/dsh-deep-view/contracts'
@@ -26,7 +30,7 @@ import { toolDisplay } from './chat-format.ts'
 /** Host tool names from `@deepseek-ai/dsh-tool-web` (0.2.2-rc.1). Absent names are not an error. */
 export const HOST_WEB_TOOLS = ['web_search', 'web_fetch'] as const
 export { DEV_INDEX_TOOLS }
-export const DOT_INHERITED_ALLOW = [...Object.values(TOOL), 'show_view', ...HOST_WEB_TOOLS, ...DEV_INDEX_TOOLS]
+export const DOT_INHERITED_ALLOW = [...Object.values(TOOL), 'show_view', 'read', 'read_image', 'office_render', 'office_convert', ...HOST_WEB_TOOLS, ...DEV_INDEX_TOOLS]
 
 export const name = 'dsh-dot-tools'
 export const inject = ['tools', 'systemPrompt', SERVICE_NAME] as const
@@ -89,13 +93,125 @@ const bool = (args: unknown, key: string): boolean =>
 
 export const TASK_ACTIONS = ['create', 'revise', 'dispatch', 'check', 'read', 'list', 'supplement', 'finish', 'step', 'closeout', 'pause', 'resume', 'cancel', 'decide', 'reject', 'link', 'unlink'] as const
 
+const CREDENTIAL_GUARD_TOOLS: ReadonlySet<string> = new Set(['read', 'read_image', 'office_render', 'office_convert'])
+const CREDENTIAL_GUARD_KEYS = ['file_path', 'path', 'input', 'output_dir', 'output'] as const
+const CREDENTIAL_GUARD_REASON = 'That path looks like a credential file and will not be read.'
+
+function guardArgs(args: unknown): Record<string, unknown> | undefined {
+  if (typeof args === 'string') {
+    try {
+      const parsed = JSON.parse(args) as unknown
+      return parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed as Record<string, unknown> : undefined
+    } catch { return undefined }
+  }
+  return args !== null && typeof args === 'object' && !Array.isArray(args) ? args as Record<string, unknown> : undefined
+}
+
+function expandHome(raw: string): string {
+  if (raw === '~') return homedir()
+  if (raw.startsWith('~/') || raw.startsWith('~\\')) return join(homedir(), raw.slice(2))
+  return raw
+}
+
+function resolveExistingAndLinks(candidate: string): readonly string[] {
+  const out = new Set<string>([candidate])
+  const walk = (inputPath: string, depth: number): void => {
+    if (depth > 16) return
+    const tail: string[] = []
+    let cur = inputPath
+    while (true) {
+      try {
+        const stat = lstatSync(cur)
+        if (stat.isSymbolicLink()) {
+          const rawLink = expandHome(readlinkSync(cur))
+          const target = isAbsolute(rawLink) ? rawLink : resolve(dirname(cur), rawLink)
+          const next = tail.length > 0 ? join(target, ...tail) : target
+          if (!out.has(next)) {
+            out.add(next)
+            walk(next, depth + 1)
+          }
+        }
+      } catch { /* missing segment or unreadable link */ }
+      if (existsSync(cur)) {
+        try {
+          const real = (realpathSync.native ?? realpathSync)(cur)
+          out.add(tail.length > 0 ? join(real, ...tail) : real)
+        } catch { /* ignore transient fs errors */ }
+        break
+      }
+      const parent = dirname(cur)
+      if (parent === cur) break
+      const base = cur.slice(parent.length).replace(/^[/\\]+/, '')
+      if (base) tail.unshift(base)
+      cur = parent
+    }
+  }
+  walk(candidate, 0)
+  return [...out]
+}
+
+function resolvedCredentialPath(raw: string, bases: readonly string[]): boolean {
+  const trimmed = raw.trim()
+  if (!trimmed) return false
+  if (credentialLikePath(trimmed)) return true
+  const expanded = expandHome(trimmed)
+  if (credentialLikePath(expanded)) return true
+  const roots = isAbsolute(expanded)
+    ? [resolve(expanded)]
+    : bases.map(base => resolve(base, expanded))
+  for (const root of roots) {
+    for (const candidate of resolveExistingAndLinks(root)) {
+      if (credentialLikePath(candidate)) return true
+    }
+  }
+  return false
+}
+
+function credentialBases(args: Record<string, unknown>, key: string, baseDir?: string): readonly string[] {
+  const bases: string[] = []
+  const seen = new Set<string>()
+  const add = (base: string | undefined) => {
+    if (!base) return
+    const resolved = resolve(base)
+    if (!seen.has(resolved)) {
+      seen.add(resolved)
+      bases.push(resolved)
+    }
+  }
+  if (key !== 'path' && key !== 'file_path' && typeof args.path === 'string' && args.path.trim()) {
+    const expandedPath = expandHome(args.path.trim())
+    if (isAbsolute(expandedPath)) add(expandedPath)
+    else {
+      if (baseDir) add(resolve(baseDir, expandedPath))
+      add(resolve(expandedPath))
+    }
+  }
+  if (baseDir) add(baseDir)
+  add(resolve())
+  return bases
+}
+
+export function credentialToolGuard(exec: { readonly name: string; readonly arguments?: unknown }, baseDir?: string): string | undefined {
+  if (!CREDENTIAL_GUARD_TOOLS.has(exec.name)) return undefined
+  const args = guardArgs(exec.arguments)
+  if (!args) return CREDENTIAL_GUARD_REASON
+  for (const key of CREDENTIAL_GUARD_KEYS) {
+    const value = args[key]
+    if (value === undefined || value === null) continue
+    if (typeof value !== 'string') return CREDENTIAL_GUARD_REASON
+    const bases = credentialBases(args, key, baseDir)
+    if (resolvedCredentialPath(value, bases)) return CREDENTIAL_GUARD_REASON
+  }
+  return undefined
+}
+
 export function apply(ctx: Context): void {
   installDotWeb(ctx)
   const host = ctx as ToolHost
   const dot = () => host[SERVICE_NAME]
   // Names outside the locked set go to the capability layer: granted extras pass
   // while still granted and applied to the live segment; everything else denies.
-  gateToolExecution(ctx, DOT_INHERITED_ALLOW, exec => dot().capabilityGate(exec))
+  gateToolExecution(ctx, DOT_INHERITED_ALLOW, exec => dot().capabilityGate(exec), exec => credentialToolGuard(exec, (dot() as { readonly homeDir?: string } | undefined)?.homeDir))
   devIndexLoad = installDotDevIndex(ctx)
   // Both sections read what the segment froze when it started, so every request of a segment
   // shares one prompt prefix; a settings edit reaches dot with her next segment. A session
@@ -223,10 +339,10 @@ export function apply(ctx: Context): void {
   // ── dot_workspace (merged from dot_list_workspaces + dot_create_workspace) ─
   tool(defineToolInput({
     name: TOOL.workspace,
-    description: 'Inspect or create DSH workspaces (file edits always run on task sessions, never here). action=list: list all workspaces (id, title, directory, session count), marking your own workspace. action=inspect: read metadata of one workspace (defaults to your own). action=files: list files and folders inside a workspace (read-only; optional relative path). action=read: read a text file inside the workspace (relative path under the workspace, or an absolute path inside a registered workspace/change directory; optional start_line and max_lines, default 400, max 2000). action=create: register or reuse a workspace at an absolute directory, creating the directory if absent.',
+    description: 'Inspect or create DSH workspaces (file edits always run on task sessions, never here). action=list: list all workspaces (id, title, directory, session count), marking your own workspace. action=inspect: read metadata of one workspace (defaults to your own). action=files: list files and folders inside a workspace (read-only; optional relative path). action=read: read a text file (relative path under the workspace, or any absolute path; credential-like paths stay refused; optional start_line and max_lines, default 400, max 2000). action=create: register or reuse a workspace at an absolute directory, creating the directory if absent.',
     parameters: {
       action: { type: 'string', enum: ['list', 'inspect', 'files', 'create', 'read'], required: true, description: 'Operation: list, inspect, files, read, or create.' },
-      path: { type: 'string', description: 'create: absolute directory path. files: optional relative subpath inside the workspace. read: file path, relative inside the workspace or absolute inside an allowed root.' },
+      path: { type: 'string', description: 'create: absolute directory path. files: optional relative subpath inside the workspace. read: file path, relative inside the workspace or any absolute path.' },
       title: { type: 'string', description: 'create: optional display title for a newly registered workspace.' },
       workspace_id: { type: 'string', description: 'inspect/files/read: workspace id from action=list; omit to target your own workspace.' },
       start_line: { type: 'integer', description: 'read: first line to show, 1-based (default 1).' },

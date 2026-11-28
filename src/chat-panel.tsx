@@ -28,6 +28,7 @@ import { PersonaPanel, type KnowledgeApi } from './persona-panel.tsx'
 import { TrajectoryPanel, type TrajectoryApi } from './trajectory-panel.tsx'
 import type { BoardView, ChatItem, ChatSnapshot, DotSettings, RecipeBoardRow, RolloverReason, SelfStatusView } from './contracts.ts'
 import type { ChatImage } from './chat-images.ts'
+import { humanBytes, type ChatFileReceipt } from './chat-files.ts'
 import { SettingsPanel, useSettingProposals, type SaveNotice, type SettingsApi } from './settings-panel.tsx'
 import type { RenderFactorySlot } from '@klarkxy/dsh-plugin-kit/model-picker'
 import { cardCopy, fillText, formatDuration, formatTokens, formatWhen, intlLocale, t, toolLabel, type CopyLocale, type TextKey } from './ui-copy.ts'
@@ -45,7 +46,8 @@ export const CHAT_ROOT = 'dsh-dot-chat'
 export interface ChatApi extends SettingsApi, ContextApi, TrajectoryApi, KnowledgeApi {
   chat(itemsRev: number, signal: AbortSignal): Promise<ChatSnapshot | undefined>
   wait(rev: number, itemsRev: number, signal: AbortSignal): Promise<ChatSnapshot | undefined>
-  say(text: string, images?: readonly ChatImage[]): Promise<void>
+  attach(name: string, data: string): Promise<ChatFileReceipt>
+  say(text: string, images?: readonly ChatImage[], files?: readonly string[]): Promise<void>
   stop(): Promise<void>
   board(signal: AbortSignal): Promise<BoardView>
   /** Remove one of Dorothy's reminders from the board. */
@@ -654,15 +656,16 @@ export function ChatPanel({ locale, api, Card, onOpenSession, renderFactorySlot 
 
   const { pendingEchoes, pushEcho, removeEcho } = useLocalEchoes(state.items)
 
-  const send = useCallback(async (text: string, images: readonly ChatImage[]) => {
+  const send = useCallback(async (text: string, images: readonly ChatImage[], files: readonly ChatFileReceipt[]) => {
     setSendError(undefined)
-    const echo = pushEcho(text, images)
+    const echo = pushEcho(text, images, files)
     try {
-      await api.say(text, images)
+      await api.say(text, images, files.map(file => file.id))
     } catch (failure) {
       removeEcho(echo)
       const message = failure instanceof Error ? failure.message : String(failure)
-      setSendError(/\bHTTP 413\b/.test(message) ? t(locale, 'sendTooLarge') : message)
+      const code = (failure as { readonly code?: unknown } | null | undefined)?.code
+      setSendError(code === 'dot/file-expired' ? t(locale, 'fileReceiptExpired') : /\bHTTP 413\b/.test(message) ? t(locale, 'sendTooLarge') : message)
       throw failure
     }
     // Keep the local bytes only for a message the host accepted: a rejected send must not
@@ -744,7 +747,13 @@ export function ChatPanel({ locale, api, Card, onOpenSession, renderFactorySlot 
             </div>
           ) : null}
           {logRows}
-          {pendingEchoes.map(echo => <div key={'echo:' + echo.at} className="dsh-dot-user dsh-dot-echo">{echo.text ? <UserMessageBubble>{echo.text}</UserMessageBubble> : null}{echo.images.length > 0 ? <ImageNotes locale={locale} images={echo.images.map(image => ({ mediaType: image.mediaType, previewUrl: `data:${image.mediaType};base64,${image.data}`, ...(image.name ? { name: image.name } : {}) }))} onPreview={openPreview} /> : null}</div>)}
+          {pendingEchoes.map(echo => (
+            <div key={'echo:' + echo.at} className="dsh-dot-user dsh-dot-echo">
+              {echo.text ? <UserMessageBubble>{echo.text}</UserMessageBubble> : null}
+              {echo.images.length > 0 ? <ImageNotes locale={locale} images={echo.images.map(image => ({ mediaType: image.mediaType, previewUrl: `data:${image.mediaType};base64,${image.data}`, ...(image.name ? { name: image.name } : {}) }))} onPreview={openPreview} /> : null}
+              {echo.files.length > 0 ? <FileNotes files={echo.files} /> : null}
+            </div>
+          ))}
           {showStreaming ? <BotLine lead={!lastInReply}><MarkdownText text={streaming} labels={labels} variant="body" streaming /></BotLine> : null}
           {preparingCard ? <BotLine lead={!lastInReply}><span role="status"><TextShimmer active>{t(locale, 'cardPreparing')}</TextShimmer></span></BotLine> : null}
           {showThinking ? <BotLine lead={!lastInReply}><TextShimmer active>{t(locale, 'thinking')}</TextShimmer></BotLine> : null}
@@ -783,6 +792,7 @@ export function ChatPanel({ locale, api, Card, onOpenSession, renderFactorySlot 
         onNewSegment={() => api.newSegment()}
         onOpenTasks={() => requestDrawer({ kind: 'tab', tab: 'tasks' })}
         onOpenSettings={() => requestDrawer({ kind: 'tab', tab: 'general' })}
+        onAttach={(name, data) => api.attach(name, data)}
         onSend={send}
         onStop={() => { void api.stop() }}
         onDismissError={() => setSendError(undefined)}
@@ -899,6 +909,7 @@ function renderRow(row: Row, context: RenderContext): ReactNode {
               onPreview={context.onPreviewImage}
             />
           ) : null}
+          {item.files && item.files.length > 0 ? <FileNotes files={item.files} /> : null}
         </div>
       )
     }
@@ -1197,6 +1208,14 @@ function Notice({ locale, text, structured, hiddenRequestIds, tasks, onOpenSessi
             : <div className="dsh-dot-notice-entry"><div className="dsh-dot-card-body">{parsed.fallback ?? text}</div></div>}
         </div>
       </DisclosureRow>
+    </div>
+  )
+}
+
+function FileNotes({ files }: { files: readonly { readonly name: string; readonly bytes: number }[] }) {
+  return (
+    <div className="dsh-dot-files">
+      {files.map((file, index) => <span key={`${file.name}:${index}`} className="dsh-dot-file-chip">{file.name} · {humanBytes(file.bytes)}</span>)}
     </div>
   )
 }

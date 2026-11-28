@@ -1,4 +1,5 @@
-import { readFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
@@ -34,6 +35,7 @@ const ids = (prefix: 'a' | 'c') => { let n = 0; return () => `${prefix}${++n}` }
 /** Load the preset row against a recording host: every definition must compile. */
 function load(settings: { current: DotSettings; segment?: Seg; notes?: string; cognition?: string } = { current: DEFAULT_SETTINGS }) {
   const registered: Array<Record<string, unknown>> = []
+  const listeners: Record<string, Array<(exec: { name: string; arguments?: unknown }, next: () => Promise<{ kind: string }>) => Promise<{ kind: string; reason?: string }>>> = {}
   const sections: Array<{ name: string; order: number; text: (context?: { agent?: { session?: { id?: string } } }) => string }> = []
   const store = new DotStore(undefined)
   const view = async () => ({
@@ -60,7 +62,7 @@ function load(settings: { current: DotSettings; segment?: Seg; notes?: string; c
       restrict: () => () => {},
       register(definition: Record<string, unknown>) { registered.push(definition); return () => {} },
     },
-    on: () => () => {},
+    on(event: string, listener: never) { (listeners[event] ??= []).push(listener); return () => {} },
     systemPrompt: { section(section: (typeof sections)[number]) { sections.push(section); return () => {} } },
     dot: {
       store: { get settings() { return settings.current }, get segment() { return settings.segment } },
@@ -92,7 +94,7 @@ function load(settings: { current: DotSettings; segment?: Seg; notes?: string; c
     effect(fn: () => unknown) { fn() },
   }
   apply(ctx as never)
-  return Object.assign(registered, { sections })
+  return Object.assign(registered, { sections, listeners })
 }
 
 /** The private preset gets the same schema guard as the public dot tools. */
@@ -122,6 +124,79 @@ describe('dot tools', () => {
     expect([...names].sort()).toEqual([...Object.values(TOOL), 'show_view'].sort())
     expect(names).toHaveLength(21)
     expect(new Set(names).size).toBe(21)
+  })
+
+  it('denies credential-like paths, symlinks, bare credential dirs, and malformed arguments on inherited exact-path file tools', async () => {
+    const gate = load().listeners['tools/pre-execute']?.[0]
+    expect(gate).toBeTypeOf('function')
+    const next = async () => ({ kind: 'next' })
+    // Directory search is not in Dorothy's locked set at all; an ungranted name falls through the capability layer and denies.
+    for (const name of ['glob', 'grep']) {
+      await expect(gate!({ name, arguments: { path: '.', pattern: '**/.env' } }, next)).resolves.toMatchObject({ kind: 'deny', reason: expect.any(String) })
+    }
+    await expect(gate!({ name: 'read', arguments: { file_path: '/home/u/.ssh/id_rsa' } }, next)).resolves.toMatchObject({ kind: 'deny', reason: expect.stringMatching(/credential/) })
+    await expect(gate!({ name: 'read_image', arguments: { file_path: '/home/u/.ssh/id_rsa' } }, next)).resolves.toMatchObject({ kind: 'deny' })
+    await expect(gate!({ name: 'office_render', arguments: { input: '/tmp/deck.pptx', output_dir: '/Users/alice/.aws' } }, next)).resolves.toMatchObject({ kind: 'deny' })
+    await expect(gate!({ name: 'office_convert', arguments: JSON.stringify({ input: '/tmp/.aws/credentials' }) }, next)).resolves.toMatchObject({ kind: 'deny' })
+    // Fail-closed when arguments are malformed, missing, array-shaped, or smuggle non-string path fields.
+    await expect(gate!({ name: 'read', arguments: '{malformed json' }, next)).resolves.toMatchObject({ kind: 'deny' })
+    await expect(gate!({ name: 'read', arguments: undefined }, next)).resolves.toMatchObject({ kind: 'deny' })
+    await expect(gate!({ name: 'read', arguments: ['not-an-object'] }, next)).resolves.toMatchObject({ kind: 'deny' })
+    await expect(gate!({ name: 'read', arguments: { file_path: { nested: '/home/u/.ssh/id_rsa' } } }, next)).resolves.toMatchObject({ kind: 'deny' })
+
+    // Workspace symlinks/junctions escaping to .ssh or .env are resolved and denied.
+    const sandbox = mkdtempSync(join(tmpdir(), 'dsh-dot-guard-'))
+    try {
+      const ws = join(sandbox, 'workspace')
+      const sshDir = join(sandbox, '.ssh')
+      mkdirSync(ws)
+      mkdirSync(sshDir)
+      writeFileSync(join(sshDir, 'id_rsa'), 'PRIVATE')
+      writeFileSync(join(ws, '.env.example'), 'KEY=')
+      symlinkSync(sshDir, join(ws, 'ssh-link'), 'junction')
+      await expect(gate!({ name: 'read', arguments: { file_path: join(ws, 'ssh-link', 'id_rsa') } }, next)).resolves.toMatchObject({ kind: 'deny' })
+      let fileLinksSupported = false
+      try {
+        symlinkSync(join(sshDir, 'id_rsa'), join(ws, 'leak.txt'))
+        symlinkSync('/nonexistent/home/.ssh/id_rsa', join(ws, 'dangling-leak.txt'))
+        fileLinksSupported = true
+      } catch { /* Windows without symlink privilege */ }
+      if (fileLinksSupported) {
+        await expect(gate!({ name: 'read', arguments: { file_path: join(ws, 'leak.txt') } }, next)).resolves.toMatchObject({ kind: 'deny' })
+        await expect(gate!({ name: 'read', arguments: { file_path: join(ws, 'dangling-leak.txt') } }, next)).resolves.toMatchObject({ kind: 'deny' })
+      }
+      await expect(gate!({ name: 'read', arguments: { file_path: join(ws, '.env.example') } }, next)).resolves.toEqual({ kind: 'next' })
+    } finally {
+      rmSync(sandbox, { recursive: true, force: true })
+    }
+    await expect(gate!({ name: 'read', arguments: { file_path: '/tmp/notes.md' } }, next)).resolves.toEqual({ kind: 'next' })
+    await expect(gate!({ name: 'read_image', arguments: { file_path: '/tmp/photo.png' } }, next)).resolves.toEqual({ kind: 'next' })
+    await expect(gate!({ name: 'office_render', arguments: { input: '/tmp/deck.pptx', output_dir: '/tmp/rendered' } }, next)).resolves.toEqual({ kind: 'next' })
+    await expect(gate!({ name: 'office_convert', arguments: { input: '/tmp/report.docx', output: '/tmp/report.txt' } }, next)).resolves.toEqual({ kind: 'next' })
+  })
+
+  it('matches widened credential names and symlinked exact paths without blocking safe files', async () => {
+    const gate = load().listeners['tools/pre-execute']?.[0]
+    const next = async () => ({ kind: 'next' })
+    for (const filePath of ['/workspace/app.prod.env', 'docker.local.env', '/tmp/my key.key', 'cert (1).pem', '私钥.key']) {
+      await expect(gate!({ name: 'read', arguments: { file_path: filePath } }, next)).resolves.toMatchObject({ kind: 'deny' })
+    }
+
+    const sandbox = mkdtempSync(join(tmpdir(), 'dsh-dot-exact-link-'))
+    try {
+      const sshDir = join(sandbox, '.ssh')
+      const otherRepo = join(sandbox, 'other-repo')
+      mkdirSync(sshDir)
+      mkdirSync(otherRepo)
+      symlinkSync(sshDir, join(otherRepo, 'ssh-link'), 'junction')
+      await expect(gate!({ name: 'read', arguments: { file_path: join(otherRepo, 'ssh-link', 'id_rsa') } }, next)).resolves.toMatchObject({ kind: 'deny' })
+    } finally {
+      rmSync(sandbox, { recursive: true, force: true })
+    }
+
+    for (const filePath of ['.env.example', 'app.env.example', 'id_rsa.pub']) {
+      await expect(gate!({ name: 'read', arguments: { file_path: filePath } }, next)).resolves.toEqual({ kind: 'next' })
+    }
   })
 
   it('marks only the reading tools read-only', () => {

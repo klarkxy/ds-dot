@@ -45,6 +45,16 @@ describe('chatItems', () => {
     expect(items).toMatchObject([{ kind: 'user', text: '', images: [{ mediaType: 'image/png', name: 'dot.png' }] }])
   })
 
+  it('keeps a file-only human message and names the file attachment', () => {
+    const items = chatItems([
+      ev(1, 'user/message', {
+        content: [{ type: 'file', attachment: { name: 'notes.md', bytes: 123 } }],
+        source: { kind: 'user' },
+      }),
+    ])
+    expect(items).toMatchObject([{ kind: 'user', text: '', files: [{ name: 'notes.md', bytes: 123 }] }])
+  })
+
   it('splits an agreement note carried by a human message into a separate chat row', () => {
     const note = '[dot agreement notes]\nYour background reflection pass noticed something.'
     const items = chatItems([

@@ -93,13 +93,19 @@ const GIT_RETARGET = /(?:^|[\s;|&"'\\])--(?:git-dir|work-tree)(?:[\s=]|$)|(?<![-
 const GIT_C_FLAG = new RegExp(
   String.raw`(?:^|[\s;|&"'(\\])-C(?=$|[\s"'./\\~])|\b[Gg][Ii][Tt](?:\s+${GIT_OTHER_FLAG})*\s+-C\S+`,
 )
-const CREDENTIAL = /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----|\b(?:AKIA[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9_]{36,}|github_pat_[A-Za-z0-9_]{22,}|sk-(?:live|proj)-[A-Za-z0-9_-]{20,}|npm_[A-Za-z0-9]{36})\b|(?:^|[\s"'=:/\\])(?:\.ssh[/\\]+id_(?:rsa|ed25519|ecdsa|dsa)|\.aws[/\\]+credentials|\.npmrc|\.pypirc|\.netrc|\.env(?:\.(?!example\b|sample\b|template\b|dist\b)[\w-]+)*)(?=$|[\s"'&;|/\\])/i
+const CREDENTIAL = /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----|\b(?:AKIA[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9_]{36,}|github_pat_[A-Za-z0-9_]{22,}|sk-(?:live|proj)-[A-Za-z0-9_-]{20,}|npm_[A-Za-z0-9]{36})\b|(?:^|[\s"'=:/\\])(?:\.ssh|\.aws|\.gnupg|\.kube|id_(?:rsa|ed25519|ecdsa|dsa)(?![\w.*-]*\.pub(?=$|[\s"'&;|/\\]))[\w.*-]*|[*\w.-]+\.(?:pem|p12|pfx)|(?:\*+|[\w.-]*[/\\][*\w.-]+)\.key|\.npmrc|\.pypirc|\.netrc|\*+\.env|\.env(?:\.(?!example\b|sample\b|template\b|dist\b)[\w-]+)*)(?=$|[\s"'&;|/\\])/i
+const CREDENTIAL_PATH_EXT = /(?:^|[/\\])(?:[^/\\]+\.(?:pem|key|p12|pfx|\{[^}]*\b(?:pem|key|p12|pfx)\b[^}]*\})|[^/\\]+\.env)(?=$|[/\\])/i
 const REMOTE_EXEC = /\b(?:curl|wget)\b[^;&|\n]{0,300}?\|\s*(?:sudo\s+)?(?:sh|bash|zsh|fish|python[0-9.]*|node|iex|pwsh|powershell)\b|\b(?:iwr|irm|Invoke-WebRequest|Invoke-RestMethod)\b[^;&|\n]{0,300}?\|\s*(?:iex|Invoke-Expression)\b/i
 const WRITE = /\b(?:Set-Content|Add-Content|Out-File|New-Item|Copy-Item|Move-Item|Remove-Item|mkdir|touch|cp|mv|rm|truncate|tee)\b|\b(?:sed|perl)\s+-[A-Za-z]*i\b|\bdd\b[^;&|\n]*\bof=|\bfs\.(?:writeFileSync|writeFile|appendFileSync|appendFile|unlinkSync|unlink|renameSync)\s*\(|\bshutil\.(?:copy|move)\s*\(|(?:^|[\s;|&])>{1,2}\s*\S/m
 
 /** A filesystem path that would expose credentials when read. Same rules as the credential gate. */
 export function credentialLikePath(path: string): boolean {
-  return CREDENTIAL.test(path)
+  return CREDENTIAL.test(path) || CREDENTIAL_PATH_EXT.test(path)
+}
+
+/** Unstructured text that names or contains credential material. */
+export function credentialLikeText(text: string): boolean {
+  return CREDENTIAL.test(text)
 }
 
 /**

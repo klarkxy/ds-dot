@@ -34,6 +34,23 @@
       },
     },
     {
+      id: 'composer-files',
+      pr: 93,
+      date: '2026.11.26',
+      post: 'oranges-and-hello',
+      file: 'dot-93-composer-files.gif',
+      title: {
+        zh: '文件从小卡片递到我手里',
+        en: 'Files handed over from the little card',
+        ja: '小さなカードからファイルを手渡す',
+      },
+      desc: {
+        zh: '从“+”里选中 Markdown 和 PDF，我读完文本再请 Office 把 PDF 渲染出来，两个口令都回了。',
+        en: 'Pick a Markdown file and a PDF from “+”; I read the text, render the PDF through Office, and bring both passphrases back.',
+        ja: '「+」から Markdown と PDF を渡すと、テキストを読み、PDF は Office で描画して、ふたつの合言葉を返します。',
+      },
+    },
+    {
       id: 'run-watchdog',
       pr: 99,
       date: '2026.11.26',
@@ -376,6 +393,49 @@
       },
     },
     {
+      slug: 'oranges-and-hello',
+      date: '2026.11.26',
+      category: 'notes',
+      image: 'images/chibi-orange.jpg',
+      aspect: 'square',
+      imageAlt: {
+        zh: '坐在樱花路行李箱上的Q版桃乐丝眯眼开心递出剥好的橘子',
+        en: 'Chibi Dorothy sitting happily on a suitcase along a sakura path, holding out a peeled mandarin orange',
+        ja: '桜の石畳でトランクに腰かけ、笑顔でむいたみかんを差し出すちびドロシー',
+      },
+      caption: {
+        zh: '忙完手头这一阵，坐箱子上歇会儿，分你一半橘子。',
+        en: 'Taking a breather on the suitcase—want half an orange?',
+        ja: 'ひと仕事おわって休憩中。よかったらみかん半分どうぞ。',
+      },
+      title: {
+        zh: '输入框收成一张卡片，文件也能直接递给我',
+        en: 'One tidy composer card, and files can come straight over',
+        ja: '入力欄はすっきり一枚のカード、ファイルもそのまま渡せます',
+      },
+      excerpt: {
+        zh: '聊天输入框现在是一张干净的小卡片，“+”里收着添文件和快捷指令，发送、停止都是圆圆的小按钮。附件不再只收图片，中文文件名也不会丢字；我能读机器上任意路径的文本，但凭据文件仍然碰不得。',
+        en: 'The chat composer is now one clean little card: files and slash commands sit under “+”, with round send and stop buttons on the right. Attachments are no longer image-only, Chinese filenames stay intact, and I can read text anywhere on the machine—credential files still stay off-limits.',
+        ja: '入力欄はすっきりした一枚のカードになり、「+」にファイル追加やショートカットをまとめ、送信と停止は丸いボタンになりました。添付は画像だけでなくなり、中国語のファイル名もそのまま残ります。マシン上のどのパスでも読めますが、認証情報には触れません。',
+      },
+      paragraphs: {
+        zh: [
+          '输入框这回收拾得清爽多了：上面专心写字，下面左边只留一个“+”，添加图片或文件、快捷指令、清空输入都收在里面；右边是圆圆的发送键，跑起来时旁边再陪一个同样圆的停止键。附件也不再只认图片，md、docx、pdf、xlsx、代码文件都能直接拖进来；像“需求说明.md”这种中文名字，路上也不会被削掉。',
+          '递进来的附件会先存成只读副本，我也可以按你给的绝对路径读工作区外面的文本；不过我还是只读不写，更不会自己去跑命令。`.ssh`、`.env`、私钥这类凭据路径照样会被拦下。Word、PDF 这类文档会走 Office 技能——需要先在额外能力里允许 skill；PDF 会渲染成图来看，所以当前模型得会看图片。刚认识时不知道怎么开口，还是可以抄下面那几句，顺便分你一半橘子，doro~',
+        ],
+        en: [
+          'The composer feels much tidier now: write up top, keep one quiet “+” on the left for images or files, slash commands, and clearing the draft, while a round send button sits on the right and a matching round stop button appears beside it when I am running. Attachments are no longer image-only either—md, docx, pdf, xlsx, code files, and the rest can come along, and a name like “需求说明.md” keeps every Chinese character intact.',
+          'Attachments arrive as read-only saved copies, and I can also read absolute paths outside registered workspaces. I still never write files or run commands myself, and credential-shaped paths such as `.ssh`, `.env`, or private keys stay refused. Word and PDF files go through the Office skill, which needs the skill capability granted first; PDFs are rendered as pages to look at, so the active model needs image input. If you are new here, the four starter lines below still work—and there is half an orange for you, doro~',
+        ],
+        ja: [
+          '入力欄はだいぶすっきりしました。上で文章を書き、左下の「+」に画像やファイルの追加、ショートカット、入力クリアをまとめ、右側には丸い送信ボタン、実行中は同じ形の停止ボタンが並びます。添付も画像だけではなく、md、docx、pdf、xlsx、コードファイルなどをそのまま渡せます。「需求说明.md」のような中国語の名前も途中で欠けません。',
+          '受け取った添付は読み取り専用のコピーとして保存され、登録済みワークスペースの外でも、絶対パスを教えてもらえれば読めます。それでも私はファイルを書き換えたりコマンドを実行したりはしませんし、`.ssh`、`.env`、秘密鍵のような認証情報のパスは止まります。Word や PDF は Office スキル経由で扱うので、先に追加機能で skill を許可してください。PDF はページ画像として見るので、使うモデルが画像入力に対応している必要があります。初めての方は下の例文もそのまま使えます。みかんも半分どうぞ、doro~',
+        ],
+      },
+      showInvite: true,
+      showPrompts: true,
+    },
+    {
       slug: 'run-watchdog',
       date: '2026.11.26',
       category: 'rules',
@@ -664,49 +724,6 @@
           'それに、レシピを更新したあとにかえってやり直しやエラーが増えた場合は、過去の結果と見比べて「前のやり方に戻しませんか」と提案を出しておきます。実際に戻すかどうかは自分で決められます。',
         ],
       },
-    },
-    {
-      slug: 'oranges-and-hello',
-      date: '2026.11.19',
-      category: 'notes',
-      image: 'images/chibi-orange.jpg',
-      aspect: 'square',
-      imageAlt: {
-        zh: '坐在樱花路行李箱上的Q版桃乐丝眯眼开心递出剥好的橘子',
-        en: 'Chibi Dorothy sitting happily on a suitcase along a sakura path, holding out a peeled mandarin orange',
-        ja: '桜の石畳でトランクに腰かけ、笑顔でむいたみかんを差し出すちびドロシー',
-      },
-      caption: {
-        zh: '忙完手头这一阵，坐箱子上歇会儿，分你一半橘子。',
-        en: 'Taking a breather on the suitcase—want half an orange?',
-        ja: 'ひと仕事おわって休憩中。よかったらみかん半分どうぞ。',
-      },
-      title: {
-        zh: '上手常说的几句话，顺便分颗欧润吉',
-        en: 'Four day-one prompts and half an orange',
-        ja: '最初の一言サンプルと、みかんを半分',
-      },
-      excerpt: {
-        zh: '这一篇就放笔记本最后几页的小纸条：一行安装命令、刚认识不知从何说起时可以直接复制的四句话，还有几个顺手的搭档插件。',
-        en: 'Just the back pages of my notebook: the single install line, four easy prompts if you aren’t sure how to kick off, and a few helpful companion plugins.',
-        ja: '手帳の後ろのページに挟んだメモだけ置いておきます。導入コマンドと最初の一言サンプル4つ、あわせて便利な仲間の紹介です。',
-      },
-      paragraphs: {
-        zh: [
-          '写了这么几篇，其实日常用起来没那么多讲究。刚装好对着空白输入框不知道先交什么活时，下面那四句看顺哪句直接抄去用就行；懒得敲字的话，把报错或页面截图直接拖进对话框指给我看也很方便。',
-          '用顺手以后，如果还需要自动追 PR 消息或定时唤醒，按需配一两个搭档插件就好。要是这会儿正闲着，先把最下面那行命令敲进终端叫我过来吧，doro~',
-        ],
-        en: [
-          'After all those notes, day-to-day use is pretty simple. Copy any of the four lines below when you open the chat box for the first time, or just drop screenshots in and point at whatever looks off.',
-          'Down the road you can snap on companions for GitHub alerts or scheduled runs whenever you want them. For now, drop that single install command into your terminal whenever you’re ready, doro~',
-        ],
-        ja: [
-          'いろいろ書きましたが、ふだんの使い方はけっこうシンプルです。最初に何から頼むか迷ったら下のフレーズをそのまま使ってみてください。文字を打つのが面倒なときは、エラー画面のスクリーンショットをそのまま貼ってもらっても大丈夫です。',
-          '慣れてきたら PR 通知やタイマーの相棒もあとから足せます。よかったら下の1行で呼んでみてくださいね、doro~',
-        ],
-      },
-      showInvite: true,
-      showPrompts: true,
     },
   ];
 

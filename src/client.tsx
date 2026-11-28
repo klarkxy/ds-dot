@@ -20,6 +20,7 @@ import { trajectoryCss } from './trajectory-panel.tsx'
 import { PLUGIN_NAME, RPC_CHANNEL, type AttentionView, type BoardView, type RecipeBoardRow, type CapabilityCatalogView, type ChatSnapshot, type DotContextView, type DotMcpListView, type DotSettings, type FactoryResetPreview, type FactoryResetResult, type GithubPollStatusView, type GithubPollTestResult, type KeepaliveInfo, type KnowledgeView, type ReflectionRun, type SelfStatusView, type SettingProposal, type TrajectoryView, type TaskPermission, type WatchdogAnnotation, type WatchdogDiagnosticsView } from './contracts.ts'
 import type { UpdateStatus } from './auto-update.ts'
 import { copyLocale, t, type CopyLocale } from './ui-copy.ts'
+import type { ChatFileReceipt } from './chat-files.ts'
 import { DotIcon } from './whale.tsx'
 
 export const name = 'dsh-dot-client'
@@ -76,7 +77,8 @@ export function apply(ctx: Context): void {
   const api: ChatApi = {
     chat: (itemsRev, signal) => call<ChatSnapshot | undefined>('chat', { itemsRev }, signal),
     wait: (rev, itemsRev, signal) => call<ChatSnapshot | undefined>('wait', { rev, itemsRev }, signal),
-    say: async (text, images) => { await call('say', { text, ...(images && images.length > 0 ? { images } : {}) }) },
+    attach: (name, data) => call<ChatFileReceipt>('attach', { name, data }),
+    say: async (text, images, files) => { await call('say', { text, ...(images && images.length > 0 ? { images } : {}), ...(files && files.length > 0 ? { files } : {}) }) },
     stop: async () => { await call('stop') },
     board: signal => call<BoardView>('board', {}, signal),
     removeSchedule: id => call<boolean>('schedule.remove', { id }),

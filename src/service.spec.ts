@@ -8,6 +8,7 @@ import type { RawEvent } from './chat.ts'
 import { DEFAULT_SETTINGS, PRESET_ID, REMINDER_HEAD, type DotContextView, type DotSettings } from './contracts.ts'
 import { bindHost, FULL_ACCESS, type DotHost, type SessionRow, type WorkspaceRow } from './host.ts'
 import { DotService, HOME_TITLE } from './service.ts'
+import { CHAT_FILE_RECEIPT_TTL_MS } from './chat-files.ts'
 import { readSnapshot, saveSnapshot } from './artifacts.ts'
 import * as artifacts from './artifacts.ts'
 import { launchReservedRun } from './execution.ts'
@@ -51,7 +52,7 @@ function fakeHost() {
   const workspaces: WorkspaceRow[] = []
   const calls: string[] = []
   const timeline: string[] = []
-  const said: Array<{ text: string; carriedNotices?: string; images?: readonly { mediaType: string }[]; notice?: import('./chat-format.ts').ParsedNotice }> = []
+  const said: Array<{ text: string; carriedNotices?: string; images?: readonly { mediaType: string }[]; files?: readonly { attachmentId: string; name: string; bytes: number }[]; notice?: import('./chat-format.ts').ParsedNotice }> = []
   const relayed: Array<{ target: string; text: string; notice?: import('./chat-format.ts').ParsedNotice }> = []
   const dots = new Set<string>()
   const lost = new Set<string>()
@@ -158,7 +159,8 @@ function fakeHost() {
       calls.push(`handoff-view ${fromSessionId} ${toSessionId}`)
     },
     modelKey: () => model,
-    async say(sessionId, text, carriedNotices, _answer, images, notice) { said.push({ text, ...carriedNotices ? { carriedNotices } : {}, ...images?.length ? { images } : {}, ...(notice ? { notice } : {}) }); calls.push(`say ${sessionId} ${text}`); timeline.push(`say ${text}`) },
+    async attachFile(name) { return { attachmentId: `att-${name}`, name, bytes: 1 } },
+    async say(sessionId, text, carriedNotices, _answer, images, notice, files) { said.push({ text, ...carriedNotices ? { carriedNotices } : {}, ...images?.length ? { images } : {}, ...files?.length ? { files } : {}, ...(notice ? { notice } : {}) }); calls.push(`say ${sessionId} ${text}`); timeline.push(`say ${text}`) },
     async stop(sessionId) { calls.push(`stop ${sessionId}`) },
     async stopActivity(sessionId) {
       calls.push(`stop-activity ${sessionId}`)
@@ -266,6 +268,26 @@ describe('DotService.ensureDot', () => {
     // The model setting is applied before the message reaches dot.
     expect(h.calls.indexOf(`sync-model ${dot}`)).toBeLessThan(h.calls.indexOf(`say ${dot} plan the release`))
     await expect(h.service.say('   ')).rejects.toThrow(/non-empty/)
+  })
+
+  it('uploads a file, sends its receipt once, and rejects an already consumed receipt without sending', async () => {
+    const h = setup()
+    const receipt = await h.service.attachFile('../notes final.md', Buffer.from('hello').toString('base64'))
+    expect(receipt).toMatchObject({ name: 'notes final.md', bytes: 1 })
+    await h.service.say('', undefined, [], [receipt.id])
+    expect(h.said[0]).toMatchObject({ files: [{ attachmentId: 'att-notes final.md', name: 'notes final.md' }] })
+    const before = h.calls.filter(call => call.startsWith('say ')).length
+    await expect(h.service.say('again', undefined, [], [receipt.id])).rejects.toThrow(/Attach the file again/)
+    expect(h.calls.filter(call => call.startsWith('say '))).toHaveLength(before)
+  })
+
+  it('rejects unknown and TTL-expired attachment receipts with dot/file-expired and duplicate ids as invalid', async () => {
+    const h = setup()
+    await expect(h.service.say('unknown', undefined, [], ['missing-receipt'])).rejects.toMatchObject({ code: 'dot/file-expired' })
+    const receipt = await h.service.attachFile('note.txt', Buffer.from('hello').toString('base64'))
+    h.advance(CHAT_FILE_RECEIPT_TTL_MS + 1)
+    await expect(h.service.say('expired', undefined, [], [receipt.id])).rejects.toMatchObject({ code: 'dot/file-expired' })
+    await expect(h.service.say('duplicate', undefined, [], [receipt.id, receipt.id])).rejects.toMatchObject({ code: 'invalid' })
   })
 })
 

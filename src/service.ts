@@ -2238,13 +2238,30 @@ export class DotService {
   private async retireWatched(rows: readonly { readonly sessionId: string; readonly archived: boolean }[], watchedAt: ReadonlyMap<string, number>): Promise<void> {
     if (this.closing) return
     const byId = new Map(rows.map(row => [row.sessionId, row]))
+    const candidates: string[] = []
     for (const task of this.store.list()) {
       if (task.origin !== 'watched' || task.status === 'archived') continue
       // A watch created or rewritten while the list was in flight keeps its new state.
       if (watchedAt.get(task.sessionId) !== task.updatedAt) continue
       const row = byId.get(task.sessionId)
       if (row && !row.archived) continue
-      await this.retireWatch(task.sessionId)
+      candidates.push(task.sessionId)
+    }
+    if (candidates.length === 0) return
+    let freshRows: Awaited<ReturnType<DotHost['listSessions']>>
+    try {
+      freshRows = await this.host.listSessions(AbortSignal.timeout(15_000), { fresh: true })
+    } catch {
+      return
+    }
+    const freshById = new Map(freshRows.map(row => [row.sessionId, row]))
+    for (const sessionId of candidates) {
+      const task = this.store.task(sessionId)
+      if (!task || task.origin !== 'watched' || task.status === 'archived') continue
+      if (watchedAt.get(sessionId) !== task.updatedAt) continue
+      const row = freshById.get(sessionId)
+      if (row && !row.archived) continue
+      await this.retireWatch(sessionId)
     }
   }
 

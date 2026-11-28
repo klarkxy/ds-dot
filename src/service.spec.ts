@@ -242,6 +242,39 @@ describe('DotService asynchronous card replies', () => {
   })
 })
 
+describe('watched session retirement', () => {
+  const row = (sessionId: string) => ({ sessionId, running: false, updatedAt: 1, blank: false, subagent: false, archived: false })
+
+  it('rechecks fresh rows before retiring a watch missing from a stale list', async () => {
+    const h = setup()
+    const calls: Array<boolean | undefined> = []
+    let includeWatch = false
+    h.host.listSessions = async (_signal, options) => {
+      calls.push(options?.fresh)
+      return options?.fresh === true && includeWatch ? [row('session-b')] : []
+    }
+    await h.service.watch('session-b', 'keep an eye')
+    includeWatch = true
+    await h.service.syncWatched()
+    expect(h.store.task('session-b')).toMatchObject({ origin: 'watched' })
+    expect(h.store.task('session-b')?.status).not.toBe('archived')
+    expect(calls).toEqual([undefined, true])
+  })
+
+  it('still retires a genuinely missing watch after the fresh recheck', async () => {
+    const h = setup()
+    const calls: Array<boolean | undefined> = []
+    h.host.listSessions = async (_signal, options) => {
+      calls.push(options?.fresh)
+      return []
+    }
+    await h.service.watch('missing-watch', 'keep an eye')
+    await h.service.syncWatched()
+    expect(h.store.task('missing-watch')?.status).toBe('archived')
+    expect(calls).toEqual([undefined, true])
+  })
+})
+
 describe('DotService.ensureDot', () => {
   it('creates dot once under its own preset and resumes it afterwards', async () => {
     const h = setup()
